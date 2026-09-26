@@ -6,7 +6,7 @@ import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { ToolDefinition, ToolGuard, ToolExecution, ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { ensureTechnicalDeviationSection, normalizeOutlineCandidate } from '../src/outline-generation-normalization.ts'
 import { applyOutlineRepair } from '../src/outline-generation-repair.ts'
-import { missingOutlineResponsePoints } from '../src/outline-shared-validator.ts'
+import { missingOutlineResponsePoints, validateOutlineSharedStructure } from '../src/outline-shared-validator.ts'
 import { outlineArtifactSha256 } from '../src/outline-confirmation-artifacts.ts'
 import { buildWritableSectionWorklist, sectionVisibleRequirements } from '../src/section-evidence-context.ts'
 import type { Agent } from '@deepseek-ai/dsh-agent'
@@ -30,6 +30,7 @@ import {
 } from '@deepseek-ai/dsh-bid'
 import type { BidRunProgressInput } from '../src/control-plane-contract.ts'
 import { createTestBidRunContext } from '../src/run-coordinator.ts'
+import { createBidCapabilityDispatcher } from '../src/bid-capability-dispatcher.ts'
 
 const executeOutlineGeneration = (
   agent: Agent,
@@ -307,6 +308,52 @@ function failureCodes(result: Awaited<ReturnType<typeof validateOutlineGeneratio
   return result.ok ? [] : result.issues.map(issue => issue.code)
 }
 
+it('公共目录生成能力通过内建分派器复核现有完整候选', async () => {
+  const workspace = await fixture()
+  const formal = withTechnicalDeviation(reviewedOutline)
+  await publishOutline(workspace, formal, [])
+  await publishDraft(workspace, formal)
+  const { agent } = modelAgent(workspace, async () => { throw new Error('完整候选不应再次调用模型') })
+  const dispatcher = createBidCapabilityDispatcher({ modelStageRepairAttempts: 1,
+    evidenceMappingMaxConcurrency: 1, chapterWritingMaxConcurrency: 1, webSearchEnabled: false })
+  const call = { capability: 'outline.generate' as const, input: {} }
+  expect(() => dispatcher.allowedWrites(call, new Set(['SEC-SCHEDULE']), workspace, 'outline-step'))
+    .toThrow('BID_GENERATION_PROJECT_SCOPE_REQUIRED')
+  const writes = await dispatcher.allowedWrites(call, null, workspace, 'outline-step')
+  expect(writes.has('outline/outline.json')).toBe(true)
+  const context = { canonical: workspace, working: workspace, agent,
+    run: createTestBidRunContext(), sectionIds: null,
+    stepDirectory: workspace.root, inputSources: new Map(), baselineHashes: new Map(),
+    allowedWrites: writes, stepId: 'outline-step', rootWorkId: 'outline-task',
+    authorization: { session_id: 'main', message_id: 'outline-request' }, inputSha256: '0'.repeat(64) }
+  const result = await dispatcher.execute(call, context)
+  await dispatcher.validate(call, context, result.result)
+  expect(result.result.target_section_ids).toEqual(formal.sections.map(section => section.id))
+  expect(result.result.changed_artifacts).toEqual(['outline/generation-inputs.json'])
+})
+
+it('公共目录生成能力从正式分析输入生成并校验初步目录', async () => {
+  const workspace = await fixture()
+  const { agent } = modelAgent(workspace, async () => {}, { structuredOutputs: [
+    reviewedOutline, { operations: [], issues: [] },
+  ] })
+  const dispatcher = createBidCapabilityDispatcher({ modelStageRepairAttempts: 1,
+    evidenceMappingMaxConcurrency: 1, chapterWritingMaxConcurrency: 1, webSearchEnabled: false })
+  const call = { capability: 'outline.generate' as const, input: {} }
+  const context = { canonical: workspace, working: workspace, agent,
+    run: createTestBidRunContext(), sectionIds: null,
+    stepDirectory: workspace.root, inputSources: new Map(), baselineHashes: new Map(),
+    allowedWrites: await dispatcher.allowedWrites(call, null, workspace, 'outline-step'),
+    stepId: 'outline-step', rootWorkId: 'outline-task',
+    authorization: { session_id: 'main', message_id: 'outline-request' }, inputSha256: '0'.repeat(64) }
+  const result = await dispatcher.execute(call, context)
+  await dispatcher.validate(call, context, result.result)
+  expect(result.result.target_section_ids).toContain('SEC-SCHEDULE')
+  expect(result.result.changed_artifacts).toContain('outline/outline.json')
+  expect(result.result.changed_artifacts).toContain('outline/draft.json')
+  expect(result.result.changed_artifacts).toContain('outline/quality-report.json')
+})
+
 describe('S3 候选错误分流', () => {
   const defects = ['rp', 'scoring', 'required', 'json'] as const
   function broken(kind: typeof defects[number]): string {
@@ -428,6 +475,35 @@ describe('S3 候选错误分流', () => {
 })
 
 describe('S3 需求、合规、框架与结构局部修复', () => {
+  it('按 parent_id 派生目录层级，未知父节点仍由结构校验拒绝', async () => {
+    const workspace = await fixture()
+    const catalog = parseScoringResponsePointCatalog(JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/scoring-response-points.json'), 'utf8')))
+    const outline = structuredClone(reviewedOutline)
+    outline.sections[0]!.level = 2
+    outline.sections[1]!.level = 3
+    outline.sections[2]!.level = 3
+    const normalized = normalizeOutlineCandidate(outline, catalog, scoringArtifact)
+    expect(normalized.sections.map(section => section.level)).toEqual([1, 2, 2])
+    const invalid = structuredClone(outline)
+    invalid.sections[1]!.parent_id = 'MISSING'
+    const issues: StageValidationIssue[] = []
+    validateOutlineSharedStructure(normalizeOutlineCandidate(invalid, catalog, scoringArtifact).sections, issues)
+    expect(issues.map(issue => issue.code)).toContain('OUTLINE_SHARED_SECTION_PARENT_UNKNOWN')
+  })
+
+  it('将已拆分父节修为结构章时显式清空父节作答要求，保留子节内容', async () => {
+    const workspace = await fixture()
+    const catalog = parseScoringResponsePointCatalog(JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/scoring-response-points.json'), 'utf8')))
+    const outline = structuredClone(reviewedOutline)
+    outline.sections[0] = { ...outline.sections[0]!, writable: true, must_answer: ['说明组织与进度。'] }
+    const repaired = applyOutlineRepair(outline, [{ type: 'repair_structure', section_index: 0,
+      writable: false, must_answer: [] }], catalog, scoringArtifact)
+    expect(repaired.sections[0]).toMatchObject({ writable: false, must_answer: [] })
+    expect(repaired.sections.slice(1)).toEqual(outline.sections.slice(1))
+    expect(() => applyOutlineRepair(outline, [{ type: 'repair_structure', section_index: 0,
+      writable: false }], catalog, scoringArtifact)).toThrow('结构章节的 must_answer 必须为空')
+  })
+
   it('新增与拆分章节可明确分配需求、合规、框架和评分，不扩大浏览器操作权限', async () => {
     const workspace = await fixture()
     const catalog = parseScoringResponsePointCatalog(JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/scoring-response-points.json'), 'utf8')))
@@ -471,6 +547,9 @@ describe('S3 需求、合规、框架与结构局部修复', () => {
     const { agent, followup } = modelAgent(workspace, async (prompt, submitReview) => {
       if (prompt.includes('局部关联与结构修复')) {
         for (const text of [requirements.requirements[0]!.raw_text, scoring.scoring_items[0]!.raw_text, compliance.compliance_items[0]!.raw_text, 'framework_refs']) expect(prompt).toContain(text)
+        expect(prompt).toContain('writable=false 和 must_answer=[]')
+        expect(prompt).toContain('level 由 Host 根据 parent_id 派生')
+        expect(prompt).toContain('update_section 修改 scoring_response_point_ids 时')
         await writeFile(join(workspace.projectRoot, 'outline/repair-operations.json'), JSON.stringify(operations))
       } else {
         expect(prompt).toContain('Blueprint Quality Review')
@@ -761,6 +840,10 @@ describe('outline-generation Blueprint Quality Review', () => {
       expect(prompt).toContain('RP-000001')
       expect(prompt).toContain('说明实施阶段和进度保障')
     }
+    expect(subagentPrompt(subagentStart.mock.calls[3]![1])).toContain('已有全局 Compliance 不因缺少章节而算遗漏')
+    expect(subagentPrompt(subagentStart.mock.calls[3]![1])).toContain('不为此新增可写章节或分配给技术叶子')
+    expect(subagentPrompt(subagentStart.mock.calls[3]![1])).toContain('结构父节 writable=false 时 must_answer 必须保持 []')
+    expect(subagentPrompt(subagentStart.mock.calls[3]![1])).toContain('同一操作必须提交该可写章节完整且具体的 must_answer')
     expect(JSON.parse(await readFile(join(workspace.projectRoot, 'outline/outline.json'), 'utf8'))).toEqual(withTechnicalDeviation(researchDrivenOutline))
   })
 
@@ -890,6 +973,7 @@ describe('outline-generation Blueprint Quality Review', () => {
     const workspace = await fixture()
     const task = renderOutlineGenerationTask({ id: 'session', session: { events: [] } } as unknown as Agent, workspace, buildBidStageTask('outline_generation'))
     expect(task).toContain('索引重复引用不能替代正文拆分')
+    expect(task).toContain('第二章仍可为 level=1')
   })
 
   it('allows one response point to be covered by multiple writable sections', () => {
@@ -1273,7 +1357,8 @@ describe('S3 确定性规范化与局部续修', () => {
     expect(added.sections.slice(0, 3)).toEqual(reviewedOutline.sections)
     expect(missingOutlineResponsePoints(added, catalog)).toEqual([])
     const split = applyOutlineRepair(reviewedOutline, [{ type: 'split_section', section_id: 'SEC-SCHEDULE', children: [
-      { title: '阶段计划', purpose: '说明阶段计划', must_answer: ['明确各阶段里程碑'], scoring_response_point_ids: ['RP-000001'] },
+      { title: '阶段计划', purpose: '说明阶段计划', must_answer: ['明确各阶段里程碑'],
+        requirement_ids: ['REQ-SCHEDULE'], scoring_response_point_ids: ['RP-000001'] },
       { title: '延期防控', purpose: '说明延期防控', must_answer: ['明确延期预警、责任人与纠偏措施'], scoring_response_point_ids: ['RP-000011'] },
     ] }], catalog, scoringArtifact)
     expect(split.sections.slice(0, 2)).toEqual(reviewedOutline.sections.slice(0, 2))

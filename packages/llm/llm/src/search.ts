@@ -4,7 +4,9 @@ import { HarnessError } from './error.ts'
 
 /** Typed search/fetch failure with an open machine-readable code. */
 export class WebError extends HarnessError {
+  /** Web 请求失败时可用的 HTTP 状态码。 */
   readonly statusCode: number | undefined
+  /** 服务端建议的重试等待时间。 */
   readonly retryAfter: string | undefined
 
   constructor(

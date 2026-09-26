@@ -37,6 +37,9 @@ describe('Bid client projection', () => {
       session.append('bid.docx_export.changed', { operation: { ...running, status: 'failed', error: '导出中断' } })
       expect(ctx.sessionProjections.snapshot(session).values[BID_DOCX_EXPORT_PROJECTION_KEY]).toMatchObject({ status: 'failed', error: '导出中断' })
       expect(docxExportOperationSchema.safeParse({ ...running, status: 'completed' }).success).toBe(false)
+      const completed = { ...running, status: 'completed', path: 'output/bid.docx', warnings: [] }
+      expect(docxExportOperationSchema.safeParse({ ...completed, filePath: 'E:\\project\\.bid-harness\\output\\bid.docx' }).success).toBe(true)
+      expect(docxExportOperationSchema.safeParse(completed).success).toBe(true)
       expect(docxExportOperationSchema.safeParse({ ...running, status: 'failed' }).success).toBe(false)
     } finally {
       disposeProjection()

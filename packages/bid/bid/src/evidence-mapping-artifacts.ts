@@ -102,6 +102,11 @@ const evidenceMappingTaskSchema = z.object({
   section_ids: z.array(z.string().min(1)),
   outline_edit_scope_id: z.string().min(1).optional(),
   research_candidate_task_ids: z.array(z.string().min(1)).optional(),
+  coverage_candidates: z.object({
+    requirement_ids: z.array(z.string().min(1)),
+    scoring_ids: z.array(z.string().min(1)),
+    scoring_response_point_ids: z.array(z.string().regex(/^RP-\d{6}$/u)),
+  }).strict().optional(),
   summary_section_ids: z.array(z.string().min(1)).optional(),
   review_issues: z.array(z.string().min(1)).optional(),
   heading_path: z.array(z.string().min(1)).min(1),
@@ -176,12 +181,20 @@ export type TransientWebChunkEvidenceMaterial = z.infer<typeof transientWebChunk
 /** Public technical reference bound to a durable Host snapshot. */
 export type WebEvidenceMaterial = z.infer<typeof webEvidenceMaterialSchema>
 
-/** 返回 Web Material 的稳定身份；同一 Source 的不同 Chunk 集合必须分别保留。 */
+/**
+ * 返回 Web Material 的稳定身份；同一 Source 的不同 Chunk 集合必须分别保留。
+ * @param material 已绑定来源的 Web 资料。
+ * @returns 资料来源及其片段集合的稳定身份。
+ */
 export function webMaterialIdentity(material: Pick<WebEvidenceMaterial, 'source_id' | 'chunk_refs'>): string {
   return `${material.source_id}\u0000${canonicalWebChunkRefs(material.chunk_refs).join('\u0000')}`
 }
 
-/** 将 Web Chunk 引用规范化为去重、排序后的确定性顺序。 */
+/**
+ * 将 Web Chunk 引用规范化为去重、排序后的确定性顺序。
+ * @param refs 待规范化的片段引用。
+ * @returns 去重并排序的片段引用。
+ */
 export function canonicalWebChunkRefs(refs: readonly string[]): string[] {
   return [...new Set(refs)].sort()
 }

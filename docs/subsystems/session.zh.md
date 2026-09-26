@@ -618,7 +618,7 @@ interface TurnEndReasonMap {
 
 ## Cordis API
 
-Generated from source by `scripts/gen-cordis-catalog.ts` (verified fresh by `pnpm run verify-cordis-catalog` in doc-sync; regenerate with `pnpm run gen-cordis-catalog`) — the language sides differ only in locale-specific paired document paths. Signature blocks use a `ts cordis-catalog` fence and keep the original source JSDoc; dispatch modes are defined in the [primer](../cordis-primer.zh.md#dispatch-modes), and the framework-inherited `ctx` API lives in [cordis-api/inherited.md](../cordis-api/inherited.md).
+本区由 `scripts/gen-cordis-catalog.ts` 根据源码生成，`pnpm run verify-cordis-catalog` 检查内容是否最新。签名代码块保留源码 JSDoc；事件派发模式见 [Cordis 入门](../cordis-primer.zh.md#dispatch-modes)，框架继承的 `ctx` API 见 [Cordis API](../cordis-api/inherited.md)。
 
 <a id="ctxsessions--sessionstore"></a>
 
@@ -785,6 +785,26 @@ Types: [Scoped](scope.zh.md)
 
 Source: [`packages/core/session/src/index.ts`](../../packages/core/session/src/index.ts)
 
+<a id="sessiondeleted--emit"></a>
+
+#### `session/deleted` — emit
+
+A Session's durable log was permanently removed after its live lifecycle stopped. Consumers discard per-session derived state for this identity.
+
+```ts cordis-catalog
+/**
+ * A Session's durable log was permanently removed after its live lifecycle
+ * stopped. Consumers discard per-session derived state for this identity.
+ * @param id - Deleted Session identity.
+ * @mode emit
+ */
+'session/deleted'(id: SessionId): void
+```
+
+Types: [SessionId](core.zh.md)
+
+Source: [`packages/session/session-persistence/src/index.ts`](../../packages/session/session-persistence/src/index.ts)
+
 <a id="sessiondisposed--emit"></a>
 
 #### `session/disposed` — emit
@@ -854,4 +874,21 @@ Awaited parallel durability checkpoint: every listener runs and the caller await
 Types: [Scoped](scope.zh.md)
 
 Source: [`packages/core/session/src/index.ts`](../../packages/core/session/src/index.ts)
+
+<a id="sessionprompt-admission--serial"></a>
+
+#### `session/prompt-admission` — serial
+
+Host-wide prompt admission. The first rejection prevents message creation and Agent dispatch.
+
+```ts cordis-catalog
+/**
+ * Host-wide prompt admission. The first rejection prevents message creation and Agent dispatch.
+ * @mode serial
+ * @param request - addressed session and unpersisted browser input.
+ */
+'session/prompt-admission'( request: SessionPromptAdmissionRequest, ): SessionPromptAdmissionRejection | void | Promise<SessionPromptAdmissionRejection | void>
+```
+
+Source: [`packages/host/apiproxy/src/prompt-admission.ts`](../../packages/host/apiproxy/src/prompt-admission.ts)
 <!-- END GENERATED cordis-surface -->

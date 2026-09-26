@@ -2,11 +2,9 @@
  * Generate the per-subsystem Cordis service/event reference regions from the
  * Typert catalog projection. Every harness `ctx.<key>` service and event scope
  * maps to exactly one `docs/subsystems/` page through the curated tables below;
- * the generator injects each page's Cordis API reference between its GENERATED markers —
- * into both language sides of the pair, localizing paired document paths for
- * the Chinese side while retaining every other byte — and re-records a pair's
- * `.i18n.yaml` only when nothing outside the region changed. The
- * projection enforces event modes, JSDoc parameter/return completeness, and
+ * the generator injects each page's Cordis API reference between its GENERATED markers.
+ * Chinese output localizes links to existing Chinese Markdown targets.
+ * The projection enforces event modes, JSDoc parameter/return completeness, and
  * signature type-link coverage; the inherited (vendor) tier renders to
  * `docs/cordis-api/inherited.md`. `--check` verifies every generated artifact.
  *
@@ -18,7 +16,7 @@
  * a missing regeneration.
  */
 
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import {
   projectCordisCatalog,
@@ -30,15 +28,7 @@ import {
 import type { CordisCatalogPolicy } from '@deepseek-ai/dsh-typert-generator'
 import { renderCordisCoreApiPages } from './cordis-core-api.ts'
 import { contextKeyMap, contextMergeFiles, eventNameList } from './cordis-walk.ts'
-import {
-  blobHash,
-  parsePairMeta,
-  parseTranslationPairingManifest,
-  partitionGeneratedRegions,
-  renderPairMeta,
-  translationPairSourcePredicate,
-} from './translation-pairing.ts'
-import { rewriteTranslationLinkLocales } from './translation-links.ts'
+import { isExternalOrAbsoluteMarkdownUrl, markdownDestination, parseMarkdown, splitMarkdownUrlTarget, visitMarkdown } from './markdown.ts'
 
 const root = resolve(import.meta.dirname, '..')
 const SUBSYSTEMS_DIR = 'docs/subsystems'
@@ -60,6 +50,7 @@ export const SERVICE_PAGE: Record<string, string> = {
   agents: 'core.md',
   apiProxy: 'typert.md',
   approval: 'approval.md',
+  bid: 'bid.md',
   attachments: 'attachment.md',
   shell: 'shell.md',
   shellEnv: 'shell.md',
@@ -76,6 +67,7 @@ export const SERVICE_PAGE: Record<string, string> = {
   fileReferences: 'session-reference.md',
   fs: 'filesystem.md',
   goals: 'goal.md',
+  goalRoundDriver: 'goal.md',
   webServer: 'web-server.md',
   invariants: 'invariants.md',
   llm: 'llm-streaming.md',
@@ -344,6 +336,9 @@ export const LINK_MAP: Readonly<Record<string, string>> = {
   LlmAdapter: 'llm-streaming.md',
   PreparedLlmCall: 'llm-streaming.md',
   LlmRuntime: 'llm-streaming.md',
+  LlmCapability: 'llm-streaming.md',
+  HostedWebSearch: 'llm-streaming.md',
+  HostedSearchOptions: 'llm-streaming.md',
   StreamChunk: 'llm-streaming.md',
   SkillProviderControl: 'skills.md',
   CreateSessionOptions: 'persistence.md',
@@ -374,6 +369,8 @@ export const LINK_MAP: Readonly<Record<string, string>> = {
   Scoped: 'scope.md',
   EpochHeader: 'session.md',
   Session: 'session.md',
+  SessionPromptAdmissionRequest: 'session.md',
+  SessionPromptAdmissionRejection: 'session.md',
   SessionEventMap: 'session.md',
   TurnEndReason: 'session.md',
   TurnTrigger: 'session.md',
@@ -426,6 +423,7 @@ export const LINK_MAP: Readonly<Record<string, string>> = {
   SubagentRun: 'subagent.md',
   SubagentRuntime: 'subagent.md',
   SubagentStartRequest: 'subagent.md',
+  ResolvedSubagentStartRequest: 'subagent.md',
   AssembleContext: 'system-prompt.md',
   PromptContext: 'system-prompt.md',
   PromptSection: 'system-prompt.md',
@@ -609,6 +607,50 @@ export const TYPE_LINK_EXEMPTIONS: Readonly<Record<string, string>> = {
   LocaleDict: 'service-local dictionary fields are owned by packages/client/i18n/src/index.ts',
   ThemeTokens: 'service-local token dictionary is owned by packages/client/ui-theme/src/index.ts',
   Translate: 'service-local bound translator is owned by packages/client/i18n/src/index.ts',
+  BidAddRevisionIssueRequest: 'Bid control-plane contract is owned by packages/bid/bid/README.md',
+  BidCapabilityPlanView: 'Bid control-plane contract is owned by packages/bid/bid/README.md',
+  BidCapabilityTask: 'Bid control-plane contract is owned by packages/bid/bid/README.md',
+  BidChapterRevisionRequest: 'Bid control-plane contract is owned by packages/bid/bid/README.md',
+  BidChapterRevisionResult: 'Bid control-plane contract is owned by packages/bid/bid/README.md',
+  BidChapterWritingGateResult: 'Bid control-plane contract is owned by packages/bid/bid/README.md',
+  BidClientProjection: 'Bid control-plane contract is owned by packages/bid/bid/README.md',
+  BidDeleteRevisionIssueRequest: 'Bid control-plane contract is owned by packages/bid/bid/README.md',
+  BidDetailsView: 'Bid control-plane contract is owned by packages/bid/bid/README.md',
+  BidDocxExportResult: 'Bid control-plane contract is owned by packages/bid/bid/README.md',
+  BidEvidenceMappingProgress: 'Bid control-plane contract is owned by packages/bid/bid/README.md',
+  BidFileIntakeFileResult: 'Bid control-plane contract is owned by packages/bid/bid/README.md',
+  BidFileIntakeResult: 'Bid control-plane contract is owned by packages/bid/bid/README.md',
+  BidOutlineConfirmationResult: 'Bid control-plane contract is owned by packages/bid/bid/README.md',
+  BidOutlineRegenerationResult: 'Bid control-plane contract is owned by packages/bid/bid/README.md',
+  BidReviewChapterView: 'Bid control-plane contract is owned by packages/bid/bid/README.md',
+  BidReviewWorkbenchView: 'Bid control-plane contract is owned by packages/bid/bid/README.md',
+  BidRevisionComparisonResult: 'Bid control-plane contract is owned by packages/bid/bid/README.md',
+  BidRevisionQueueResult: 'Bid control-plane contract is owned by packages/bid/bid/README.md',
+  BidRevisionQueueView: 'Bid control-plane contract is owned by packages/bid/bid/README.md',
+  BidRunContext: 'Bid control-plane contract is owned by packages/bid/bid/README.md',
+  BidStage: 'Bid control-plane contract is owned by packages/bid/bid/README.md',
+  BidTaskState: 'Bid control-plane contract is owned by packages/bid/bid/README.md',
+  BidTenderAnalysisConfirmationResult: 'Bid control-plane contract is owned by packages/bid/bid/README.md',
+  BidUpdateRevisionIssueRequest: 'Bid control-plane contract is owned by packages/bid/bid/README.md',
+  BidUploadFile: 'Bid control-plane contract is owned by packages/bid/bid/README.md',
+  CapabilityTaskDispatcher: 'Bid control-plane contract is owned by packages/bid/bid/README.md',
+  CapabilityTaskRequest: 'Bid control-plane contract is owned by packages/bid/bid/README.md',
+  DocxFormatRequest: 'Bid control-plane contract is owned by packages/bid/bid/README.md',
+  DocxFormatSuggestion: 'Bid control-plane contract is owned by packages/bid/bid/README.md',
+  DocxFormatView: 'Bid control-plane contract is owned by packages/bid/bid/README.md',
+  DocxTemplateId: 'Bid control-plane contract is owned by packages/bid/bid/README.md',
+  DocxTemplateLibraryView: 'Bid control-plane contract is owned by packages/bid/bid/README.md',
+  IncomingFile: 'Bid control-plane contract is owned by packages/bid/bid/README.md',
+  OutlineArtifact: 'Bid control-plane contract is owned by packages/bid/bid/README.md',
+  OutlineDraftIdentityRequest: 'Bid control-plane contract is owned by packages/bid/bid/README.md',
+  OutlineDraftMutationRequest: 'Bid control-plane contract is owned by packages/bid/bid/README.md',
+  OutlineDraftMutationResult: 'Bid control-plane contract is owned by packages/bid/bid/README.md',
+  OutlineDraftView: 'Bid control-plane contract is owned by packages/bid/bid/README.md',
+  OutlineReviewContext: 'Bid control-plane contract is owned by packages/bid/bid/README.md',
+  TenderAnalysisConfirmationView: 'Bid control-plane contract is owned by packages/bid/bid/README.md',
+  TenderAnalysisEditOperation: 'Bid control-plane contract is owned by packages/bid/bid/README.md',
+  WritingEntryIntent: 'Bid control-plane contract is owned by packages/bid/bid/README.md',
+  WebRuntimeDiagnostics: 'Web runtime diagnostics are owned by packages/web/web/src/index.ts',
   WebUpgradeRoute:
     'upgrade route registration contract is owned by packages/host/webserver/src/index.ts',
   InvariantRegistration: 'service-local lifecycle handle is owned by packages/runtime-diagnostics/invariants/README.md',
@@ -745,17 +787,25 @@ export interface WalkPartitionMaps {
   readonly eventWalkExemptions: Readonly<Record<string, string>>
 }
 
-/** Project paired Markdown destinations in one generated region to the page's locale. */
+/** 将中文页面生成区中的链接指向已有的中文文档。 */
 export function localizePageRegion(region: string, pageRel: string, scanRoot: string = root): string {
   if (!pageRel.endsWith('.zh.md')) return region
-  const manifest = parseTranslationPairingManifest(
-    readFileSync(resolve(scanRoot, 'scripts/translation-pairing.manifest.json'), 'utf8'),
-  )
-  return rewriteTranslationLinkLocales(region, {
-    repoRoot: scanRoot,
-    sourcePath: pageRel,
-    isTranslationPairSource: translationPairSourcePredicate(manifest),
-  }).content
+  const replacements: { start: number; end: number; value: string }[] = []
+  visitMarkdown(parseMarkdown(region), (node) => {
+    if (node.type !== 'link' && node.type !== 'definition') return
+    if (isExternalOrAbsoluteMarkdownUrl(node.url)) return
+    const destination = markdownDestination(region, node)
+    const { path, suffix } = splitMarkdownUrlTarget(destination.url)
+    if (!path.endsWith('.md') || path.endsWith('.zh.md')) return
+    const chinesePath = path.replace(/\.md$/, '.zh.md')
+    if (!existsSync(resolve(scanRoot, dirname(pageRel), decodeURIComponent(chinesePath)))) return
+    replacements.push({ start: destination.start, end: destination.end, value: `${chinesePath}${suffix}` })
+  })
+  let localized = region
+  for (const replacement of replacements.sort((left, right) => right.start - left.start)) {
+    localized = localized.slice(0, replacement.start) + replacement.value + localized.slice(replacement.end)
+  }
+  return localized
 }
 
 /**
@@ -879,15 +929,14 @@ export function computeOutputs(): [string, string][] {
       events.filter(e => EVENT_SCOPE_PAGE[e.scope] === page),
       CORDIS_CATALOG_POLICY,
     )
-    for (const side of [page, page.replace(/\.md$/, '.zh.md')]) {
+    for (const side of [page.replace(/\.md$/, '.zh.md')]) {
       const rel = `${SUBSYSTEMS_DIR}/${side}`
       const localizedRegion = localizePageRegion(region, rel)
       let current: string
       try {
         current = readFileSync(resolve(root, rel), 'utf8')
       } catch {
-        // Both pair sides must exist before a region can be injected; the
-        // pairing gate owns pair completeness, this generator names the miss.
+        // A mapped documentation page must exist before its region can be injected.
         problems.push(`${rel}: mapped subsystems page does not exist.`)
         continue
       }
@@ -900,51 +949,6 @@ export function computeOutputs(): [string, string][] {
   }
   if (problems.length > 0) throw new Error(`gen-cordis-catalog: ${problems.length} page violation(s):\n${problems.map(p => `  ${p}`).join('\n')}`)
   return outputs
-}
-
-/**
- * Re-record a pair's `.i18n.yaml` after a region write ONLY when the write is
- * region-confined: both sides' region-stripped content must be byte-equal to
- * the region-stripped previous content whose hashes the record holds. The
- * caller supplies the previous bytes (read before writing); human-content
- * drift leaves the record untouched so the pairing gate still demands the
- * normal translation flow.
- * @param pageRel - repo-relative English page path (`docs/subsystems/x.md`).
- * @param before - pre-write bytes per repo-relative path.
- * @param scanRoot - repository root override for tests.
- * @returns true when the record was refreshed.
- */
-export function maybeRecordPair(pageRel: string, before: Map<string, Buffer>, scanRoot: string = root): boolean {
-  const zhRel = pageRel.replace(/\.md$/, '.zh.md')
-  const metaRel = pageRel.replace(/\.md$/, '.i18n.yaml')
-  const metaAbs = resolve(scanRoot, metaRel)
-  let meta: string
-  try {
-    meta = readFileSync(metaAbs, 'utf8')
-  } catch {
-    // No record yet: a brand-new pair is recorded by the author's --write
-    // after review, never silently by regeneration.
-    return false
-  }
-  // The record must contain exactly the two valid entries for THIS pair;
-  // a malformed or renamed-key sidecar is the pairing gate's problem to
-  // report, never something regeneration silently repairs into validity.
-  const recorded = parsePairMeta(meta)
-  const names = [pageRel, zhRel].map(rel => rel.split('/').at(-1) ?? rel)
-  if (!recorded || recorded.size !== 2 || !names.every(name => recorded.has(name))) return false
-  for (const rel of [pageRel, zhRel]) {
-    const previous = before.get(rel)
-    if (!previous) return false
-    if (recorded.get(rel.split('/').at(-1) ?? rel) !== blobHash(previous)) return false
-    const current = readFileSync(resolve(scanRoot, rel))
-    const strippedBefore = partitionGeneratedRegions(previous.toString('utf8')).stripped
-    const strippedAfter = partitionGeneratedRegions(current.toString('utf8')).stripped
-    if (strippedBefore !== strippedAfter) return false
-  }
-  const source = readFileSync(resolve(scanRoot, pageRel))
-  const zh = readFileSync(resolve(scanRoot, zhRel))
-  writeFileSync(metaAbs, renderPairMeta(pageRel, blobHash(source), zhRel, blobHash(zh)))
-  return true
 }
 
 /** CLI entry: default regenerates every artifact, `--check` fails if any is
@@ -979,33 +983,15 @@ export function main(): void {
     process.exit(1)
   }
 
-  const before = new Map<string, Buffer>()
-  for (const [out] of outputs) {
-    try {
-      before.set(out, readFileSync(resolve(root, out)))
-    } catch {
-      // First generation of this artifact; nothing to guard, nothing to record.
-    }
-  }
   let changedPages = 0
-  let recorded = 0
   for (const [out, content] of outputs) {
     const destination = resolve(root, out)
-    if (before.get(out)?.toString('utf8') === content) continue
+    if (existsSync(destination) && readFileSync(destination, 'utf8') === content) continue
     mkdirSync(dirname(destination), { recursive: true })
     writeFileSync(destination, content)
     changedPages++
   }
-  for (const page of [...new Set([...Object.values(SERVICE_PAGE), ...Object.values(EVENT_SCOPE_PAGE)])]) {
-    const rel = `${SUBSYSTEMS_DIR}/${page}`
-    const zhRel = rel.replace(/\.md$/, '.zh.md')
-    const wroteEither = [rel, zhRel].some((side) => {
-      const previous = before.get(side)
-      return previous !== undefined && previous.toString('utf8') !== readFileSync(resolve(root, side), 'utf8')
-    })
-    if (wroteEither && maybeRecordPair(rel, before)) recorded++
-  }
-  console.log(`gen-cordis-catalog: ${outputs.length} artifact(s) computed, ${changedPages} written, ${recorded} pair record(s) refreshed.`)
+  console.log(`gen-cordis-catalog: ${outputs.length} artifact(s) computed, ${changedPages} written.`)
 }
 
 // Run only when invoked as a script, not when imported by a test.

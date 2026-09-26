@@ -59,15 +59,19 @@ export interface BidRunNotice {
   /** Workflow stage whose execution stopped. */
   readonly stage: BidStage
   /** Neutral user stop or an interrupted automatic attempt. */
-  readonly kind: 'stopped' | 'interrupted'
+  readonly kind: 'stopped' | 'interrupted' | 'completed'
   /** Presentation intent; the renderer does not infer severity from text. */
   readonly severity: 'info' | 'error'
   /** Host-authored, model-invisible user-facing summary. */
   readonly message: string
+  /** 已完成能力 Work 的身份；其他 Run 通知不携带。 */
+  readonly workId?: string
+  /** 同批发布的结果凭据路径；其他 Run 通知不携带。 */
+  readonly resultRef?: string
 }
 
 /** Why one Run stopped before completing its stage. */
-export type BidRunSuspensionCause = 'user_stop' | 'retry_exhausted' | 'executor_error' | 'host_restart'
+export type BidRunSuspensionCause = 'user_stop' | 'retry_exhausted' | 'executor_error' | 'host_restart' | 'awaiting_input'
 
 /** Durable decision family presented for a recoverable Bid boundary. */
 export type BidRunDecisionType = 'run_recovery'
@@ -84,6 +88,7 @@ export interface BidRunResumeIdentity {
 /** Closed set of durable work admitted by the Bid Host. */
 export const BID_WORK_KINDS = [
   'stage_execution',
+  'capability_task',
   'file_intake',
   'evidence_remap',
   'outline_regeneration',
@@ -309,6 +314,20 @@ export interface BidClientProjection {
   maxFiles?: number | undefined
   maxFileBytes?: number | undefined
   maxTotalBytes?: number | undefined
+}
+
+/** Host 从能力 Work 的不可变请求与检查点读取的计划摘要。 */
+export interface BidCapabilityPlanView {
+  readonly workId: string
+  readonly title: string
+  readonly scope: string
+  readonly status: 'queued' | 'running' | 'awaiting_input' | 'suspended' | 'completed' | 'failed'
+  readonly steps: readonly {
+    readonly id: string
+    readonly capability: string
+    readonly status: 'pending' | 'running' | 'awaiting_input' | 'completed' | 'failed'
+    readonly detail: string | null
+  }[]
 }
 
 /** 已发布阶段详情；S4 执行期间的目录保持为 S3 确认版本。 */

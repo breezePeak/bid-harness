@@ -783,24 +783,28 @@ describe('SessionPersistenceSqlite edge behavior', () => {
     await ctx.fiber.dispose()
   })
 
-  it('rejects non-files and symbolic links', async () => {
+  it('rejects non-files', async () => {
     const directoryPath = await freshDbPath('dsh-sqlite-directory-')
     await mkdir(directoryPath)
     expect(errorMessage(await backendFailure(directoryPath)))
       .toMatch(/must be a regular file/)
+  })
 
+  it.runIf(process.platform !== 'win32')('rejects symbolic-link files', async () => {
     const linkPath = await freshDbPath('dsh-sqlite-link-')
     const target = join(linkPath, '..', 'target.db')
     await writeFile(target, '')
     await symlink(target, linkPath)
     expect(errorMessage(await backendFailure(linkPath)))
       .toMatch(/not a symbolic link/)
+  })
 
+  it('rejects linked parent directories', async () => {
     const parentLinkPath = await freshDbPath('dsh-sqlite-parent-link-')
     const realParent = join(parentLinkPath, '..', 'real-parent')
     const linkedParent = join(parentLinkPath, '..', 'linked-parent')
     await mkdir(realParent, { mode: 0o700 })
-    await symlink(realParent, linkedParent)
+    await symlink(realParent, linkedParent, process.platform === 'win32' ? 'junction' : 'dir')
     expect(errorMessage(await backendFailure(join(linkedParent, 'sessions.db'))))
       .toMatch(/must be a real directory/)
   })

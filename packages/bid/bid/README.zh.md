@@ -37,7 +37,15 @@ S2 Run 首次通过 running 检查点后，Host 把一个原生 Goal 绑定到�
 
 `project-state.json` 是项目进度的持久化来源，schema version 4 扁平保存 `stage`、`status`、`run`、单调递增 revision 和 `updated_at`，不保存聊天消息、工具调用、提示词或摘要。读取器会把结构合法的 v3 状态归一为 v4，后续写入只使用 v4。Bid Session 启动时从 `session.header.cwd` 定位项目；缺少状态文件时初始化 S1 等待上传，否则通过 `bid.project.resumed` 恢复当前 Session 的 Projection。Workspace 的“+”继续调用 `sessions.create()`：新 Session 不读取其他 Session 的聊天或模型上下文，也不建立父会话关系。
 
-`BidOrchestrator` 绑定执行操作所用的 DSH Session，并通过 `reduceBidTaskState()` 归约当前 Session 已同步的状态。Run 只记录一次执行尝试的身份、epoch、基线 revision、工作描述和进度，停止原因属于外层 `suspended` 状态。Host 为每次自动执行传入强制 `BidRunContext`；调度准入、Child 收敛、取消信号和正式写入栅栏都归该 Run 所有。读取到没有活动 operation 的 `running` 时，Host 在项目锁内将其确定性改为 `suspended(host_restart)`，不自动执行；恢复必须同时匹配挂起 Run ID 和项目 revision，并由执行器按持久检查点核对已完成工作。
+`BidOrchestrator` 绑定执行操作所用的 DSH Session，并通过 `reduceBidTaskState()` 归约当前 Session 已同步的状态。Run 只记录一次执行尝试的身份、epoch、基线 revision、工作描述和进度，停止原因属于外层 `suspended` 状态。Host 为每次自动执行传入强制 `BidRunContext`；调度准入、Child 收敛、取消信号和正式写入栅栏都归该 Run 所有。读取到没有活动 operation 的未完成 `running` 时，Host 在项目锁内将其改为 `suspended(host_restart)`，不自动执行；能力 Work 已有可验证的正式提交凭据时只补完成结算。恢复必须同时匹配挂起 Run ID 和项目 revision，并由执行器按持久检查点核对已完成工作。
+
+`capability_task` 用一个 Work 和一个 Run 顺序执行已注册适配器的能力步骤。Host 将真实用户消息、初始计划、输入摘要和任务前状态保存为不可变请求；`runs/<workId>/task-checkpoint.json` 保存已开始步骤、结果与后续授权的计划补丁。每步只在独立候选目录执行，Host 核对目标 ID 与精确文件清单后合并到 Work 候选；最终业务文件与 `requests/<workId>/result.json` 凭据同批发布。恢复先核对凭据和正式文件，已提交的 Work 只补 Run 结算及公开会话通知。`awaiting_input` 保留原 Work，并以持久化原生问题取得补充文本；用户停止使 Run 提交权限退休并等待 Child 收敛。适配器由 `BidHostRuntime.registerCapabilityTaskDispatcher()` 注册，`runCapabilityTask()` 仅接受当前公开主 Agent 与真实用户消息授权。
+
+主 Agent 在所有 Bid 阶段都可用 `bid_project_inspect` 读取项目，用 `bid_run_task` 提交有序能力步骤。段落范围只接纳引用同一选区的单步 `chapter.revise`，后续计划补丁也不能扩大为整章或结构写入。挂起的能力 Work 可由后续真实用户消息调用 `bid_plan_task` 替换尚未开始的后缀；Host 保留已完成步骤和原任务范围，保存计划后仍等待明确恢复。旧目录、资料、写作计划及章节修订工具在原生确认或 S5 热插入边界保留既有处理，其余阶段按相同能力适配器执行；目录旧参数仍要匹配当前确认目录的 CAS 身份。运行中跨能力请求先保存到当前 Work 命令日志，收敛后由独立 Work 顺序执行。
+
+目录能力以当前确认目录为已写项目的基线，首次确认前读取当前 Draft。`outline.update` 同时应用结构操作与经过真实招标 ID 校验的业务归属；拆分子章不会机械继承父章的全部要求。`outline.refine` 先由独立子会话提出结构操作，再基于 Host 分配的新章节 ID 分配业务引用。`chapter.reorganize` 把旧正文按完整 Markdown 块交由子会话分配，Host 核对源正文 SHA、块身份、目标范围、完整覆盖及显式共享或删减。迁移成果写入 `chapters/reuse-seeds.json` 并保持待写、待审；退役章节的计划、资料和旧 Manifest 归属保存在 `outline/reassignment.json`，未分配的旧正文由 `chapters/pending-reorganization.json` 指明。目录、Draft、授权来源为 `user_task` 的 confirmation、Evidence、Writing Plan、执行索引及 Manifest 在同一步候选中校验，再由能力 Work 发布实际改变的精确文件。
+
+`evidence.research` 的局部能力复用 S4 remap：`supplement` 保留并去重旧材料，`replace` 只替换目标章节；范围外映射和既有 Web 来源顺序保持原样。拆分后的退役章节资料只作为待判断候选，当前正文草稿只辅助检索意图，二者都不自动成为 Evidence。研究不开放目录结构工具；需要深化时先执行独立目录步骤。研究更新章节写作说明后同步当前确认目录及相关写作索引，新增 Web 快照从严格来源账本取得精确文件许可；阶段映射计划与检查点留在步骤候选内，不随能力结果发布。
 
 全新项目的文件接入必须等待专用上传操作，因为其 Executor 需要已准入的文件批次。S2 的 Stage Policy 声明 `requiresUserConfirmationAfterValidation`；初次校验通过后记录 `bid.user_confirmation.required`，不记录完成事件。`confirmValidatedStage()` 在正式 Artifact 再次通过 Validator 后才记录用户确认和阶段完成。
 
@@ -63,7 +71,9 @@ S2 的 `project.json` 记录项目背景、建设目标、实施约束和项目�
 
 `bid/getTenderAnalysisForConfirmation` 返回 S2 的四个 Artifact；`bid/confirmTenderAnalysis` 只允许编辑规范化项目、要求、评分与合规字段。原文、分值、ID、`source_refs` 与招标文件覆盖集合不在操作协议中。Host 原子替换四个原路径文件并再次执行完整 S2 Validator；无效输入返回问题并保持 `waiting_user`，通过后才完成 S2 并启动 S3。
 
-`bid/getDetails` 只读已发布详情：S2 确认后继续返回最终招标信息；S3 确认后读取 `outline/initial-confirmed-outline.json`，S4 执行期间保持该版本，等待确认时读取已生成目录，S4 确认后读取 `outline/confirmed-outline.json`。详情读取依赖恢复后的项目状态和原有产物，不新增工作流事件或磁盘格式，也不改变确认接口的编辑准入。
+`bid/getDetails` 只读已发布详情：已存在的 `outline/confirmed-outline.json` 与章节位置决定最终目录和正文入口是否可见；没有最终目录时仍按首次确认边界显示初始或候选目录。阶段标签不会隐藏已有正式正文，也不改变确认接口的编辑准入。
+
+Bid Main Agent 可在任意阶段通过 `bid_run_task` 提交真实用户消息授权的能力计划。运行中的跨能力请求先写入不可变请求，再登记到原 Work 的 `commands.json`；原 Work 结束后按顺序启动独立能力 Work，挂起时保留待办并让原 Run 先恢复。`getCapabilityTaskPlan` 从请求和步骤检查点返回实际进度，未登记的孤立文件不构成接纳。`tender.analyze`、`outline.generate` 和 `document.review` 只接受项目范围；整书审核重新核对已完成正文并更新全局合规与整书验收记录，不启动 Writer 或改写正文。`docx.export` 只能作为任务最后一步，在前序能力正式结算后使用独立 Word 导出；导出提示包含正文快照摘要。局部任务成功不推进或倒退默认整本路线，首次 S2–S5 确认仍由原生阶段入口执行。
 
 S3 的评分响应点拆解与语义复核都上报 `analyzing`，对应计划第一步；`reviewing` 只用于目录确定性校验通过后的目录质量复核。首次执行和候选恢复遵守相同的进度含义，评分响应点复核失败时不标记目录生成或校验已完成。
 

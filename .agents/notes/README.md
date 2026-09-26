@@ -37,9 +37,9 @@ The `architecture` / `process` line: **architecture** is about the source we shi
 
 Archive an implemented Agent Note when the shipped decision is complete and its rationale is unlikely to guide future work. Keep it active when its alternatives, ownership boundary, negative guarantee, durable or wire semantics, security rule, or reintroduction condition remains useful. Never archive a proposed note: reject an obsolete proposal. Keep a rejected note only while it prevents a plausible mistake; otherwise delete it. Use the calibrated [`dsh-archive-agent-notes`](../skills/dsh-archive-agent-notes/SKILL.md) workflow rather than word count, age, or a target quota.
 
-The archive is path-encoded as `archived/{class}/yyyy-mm-dd-topic-title.md`; `implemented` is deliberately absent because only implemented notes can enter it. An archival change moves the note, retains `Status: implemented`, inserts `Archived: YYYY-MM-DD` immediately below that status, and repairs or deletes inbound links. Legacy translations and sidecars already sealed with archived notes remain frozen. These are the only permitted content changes during archival.
+The archive is path-encoded as `archived/{class}/yyyy-mm-dd-topic-title.md`; `implemented` is deliberately absent because only implemented notes can enter it. An archival change moves the note, retains `Status: implemented`, inserts `Archived: YYYY-MM-DD` immediately below that status, and repairs or deletes inbound links. Existing Markdown bodies already sealed with archived notes remain frozen. These are the only permitted content changes during archival.
 
-Once sealed, every archived record is permanently frozen. Do not edit, translate, reformat, update, move, or delete it, and do not treat it as authority for current behavior. Documentation gates skip archived sources, including their outbound links; active prose may still link into an archived note when it intentionally cites history. [`verify-archived-agent-notes`](../../scripts/verify-archived-agent-notes.ts) enforces the closed class tree, archive metadata, legacy record completeness, and the append-only frozen-content manifest. The [archive-policy Agent Note](implemented/process/2026-07-26-frozen-agent-note-archive.md) owns the rationale.
+Once sealed, every archived record is permanently frozen. Do not edit, translate, reformat, update, move, or delete it, and do not treat it as authority for current behavior. Documentation gates skip archived sources, including their outbound links; active prose may still link into an archived note when it intentionally cites history. [`verify-archived-agent-notes`](../../scripts/verify-archived-agent-notes.ts) enforces the closed class tree, archive metadata, archived Markdown headers, and the append-only frozen-content manifest. The [archive-policy Agent Note](implemented/process/2026-07-26-frozen-agent-note-archive.md) owns the rationale.
 
 ## When to write one
 
@@ -122,4 +122,4 @@ Moving a file between lifecycle folders means updating the `Status:` line and re
 
 ### Language
 
-New and updated Agent Notes use Chinese content in one `.md` file. Do not create a language counterpart, consistency sidecar, or language switcher for current work. Existing paired records may remain unchanged as historical compatibility files.
+New and updated Agent Notes use Chinese content in one `.md` file. Do not create a language counterpart, consistency sidecar, or language switcher for current work. Existing English Markdown bodies remain in the repository; translation records and pairing tools are retired.

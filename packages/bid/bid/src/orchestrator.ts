@@ -81,6 +81,9 @@ export type BidOrchestratorErrorCode =
   | 'BID_STAGE_RESET_NOT_ALLOWED'
   | 'BID_WRITING_ENTRY_ACTION_NOT_ALLOWED'
 
+/**
+ * 阶段开始前的能力准入钩子。
+ */
 export type BidBeforeStageStart = (
   stage: BidStage,
   resumeOf?: BidRunResumeIdentity,
@@ -186,13 +189,14 @@ export class BidOrchestrator {
   /**
    * Execute the current program-owned stage once without driving its successor.
    * @returns the log-derived state after the stage records completion or failure.
-   * @throws {@link BidOrchestratorError} unless the current stage is an idle ready program stage.
+   * @throws {@link BidOrchestratorError} unless the current stage can accept a program action.
    */
   runCurrentProgramStage(): Promise<BidTaskState> {
     this.assertIdle()
     const state = this.state
     const policy = getBidStagePolicy(state.stage)
-    if (policy.executor !== 'program' || state.status !== 'ready') {
+    if (policy.executor !== 'program' || (state.status !== 'ready'
+      && !(state.stage === 'file_intake' && state.status === 'waiting_user'))) {
       throw new BidOrchestratorError(
         'BID_PROGRAM_STAGE_NOT_ALLOWED',
         `cannot run Bid program stage ${JSON.stringify(state.stage)} while status is ${JSON.stringify(state.status)}`,
@@ -226,13 +230,13 @@ export class BidOrchestrator {
   }
 
   /**
-   * Execute a ready before-execution stage after its Host-owned plan has been confirmed.
+   * 执行已保存写作计划且处于 ready 的 S5。
    * @returns State after the confirmed stage settles.
    */
   runConfirmedStage(): Promise<BidTaskState> {
     this.assertIdle()
     const state = this.state
-    if (state.status !== 'ready' || getBidStagePolicy(state.stage).userGate !== 'before_execution') {
+    if (state.status !== 'ready' || state.stage !== 'chapter_writing') {
       throw new BidOrchestratorError(
         'BID_AUTOMATIC_STAGE_NOT_ALLOWED',
         `cannot run confirmed Bid stage ${JSON.stringify(state.stage)} while status is ${JSON.stringify(state.status)}`,

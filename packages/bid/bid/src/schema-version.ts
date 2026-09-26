@@ -7,7 +7,7 @@ import { z } from 'zod'
  * @param current Version written by the current implementation.
  * @returns A schema that always produces a positive integer version.
  */
-export function recordOnlySchemaVersion(current: number) {
+export function recordOnlySchemaVersion(current: number): z.ZodType<number> {
   return z.unknown().optional().transform((value): number => (
     typeof value === 'number' && Number.isInteger(value) && value > 0 ? value : current
   ))

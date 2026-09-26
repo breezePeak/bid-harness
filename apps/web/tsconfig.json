@@ -78,6 +78,7 @@
     "tests/access-confirmation.e2e.ts",
     "tests/agent-preset-selection.e2e.ts",
     "tests/bid-session.e2e.ts",
+    "tests/bid-docx-export-notice.e2e.ts",
     "tests/bid-outline-review.e2e.ts",
     "tests/bid-writing-question.e2e.ts",
     "tests/bid-run-progress.e2e.ts",

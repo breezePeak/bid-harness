@@ -5,7 +5,7 @@ import { PlanListPanel, type PlanListLabels } from '@deepseek-ai/dsh-client-ui-p
 import { NS } from '../locales.ts'
 
 export interface TodoPanelProps {
-  /** The session's current plan (empty renders nothing) — selected by the dock adapter. */
+  /** The session's current multi-step plan; hidden after completion or when the agent stops. */
   todos: readonly TodoItem[]
   /** Whether the owning agent is currently running. */
   running: boolean
@@ -14,6 +14,7 @@ export interface TodoPanelProps {
 }
 
 export function TodoPanel({ todos, running, t }: TodoPanelProps) {
+  if (!running || todos.length < 2 || todos.every(item => item.status === 'completed')) return null
   const labels: PlanListLabels = {
     title: t('todo.title'),
     completed: count => t('todo.progress.done', { done: count }),

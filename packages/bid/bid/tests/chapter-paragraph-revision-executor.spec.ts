@@ -44,6 +44,7 @@ vi.mock('../src/chapter-paragraph-revision-review.ts', async (importOriginal) =>
 
 import { BidWorkspace } from '../src/index.ts'
 import { executeParagraphRevisionTask } from '../src/chapter-paragraph-revision-executor.ts'
+import { chapterLocation } from '../src/chapter-storage.ts'
 import { chapterCandidateSha256 } from '../src/chapter-writing-review-artifacts.ts'
 import { buildParagraphRevisionReviewPath } from '../src/chapter-paragraph-revision-artifacts.ts'
 
@@ -100,7 +101,7 @@ async function fixture() {
         issues: [{ issue_id: 'ISSUE-1', instruction: '写得自然一些', suggestion: null, scope: 'paragraphs' as const,
           reference_text: '原段落。', start, end: start + '原段落。'.length }],
       },
-      serial: '0001', title: '标题', writerId: 'writer', signal: new AbortController().signal,
+      location: chapterLocation('SEC-1', 1), title: '标题', writerId: 'writer', signal: new AbortController().signal,
       customerTextContext: {
         outline: { sections: [{ id: 'SEC-1' }] }, requirements: { requirements: [] }, scoring: { scoring_items: [] },
         compliance: { compliance_items: [] }, responsePoints: { points: [] }, acceptanceCriterionIds: [],

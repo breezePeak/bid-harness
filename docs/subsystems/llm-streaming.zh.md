@@ -765,7 +765,7 @@ declare abstract class LlmAdapter {
 
 ## Cordis API
 
-Generated from source by `scripts/gen-cordis-catalog.ts` (verified fresh by `pnpm run verify-cordis-catalog` in doc-sync; regenerate with `pnpm run gen-cordis-catalog`) — the language sides differ only in locale-specific paired document paths. Signature blocks use a `ts cordis-catalog` fence and keep the original source JSDoc; dispatch modes are defined in the [primer](../cordis-primer.zh.md#dispatch-modes), and the framework-inherited `ctx` API lives in [cordis-api/inherited.md](../cordis-api/inherited.md).
+本区由 `scripts/gen-cordis-catalog.ts` 根据源码生成，`pnpm run verify-cordis-catalog` 检查内容是否最新。签名代码块保留源码 JSDoc；事件派发模式见 [Cordis 入门](../cordis-primer.zh.md#dispatch-modes)，框架继承的 `ctx` API 见 [Cordis API](../cordis-api/inherited.md)。
 
 <a id="ctxllm--llmruntime"></a>
 
@@ -789,6 +789,31 @@ registerAdapter(providers: string[], adapter: LlmAdapter): AdapterRegistrationHa
  * @returns detached provider metadata in registration order.
  */
 listProviders(): LlmProviderInfo[]
+
+/**
+ * Attach hosted search to a model provider; unloading removes that capability.
+ * @param provider - registered model route served by this search implementation.
+ * @param search - provider-owned discovery using the provider's connection settings.
+ * @returns disposer for the capability contribution.
+ */
+registerWebSearch(provider: string, search: HostedWebSearch): () => void
+
+/**
+ * Query an installed provider capability without reading its credentials.
+ * @param provider - model provider route.
+ * @param capability - operation required by a consumer.
+ * @returns whether that route and operation are registered.
+ */
+supports(provider: string, capability: LlmCapability): boolean
+
+/**
+ * Discover URLs through one explicitly selected model provider, without fallback.
+ * @param provider - route captured for this operation.
+ * @param request - query and optional source limit.
+ * @param options - captured model, cancellation, and request recorder.
+ * @returns normalized discovery results; fetched evidence remains the web service's responsibility.
+ */
+webSearch(provider: string, request: WebSearchRequest, options: HostedSearchOptions): Promise<WebSearchResult>
 
 /**
  * Declare provider routes an adapter plugin can activate through
@@ -889,7 +914,16 @@ async prepareCall(config: LlmCallConfig, signal?: AbortSignal): Promise<Prepared
  * @returns the chunk stream, possibly wrapped by `llm/stream` listeners.
  */
 stream(options: GenerateOptions): AsyncIterable<StreamChunk>
+
+/**
+ * Assemble a non-streaming result using the same provider, tools, usage, and failure protocol.
+ * @param options - full provider-neutral request.
+ * @returns assistant message, finish outcome, and optional token usage.
+ */
+async generate(options: GenerateOptions): Promise<import('./types.ts').GenerateResult>
 ```
+
+Types: [WebSearchRequest](web.zh.md) · [WebSearchResult](web.zh.md)
 
 Source: [`packages/llm/llm/src/index.ts`](../../packages/llm/llm/src/index.ts)
 

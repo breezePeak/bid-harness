@@ -18,6 +18,7 @@ import { readDocxFormat } from './docx-format-store.ts'
 import { captionRole } from './docx-numbering.ts'
 import type { BidRunContext } from './run-coordinator.ts'
 import { parseChapterMetadata } from './chapter-writing-artifacts.ts'
+import { readChapterLocations } from './chapter-storage.ts'
 import { resolveFlowchartAnchors, validateFlowchartAnchors, validateFlowchartSpec, type FlowchartSpec } from './flowchart.ts'
 import type { NativeVisioExport } from './native-visio.ts'
 import { parseTechnicalDeviationTable, type TechnicalDeviationTable } from './technical-deviation-table.ts'
@@ -45,9 +46,10 @@ async function readSavedChapter(workspace: BidWorkspace, path: string): Promise<
   }
 }
 
-async function readSavedFlowcharts(workspace: BidWorkspace, serial: string): Promise<readonly FlowchartSpec[]> {
+async function readSavedFlowcharts(workspace: BidWorkspace, metadataPath: string | undefined): Promise<readonly FlowchartSpec[]> {
+  if (metadataPath === undefined) return []
   try {
-    const metadata = parseChapterMetadata(JSON.parse(await readProjectFile(workspace, `chapters/meta/${serial}.json`)))
+    const metadata = parseChapterMetadata(JSON.parse(await readProjectFile(workspace, metadataPath)))
     for (const flowchart of metadata.flowcharts) {
       const issues = validateFlowchartSpec(flowchart)
       if (issues.length > 0) throw new Error(`流程图无法导出：${issues.join('；')}`)
@@ -135,28 +137,32 @@ export async function collectDocxExportSnapshot(
   const outlineSource = await readProjectFile(workspace, outlinePath)
   const outline = parseConfirmedOutlineArtifact(JSON.parse(outlineSource))
   const worklist = buildWritableSectionWorklist(outline)
-  const chapters = new Map<string, { content_path: string; markdown: string }>()
-  for (const [index, section] of worklist.entries()) {
+  const locations = await readChapterLocations(workspace)
+  const chapters = new Map<string, { content_path: string | undefined; metadata_path: string | undefined; markdown: string }>()
+  for (const section of worklist) {
     signal?.throwIfAborted()
-    const content_path = `chapters/sections/${String(index + 1).padStart(4, '0')}.md`
-    chapters.set(section.id, { content_path, markdown: await readSavedChapter(workspace, content_path) })
+    const assigned = locations.get(section.id)
+    const content_path = assigned?.contentPath
+    chapters.set(section.id, { content_path, metadata_path: assigned?.metadataPath,
+      markdown: content_path === undefined ? '' : await readSavedChapter(workspace, content_path) })
   }
   const technicalChapter = chapters.get(TECHNICAL_DEVIATION_SECTION_ID)
   let technicalDeviation: DocxExportSnapshot['technicalDeviation'] = { status: 'absent' }
   if (technicalChapter !== undefined) {
+    const artifact = technicalChapter.content_path ?? 'chapters/sections'
     try {
       technicalDeviation = {
         status: 'ready',
         table: parseTechnicalDeviationTable(technicalChapter.markdown),
-        artifact: technicalChapter.content_path,
+        artifact,
       }
     } catch {
       const issue = {
         code: 'DOCX_EXPORT_TECHNICAL_DEVIATION_INVALID',
         message: '第一章“技术偏离表”正文缺失或结构不完整，请先修复该章节。',
-        artifact: technicalChapter.content_path,
+        artifact,
       }
-      technicalDeviation = { status: 'pending', artifact: technicalChapter.content_path, issue }
+      technicalDeviation = { status: 'pending', artifact, issue }
     }
   }
   if (!outline.sections.some(section => section.writable ? chapters.get(section.id)?.markdown.trim() : section.summary?.trim())) {
@@ -167,7 +173,7 @@ export async function collectDocxExportSnapshot(
   let figureNumber = 0
   const format = await readDocxFormat(workspace, templateId)
   for (const [sectionId, chapter] of chapters) {
-    const flowcharts = await readSavedFlowcharts(workspace, chapter.content_path.slice(-7, -3))
+    const flowcharts = await readSavedFlowcharts(workspace, chapter.metadata_path)
     flowchartsBySection.set(sectionId, flowcharts)
     const anchorIssues = validateFlowchartAnchors(chapter.markdown, flowcharts)
     if (anchorIssues.length > 0) throw new Error(`流程图 anchor 无效：${anchorIssues.join('；')}`)
@@ -190,7 +196,7 @@ export async function collectDocxExportSnapshot(
     }
   }
   for (const [sectionId, chapter] of chapters) {
-    if (chapter.markdown !== await readSavedChapter(workspace, chapter.content_path)) {
+    if (chapter.content_path !== undefined && chapter.markdown !== await readSavedChapter(workspace, chapter.content_path)) {
       throw new BidStageExecutionError([{ code: 'DOCX_EXPORT_SNAPSHOT_CHANGED', message: `章节 ${sectionId} 在导出快照期间发生变化，请重新导出。`, artifact: chapter.content_path }])
     }
   }

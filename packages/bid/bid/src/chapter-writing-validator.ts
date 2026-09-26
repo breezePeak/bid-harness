@@ -9,6 +9,7 @@ import { sectionVisibleRequirements } from './section-evidence-context.ts'
 import { validateGlobalComplianceReview, type GlobalComplianceChapter } from './chapter-writing-global-review.ts'
 import { parseGlobalComplianceReviewArtifact } from './chapter-writing-global-review-artifacts.ts'
 import { validateChapterHeadings } from './chapter-headings.ts'
+import { readChapterLocations } from './chapter-storage.ts'
 import type { BidStage, StageArtifact, StageValidationIssue, StageValidationResult } from './control-plane-contract.ts'
 import type { LocalEvidenceMaterial, WebEvidenceMaterial } from './evidence-mapping-artifacts.ts'
 import { parseConfirmedOutlineArtifact, outlineArtifactSha256 } from './outline-confirmation-artifacts.ts'
@@ -224,10 +225,16 @@ export async function validateChapterWriting(
     }
   }
   const writable = new Map(outline.sections.filter(section => section.writable).map(section => [section.id, section]))
-  const expectedPaths = new Map(buildChapterWorklist(outline).map((section, index) => {
-    const serial = String(index + 1).padStart(4, '0')
-    return [section.id, { content: `chapters/sections/${serial}.md`, metadata: `chapters/meta/${serial}.json` }] as const
-  }))
+  let locations: Awaited<ReturnType<typeof readChapterLocations>>
+  try { locations = await readChapterLocations(workspace) } catch (error) {
+    reject(issues, 'CHAPTER_WRITING_STORAGE_INVALID', error instanceof Error ? error.message : String(error), LOG)
+    return { ok: false, issues }
+  }
+  const expectedPaths = new Map(buildChapterWorklist(outline).map(section => [section.id, {
+    content: locations.get(section.id)?.contentPath,
+    metadata: locations.get(section.id)?.metadataPath,
+    serial: locations.get(section.id)?.storageSerial,
+  }] as const))
   const actual = new Set<string>()
   const globalChapters: GlobalComplianceChapter[] = []
   const semanticBaselines = new Map<string, { markdown: string; sha256: string; currentSha256: string }>()
@@ -238,8 +245,8 @@ export async function validateChapterWriting(
     const section = writable.get(chapter.section_id)
     if (section === undefined) { reject(issues, 'CHAPTER_WRITING_SECTION_UNKNOWN', 'A chapter references an unknown or structural section.', MANIFEST); continue }
     const expectedPath = expectedPaths.get(chapter.section_id)
-    if (expectedPath === undefined || chapter.content_path !== expectedPath.content) {
-      reject(issues, 'CHAPTER_WRITING_CONTENT_PATH_INVALID', 'A chapter body path must match its confirmed traversal position.', chapter.content_path)
+    if (expectedPath?.content === undefined || chapter.content_path !== expectedPath.content) {
+      reject(issues, 'CHAPTER_WRITING_CONTENT_PATH_INVALID', 'A chapter body path must match its fixed section identity.', chapter.content_path)
     }
     if (JSON.stringify(chapter.requirement_ids) !== JSON.stringify(section.requirement_ids)
       || JSON.stringify(chapter.scoring_ids) !== JSON.stringify(section.scoring_ids)
@@ -252,7 +259,7 @@ export async function validateChapterWriting(
     }
     for (const answer of chapter.covered_must_answer) if (!section.must_answer.includes(answer)) reject(issues, 'CHAPTER_WRITING_MUST_ANSWER_UNKNOWN', 'A chapter records a must-answer outside its confirmed section.', MANIFEST)
     for (const answer of section.must_answer) if (!chapter.covered_must_answer.includes(answer)) reject(issues, 'CHAPTER_WRITING_MUST_ANSWER_MISSING', 'A chapter omits a required must-answer from its metadata.', MANIFEST)
-    if (expectedPath !== undefined) {
+    if (expectedPath?.metadata !== undefined) {
       const metadataRaw = await readJson(workspace, expectedPath.metadata, issues)
       if (metadataRaw !== undefined) {
         try {
@@ -361,9 +368,10 @@ export async function validateChapterWriting(
       globalReviewValidationChapters.push(chapter)
       continue
     }
-    const serial = expectedPaths.get(chapter.section_id)?.content.slice(-7, -3)
-    const path = serial === undefined ? undefined
-      : await resolveSemanticRevisionPath(workspace, serial, chapter.section_id, expected, chapter.candidate_sha256)
+    const storageSerial = expectedPaths.get(chapter.section_id)?.serial
+    const path = storageSerial === undefined ? undefined
+      : await resolveSemanticRevisionPath(workspace, String(storageSerial).padStart(4, '0'),
+        chapter.section_id, expected, chapter.candidate_sha256)
     if (path?.valid !== true || path.from_markdown === undefined) {
       reject(issues, 'GLOBAL_COMPLIANCE_CHAPTER_STALE', '文档级核验引用的章节正文版本没有有效语义修订链。', GLOBAL_REVIEW)
       continue

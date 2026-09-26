@@ -7,7 +7,8 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm/message'
 import { type ObjectJsonSchema, type ToolDefinition, type ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { z } from 'zod'
 import { zodJsonSchema } from './zod-json-schema.ts'
-import { applyOutlineEdits, outlineEditOperationSchema, parseOutlineEditOperations, type OutlineEditOperation } from './outline-confirmation-edits.ts'
+import { applyOutlineEdits, outlineBusinessBindingSchema, outlineEditOperationSchema,
+  parseOutlineEditOperations, type OutlineBusinessBinding, type OutlineEditOperation } from './outline-confirmation-edits.ts'
 import { outlineArtifactSha256, parseOutlineDraft, type OutlineDraftView } from './outline-confirmation-artifacts.ts'
 import { outlineSectionScope } from './section-evidence-context.ts'
 import { outlineRegenerationChanges, parseOutlineRegenerationChangeSet } from './outline-regeneration-artifacts.ts'
@@ -197,6 +198,50 @@ export async function generateScopedOutlineOperations(
   } finally { await run.dispose() }
 }
 
+/**
+ * 结构操作完成后，让独立子会话按 Host 分配的真实章节 ID 重新分配业务引用。
+ * @param agent 当前执行 Agent。
+ * @param candidate 已分配新 ID 的候选目录。
+ * @param sectionIds 本次可修改的章节范围。
+ * @param facts 当前招标事实和响应点的有界摘要。
+ * @param feedback 用户本次局部深化目标。
+ * @param signal 当前 Run 的取消信号。
+ * @returns 供 Host 校验的章节业务归属候选。
+ */
+export async function generateScopedOutlineBusinessBindings(
+  agent: Agent, candidate: OutlineArtifact, sectionIds: readonly string[], facts: unknown,
+  feedback: string, signal: AbortSignal,
+): Promise<OutlineBusinessBinding[]> {
+  const selected = outlineSectionScope(candidate, sectionIds)
+  const subagents = agent.ctx.get('subagents')
+  if (subagents === undefined || subagents.getProvider('spawn')?.inheritsParentContext !== false) {
+    throw new Error('局部目录业务归属需要独立上下文的 spawn provider。')
+  }
+  const run = await subagents.start('spawn', {
+    parent: agent, signal, label: '局部目录业务归属', maxDepth: 1, toolFilter: { allow: [] },
+    prompt: [{ type: 'text', text: [
+      `用户目标：${feedback}`,
+      `当前候选目录：${JSON.stringify(candidate)}`,
+      `本次可修改章节：${JSON.stringify([...selected])}`,
+      `真实招标要求、评分、合规与响应点：${JSON.stringify(facts)}`,
+      '只为业务归属需要改变的可写叶节返回完整 requirement_ids、scoring_ids、scoring_response_point_ids、compliance_ids。',
+      '拆分时按章节真实职责分配父章要求；不得给每个子章机械复制全部父章 ID。不得创造不存在的 ID。',
+      '不得写文件。最终只返回原始 JSON 数组，格式为：',
+      JSON.stringify(zodJsonSchema(z.array(outlineBusinessBindingSchema))),
+    ].join('\n') }],
+  })
+  try {
+    const result = await run.result
+    signal.throwIfAborted()
+    if (result.stopReason !== 'completed') throw new Error(`BID_OUTLINE_BINDING_FAILED: ${result.stopReason}`)
+    const output = z.array(outlineBusinessBindingSchema).parse(JSON.parse(
+      result.output.flatMap(block => block.type === 'text' ? [block.text] : []).join(''),
+    ) as unknown)
+    if (output.some(binding => !selected.has(binding.section_id))) throw new Error('BID_OUTLINE_BINDING_SCOPE_INVALID')
+    return output
+  } finally { await run.dispose() }
+}
+
 /** Optional user-feedback regeneration identity layered onto bounded, resumable S3 execution. */
 export interface OutlineGenerationExecutionOptions extends ModelStageExecutionOptions {
   readonly regeneration?: { readonly feedback: string; readonly revision: number; readonly draftSha256: string }
@@ -305,7 +350,10 @@ function renderStructuredQualityReviewTask(
     `<response-point-catalog>\n${JSON.stringify(input.catalog)}\n</response-point-catalog>`,
     `<outline-framework-structures>\n${JSON.stringify(input.frameworks)}\n</outline-framework-structures>`,
     `<reference-bid-structures>\n${JSON.stringify(input.referenceBids)}\n</reference-bid-structures>`,
-    '逐项检查技术 Requirement、Scoring、稳定 Response Point 和 Compliance 是否在合适的可写叶子中真实覆盖，并检查章节颗粒度、must_answer、树结构、人工框架继承和旧项目污染。',
+    '逐项检查技术 Requirement、Scoring 和稳定 Response Point 是否在合适的可写叶子中真实覆盖；区分技术响应 Compliance 与全局材料核验，并检查章节颗粒度、must_answer、树结构、人工框架继承和旧项目污染。',
+    '只需材料核验的投标资格、企业证书和行政递交事项由 global_compliance_ids 覆盖，不为此新增可写章节或分配给技术叶子；已有全局 Compliance 不因缺少章节而算遗漏。',
+    '结构父节 writable=false 时 must_answer 必须保持 []，只用 summary 概述；具体 Requirement、Scoring 和 RP 的作答指导放在可写叶节，不给父节补写作要求。',
+    '若 update_section 修改 scoring_response_point_ids，同一操作必须提交该可写章节完整且具体的 must_answer；RP 只可由可写叶子承担。',
     '在本轮完成全部检查，把必须修正的问题一次性放入 operations，并自检应用这些操作后的完整目录；不要返回整本新目录。无需修正时返回 operations: []。措辞润色和可选补充放入 advisory issues，不要作为必须修改的操作。',
     'issues 只允许 severity=advisory，用于仍可交给用户判断的非阻断建议；阻断问题不能只写入 issues。reference_bid 不能产生 framework_refs。',
     '每条建议只返回 severity 和 message，message 用中文说明具体业务问题；不要生成问题代码或编号。',
@@ -351,7 +399,7 @@ export function renderOutlineGenerationTask(
     '技术标目录只组织投标人需要展开的技术方案、实施措施和交付成果。投标资格、企业资质证书、行政递交或其他只需材料核验的 Compliance 放入 global_compliance_ids，不得为复述或解释这类要求单独创建可写章节；与技术任务混合时，章节只承担可作答的技术部分。',
     `本轮初稿唯一输出：${root}/${OUTLINE_ARTIFACT}。Host 随后会强制发送一次 Blueprint Quality Review。`,
     `文件严格包含 schema_version=${OUTLINE_GENERATION_SCHEMA_VERSION}、scope="technical_bid"、document_title、global_compliance_ids、sections。不得写 content、body、markdown 或任何正文。`,
-    'sections 是 parent_id + order 的扁平树。每个节点严格包含 id、parent_id、order、level、title、purpose、writable、must_answer、requirement_ids、scoring_ids、compliance_ids、origin、framework_refs、scoring_response_point_ids、suggested_tables、suggested_figures、writing_notes。origin 只说明目录结构来源，取 framework/generated/mixed，不是 Evidence ID。framework_refs 使用 [{"file_id":"...","heading_path":["..."]}] 追溯原框架标题：直接继承为 framework，调整或在框架下扩展为 mixed，Tender 全新增为 generated 且数组为空。',
+    'sections 是 parent_id + order 的扁平树。根节 level=1，子节 level=父节 level+1；order 是同级顺序，第二章仍可为 level=1。每个节点严格包含 id、parent_id、order、level、title、purpose、writable、must_answer、requirement_ids、scoring_ids、compliance_ids、origin、framework_refs、scoring_response_point_ids、suggested_tables、suggested_figures、writing_notes。origin 只说明目录结构来源，取 framework/generated/mixed，不是 Evidence ID。framework_refs 使用 [{"file_id":"...","heading_path":["..."]}] 追溯原框架标题：直接继承为 framework，调整或在框架下扩展为 mixed，Tender 全新增为 generated 且数组为空。',
     '模型只选择 scoring_response_point_ids，不必抄写 scoring_response_points；Host 从正式清单按选择顺序重建快照并合并所属 scoring_ids。每个 RP 至少由一个合适的可写叶子覆盖，也可由多个章节共同响应。不得修改正式清单或猜测 RP 编号。',
     'writable 节点必须有至少一个具体 must_answer。父评分、子评分和通用质量评分可以同时关联。结构节点 writable=false、must_answer=[] 且必须有子节点。章节标题应按技术语义表达组织、阶段、质量、风险、安全、验收等内容，但不要套固定模板。',
     '不要创建“目录”章节。Host 固定保留 id=dsh-technical-deviation-table、title=技术偏离表的可写第一章；封面和目录由导出程序生成，第二章以后才组织本项目的动态技术正文。',
@@ -410,10 +458,10 @@ export function renderOutlineGenerationRepairTask(
     ...(context.associations === undefined ? [] : [
       '权威需求原文、合规规则、合法框架文件与标题路径（只读）：' + JSON.stringify(context.associations),
       '全部正式评分原文（只读）：' + JSON.stringify(context.scoring),
-      '按问题选择 requirement_ids、scoring_ids、compliance_ids、framework_refs、origin 或 global_compliance_ids 的局部操作；新增或拆分章节时明确分配必要关联。结构错误使用 move/add/delete/split/merge 或 repair_structure；repair_structure 仅修改声明节点的结构字段，只有重复 ID 才能换编号。',
+      '按问题选择 requirement_ids、scoring_ids、compliance_ids、framework_refs、origin 或 global_compliance_ids 的局部操作；新增或拆分章节时明确分配必要关联。已有全局覆盖的投标资格、企业证书等材料核验 Compliance 不分配给技术叶子。结构错误使用 move/add/delete/split/merge 或 repair_structure；level 由 Host 根据 parent_id 派生，不用操作修复；把有子节的父节改为不可写时，同一 repair_structure 操作须提交 writable=false 和 must_answer=[]，并确认原有作答要求已由子节承担；只有重复 ID 才能换编号。',
     ]),
     ...renderStageRepairIssues(issues), context.failure ?? '',
-    '判断已有章节能否承担：能则补充关联并完善具体 must_answer；确实缺少内容时新增章节或局部拆分。保留未涉及章节的 ID、内容和相对顺序。不得默认挂到第一章、结构父节点或集中放入索引附录。只补编号没有实际写作指导不算修复。',
+    '判断已有章节能否承担：能则补充关联并完善具体 must_answer；update_section 修改 scoring_response_point_ids 时，同一操作必须提交该可写章节完整且具体的 must_answer。确实缺少内容时新增章节或局部拆分。保留未涉及章节的 ID、内容和相对顺序。不得默认挂到第一章、结构父节点或集中放入索引附录。只补编号没有实际写作指导不算修复。',
     '只返回局部编辑操作，不得重写 outline.json 或质量报告。scoring_response_point_ids 是章节最终选定的完整列表，保留已有合理关联。新增 ID 由 Host 分配。',
     '唯一输出：' + root + '/outline/repair-operations.json',
     JSON.stringify(zodJsonSchema(z.array(context.associations === undefined

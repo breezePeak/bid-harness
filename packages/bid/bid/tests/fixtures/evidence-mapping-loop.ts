@@ -39,7 +39,7 @@ function finalText(text: string): StreamChunk[] {
 type ScriptStep = StreamChunk[] | ((options: GenerateOptions) => StreamChunk[])
 
 /** @param options 模型实际可见的工具结果。 @returns 针对当前待审引用的固定复核回复。 */
-export function reviewPendingMappingItems(options: GenerateOptions): StreamChunk[] {
+function reviewPendingMappingItems(options: GenerateOptions): StreamChunk[] {
   for (const message of [...options.messages].reverse()) {
     for (const block of message.content) {
       if (block.type !== 'tool-result') continue
@@ -59,6 +59,7 @@ export function reviewPendingMappingItems(options: GenerateOptions): StreamChunk
 class ScriptedAdapter extends LlmAdapter {
   interactive = false
   readonly requests: GenerateOptions[] = []
+  readonly reviewScript: ScriptStep[] = []
   constructor(
     private readonly parentId: SessionId,
     private readonly parentScript: ScriptStep[],
@@ -77,7 +78,11 @@ class ScriptedAdapter extends LlmAdapter {
       yield* finalText('等待 Host 下发目录深化任务。')
       return
     }
-    const response = (options.sessionId === this.parentId ? this.parentScript : this.childScript).shift()
+    const script = options.sessionId === this.parentId ? this.parentScript
+      : this.reviewScript.length > 0 && (options.system?.includes('技术标目录质量复核 Subagent')
+        || options.system?.includes('技术标章节独立审查 Subagent'))
+        ? this.reviewScript : this.childScript
+    const response = script.shift()
     if (response === undefined && this.interactive) {
       yield* finalText('等待用户确认。')
       return
@@ -279,6 +284,9 @@ async function prepareS2(workspace: BidWorkspace): Promise<{
   await writeFile(join(workspace.projectRoot, 'analysis/requirements.json'), JSON.stringify({ schema_version: 1, requirements: [{ id: 'REQ-1', category: '技术', raw_text: '访问控制', normalized_requirement: '提供访问控制方案', mandatory: true, source_refs: [sourceRef] }] }))
   const scoring = { schema_version: 1 as const, scoring_items: [{ id: 'SCORE-1', parent: null, group: '技术', title: '安全', raw_text: '安全审计', criterion: '方案完整', score: 5, score_range: null, must_answer: true, source_refs: [sourceRef] }] }
   await writeFile(join(workspace.projectRoot, 'analysis/scoring.json'), JSON.stringify(scoring))
+  await writeFile(join(workspace.projectRoot, 'analysis/scoring-origin.json'), JSON.stringify(scoring))
+  await writeFile(join(workspace.projectRoot, 'analysis/tender-analysis-selection.json'),
+    JSON.stringify({ schema_version: 1, selected_scoring_ids: ['SCORE-1'] }))
   await writeFile(join(workspace.projectRoot, 'analysis/scoring-response-points.json'), JSON.stringify(createScoringResponsePointCatalog(scoring, { schema_version: 1, points: [{ scoring_id: 'SCORE-1', order: 1, text: '说明访问控制' }] })))
   await writeFile(join(workspace.projectRoot, 'analysis/compliance.json'), JSON.stringify({ schema_version: 1, compliance_items: [] }))
   await mkdir(join(workspace.projectRoot, 'outline'), { recursive: true })
@@ -469,7 +477,8 @@ export async function runEvidenceMappingLoop(ctx: Context, root: string, repair:
 
   const outcome = await orchestrator.runCurrentAutomaticStage()
   adapter.interactive = interactive
-  return { agent, workspace, sourceUrl, outcome, requests: adapter.requests, parentScript, childScript }
+  return { agent, workspace, sourceUrl, outcome, requests: adapter.requests,
+    parentScript, childScript, reviewScript: adapter.reviewScript }
 }
 
 /**
@@ -552,7 +561,7 @@ export async function runChapterWritingLoop(ctx: Context, root: string) {
   if (corpus === undefined || tender.chunksPath === null) throw new Error('缺少 S5 回放资料')
   const workspacePath = relative(root, workspace.projectRoot).replaceAll('\\', '/')
   const candidate = {
-    markdown: '# 访问控制与安全审计\n\n本项目先核查角色与访问权限，再组织安全审计和结果复核。实施流程以本地资料为编排参考，按权限授予、执行检查、记录留存三个步骤说明责任与交付结果。\n\n| 管理事项 | 台账记录内容 |\n| --- | --- |\n| 权限授予 | 访问权限 |\n| 执行检查 | 安全审计 |\n| 记录留存 | 复核结果 |',
+    markdown: '# 访问控制与安全审计\n\n本项目先核查角色与访问权限，再组织安全审计和结果复核。实施流程以本地资料为编排参考，按权限授予、执行检查、记录留存三个步骤说明责任与交付结果。\n\n表 访问控制与安全审计管理台账\n| 管理事项 | 台账记录内容 |\n| --- | --- |\n| 权限授予 | 访问权限 |\n| 执行检查 | 安全审计 |\n| 记录留存 | 复核结果 |',
     metadata: {
       local_materials_used: [{ file_ref: 'F1', chunk: corpus.chunks[0]!.id, usage: 'reference', summary: '支撑本章实施流程的组织与步骤安排。' }],
     },
@@ -595,6 +604,8 @@ export async function runChapterWritingLoop(ctx: Context, root: string) {
     toolCall('reject-new-setext-heading', 'submit_chapter', { ...candidate, markdown: `${candidate.markdown}\n\n补充服务方案\n---\n\n不属于确认目录的目录层级。` }),
     toolCall('reject-internal-id', 'submit_chapter', { ...candidate, markdown: `${candidate.markdown}\n\n我方按 REQ-1 组织访问控制实施。` }),
     toolCall('submit-chapter', 'submit_chapter', candidate),
+  ]
+  const reviewScript = [
     toolCall('review-incomplete', 'finish_chapter_review', {}),
     toolCall('submit-coverage', 'review_coverage_items', { items: Array.from({ length: section.must_answer.length + section.requirement_ids.length + (section.scoring_response_point_ids ?? []).length + 1 }, (_, index) => ({ item_ref: `R${index + 1}`, ...coverage })) }),
     toolCall('review-global-constraint', 'review_global_constraints', {
@@ -607,6 +618,7 @@ export async function runChapterWritingLoop(ctx: Context, root: string) {
     toolCall('finish-review', 'finish_chapter_review', {}),
   ]
   const adapter = new ScriptedAdapter(sessionId, parentScript, childScript)
+  adapter.reviewScript.push(...reviewScript)
   ctx.effect(() => ctx.llm.registerAdapter(['mock'], adapter))
   registerIntegrationTools(ctx, root, 'https://official.example/standard')
   const agent = ctx.agentLoop.create(sessionId, { provider: 'mock', model: 'mock' }, { cwd: root })
@@ -614,7 +626,8 @@ export async function runChapterWritingLoop(ctx: Context, root: string) {
     maxRepairAttempts: 0, maxConcurrency: 1, run: createTestBidRunContext(),
   })
   if (await readFile(evidencePath, 'utf8') !== evidenceBefore) throw new Error('S5 补搜修改了 S4 evidence map')
-  return { agent, artifacts, workspace, requests: adapter.requests, parentScript, childScript }
+  return { agent, artifacts, workspace, requests: adapter.requests, parentScript, childScript,
+    reviewScript: adapter.reviewScript }
 }
 
 /**

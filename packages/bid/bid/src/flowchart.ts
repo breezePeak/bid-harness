@@ -193,6 +193,11 @@ function flowchartLevels(spec: FlowchartSpec): Map<string, number> {
   return levels
 }
 
+/**
+ * 按照节点依赖生成确定性的流程图布局。
+ * @param spec 流程图节点和连线。
+ * @returns 可直接绘制的节点及连线位置。
+ */
 export function layoutFlowchart(spec: FlowchartSpec): FlowchartLayout {
   const nodeLevels = flowchartLevels(spec)
   const groups = new Map<number, FlowchartNode[]>()
@@ -276,9 +281,9 @@ function shortenEnd(points: FlowchartPoint[], marker: number): FlowchartPoint[] 
 function labelPlacement(points: FlowchartPoint[]): FlowchartPoint & { anchor: 'start' | 'middle' } {
   let longest = 0
   let segment = { from: points[0] ?? { x: 0, y: 0 }, to: points[1] ?? points[0] ?? { x: 0, y: 0 } }
-  for (let index = 0; index < points.length - 1; index++) {
-    const from = points[index]!
-    const to = points[index + 1]!
+  for (const [index, from] of points.entries()) {
+    const to = points[index + 1]
+    if (to === undefined) break
     const length = Math.hypot(to.x - from.x, to.y - from.y)
     if (length >= longest) {
       longest = length

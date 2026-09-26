@@ -18,8 +18,9 @@
 
 ## 父章节参考资料区
 
-- complementary "参考资料与审查":
-  - heading "参考资料" [level=2]
+- complementary "章节审核与参考资料":
+  - heading "章节审核" [level=2]
+  - text: 等待审核
   - paragraph: 本章概述下属章节的主要内容。请选择子章节查看具体方案、参考资料与依据。
 
 ## 叶章节

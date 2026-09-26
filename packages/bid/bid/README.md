@@ -29,7 +29,7 @@ S6 只对流程图、表格和图片执行最终页面视觉审核；标题、�
 
 ## Control plane types
 
-独立 Word 导出以 `bid.docx_export.changed` 记录有界里程碑，并由同名 Session 投影恢复最新任务；运行、完成和失败属于导出记录，不改变 `bid.runtime` 主任务。导出与 S5 可并行，同一会话的重复请求复用执行句柄；宿主重启后，失去句柄的运行态在详情读取时结算为中断失败。
+独立 Word 导出以 `bid.docx_export.changed` 记录有界里程碑，并由同名 Session 投影恢复最新任务；运行、完成和失败属于导出记录，不改变 `bid.runtime` 主任务。完成态保留项目内 `path` 供下载，同时记录生成时的绝对 `filePath` 供聊天显示文件位置；旧记录允许缺少绝对路径。导出与 S5 可并行，同一会话的重复请求复用执行句柄；宿主重启后，失去句柄的运行态在详情读取时结算为中断失败。
 
 本包导出固定的 `BidStage`、`BidTaskStatus` 和唯一判别联合 `BidTaskState`。只有 `running` 与 `suspended` 分支携带 Run 执行数据；browser-safe 子路径 `@deepseek-ai/dsh-bid/control-plane` 直接向客户端暴露同一状态结构。
 
@@ -53,25 +53,41 @@ S2 的 Main Agent 只用 `grep`、`read`、按需 `view_pdf_page` 和一个 `sub
 
 S5 的 Main Agent 把自然语言要求转成版本化任务契约：全书指令、逐节任务、逐节验收条件和整书验收条件。Writer 接收当前章节的完整契约；Reviewer 在既有 Requirement、Scoring、Compliance、Evidence、声明依据、章节职责和质量审核之外逐项记录动态验收结果。Writer 能修复的 `required` 失败进入有界定向修订，`preferred` 失败和外部资料缺口只保留在报告中。Host 只负责身份、版本、并发、失效、持久化和显式确定性指标，不按需求文字选择业务分支。
 
+局部章节能力使用 S5 同一 Writer、Reviewer 和修复调度器。`chapter.write` 只执行授权叶节，新增叶节使用新 Writer，并读取已分配正文草稿及当前 S4 资料；`chapter.review` 只审核现有正文，同一请求和候选身份的有效报告可复用。目录新增叶节时，Writing Plan 按其目的和写作说明建立任务并由 Host 分配新的语义 AC，未变章节的 AC ID 保持不变。执行计划与日志始终覆盖当前完整确认目录，Manifest 只列出真实完成的章节；未写章节仍为待办。局部任务不运行全书合规审核与完成修复，强依赖提供已完成章节的有效交接，范围外下游只报告待复核影响。能力适配器只报告实际改变的正文、元数据、审核、共享索引及来源账本文件。
+
+`tender.update` 在任何已有招标分析数据的阶段只修改规范化字段与评分选择，来源原文、引用、文件定位及已有 ID 保持不变。评分来源清单保留全部事实，下游评分清单只投影当前选择；语义变化仅重建对应评分项的响应点，其他 RP ID 保持不变。`analysis/tender-update-impact.json` 记录受影响章节及待复核成果，原正文不会因理解更正被自动覆盖。`writing.plan` 使用真实用户 Session 中的消息原话，章节要求只进入目标章节，项目范围内的全书约束才影响所有叶节；未变章节的 AC ID 保持稳定。
+
+Bid Main Agent 可在任意项目阶段通过 `bid_run_task` 提交真实用户消息授权的能力计划；Host 按顺序在同一个 Work 中执行步骤，并返回发布凭据及实际变更文件。初次招标分析与目录生成、招标理解修订、目录调整与正文迁移、局部资料研究、写作计划、章节写作、修订、章节审核和整书审核使用内建分派器。`tender.analyze`、`outline.generate` 和 `document.review` 只接受项目范围；整书审核重新核对当前已完成正文并更新全局合规与整书验收记录，不启动 Writer 或改写正文。缺少正式输入时返回具体错误。项目阶段仍表示默认整本路线进度，首次 S2–S5 确认由原生阶段入口执行；局部任务成功不会自动推进或倒退整本路线。
+
+已写章节的拆分或合并使用有序能力计划，依次调整目录、迁移原文和复核结果；明确只改目录的任务可留下待迁移正文。`outline.update` 新增或拆分章节且未提供业务归属时，执行器取得新章节 ID 后通过独立子会话按职责分配招标要求、评分响应点和合规引用，再执行完整目录校验；显式提供的归属仍直接校验，缺失或非法引用不会因自动分配而放行。
+
+运行中的跨能力请求先写入不可变请求，再登记到原 Work 的 `commands.json`；原 Work 结束后按顺序启动独立能力 Work，挂起时保留待办并让原 Run 先恢复。`getCapabilityTaskPlan` 从请求和步骤检查点返回实际进度，未登记的孤立文件不构成接纳。`docx.export` 只能作为任务最后一步，在前序能力正式结算后使用独立 Word 导出；导出提示包含正文快照摘要。已存在的最终确认目录与章节位置决定详情和正文入口是否可见，阶段标签不会隐藏已有正式正文。
+
 S5 流程图默认由原 Writer 查看最终渲染 PNG；只有真实画面变化才再次回看，最多展示四次不同画面，这些轮次不占正文修复预算。用户可在 S5 运行或挂起时通过 `bid_set_flowchart_visual_review(policy="skip" | "required")` 设置当前 work 的后续视觉检查策略，命令保存在 `runs/<workId>/commands.json`，恢复原 Run 后继续生效。`skip` 不请求图片输入，仍执行流程图结构、正文锚点和 Reviewer 校验；新 work 默认 `required`。
 
 Word 模板上传、模板库选择、格式确认、独立格式建议和导出等写操作按项目互斥，同项目各会话均可操作，与 S1—S5 的启动和执行并行；列表、预览和页数测算使用只读快照。S6 当前导出模板只是本次预览、测算和导出的显式参数，不会隐式改写 S5 页数基准；“设为页数基准模板”是独立操作。导出不取得阶段锁、不写阶段检查点；阶段重置会删除章节和输出，因此与 Word 写入双向互斥。每次导出在同一发布事务登记 DOCX、Markdown 快照和流程图；自定义输出目录的阶段重置只删除这些已登记的项目文件。导出仅从确认目录与正文文件取内容，不依赖章节 Manifest、执行记录或审核报告，不在导出阶段重新审查正文。读取期间目录或正文变化时拒绝本次快照；正文及父节点概述均缺失时拒绝生成空文档。输出使用带时间标识的 Markdown 与 DOCX 文件，保留阶段状态及审核详情。
+
+### 公共能力契约与项目读取
+
+`bid-capability-contract.ts` 定义静态能力 ID、按能力区分的业务输入、项目或章节或段落任务范围，以及来源于任务、前一步真实目标或明确章节 ID 的步骤范围。段落范围只接纳引用同一选区的单步 `chapter.revise`；后续计划补丁不能扩大该范围。Host 持有 Run、输入摘要、工作副本和允许写入的文件集合；`bid-capability-registry.ts` 声明实际输入前提、核对结果引用，并将默认 S2–S5 路线映射到现有执行器与整阶段 Validator。上传后续行和恢复续行共用 `automaticOrchestrator()` 的能力分发；阶段确认、恢复和后继阶段仍由 `BidOrchestrator` 处理。主 Agent 在各阶段可用 `bid_project_inspect` 分页读取招标理解、目录、资料映射、写作计划、正文和执行记录，用 `bid_run_task` 提交授权的局部能力任务；运行中跨能力写入先持久化排队。旧 `bid_stage_inspect` 继续提供阶段快照。
 
 ## Bid Agent behavior
 
 ### 全阶段 Main Agent 交互
 
-S1–S5 与 `docx_export` 的 `running` 和 `completed` 均开放普通消息，S2–S5 的 `waiting_user` 继续开放交互。公开消息通过正式 `Agent.steer()` 和 inbox 留在发起消息的 Interaction Session；Host 为每个 Long Run 创建独立 Execution Session，阶段执行、Child、Writer 与 Reviewer 不占用聊天 Agent。同项目的其他顶层 Session 也能读取项目快照并聊天，但不能取得第二个项目写入所有者。运行态和完成态公开回合只挂载当前阶段工具，私有 finish 工具及继承的通用工具不进入用户请求 Schema。
+S1–S5 与 `docx_export` 的 `running` 和 `completed` 均开放普通消息，S2–S5 的 `waiting_user` 继续开放交互。公开消息通过正式 `Agent.steer()` 和 inbox 留在发起消息的 Interaction Session；Host 为每个 Long Run 创建独立 Execution Session，阶段执行、Child、Writer 与 Reviewer 不占用聊天 Agent。同项目的其他顶层 Session 也能读取项目快照并聊天，但不能取得第二个项目写入所有者。运行态和完成态公开回合挂载当前阶段工具及项目级只读检查，私有 finish 工具及继承的通用工具不进入用户请求 Schema。
 
 S2、S3 和 S5 的私有协议只在 Execution Session 中运行；Execution Agent 消费直属 Child 的 report 和 settled 消息，Interaction Session 始终过滤这些原始消息。Run 挂起、attention_required 或最终完成时，Host 只把阶段、状态、原因、错误码、摘要和最多三条问题作为 `@deepseek-ai/dsh-bid` instruction 注入 Interaction Agent；空闲 Agent 不被唤醒，下次用户消息会一并取得该持久 inbox 消息。连续用户消息由各自聊天 Agent 保持原顺序，单次回复的结束或失败不结算阶段 operation，也不等待执行 Agent idle。
 
 Main Agent 通过只读 `bid_stage_inspect` 读取有界阶段快照。快照包含阶段状态、开始时间、最近公开事件和当前产物摘要；S4 额外返回任务计数，S5 返回至多一百个章节的 Writer/Reviewer 状态、最近问题、当前页数估算和 Word 格式身份。只有 `task_contract_context` 或正文引用检查才读取对应详细上下文，普通进度问题不会把完整招标书、全部 Artifact 或执行日志送入模型。S3/S4 等待确认时另提供 `bid_outline_apply_operations`、`bid_outline_regenerate_scope`，S4 提供 `bid_evidence_remap`。编号和标题由模型根据 inspect 的当前目录树解析为实际 Section ID，不要求用户填写内部 ID。检查结果、交互提示和工具结果都进入会话日志；动态工具集合改变后续请求的工具前缀，已记录的历史消息不改写。
 
-普通消息只由模型判断问答或受控修改，不按关键词、引用或发送方式触发业务动作。`bid_pause_stage` 只暂停后续模型、Child、Writer 和 Reviewer 任务调度，已经运行的任务继续收敛；`bid_resume_stage` 释放当前 operation 的调度门。任一同项目 Interaction Session 的聊天原生 Stop 通过 `agent/cancel-requested` 同时取消当前公开回复与唯一活动 Run；Host 先退休提交权限，再关闭调度、取消 Execution Session 后台任务并持久化挂起。挂起 Run 的继续、当前阶段重跑和停止由 Host 通过 DSH 原生用户提问提供，普通消息不会回答该问题。
+用户确认修改建议后，Main Agent 在同一回合提交包含必要目录、资料、正文和复核步骤的任务。`outline.update.defer_content_migration` 只允许将迁移延后到同一任务的 `chapter.reorganize`，随后必须安排 `chapter.write` 或 `chapter.review`；缺少后续步骤时接纳入口返回可修正的错误。仅用户明确只改目录或暂缓正文时，任务才设置 `allow_pending_content=true`。Host 发布前拒绝本次新增的未迁移正文，保留正式产物及候选检查点，不将中间目录结果报告为完整修改。
 
-S4 最终目录确认或 S5 重置启动后，S5 先停在 `chapter_writing/waiting_user`。手动模式通过 `request_writing_requirements` 让 Host 按确认目录哈希写入 `chapters/writing-request.json`，再由 Host 使用 Interaction Session 的原生 `ask_user_question` 询问“开始正文编写前，是否还有其他整体写作要求？”，并提供“没有，开始编写”及自定义输入；刷新或换 Session 不会重复询问，也不会启动 Writer。回答持久化后，Main Agent 读取 `task_contract_context.writing_request` 制定首次 Writing Plan；Host 将自定义回答原文加入顶层 `user_requirements`，不伪造 `user_message_refs`，并通过 `bid_confirm_writing_plan` 保存 `chapters/writing-plan.json`。模型提交条件描述、优先级和 `semantic` 或受支持的 `deterministic` evaluator；Host 绑定文档或章节 scope，分配稳定条件 ID 和单调计划版本。
+普通消息只由模型判断问答或受控修改，不按关键词、引用或发送方式触发业务动作。`bid_pause_stage` 只暂停后续模型、Child、Writer 和 Reviewer 任务调度，已经运行的任务继续收敛；`bid_resume_stage` 释放当前 operation 的调度门。任一同项目 Interaction Session 的聊天原生 Stop 通过 `agent/cancel-requested` 同时取消当前公开回复与唯一活动 Run；Host 先退休提交权限，再关闭调度、取消 Execution Session 后台任务并持久化挂起。系统异常挂起后不提出恢复选项，用户在聊天中明确要求继续时，Main Agent 调用 `bid_resume_current_run`，Host 核对 Run 身份和项目 revision 后继续原 Work。用户主动停止后的继续、当前阶段重跑和停止仍由 DSH 原生用户提问处理。
 
-全自动模式只在 `chapter_writing/waiting_user` 调用 `auto_start_chapter_writing`。Host 读取最终确认目录，生成覆盖全部可写叶节且 `user_message_refs`、`user_requirements` 均为空的 schema v3 默认 Writing Plan，运行 `validateWritingPlan()` 后原子写入，并由 `ready` 直接进入正文执行。该路径不创建询问标记、不伪造用户原话。确认模式只由客户端 Session store 持有；Host 仍拒绝在 `failed` 或其他阶段状态调用自动启动。
+S4 最终目录确认后，Host 在同一项目操作中直接进入 S5，不再询问整体写作意见。首次启动前根据最终确认目录保存 schema v3 默认 Writing Plan，覆盖全部可写叶节，用户消息引用、用户要求和动态验收条件为空；已有当前目录的有效计划则继续复用。计划在创建 S5 Work 前保存，使执行输入指纹包含实际计划。该流程不依赖浏览器是否打开，也不受手动／自动确认模式影响。
+
+S5 重置后的空入口由客户端调用 `auto_start_chapter_writing` 生成默认计划并启动。显式停止或已保存的写作要求仍遵守各自恢复操作，不自动覆盖；运行中新增要求继续通过 `bid_confirm_writing_plan` 更新计划。决定依据见[S4 确认后直接写作](../../../.agents/notes/implemented/feature/2026-09-26-s5-start-after-outline-confirmation.md)。
 
 S5 运行中或完成后的消息先进入主 Agent。进度询问、安排说明和正文解释只读取快照，不修改阶段、计划版本、询问标记或当前 Writer；明确的新要求才调用 `bid_confirm_writing_plan`。Host 把新计划送入当前调度器，不取消无关 Writer 或 Reviewer：未开始章节读取新契约，已完成的受影响章节进入定向修复，运行中的受影响章节递增输入 epoch 并丢弃迟到旧结果。`chapters/applied-writing-plan.json` 记录执行日志采用的计划版本；模型决定 `revision.affected_section_ids`，程序只扩展真实强依赖下游。正文引用作为结构化上下文进入 Main Agent；引用本身不等于修订，只有明确修改才调用 `bid_revise_chapter`。
 
@@ -103,7 +119,7 @@ S4 启动 Child 前复检 reference/reference_bid Corpus，损坏文件以 `EVID
 
 Section Child 通过 `submit_section_research_assessment` 只记录研究充分性、中性 findings、真实依据和专业方案推演边界。Research Ready 后先用 `update_section_task` 提交完整 Writing Brief、writing_dimensions、missing_topics 及当前覆盖，再用 `submit_section_structure_assessment` 判断 KEEP/REFINE、目录导航和隐藏标题压力，并逐项决定主题归位。Host 将判断绑定当前 Blueprint fingerprint；任务、研究或目录语义变化会使判断 stale，重新判断前不能锁定。同一方法的普通步骤允许留章内，连续流程或没有独立评分点不能单独证明 KEEP。
 
-目录操作保留现有 Section 子树作用域。模型提供操作、finding_indices 和业务理由，Host 分配稳定 Section ID 并保存 finding→实际节点绑定；连续编辑不要求因新 ID 重交 Research Assessment。编辑完成后依据最新 Blueprint 重新判断，再用 `lock_section_outline` 锁定。全书 `reviewRefinedOutline()` 读取精简 Structure Review Cards，独立检查叶子过粗、过度拆分、同级职责和隐藏标题压力。阻断问题由程序填写 `OUTLINE_STRUCTURE_REVIEW` 类别，只重开受影响子树的 `MAP-REPAIR-*`；Repair 接收中性 findings、当前 Blueprint 和具体问题，不继承旧 KEEP/归位理由。Final Check 继续复核任务、资料用途、缺口与父总述，不获得结构编辑权限。
+目录操作保留现有 Section 子树作用域。模型提供操作、finding_indices 和业务理由，Host 分配稳定 Section ID 并保存 finding→实际节点绑定；连续编辑不要求因新 ID 重交 Research Assessment。新叶节的候选 Requirement、Scoring 和 Response Point 可用于研究引用校验，正式章节关联仍由 `update_section_task` 的 coverage_override 决定。编辑完成后依据最新 Blueprint 重新判断，再用 `lock_section_outline` 锁定。全书 `reviewRefinedOutline()` 读取精简 Structure Review Cards，独立检查叶子过粗、过度拆分、同级职责和隐藏标题压力。阻断问题由程序填写 `OUTLINE_STRUCTURE_REVIEW` 类别，只重开受影响子树的 `MAP-REPAIR-*`；Repair 接收中性 findings、当前 Blueprint 和具体问题，不继承旧 KEEP/归位理由。Final Check 继续复核任务、资料用途、缺口与父总述，不获得结构编辑权限。
 
 无参数 `finish_final_check` 根据当前版本记录计算漏项、过期及阻断，不接受模型自报已审清单，baseline 也不算已审。提示首轮展开当前待审对象；当 finish 发现 pending review 时返回 `review_pending`、当前 `review_ref` 列表和结构化诊断，修复轮次必须先用 `list_review_items` 刷新。可修问题必须通过 `review_items` 的 `correct` 实际修改 S4 产物；旧引用失效后生成新 fingerprint，重新复核并 `keep`，不能继承旧结论。不可在当前边界修复的 `block` 直接终止当前 Final Check，不进入无意义的普通重试。全部收口后合并、去重、整体验证并发布正式产物；失败沿用有限修复及回滚。检查点保存研究发现、带 fingerprint/stale 的结构判断、失效次数、目录操作及 Host 绑定、任务与资料版本和完成状态；结构字段、任务身份及输入关系必须严格校验，旧 S4 数据必须重置。正式 Outline 与 S5 输入不变。日志的 statistics 和各任务 research_stats 记录叶子数、研究充分性、搜索次数与命中、Web 成败及原因、findings、KEEP/REFINE、stale、结构操作、全书复核问题和 Repair 结果，不保存完整 Prompt；日志只接受当前工具名 `web_search` 与 `web_fetch`。
 
@@ -130,6 +146,8 @@ Host 从记录确定 verdict：Writer 可修复的固定审核失败或 `require
 Writer 或 Reviewer 异常结束时，执行日志和阶段失败消息保留 Provider 提供的安全诊断，便于区分模型服务故障与产物校验问题。
 
 S5 将 `execution-log.json` 作为章节级检查点。模型流断开或结果通道错误使用独立运行重试预算；单章最终失败不取消无关章节。恢复验证当前计划版本、日志、正文、metadata、Reviewer 报告、资料完整性、内容 Hash 和 Child 身份；正文与 metadata 合法但 Reviewer 报告缺失或协议过期时保留正文并只重新审核，未完成、正文损坏、身份失效或当前计划明确影响的章节及其全部强依赖下游才重置为 pending。弱关联不传播失效，无关的合法 completed 继续复用。正常提交与最终读取共用 canonical 覆盖、引句、身份及 verdict 一致性检查；执行日志记录强依赖正文 Hash 供追溯，输入有效性按实际传给下游的 handoff Hash 判断。`review_sha256` 和 `review.candidate_sha256` 均绑定 `chapterCandidateSha256(markdown)`，不是报告 JSON 的 Hash。文档级报告逐项绑定其检查过的章节 Hash 与资料证据，未变化项可在恢复时复用，变化项重新审核。
+
+可写章节的 `section_id` 与四位文件序号分别表示业务身份和磁盘位置。Host 在 `execution-log.json` 保存 `storage_serial` 和单调递增的 `next_storage_serial`；旧项目从 metadata 和 Manifest 中交叉核对已有位置，在正式写操作中补齐日志。目录移动、改名和插章不重排旧文件；工作台、修订、估页及 Word 导出按章节身份读取位置，导出顺序仍按当前确认目录。缺少可证明身份的旧正文或相互矛盾的归属会返回存储诊断，不按目录位置猜测。
 
 候选 Web 来源缺失、Hash 错误或路径不安全时，预检及 W 引用表向 Writer 标明不可用，不影响无关章节，也不删掉对应写作要求；实际引用仍在当前提交工具中校验账本身份与正文。已发 W 在同章修复中保留编号，不因过滤或追加来源重编号。整体账本错误和 Host 写盘失败仍会使执行失败。
 

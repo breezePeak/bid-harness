@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
   extendArchiveManifest,
-  gitBlobHash,
   parseArchiveManifest,
   renderArchiveManifest,
   validateArchiveArtifacts,
@@ -14,11 +13,9 @@ function fixture(): Map<string, Buffer> {
   const base = '2026-07-26-example'
   const source = Buffer.from(`# Agent Note: Example\n\nStatus: implemented\nArchived: 2026-07-26\n\nEnglish | [中文](${base}.zh.md)\n\n## Problem\n\nExample.\n`)
   const zh = Buffer.from(`# Agent Note: 示例\n\nStatus: implemented\nArchived: 2026-07-26\n\n[English](${base}.md) | 中文\n\n## 问题\n\n示例。\n`)
-  const meta = Buffer.from(`${base}.md: ${gitBlobHash(source)}\n${base}.zh.md: ${gitBlobHash(zh)}\n`)
   return new Map([
     [`process/${base}.md`, source],
     [`process/${base}.zh.md`, zh],
-    [`process/${base}.i18n.yaml`, meta],
   ])
 }
 
@@ -29,7 +26,7 @@ describe('archived Agent Notes', () => {
     expect(isArchivedAgentNotePath('.agents/notes/implemented/process/example.md')).toBe(false)
   })
 
-  it('accepts one complete implemented triplet with matching archive metadata', () => {
+  it('accepts archived Markdown bodies with valid headers', () => {
     expect(validateArchiveArtifacts(fixture())).toEqual([])
   })
 
@@ -40,14 +37,13 @@ describe('archived Agent Notes', () => {
     ]))).toEqual([])
   })
 
-  it('rejects incomplete triplets and invalid archive headers', () => {
+  it('rejects invalid archive headers', () => {
     const artifacts = fixture()
-    artifacts.delete('process/2026-07-26-example.i18n.yaml')
     artifacts.set(
       'process/2026-07-26-example.md',
       Buffer.from('# Agent Note: Example\n\nStatus: proposed\nArchived: yesterday\n'),
     )
-    expect(validateArchiveArtifacts(artifacts).join('\n')).toMatch(/incomplete legacy bilingual record/)
+    expect(validateArchiveArtifacts(artifacts).join('\n')).toMatch(/line 3 must be `Status: implemented`/)
   })
 
   it('extends the manifest without permitting a sealed change or removal', () => {
@@ -55,7 +51,7 @@ describe('archived Agent Notes', () => {
     const empty: ArchiveManifest = { version: 1, files: {} }
     const first = extendArchiveManifest(empty, artifacts)
     expect(first.errors).toEqual([])
-    expect(first.added).toHaveLength(3)
+    expect(first.added).toHaveLength(2)
 
     const sealed: ArchiveManifest = { version: 1, files: first.files }
     const changed = new Map(artifacts)

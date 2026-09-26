@@ -2,10 +2,11 @@
  * Bid Session browser plugin. It renders the Host-computed `bid.runtime` projection
  * in `conversation.input.dock`, mirrors `projection.composer` into the existing
  * per-session composer block registry, and carries selected files through
- * dedicated same-origin binary endpoints. It folds no Bid events and owns no
- * Bid business state.
+ * dedicated same-origin binary endpoints. It projects durable Bid notices into
+ * chat and owns no Bid business state.
  */
 import type { ClientContext, SessionId } from '@deepseek-ai/dsh-client-runtime/client'
+import type { BidCapabilityPlanView } from '@deepseek-ai/dsh-bid/control-plane'
 import { BID_BINARY_UPLOAD_PATH, BID_UPLOAD_FILES_HEADER, BID_UPLOAD_SESSION_HEADER, DOCX_TEMPLATE_NAME_HEADER, DOCX_TEMPLATE_REVISION_HEADER, DOCX_TEMPLATE_SIZE_HEADER, DOCX_TEMPLATE_UPLOAD_PATH, OUTLINE_CONFIRMATION_ISSUES, parseBidReviewWorkbenchView, type BidClientProjection, type BidDocumentRole, type BidEvidenceMappingProgress, type BidFileIntakeFileResult, type BidFileIntakeResult, type BidPageEstimate, type DocxFormatView, type DocxTemplateLibraryView, type DocxTemplateUploadResult, type OutlineConfirmationIssueCode, type OutlineConfirmationRepairAction, type OutlineDraftMutationRequest, type OutlineDraftView, type OutlineReviewContext, type StageValidationIssue, type TenderAnalysisConfirmationView, type TenderAnalysisEditOperation, type WritingEntryIntent } from '@deepseek-ai/dsh-bid/control-plane'
 // Type-only: pulls the generated Bid Remote API and ctx.remote merge through the Client assembly boundary.
 import type {} from '@deepseek-ai/dsh-api-remotes/client'
@@ -22,6 +23,8 @@ import { BidReviewWorkbench, type BidReviewChapterView } from './BidReviewWorkbe
 import { BidComposerContext } from './BidComposerContext.tsx'
 import { BidRunNotice } from './BidRunNotice.tsx'
 import { bidRunNoticeDefinition } from './bid-run-notice-definition.ts'
+import { BidDocxExportNotice, type BidDocxExportNoticeInjected } from './BidDocxExportNotice.tsx'
+import { bidDocxExportNoticeDefinition } from './bid-docx-export-notice-definition.ts'
 import { createBidRevisionStore } from './revision-reference.ts'
 import { createBidConfirmationModeStore } from './confirmation-mode.ts'
 import { en, zh, type BidKey } from './locales.ts'
@@ -51,6 +54,8 @@ export interface BidStagePanelInjected {
   setBackgroundActivity: (active: boolean) => void
   /** 读取已发布详情并恢复各标签的可见性。 */
   getDetails: () => Promise<BidDetailsView>
+  /** 读取当前能力 Work 或已登记请求的只读步骤摘要。 */
+  getCapabilityTaskPlan: () => Promise<BidCapabilityPlanView | null>
   setDetailsAvailable: (details: BidDetailsView | null, confirmingOutline?: boolean, confirmingTender?: boolean) => void
   /** Mirror the Host composer capability into the existing session block. */
   setComposerBlock: (reason: string | undefined, embedded?: boolean) => void
@@ -136,6 +141,7 @@ function actionFailure(error: {
  */
 export function apply(ctx: ClientContext): void {
   ctx.conversationEvents.register(bidRunNoticeDefinition)
+  ctx.conversationEvents.register(bidDocxExportNoticeDefinition)
   const revisionStore = createBidRevisionStore()
   const confirmationModeStore = createBidConfirmationModeStore()
   const pendingSectionLocate = new Map<string, string>()
@@ -261,6 +267,13 @@ export function apply(ctx: ClientContext): void {
     name: 'conversation.chat.node',
     key: 'bid-run-notice',
   }, BidRunNotice))
+  ctx.slots.inject('conversation.chat.node', () => ctx.slots.register({
+    name: 'conversation.chat.node',
+    key: 'bid-docx-export-notice',
+    inject: (sessionId: SessionId): BidDocxExportNoticeInjected => ({
+      showExport: () => { ctx.sessions.scope(sessionId)?.get('conversation')?.selectView('bid-word-export') },
+    }),
+  }, BidDocxExportNotice))
   ctx.slots.inject('conversation.input.left', () => ctx.slots.register({
     name: 'conversation.input.left',
     id: 'bid-confirmation-mode',
@@ -303,6 +316,11 @@ export function apply(ctx: ClientContext): void {
         } : undefined)
       },
       getDetails: () => getDetails(sessionId),
+      getCapabilityTaskPlan: async () => {
+        const result = await ctx.remote.bid.getCapabilityTaskPlan(sessionId)
+        if (!result.ok) throw actionFailure(result.error)
+        return result.value
+      },
       setDetailsAvailable: (details, confirmingOutline = false, confirmingTender = false) => {
         const conversation = ctx.sessions.scope(sessionId)?.get('conversation')
         conversation?.setViewAvailable('bid-tender', confirmingTender || details?.tender != null)

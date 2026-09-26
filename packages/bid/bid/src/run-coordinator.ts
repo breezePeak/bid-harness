@@ -458,10 +458,10 @@ export class BidRunCoordinator {
       supersedesTurn: superseded?.type === 'turn/end' ? superseded.data.turn : null,
       runId: snapshot.runId,
       stage: snapshot.work.stage,
-      kind: cause === 'user_stop' ? 'stopped' : 'interrupted',
-      severity: cause === 'user_stop' ? 'info' : 'error',
-      message: cause === 'user_stop'
-        ? '当前任务已停止，已保存已完成进度。'
+      kind: cause === 'user_stop' || cause === 'awaiting_input' ? 'stopped' : 'interrupted',
+      severity: cause === 'user_stop' || cause === 'awaiting_input' ? 'info' : 'error',
+      message: cause === 'user_stop' || cause === 'awaiting_input'
+        ? cause === 'awaiting_input' ? '当前任务等待补充输入，已保存已完成进度。' : '当前任务已停止，已保存已完成进度。'
         : [error?.code, error?.message, ...error?.issues?.slice(0, 3).map(issue => `${issue.code}: ${issue.message}`) ?? []]
           .filter((value): value is string => value !== undefined)
           .map(value => sanitizeBidErrorText(value))

@@ -128,6 +128,12 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         parameters: [{ name: 'ownerCtx', description: 'caller context that owns load, setup, and the live lifecycle.' }, { name: 'options', description: 'persisted identity, loop options, setup, and cancellation.' }],
         returns: 'the published handle.',
       },
+      {
+        signature: 'async disposeAgent(id: SessionId): Promise<boolean>',
+        description: 'Stop one factory-owned live Agent by its shared Session identity.',
+        parameters: [{ name: 'id', description: 'Session identity of the live Agent.' }],
+        returns: 'Whether a live Agent was found and disposed.',
+      },
     ],
   },
   {
@@ -259,6 +265,12 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         description: 'Load a persisted session and resume an agent on it through the registered factory. Rejects if no factory is registered; the factory rejects if session persistence is not configured or persistence/setup fails.',
         parameters: [{ name: 'options', description: 'persisted identity, configuration, and optional setup.' }],
         returns: 'the handle after setup, rollback-covered publication, and loop start complete.',
+      },
+      {
+        signature: 'async dispose(id: SessionId): Promise<boolean>',
+        description: 'Stop and remove a live Agent together with its Session.',
+        parameters: [{ name: 'id', description: 'Shared Agent and Session identity.' }],
+        returns: 'whether a live lifecycle was removed.',
       },
       {
         signature: 'register(agent: Agent): () => void',
@@ -498,6 +510,241 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         parameters: [{ name: 'request', description: 'the key, the method, the surface, and the cancel signal.' }],
         returns: '`authorized` once the flow\'s record is committed during this attempt and observed, or `cancelled` when the human declined or the caller withdrew.',
         throws: ['{AuthorizationError} code `NO_FLOW` when nothing claims the key, `UNKNOWN_METHOD` when the named method is not one the flow offers, `ALREADY_IN_FLIGHT` when an attempt is already running for the key, or `NOT_COMMITTED` when the flow resolved without committing a record during the attempt.'],
+      },
+    ],
+  },
+  {
+    key: 'bid',
+    summary: 'Host-owned Bid RPC runtime that serializes stage mutations and publishes durable stage state.',
+    description: 'Host-owned Bid RPC runtime that serializes stage mutations and publishes durable stage state.',
+    methods: [
+      {
+        signature: 'registerCapabilityTaskDispatcher(dispatcher: CapabilityTaskDispatcher): () => void',
+        description: '安装能力步骤执行器；后续能力适配器共用此单一 Run 入口。',
+        parameters: [{ name: 'dispatcher', description: '负责授权文件、执行和业务校验的适配器。' }],
+        returns: '仅移除当前注册实例的 disposer。',
+      },
+      {
+        signature: 'async resetStage(agent: Agent, stage: BidStage): Promise<BidTaskState>',
+        description: 'Rewind to the current or an earlier Bid stage and apply its fixed restart policy. Active work is cancelled and drained before artifacts owned by the selected stage and every later stage are removed.',
+        parameters: [{ name: 'agent', description: 'live Bid Agent receiving the scoped command.' }, { name: 'stage', description: 'current or earlier stage named by that command.' }],
+        returns: 'S2-S4 已提交的 ready 状态；S1 与 S5 返回 waiting_user。',
+      },
+      {
+        signature: '@Remote(\'requestWritingRequirements\') async requestWritingRequirements( session: Session, intent?: WritingEntryIntent, ): Promise<BidChapterWritingGateResult>',
+        description: 'Ask the Main Agent for manual S5 writing requirements.',
+        parameters: [{ name: 'session', description: 'live Bid Session waiting before chapter writing.' }, { name: 'intent', description: 'whether to ensure or retry the writing request.' }],
+        returns: 'the unchanged waiting state after the request is durably queued.',
+      },
+      {
+        signature: '@Remote(\'autoStartChapterWriting\') async autoStartChapterWriting(session: Session): Promise<BidChapterWritingGateResult>',
+        description: 'Start S5 with a Host-generated plan that contains no user requirements.',
+        parameters: [{ name: 'session', description: 'live Bid Session waiting before chapter writing.' }],
+        returns: 'the state reached through the existing confirmed-stage orchestrator.',
+      },
+      {
+        signature: '@Remote(\'stopRun\') async stopRun(session: Session): Promise<{ accepted: true }>',
+        description: '停止当前会话回复及项目后台 Run，保留待处理的用户消息。',
+        parameters: [{ name: 'session', description: '发起停止的 Bid 主会话。' }],
+        returns: '后台任务停止并保存状态后确认接受。',
+      },
+      {
+        signature: '@Remote(\'uploadFiles\') async uploadFiles(session: Session, files: readonly BidUploadFile[]): Promise<BidFileIntakeResult>',
+        description: 'Import and validate one browser-selected file batch for the current Bid stage.',
+        parameters: [{ name: 'session', description: 'Host-resolved live Session; only its header supplies workspace identity.' }, { name: 'files', description: 'Browser file metadata and canonical base64 bytes.' }],
+        returns: 'the next runtime state or one stable business rejection.',
+      },
+      {
+        signature: 'async uploadIncomingFiles( session: Session, incoming: readonly IncomingFile[], failures: readonly BidFileIntakeFileResult[] = [], ): Promise<BidFileIntakeResult>',
+        description: 'Run the common S1 admission, persistence, manifest validation, and stage transition for raw bytes.',
+        parameters: [{ name: 'session', description: 'live Session selected by the browser transport.' }, { name: 'incoming', description: 'every decoded selected file in request order.' }, { name: 'failures', description: 'file-level transport decode failures retained for an S1 failure.' }],
+        returns: 'the durable S1 outcome.',
+      },
+      {
+        signature: 'async runCapabilityTask( agent: Agent, task: BidCapabilityTask, authorization: CapabilityTaskRequest[\'authorization\'], inputPaths: readonly string[], onAdmitted?: (run: BidRunContext) => Promise<void>, ): Promise<BidTaskState>',
+        description: '接纳一个由真实用户消息授权的能力序列。',
+        parameters: [{ name: 'agent', description: '公开主会话的 Agent。' }, { name: 'task', description: '有序能力步骤与任务范围。' }, { name: 'authorization', description: '用户消息身份。' }, { name: 'inputPaths', description: '本次任务读取的正式输入文件。' }, { name: 'onAdmitted', description: 'Run 落盘后调用的可选接纳回调。' }],
+        returns: 'Run 结算后的项目状态。',
+      },
+      {
+        signature: 'async resumeCurrentRun( session: Session, suspendedRunId: string, expectedProjectRevision: number, onAccepted?: (run: BidRunContext) => void, recovery?: { goalId: string; instruction: string }, ): Promise<BidTaskState>',
+        description: 'Resume one exact suspended Run after checking its project revision and durable checkpoints.',
+        parameters: [{ name: 'session', description: 'Bid Session that owns the suspended Run.' }, { name: 'suspendedRunId', description: 'Exact suspended attempt selected by the client.' }, { name: 'expectedProjectRevision', description: 'Project revision observed by the client.' }, { name: 'onAccepted', description: 'Callback invoked after the replacement Run is durable.' }, { name: 'recovery', description: 'Bound Goal request revalidated and recorded inside the project lock.' }],
+        returns: 'State reached when the resumed work next settles.',
+      },
+      {
+        signature: '@Remote(\'getDocxTemplateLibrary\') async getDocxTemplateLibrary(session: Session): Promise<DocxTemplateLibraryView>',
+        description: '读取项目 Word 模板列表，不解析模板或生成文件。',
+        parameters: [{ name: 'session', description: '当前标书会话。' }],
+        returns: '模板身份、页数基准和各模板格式摘要。',
+      },
+      {
+        signature: '@Remote(\'getDocxFormat\') async getDocxFormat(session: Session, templateId: DocxTemplateId | null): Promise<DocxFormatView>',
+        description: '读取一份明确的项目 Word 配置，不解析模板或生成文件。',
+        parameters: [{ name: 'session', description: '当前标书会话。' }, { name: 'templateId', description: '模板 ID；null 明确选择系统默认格式。' }],
+        returns: '已保存格式与来源。',
+      },
+      {
+        signature: '@Remote(\'saveDocxFormat\') async saveDocxFormat(session: Session, templateId: DocxTemplateId | null, request: DocxFormatRequest): Promise<DocxFormatView>',
+        description: '保存一份模板的项目格式，独立于 S1—S5 的资料与阶段状态。',
+        parameters: [{ name: 'session', description: '当前标书会话。' }, { name: 'templateId', description: '模板 ID；null 表示系统默认格式。' }, { name: 'request', description: '包含版本及用户配置的请求；模板字节使用独立二进制端点。' }],
+        returns: '保存后的格式。',
+      },
+      {
+        signature: '@Remote(\'setEstimateDocxTemplate\') async setEstimateDocxTemplate( session: Session, templateId: DocxTemplateId | null, revision: number, ): Promise<DocxTemplateLibraryView>',
+        description: '修改 S5 页数基准，不改变 S6 当前选择或任一模板格式。',
+        parameters: [{ name: 'session', description: '当前标书会话。' }, { name: 'templateId', description: '页数测算模板；null 表示默认格式。' }, { name: 'revision', description: '要修改的配置版本。' }],
+        returns: '保存后的模板库视图。',
+      },
+      {
+        signature: '@Remote(\'previewDocx\') async previewDocx(session: Session, templateId: DocxTemplateId | null): Promise<DocxFormatView>',
+        description: '使用已保存配置和固定正文快照生成浏览器预览，不完成 S6。',
+        parameters: [{ name: 'session', description: '当前标书会话。' }, { name: 'templateId', description: '模板 ID；null 表示系统默认格式。' }],
+        returns: '带内容标识的样式预览。',
+      },
+      {
+        signature: '@Remote(\'suggestDocxFormat\') async suggestDocxFormat(session: Session, templateId: DocxTemplateId): Promise<DocxFormatSuggestion>',
+        description: '生成待确认的格式建议，不修改模板、正文或生效配置。',
+        parameters: [{ name: 'session', description: '当前标书会话。' }, { name: 'templateId', description: '模板 ID；系统默认格式不需要模型建议。' }],
+        returns: '带来源原文的建议。',
+      },
+      {
+        signature: '@Remote(\'downloadDocx\') async downloadDocx(session: Session, templateId: DocxTemplateId | null): Promise<{ data: string; name: string }>',
+        description: '下载当前项目最近一次成功的 Word，不接受浏览器文件路径。',
+        parameters: [{ name: 'session', description: '当前标书会话。' }, { name: 'templateId', description: '本次导出使用的模板 ID；null 表示系统默认格式。' }],
+        returns: '下载名称和文件字节。',
+      },
+      {
+        signature: '@Remote(\'exportDocx\') async exportDocx(session: Session, templateId: DocxTemplateId | null): Promise<BidDocxExportResult>',
+        description: '按完整目录和已保存正文生成 Word，不暂停写作，也不离开审核阶段；导出不代表审核通过。',
+        parameters: [{ name: 'session', description: '当前项目的 Bid 会话，无需持有阶段操作。' }, { name: 'templateId', description: '本次导出使用的模板 ID；null 表示系统默认格式。' }],
+        returns: '新文件信息，或稳定的拒绝结果。',
+      },
+      {
+        signature: '@Remote(\'estimateDocxPages\') async estimateDocxPages(session: Session, templateId: DocxTemplateId | null): Promise<import(\'./control-plane-contract.ts\').BidPageEstimate>',
+        description: '使用正式 Renderer 尝试核验指定模板的当前导出页数。',
+        parameters: [{ name: 'session', description: '当前标书会话。' }, { name: 'templateId', description: '待测算模板；null 表示默认格式。' }],
+        returns: '页数估算及其配置基准。',
+      },
+      {
+        signature: '@Remote(\'reviseChapter\') async reviseChapter(session: Session, request: BidChapterRevisionRequest): Promise<BidChapterRevisionResult>',
+        description: '将用户意见交给目标章节原 Writer；整个操作互斥，失败保留正文。',
+        parameters: [{ name: 'session', description: '发起修订的 Bid 会话。' }, { name: 'request', description: '章节或完整连续段落引用与编写意见。' }],
+        returns: '新正文，或可重新选择原文后重试的业务错误。',
+      },
+      {
+        signature: '@Remote(\'getReviewWorkbench\') async getReviewWorkbench(session: Session): Promise<BidReviewWorkbenchView>',
+        description: 'Read the live S5 writing and per-chapter review state without disclosing workspace paths.',
+        parameters: [{ name: 'session', description: 'Bid Session whose writing workbench is requested.' }],
+        returns: 'Browser-safe chapter workbench rows and aggregate progress.',
+      },
+      {
+        signature: '@Remote(\'getReviewChapter\') async getReviewChapter(session: Session, sectionId: string): Promise<BidReviewChapterView>',
+        description: '读取 S5 叶节正文及审查结果，或父节点在确认目录中保存的概述。',
+        parameters: [{ name: 'session', description: '持有章节产物的 Bid 会话。' }, { name: 'sectionId', description: '确认目录中的章节 ID。' }],
+        returns: '浏览器可展示的章节正文、证据和审查状态。',
+      },
+      {
+        signature: '@Remote(\'getRevisionQueue\') async getRevisionQueue(session: Session): Promise<BidRevisionQueueView>',
+        description: '读取当前审批意见队列；不持有项目锁，仅读取持久化文件。',
+        parameters: [{ name: 'session', description: 'Bid 会话。' }],
+        returns: '浏览器安全的审批意见队列视图。',
+      },
+      {
+        signature: '@Remote(\'getRevisionComparison\') async getRevisionComparison(session: Session, issueId: string): Promise<BidRevisionComparisonResult>',
+        description: '读取一条已完成审批意见所属 batch task 的完整前后正文。',
+        parameters: [{ name: 'session', description: 'Bid 会话。' }, { name: 'issueId', description: '审批意见身份。' }],
+        returns: '精确历史 comparison；旧记录不伪造缺失快照。',
+      },
+      {
+        signature: '@Remote(\'addRevisionIssue\') async addRevisionIssue(session: Session, request: BidAddRevisionIssueRequest): Promise<BidRevisionQueueResult>',
+        description: '向队列追加一条 `pending` 审批意见；不启动任何 Writer。',
+        parameters: [{ name: 'session', description: 'Bid 会话。' }, { name: 'request', description: '浏览器提交的意见输入。' }],
+        returns: '更新后的队列视图，或可重新选择原文后重试的业务错误。',
+      },
+      {
+        signature: '@Remote(\'updateRevisionIssue\') async updateRevisionIssue(session: Session, request: BidUpdateRevisionIssueRequest): Promise<BidRevisionQueueResult>',
+        description: '编辑一条 `pending` 审批意见的 instruction/suggestion/reference。',
+        parameters: [{ name: 'session', description: 'Bid 会话。' }, { name: 'request', description: '浏览器提交的编辑输入。' }],
+        returns: '更新后的队列视图，或可重新选择原文后重试的业务错误。',
+      },
+      {
+        signature: '@Remote(\'deleteRevisionIssue\') async deleteRevisionIssue(session: Session, request: BidDeleteRevisionIssueRequest): Promise<BidRevisionQueueResult>',
+        description: '物理删除一条 `pending` 审批意见；其他状态拒绝浏览器直接删除。',
+        parameters: [{ name: 'session', description: 'Bid 会话。' }, { name: 'request', description: '浏览器提交的删除输入。' }],
+        returns: '更新后的队列视图，或可重新选择原文后重试的业务错误。',
+      },
+      {
+        signature: '@Remote(\'getCapabilityTaskPlan\') async getCapabilityTaskPlan(session: Session): Promise<BidCapabilityPlanView | null>',
+        description: '读取当前能力 Work 或已登记请求的计划；只返回检查点中的步骤状态。',
+        parameters: [{ name: 'session', description: '项目公开主会话。' }],
+        returns: '最近任务的只读摘要；尚无能力任务时为 null。',
+      },
+      {
+        signature: '@Remote(\'getEvidenceMappingProgress\') async getEvidenceMappingProgress( session: Session, observed?: BidClientProjection, ): Promise<BidEvidenceMappingProgress | null>',
+        description: 'Read the current S4 Mapping Task counts while evidence mapping is active or reviewable.',
+        parameters: [{ name: 'session', description: 'Bid Session that owns the S4 execution log.' }, { name: 'observed', description: 'caller projection used to reject stale observations.' }],
+        returns: 'task counts, or null when S4 has not reached an observable state or has not produced its log.',
+      },
+      {
+        signature: '@Remote(\'getDetails\') async getDetails(session: Session): Promise<BidDetailsView>',
+        description: '组装 Bid 详情页可读取的已发布阶段产物。',
+        parameters: [{ name: 'session', description: '持有已恢复项目状态的 Bid 会话。' }],
+        returns: '已发布的招标信息、目录和正文入口；S4 等待确认时使用已生成目录，执行中保留 S3 确认目录。',
+      },
+      {
+        signature: '@Remote(\'getTenderAnalysisForConfirmation\') async getTenderAnalysisForConfirmation(session: Session): Promise<TenderAnalysisConfirmationView>',
+        description: '读取 S2 待确认或已确认结论；编辑准入仍由 confirmTenderAnalysis 校验。',
+        parameters: [{ name: 'session', description: '持有招标分析产物的 Bid 会话。' }],
+        returns: '分析产物及评分响应项选择状态。',
+      },
+      {
+        signature: '@Remote(\'setTenderScoringSelection\') async setTenderScoringSelection( session: Session, scoringId: string, selected: boolean, ): Promise<TenderAnalysisConfirmationView>',
+        description: 'Persist one S2 scoring-response decision before final confirmation.',
+        parameters: [{ name: 'session', description: 'Bid Session waiting at the S2 confirmation gate.' }, { name: 'scoringId', description: 'Stable original scoring item id.' }, { name: 'selected', description: 'Whether the item enters the downstream response workflow.' }],
+        returns: 'Updated S2 confirmation view.',
+      },
+      {
+        signature: '@Remote(\'confirmTenderAnalysis\') async confirmTenderAnalysis( session: Session, operations: readonly TenderAnalysisEditOperation[], ): Promise<BidTenderAnalysisConfirmationResult>',
+        description: 'Apply controlled S2 edits, revalidate canonical artifacts, and continue only after explicit confirmation.',
+        parameters: [{ name: 'session', description: 'Bid Session waiting at the S2 confirmation gate.' }, { name: 'operations', description: 'Validated edits to canonical tender-analysis artifacts.' }],
+        returns: 'Confirmation result and resulting runtime state, or a stable rejection.',
+      },
+      {
+        signature: '@Remote(\'getOutlineForConfirmation\') async getOutlineForConfirmation(session: Session): Promise<OutlineArtifact>',
+        description: 'Read the S4 draft only while its user-confirmation stage owns the session.',
+        parameters: [{ name: 'session', description: 'Bid Session waiting for outline confirmation.' }],
+        returns: 'Current editable outline artifact.',
+      },
+      {
+        signature: '@Remote(\'getOutlineDraft\') async getOutlineDraft(session: Session): Promise<OutlineDraftView>',
+        description: '读取或初始化 S3/S4 等待用户确认的持久化 Draft。',
+        parameters: [{ name: 'session', description: '等待目录确认的 Bid 会话。' }],
+        returns: '当前 Draft 及用于 CAS 编辑的身份。',
+      },
+      {
+        signature: '@Remote(\'getOutlineReviewContext\') async getOutlineReviewContext(session: Session): Promise<OutlineReviewContext>',
+        description: '读取目录差异审阅所需的上游事实和基线。',
+        parameters: [{ name: 'session', description: '等待目录确认的 Bid 会话。' }],
+        returns: 'S3 确认基线及已有章节关联资料；不运行生成或映射。',
+      },
+      {
+        signature: '@Remote(\'applyOutlineDraftOperations\') async applyOutlineDraftOperations(session: Session, request: OutlineDraftMutationRequest): Promise<OutlineDraftMutationResult>',
+        description: '使用 CAS 保存目录编辑；仅校验结构和覆盖，S4 语义复核留到最终确认。',
+        parameters: [{ name: 'session', description: '等待目录确认的 Bid 会话。' }, { name: 'request', description: '携带 Draft 身份的结构编辑操作。' }],
+        returns: '更新后的 Draft，或冲突及校验问题。',
+      },
+      {
+        signature: '@Remote(\'confirmOutline\') async confirmOutline(session: Session, request: OutlineDraftIdentityRequest): Promise<BidOutlineConfirmationResult>',
+        description: '确认 Draft 前仅复核语义变化的 S4 可写章节；校验失败恢复已发布产物并保留 Draft。',
+        parameters: [{ name: 'session', description: '等待目录确认的 Bid 会话。' }, { name: 'request', description: '用于拒绝过期提交的 Draft 身份。' }],
+        returns: '确认后的运行状态，或稳定拒绝。',
+      },
+      {
+        signature: '@Remote(\'regenerateOutline\') async regenerateOutline( session: Session, request: OutlineDraftIdentityRequest & { readonly feedback: string }, ): Promise<BidOutlineRegenerationResult>',
+        description: 'Regenerate a temporary S4-quality candidate from the current persisted S5 draft.',
+        parameters: [{ name: 'session', description: 'Bid Session waiting for outline confirmation.' }, { name: 'request', description: 'Current draft identity and the user\'s regeneration feedback.' }],
+        returns: 'Updated draft candidate and change set, or a stable rejection.',
       },
     ],
   },
@@ -813,6 +1060,24 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
     ],
   },
   {
+    key: 'goalRoundDriver',
+    summary: 'Host control of automatic goal admission for an exact live agent.',
+    description: 'Host control of automatic goal admission for an exact live agent.',
+    methods: [
+      {
+        signature: 'registerGate(gate: (agent: Agent, goal: GoalView) => \'wait\' | undefined): () => void',
+        description: 'Register a synchronous, read-only admission gate.',
+        parameters: [{ name: 'gate', description: 'Returns wait while Host work prevents another round.' }],
+        returns: 'Registration disposer.',
+      },
+      {
+        signature: 'request(agent: Agent): void',
+        description: 'Recheck the existing serial driver after external state changes.',
+        parameters: [{ name: 'agent', description: 'Exact live Agent whose goal may advance.' }],
+      },
+    ],
+  },
+  {
     key: 'goals',
     summary: 'Goal service (`ctx.goals`) backed exclusively by the owning session log.',
     description: 'Goal service (`ctx.goals`) backed exclusively by the owning session log.',
@@ -972,6 +1237,24 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         returns: 'detached provider metadata in registration order.',
       },
       {
+        signature: 'registerWebSearch(provider: string, search: HostedWebSearch): () => void',
+        description: 'Attach hosted search to a model provider; unloading removes that capability.',
+        parameters: [{ name: 'provider', description: 'registered model route served by this search implementation.' }, { name: 'search', description: 'provider-owned discovery using the provider\'s connection settings.' }],
+        returns: 'disposer for the capability contribution.',
+      },
+      {
+        signature: 'supports(provider: string, capability: LlmCapability): boolean',
+        description: 'Query an installed provider capability without reading its credentials.',
+        parameters: [{ name: 'provider', description: 'model provider route.' }, { name: 'capability', description: 'operation required by a consumer.' }],
+        returns: 'whether that route and operation are registered.',
+      },
+      {
+        signature: 'webSearch(provider: string, request: WebSearchRequest, options: HostedSearchOptions): Promise<WebSearchResult>',
+        description: 'Discover URLs through one explicitly selected model provider, without fallback.',
+        parameters: [{ name: 'provider', description: 'route captured for this operation.' }, { name: 'request', description: 'query and optional source limit.' }, { name: 'options', description: 'captured model, cancellation, and request recorder.' }],
+        returns: 'normalized discovery results; fetched evidence remains the web service\'s responsibility.',
+      },
+      {
         signature: 'registerConfigurableProviders(entries: readonly LlmConfigurableProvider[]): DirectoryRegistrationHandle',
         description: 'Declare provider routes an adapter plugin can activate through configuration. Registration is all-or-nothing: an empty list, invalid entry, or a provider already declared by any registration throws `LlmError` without registering the rest. Disposed with the fiber.',
         parameters: [{ name: 'entries', description: 'every configurable provider this plugin owns.' }],
@@ -1030,6 +1313,12 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         description: 'Stream one model call as raw chunks (token-level deltas). Replay state is retained only when the same adapter instance owns its historical provider and the target provider. Final adapter selection remains fixed through asynchronous exact-model resolution and dispatch. Adapter selection, dispatch, and iteration failures become terminal `error` or `aborted` finish chunks; middleware, nested-call, cleanup, and consumer failures remain thrown.',
         parameters: [{ name: 'options', description: 'the full request; `options.provider` selects the adapter.' }],
         returns: 'the chunk stream, possibly wrapped by `llm/stream` listeners.',
+      },
+      {
+        signature: 'async generate(options: GenerateOptions): Promise<import(\'./types.ts\').GenerateResult>',
+        description: 'Assemble a non-streaming result using the same provider, tools, usage, and failure protocol.',
+        parameters: [{ name: 'options', description: 'full provider-neutral request.' }],
+        returns: 'assistant message, finish outcome, and optional token usage.',
       },
     ],
   },
@@ -1208,6 +1497,12 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         signature: 'abstract append(id: SessionId, events: readonly SessionEvent[]): Promise<void>',
         description: 'Durably persist a batch of events. Honors the append-only and contiguous- seq contracts: the first event\'s `seq` MUST equal the stored next-seq (after `load` has durably closed any interrupted turn). Rejects non-JSON- serializable `event.data` with an error naming the offending event type.',
         parameters: [{ name: 'id', description: 'the session the batch belongs to.' }, { name: 'events', description: 'the contiguous batch to persist, in seq order.' }],
+      },
+      {
+        signature: 'delete(id: SessionId): Promise<boolean>',
+        description: 'Permanently remove one detached Session\'s durable log and coordinator state. A live Session must be stopped before this operation begins.',
+        parameters: [{ name: 'id', description: 'Session identity to remove.' }],
+        returns: 'whether durable state existed and was removed.',
       },
       {
         signature: 'async prepare(id: SessionId, signal?: AbortSignal): Promise<SessionPreparation>',
@@ -2248,6 +2543,12 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         parameters: [{ name: 'request', description: 'the URL plus retrieval options.' }, { name: 'signal', description: 'optional cancellation signal forwarded to the provider.' }],
         returns: 'the retrieval outcome; non-2xx responses resolve descriptively.',
       },
+      {
+        signature: 'async diagnose(): Promise<WebRuntimeDiagnostics>',
+        description: 'Resolve both capabilities with secret-free local provider diagnostics.',
+        parameters: [],
+        returns: 'the current search and fetch provider diagnostics.',
+      },
     ],
   },
   {
@@ -2337,7 +2638,7 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
       },
       {
         signature: 'delete(id: WorkspaceId): Promise<boolean>',
-        description: 'Delete one workspace registration while retaining its directory and every session log. The durable order is updated before the table deletion; a failed table write restores the prior order and keeps the entity published. Unknown ids are an idempotent no-op for domain callers.',
+        description: 'Delete one workspace registration and every Session it owns. Project directories are not part of this operation. The durable order is updated before the table deletion; a failed table write restores the prior order and keeps the entity published. Unknown ids are an idempotent no-op for domain callers.',
         parameters: [{ name: 'id', description: 'Workspace registration to remove.' }],
         returns: '`true` when a record was deleted, `false` when it was unknown.',
       },
@@ -2380,6 +2681,14 @@ export const EVENT_API: readonly EventApiEntry[] = [
     summary: 'One session committed a different agent preset to its durable log.',
     description: 'One session committed a different agent preset to its durable log. Consumers invalidate only state derived from that session\'s composition.',
     parameters: [{ name: 'sessionId', description: 'the session whose composition changed.' }, { name: 'agentPreset', description: 'the preset recorded by the committed selection.' }],
+  },
+  {
+    name: 'agent/cancel-requested',
+    mode: 'emit',
+    signature: '\'agent/cancel-requested\'(this: Scoped<Agent>, payload: { agent: Agent; cause: AgentCancelCause; keepInbox: boolean }): void',
+    summary: 'An owner requested cancellation before the Agent mutates its inbox or aborts active work.',
+    description: 'An owner requested cancellation before the Agent mutates its inbox or aborts active work.',
+    parameters: [{ name: 'payload', description: '.keepInbox Whether queued and steering input survives the request. Scope-filtered dispatch (`@deepseek-ai/dsh-scope`): agent-scoped listeners receive only that agent.' }],
   },
   {
     name: 'agent/created',
@@ -2638,6 +2947,14 @@ export const EVENT_API: readonly EventApiEntry[] = [
     parameters: [{ name: 'session', description: 'the session just entered and announced.' }],
   },
   {
+    name: 'session/deleted',
+    mode: 'emit',
+    signature: '\'session/deleted\'(id: SessionId): void',
+    summary: 'A Session\'s durable log was permanently removed after its live lifecycle stopped.',
+    description: 'A Session\'s durable log was permanently removed after its live lifecycle stopped. Consumers discard per-session derived state for this identity.',
+    parameters: [{ name: 'id', description: 'Deleted Session identity.' }],
+  },
+  {
     name: 'session/disposed',
     mode: 'emit',
     signature: '\'session/disposed\'(this: Scoped<Session>, session: Session): void',
@@ -2662,6 +2979,14 @@ export const EVENT_API: readonly EventApiEntry[] = [
     parameters: [{ name: 'session', description: 'the session whose buffered events must reach durable storage.' }],
   },
   {
+    name: 'session/prompt-admission',
+    mode: 'serial',
+    signature: '\'session/prompt-admission\'( request: SessionPromptAdmissionRequest, ): SessionPromptAdmissionRejection | void | Promise<SessionPromptAdmissionRejection | void>',
+    summary: 'Host-wide prompt admission.',
+    description: 'Host-wide prompt admission. The first rejection prevents message creation and Agent dispatch.',
+    parameters: [{ name: 'request', description: 'addressed session and unpersisted browser input.' }],
+  },
+  {
     name: 'settings/document-updated',
     mode: 'emit',
     signature: '\'settings/document-updated\'(ns: SettingsNamespace, revision: number): void',
@@ -2684,6 +3009,14 @@ export const EVENT_API: readonly EventApiEntry[] = [
     summary: 'A skill provider, runtime contribution, or provider-backed catalog may have changed.',
     description: 'A skill provider, runtime contribution, or provider-backed catalog may have changed. This is an unfiltered invalidation notification; consumers refetch the catalog for their own lookup options. Listener failures are contained and cannot veto the registry mutation.',
     parameters: [],
+  },
+  {
+    name: 'subagent/child-setup',
+    mode: 'serial',
+    signature: '\'subagent/child-setup\'(this: Scoped<Agent>, payload: { parent: Agent childContext: Context request: ResolvedSubagentStartRequest }): Promise<void> | void',
+    summary: '在 in-process one-shot Child 发布前安装本次调用的私有能力；异常回滚创建。 监听器只组合 child.ctx，不启动 Child；注册由 Child scope 释放。',
+    description: '在 in-process one-shot Child 发布前安装本次调用的私有能力；异常回滚创建。 监听器只组合 child.ctx，不启动 Child；注册由 Child scope 释放。',
+    parameters: [{ name: 'payload', description: '.request 当前已解析的创建请求。' }],
   },
   {
     name: 'subagent/end',
@@ -2855,7 +3188,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'AgentFactory',
-    declaration: 'export interface AgentFactory {\n    createAgent(ownerCtx: Context, options: CreateAgentOptions): Promise<AgentHandle>;\n    resume(ownerCtx: Context, options: ResumeAgentOptions): Promise<AgentHandle>;\n}',
+    declaration: 'export interface AgentFactory {\n    createAgent(ownerCtx: Context, options: CreateAgentOptions): Promise<AgentHandle>;\n    resume(ownerCtx: Context, options: ResumeAgentOptions): Promise<AgentHandle>;\n    disposeAgent?(id: SessionId): Promise<boolean>;\n}',
   },
   {
     name: 'AgentHandle',
@@ -3014,12 +3347,304 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export interface BashEnvVariableInfo extends BashEnvVariable {\n    contributor: string;\n    key: DshEnvironmentKey;\n}',
   },
   {
+    name: 'BidAddRevisionIssueRequest',
+    declaration: 'export interface BidAddRevisionIssueRequest {\n    readonly section_id: string;\n    readonly scope: \'paragraphs\' | \'chapter\';\n    readonly reference: BidRevisionIssueReference;\n    readonly instruction: string;\n    readonly suggestion: string | null;\n}',
+  },
+  {
+    name: 'BidCapabilityCall',
+    declaration: 'export type BidCapabilityCall = z.infer<typeof bidCapabilityInputSchema>;',
+  },
+  {
+    name: 'BidCapabilityExecutionContext',
+    declaration: 'export interface BidCapabilityExecutionContext {\n    readonly canonical: BidWorkspace;\n    readonly working: BidWorkspace;\n    readonly agent: Agent;\n    readonly sourceSession?: WritingMessageSession;\n    readonly run: BidRunContext;\n    readonly sectionIds: ReadonlySet<string> | null;\n    readonly authorizedNewDescendants?: ReadonlySet<string>;\n    readonly stepDirectory: string;\n    readonly inputSources: ReadonlyMap<string, string>;\n    readonly baselineHashes: ReadonlyMap<string, string>;\n    readonly allowedWrites: ReadonlySet<string>;\n    readonly stepId: string;\n    readonly rootWorkId: string;\n    readonly authorization: {\n        readonly session_id: string;\n        readonly message_id: string;\n    };\n    readonly inputSha256: string;\n    readonly inputAnswer?: AskUserQuestionAnswerItem;\n}',
+  },
+  {
+    name: 'BidCapabilityPlanView',
+    declaration: 'export interface BidCapabilityPlanView {\n    readonly workId: string;\n    readonly title: string;\n    readonly scope: string;\n    readonly status: \'queued\' | \'running\' | \'awaiting_input\' | \'suspended\' | \'completed\' | \'failed\';\n    readonly steps: readonly {\n        readonly id: string;\n        readonly capability: string;\n        readonly status: \'pending\' | \'running\' | \'awaiting_input\' | \'completed\' | \'failed\';\n        readonly detail: string | null;\n    }[];\n}',
+  },
+  {
+    name: 'BidCapabilityResult',
+    declaration: 'export type BidCapabilityResult = z.infer<typeof bidCapabilityResultSchema>;',
+  },
+  {
+    name: 'BidCapabilityTask',
+    declaration: 'export type BidCapabilityTask = z.infer<typeof bidCapabilityTaskSchema>;',
+  },
+  {
+    name: 'BidChapterIndicatorStatus',
+    declaration: 'export type BidChapterIndicatorStatus = \'queued\' | \'writing\' | \'repairing\' | \'content_ready\' | \'reviewing\' | \'needs_input\' | \'needs_attention\' | \'passed\' | \'failed\' | \'not_started\';',
+  },
+  {
+    name: 'BidChapterReviewStatus',
+    declaration: 'export type BidChapterReviewStatus = \'not_started\' | \'reviewing\' | \'pass\' | \'needs_input\' | \'needs_attention\' | \'failed\';',
+  },
+  {
+    name: 'BidChapterRevisionReference',
+    declaration: 'export type BidChapterRevisionReference = {\n    readonly section_id: string;\n    readonly content_sha256: string;\n} & ({\n    readonly scope: \'chapter\';\n} | {\n    readonly scope: \'paragraphs\';\n    readonly start: number;\n    readonly end: number;\n    readonly text: string;\n});',
+  },
+  {
+    name: 'BidChapterRevisionRequest',
+    declaration: 'export interface BidChapterRevisionRequest {\n    readonly instruction: string;\n    readonly reference: BidChapterRevisionReference;\n}',
+  },
+  {
+    name: 'BidChapterRevisionResult',
+    declaration: 'export type BidChapterRevisionResult = {\n    readonly ok: true;\n    readonly value: BidReviewChapterView;\n} | {\n    readonly ok: false;\n    readonly error: {\n        readonly code: string;\n        readonly message: string;\n    };\n};',
+  },
+  {
+    name: 'BidChapterWritingGateErrorCode',
+    declaration: 'export type BidChapterWritingGateErrorCode = \'BID_SESSION_REQUIRED\' | \'BID_OPERATION_IN_PROGRESS\' | \'BID_CHAPTER_WRITING_GATE_NOT_ALLOWED\' | \'BID_CHAPTER_WRITING_GATE_FAILED\' | \'BID_WRITING_ENTRY_CONFLICT\' | \'BID_WRITING_ENTRY_ACTION_NOT_ALLOWED\';',
+  },
+  {
+    name: 'BidChapterWritingGateResult',
+    declaration: 'export type BidChapterWritingGateResult = {\n    readonly ok: true;\n    readonly value: BidTaskState;\n} | {\n    readonly ok: false;\n    readonly error: {\n        readonly code: BidChapterWritingGateErrorCode;\n        readonly message: string;\n    };\n};',
+  },
+  {
+    name: 'BidChapterWritingStatus',
+    declaration: 'export type BidChapterWritingStatus = \'not_started\' | \'writing\' | \'content_ready\' | \'completed\' | \'failed\';',
+  },
+  {
+    name: 'BidChildScope',
+    declaration: 'export interface BidChildScope {\n    drain(): Promise<void>;\n}',
+  },
+  {
+    name: 'BidClientAction',
+    declaration: 'export type BidClientAction = typeof BID_CLIENT_ACTIONS[number];',
+  },
+  {
+    name: 'BidClientProjection',
+    declaration: 'export interface BidClientProjection {\n    task: BidTaskState;\n    allowedActions: readonly BidClientAction[];\n    composer: BidComposerCapability;\n    allowedExtensions?: readonly string[] | undefined;\n    maxFiles?: number | undefined;\n    maxFileBytes?: number | undefined;\n    maxTotalBytes?: number | undefined;\n}',
+  },
+  {
+    name: 'BidCommitLease',
+    declaration: 'export interface BidCommitLease {\n    writeText(path: string, value: string): Promise<void>;\n    writeJson(path: string, value: unknown): Promise<void>;\n    writeBytes(path: string, value: Uint8Array): Promise<void>;\n    remove(path: string, recursive?: boolean): Promise<void>;\n}',
+  },
+  {
+    name: 'BidCommitScope',
+    declaration: 'export class BidCommitScope {\n    constructor(private readonly identity: CommitIdentity, private readonly readProjectRevision: () => number, private readonly publication?: {\n        readonly workspaceRoot: string;\n        readonly projectRoot: string;\n    }, private readonly gate: CommitGate = createCommitGate());\n    forPublication(publication: {\n        readonly workspaceRoot: string;\n        readonly projectRoot: string;\n    }): BidCommitScope;\n    retire(): void;\n    whenDrained(): Promise<void>;\n    writeText(path: string, value: string): Promise<void>;\n    writeJson(path: string, value: unknown): Promise<void>;\n    writeBytes(path: string, value: Uint8Array): Promise<void>;\n    remove(path: string, recursive: boolean = false): Promise<void>;\n    publish<T>(write: (lease: BidCommitLease) => Promise<T>): Promise<T>;\n    assertWritable(identity: Pick<CommitIdentity, \'runId\' | \'epoch\'>): void;\n}',
+  },
+  {
+    name: 'BidComposerCapability',
+    declaration: 'export type BidComposerCapability = {\n    enabled: true;\n} | {\n    enabled: false;\n    reason: BidComposerReason;\n};',
+  },
+  {
+    name: 'BidComposerReason',
+    declaration: 'export type BidComposerReason = \'bid.upload_required\' | \'bid.stage_pending\' | \'bid.stage_running\' | \'bid.tender_analysis_confirmation_required\' | \'bid.outline_confirmation_required\' | \'bid.stage_failed\' | \'bid.completed\';',
+  },
+  {
+    name: 'BidConfig',
+    declaration: 'export interface BidConfig {\n    allowedExtensions: readonly string[];\n    maxFileBytes: number;\n    maxFiles: number;\n    maxTotalBytes: number;\n    docxTemplateMaxBytes: number;\n    projectDirectory: string;\n    outputDirectory: string;\n    enableDocxExport: boolean;\n    font: string;\n    bodySize: number;\n    headingSize: number;\n    bidderName?: string;\n    documentChunk: DocumentChunkConfig;\n}',
+  },
+  {
+    name: 'BidDeleteRevisionIssueRequest',
+    declaration: 'export interface BidDeleteRevisionIssueRequest {\n    readonly issue_id: string;\n    readonly expected_queue_revision: number;\n}',
+  },
+  {
+    name: 'BidDetailsView',
+    declaration: 'export interface BidDetailsView {\n    tender: import(\'./tender-analysis-confirmation.ts\').TenderAnalysisConfirmationView | null;\n    outline: import(\'./outline-generation-artifacts.ts\').OutlineArtifact | null;\n    outlinePresentation: {\n        source: \'initial_confirmed\' | \'final_candidate\' | \'final_confirmed\';\n        baseline: import(\'./outline-generation-artifacts.ts\').OutlineArtifact | null;\n        evidence: import(\'./evidence-mapping-artifacts.ts\').EvidenceMapArtifact | null;\n        errors: string[];\n    } | null;\n    body: boolean;\n    writingRequest?: import(\'./writing-requirements.ts\').WritingRequest | null;\n}',
+  },
+  {
+    name: 'BidDocumentRole',
+    declaration: 'export type BidDocumentRole = typeof BID_DOCUMENT_ROLES[number];',
+  },
+  {
+    name: 'BidDocxExportErrorCode',
+    declaration: 'export type BidDocxExportErrorCode = \'BID_SESSION_REQUIRED\' | \'BID_OPERATION_IN_PROGRESS\' | \'BID_DOCX_EXPORT_NOT_ALLOWED\' | \'BID_DOCX_EXPORT_FAILED\';',
+  },
+  {
+    name: 'BidDocxExportResult',
+    declaration: 'export type BidDocxExportResult = {\n    readonly ok: true;\n    readonly value: {\n        readonly path: string;\n        readonly warnings?: readonly StageValidationIssue[];\n    };\n} | {\n    readonly ok: false;\n    readonly error: {\n        readonly code: BidDocxExportErrorCode;\n        readonly message: string;\n        readonly issues?: readonly StageValidationIssue[];\n    };\n};',
+  },
+  {
+    name: 'BidEvidenceMappingProgress',
+    declaration: 'export interface BidEvidenceMappingProgress {\n    readonly initial: number;\n    readonly supplemental: number;\n    readonly total: number;\n    readonly completed: number;\n    readonly running: number;\n    readonly not_started: number;\n    readonly failed: number;\n    readonly failed_section_ids: readonly string[];\n    readonly tasks: readonly {\n        readonly task_id: string;\n        readonly title: string;\n        readonly phase: \'initial\' | \'final_check\';\n        readonly status: \'pending\' | \'running\' | \'completed\' | \'failed\';\n        readonly section_ids: readonly string[];\n        readonly child_session_id: string | null;\n        readonly latest_issue: string | null;\n    }[];\n}',
+  },
+  {
+    name: 'BidFileId',
+    declaration: 'export type BidFileId = string & {\n    readonly __bidFileId: unique symbol;\n};',
+  },
+  {
+    name: 'BidFileIntakeErrorCode',
+    declaration: 'export type BidFileIntakeErrorCode = \'BID_SESSION_REQUIRED\' | \'BID_FILE_INTAKE_NOT_ALLOWED\' | \'BID_OPERATION_IN_PROGRESS\' | \'BID_FILE_COUNT_LIMIT\' | \'BID_FILE_SIZE_LIMIT\' | \'BID_TOTAL_SIZE_LIMIT\' | \'BID_FILE_TYPE_UNSUPPORTED\' | \'BID_FILE_ROLE_INVALID\' | \'BID_FILE_NAME_INVALID\' | \'BID_FILE_INTAKE_FAILED\';',
+  },
+  {
+    name: 'BidFileIntakeFailure',
+    declaration: 'export interface BidFileIntakeFailure {\n    readonly code: BidFileIntakeErrorCode;\n    readonly message: string;\n    readonly files?: readonly BidFileIntakeFileResult[] | undefined;\n}',
+  },
+  {
+    name: 'BidFileIntakeFileResult',
+    declaration: 'export interface BidFileIntakeFileResult {\n    readonly name: string;\n    readonly role: BidDocumentRole;\n    readonly status: \'completed\' | \'failed\';\n    readonly error?: {\n        readonly code: string;\n        readonly message: string;\n    } | undefined;\n}',
+  },
+  {
+    name: 'BidFileIntakeResult',
+    declaration: 'export type BidFileIntakeResult = {\n    readonly ok: true;\n    readonly value: BidTaskState;\n    readonly files?: readonly BidFileIntakeFileResult[] | undefined;\n} | {\n    readonly ok: false;\n    readonly error: BidFileIntakeFailure;\n};',
+  },
+  {
+    name: 'BidMainAgentScope',
+    declaration: 'export interface BidMainAgentScope {\n    cancel(): void;\n    whenIdle(): Promise<void>;\n    discardOwnedInbox(): void;\n}',
+  },
+  {
+    name: 'BidManifest',
+    declaration: 'export interface BidManifest {\n    version: typeof BID_MANIFEST_VERSION;\n    files: ManifestFile[];\n}',
+  },
+  {
+    name: 'BidOutlineConfirmationResult',
+    declaration: 'export type BidOutlineConfirmationResult = {\n    readonly ok: true;\n    readonly value: BidTaskState;\n} | {\n    readonly ok: false;\n    readonly error: {\n        readonly code: \'BID_SESSION_REQUIRED\' | \'BID_OPERATION_IN_PROGRESS\' | \'BID_CONFIRM_NOT_ALLOWED\' | \'BID_OUTLINE_DRAFT_CONFLICT\' | \'BID_INVALID_USER_OUTLINE\' | \'BID_CONFIRM_FAILED\';\n        readonly message: string;\n        readonly issues?: readonly StageValidationIssue[];\n        readonly current?: import(\'./outline-confirmation-artifacts.ts\').OutlineDraftView;\n    };\n};',
+  },
+  {
+    name: 'BidOutlineRegenerationResult',
+    declaration: 'export type BidOutlineRegenerationResult = {\n    readonly ok: true;\n    readonly value: BidTaskState;\n} | {\n    readonly ok: false;\n    readonly error: {\n        readonly code: \'BID_SESSION_REQUIRED\' | \'BID_OPERATION_IN_PROGRESS\' | \'BID_REGENERATE_NOT_ALLOWED\' | \'BID_OUTLINE_FEEDBACK_REQUIRED\' | \'BID_OUTLINE_DRAFT_CONFLICT\' | \'BID_REGENERATE_FAILED\';\n        readonly message: string;\n        readonly issues?: readonly StageValidationIssue[];\n        readonly current?: import(\'./outline-confirmation-artifacts.ts\').OutlineDraftView;\n    };\n};',
+  },
+  {
+    name: 'BidPageEstimate',
+    declaration: 'export type BidPageEstimate = ({\n    readonly status: \'available\';\n    readonly pages: number;\n} & BidPageEstimateBasis) | ({\n    readonly status: \'empty\';\n} & BidPageEstimateBasis) | {\n    readonly status: \'unavailable\';\n    readonly basis?: BidPageEstimateBasis;\n};',
+  },
+  {
+    name: 'BidPageEstimateBasis',
+    declaration: 'export interface BidPageEstimateBasis {\n    readonly source: \'default\' | \'template\';\n    readonly method: \'fast\' | \'rendered\';\n    readonly template: {\n        readonly id: DocxTemplateId;\n        readonly name: string;\n        readonly revision: number;\n    } | null;\n}',
+  },
+  {
+    name: 'BidPageTargetStatus',
+    declaration: 'export type BidPageTargetStatus = {\n    readonly status: \'not_set\';\n} | {\n    readonly status: \'not_required\';\n} | {\n    readonly status: \'unavailable\';\n    readonly target: BidPageTarget | null;\n    readonly reason: string;\n} | {\n    readonly status: \'met\' | \'below\' | \'above\';\n    readonly target: BidPageTarget;\n    readonly estimated_pages: number;\n    readonly difference: number;\n    readonly format_revision: number;\n    readonly format_source: \'default\' | \'template\';\n    readonly format_template_id: DocxTemplateId | null;\n    readonly estimate_method: \'fast\' | \'rendered\';\n};',
+  },
+  {
+    name: 'BidReviewChapterView',
+    declaration: 'export interface BidReviewChapterView {\n    readonly section_id: string;\n    readonly title: string;\n    readonly number: string;\n    readonly heading_path: readonly string[];\n    readonly writable: boolean;\n    readonly markdown: string | null;\n    readonly flowcharts?: readonly FlowchartSpec[];\n    readonly content_sha256: string | null;\n    readonly requirement_ids: readonly string[];\n    readonly scoring_response_point_ids: readonly string[];\n    readonly evidence_status: \'available\' | \'missing\' | \'not_applicable\';\n    readonly materials?: readonly BidReviewMaterialView[];\n    readonly review: {\n        readonly status: BidChapterReviewStatus;\n        readonly issues: readonly BidReviewIssueView[];\n    };\n}',
+  },
+  {
+    name: 'BidReviewIssueView',
+    declaration: 'export interface BidReviewIssueView {\n    readonly issue_id: string;\n    readonly section_id: string;\n    readonly source: \'review\' | \'writing_execution\' | \'review_execution\';\n    readonly category: string;\n    readonly severity: \'high\' | \'medium\' | \'low\';\n    readonly status: \'open\' | \'resolved\' | \'dismissed\';\n    readonly title: string;\n    readonly detail: string;\n    readonly suggestion?: string;\n}',
+  },
+  {
+    name: 'BidReviewMaterialView',
+    declaration: 'export interface BidReviewMaterialView {\n    readonly source_kind: \'reference\' | \'reference_bid\' | \'web\';\n    readonly source_label: string;\n    readonly file_id: string;\n    readonly usage: string;\n    readonly summary: string;\n}',
+  },
+  {
+    name: 'BidReviewWorkbenchView',
+    declaration: 'export interface BidReviewWorkbenchView {\n    readonly schema_version: number;\n    readonly outline: readonly {\n        readonly section_id: string;\n        readonly parent_id: string | null;\n        readonly order: number;\n        readonly title: string;\n        readonly summary?: string;\n        readonly writable: boolean;\n        readonly writing_status: BidChapterWritingStatus;\n        readonly review_status: BidChapterReviewStatus;\n        readonly chapter_indicator: {\n            readonly status: BidChapterIndicatorStatus;\n            readonly tooltip: string;\n        };\n        readonly content_available: boolean;\n        readonly page_estimate?: (BidPageEstimate & {\n            readonly incomplete?: boolean;\n        }) | undefined;\n        readonly revision?: {\n            readonly batch_id: string;\n            readonly task_id: string;\n            readonly status: BidRevisionTaskStatus;\n            readonly issue_count: number;\n        };\n    }[];\n    readonly summary: {\n        readonly chapter_count: number;\n        readonly content_count: number;\n        readonly reviewed_count: number;\n        readonly needs_attention_count: number;\n        readonly page_estimate: BidPageEstimate;\n        readonly page_target: BidPageTargetStatus;\n    };\n    readonly global_compliance: {\n        readonly status: \'not_required\' | \'reviewing\' | \'pass\' | \'needs_attention\';\n        readonly reviewed_count: number;\n        readonly total_count: number;\n        readonly document_issues /* …truncated — full shape in source */',
+  },
+  {
+    name: 'BidRevisionComparisonErrorCode',
+    declaration: 'export type BidRevisionComparisonErrorCode = \'BID_REVISION_COMPARISON_NOT_AVAILABLE\' | \'BID_REVISION_COMPARISON_NOT_FOUND\' | \'BID_REVISION_COMPARISON_CORRUPT\';',
+  },
+  {
+    name: 'BidRevisionComparisonResult',
+    declaration: 'export type BidRevisionComparisonResult = {\n    readonly ok: true;\n    readonly value: BidRevisionComparisonView;\n} | {\n    readonly ok: false;\n    readonly error: {\n        readonly code: BidRevisionComparisonErrorCode;\n        readonly message: string;\n    };\n};',
+  },
+  {
+    name: 'BidRevisionComparisonView',
+    declaration: 'export interface BidRevisionComparisonView {\n    readonly issue_id: string;\n    readonly batch_id: string;\n    readonly task_id: string;\n    readonly section_id: string;\n    readonly section_title: string;\n    readonly before_markdown: string;\n    readonly after_markdown: string;\n    readonly before_sha256: string;\n    readonly after_sha256: string;\n}',
+  },
+  {
+    name: 'BidRevisionIssueReference',
+    declaration: 'export type BidRevisionIssueReference = {\n    readonly scope: \'chapter\';\n    readonly base_content_sha256: string;\n} | {\n    readonly scope: \'paragraphs\';\n    readonly base_content_sha256: string;\n    readonly start: number;\n    readonly end: number;\n    readonly text: string;\n};',
+  },
+  {
+    name: 'BidRevisionIssueStatus',
+    declaration: 'export type BidRevisionIssueStatus = \'pending\' | \'scheduled\' | \'running\' | \'completed\' | \'needs_input\' | \'conflict\' | \'failed\';',
+  },
+  {
+    name: 'BidRevisionIssueView',
+    declaration: 'export interface BidRevisionIssueView {\n    readonly issue_id: string;\n    readonly section_id: string;\n    readonly section_title: string;\n    readonly scope: \'paragraphs\' | \'chapter\';\n    readonly reference: BidRevisionIssueReference;\n    readonly instruction: string;\n    readonly suggestion: string | null;\n    readonly status: BidRevisionIssueStatus;\n    readonly batch_id: string | null;\n    readonly created_at: number;\n    readonly updated_at: number;\n}',
+  },
+  {
+    name: 'BidRevisionQueueErrorCode',
+    declaration: 'export type BidRevisionQueueErrorCode = \'BID_SESSION_REQUIRED\' | \'BID_OPERATION_IN_PROGRESS\' | \'BID_REVISION_QUEUE_NOT_ALLOWED\' | \'BID_REVISION_QUEUE_CONFLICT\' | \'BID_REVISION_ISSUE_INVALID\' | \'BID_REVISION_ISSUE_NOT_FOUND\' | \'BID_REVISION_ISSUE_NOT_EDITABLE\' | \'BID_REVISION_ISSUE_NOT_DELETABLE\' | \'BID_REVISION_ISSUE_SCOPE_MISMATCH\' | \'BID_REVISION_ISSUE_INSTRUCTION_EMPTY\' | \'BID_CHAPTER_REVISION_CONFLICT\' | \'BID_CHAPTER_REVISION_SELECTION_INVALID\' | \'BID_CHAPTER_REVISION_NOT_WRITABLE\' | \'BID_REVIEW_SECTION_UNKNOWN\';',
+  },
+  {
+    name: 'BidRevisionQueueResult',
+    declaration: 'export type BidRevisionQueueResult = {\n    readonly ok: true;\n    readonly value: BidRevisionQueueView;\n} | {\n    readonly ok: false;\n    readonly error: {\n        readonly code: BidRevisionQueueErrorCode;\n        readonly message: string;\n    };\n};',
+  },
+  {
+    name: 'BidRevisionQueueView',
+    declaration: 'export interface BidRevisionQueueView {\n    readonly schema_version: number;\n    readonly revision: number;\n    readonly issues: readonly BidRevisionIssueView[];\n}',
+  },
+  {
+    name: 'BidRevisionTaskStatus',
+    declaration: 'export type BidRevisionTaskStatus = \'queued\' | \'running\' | \'reviewing\' | \'repairing\' | \'completed\' | \'conflict\' | \'failed\' | \'needs_input\' | \'blocked\';',
+  },
+  {
+    name: 'BidRunActivityScope',
+    declaration: 'export interface BidRunActivityScope {\n    track<T>(activity: () => Promise<T>): Promise<T>;\n    retire(): void;\n    whenDrained(): Promise<void>;\n}',
+  },
+  {
+    name: 'BidRunContext',
+    declaration: 'export interface BidRunContext {\n    readonly runId: string;\n    readonly epoch: number;\n    readonly baseProjectRevision: number;\n    readonly controlRevision: number;\n    readonly work: BidWorkDescriptor;\n    readonly resumeOf?: BidRunResumeIdentity | undefined;\n    readonly signal: AbortSignal;\n    readonly scheduler: BidRunScheduler;\n    readonly commits: BidCommitScope;\n    readonly children: BidChildScope;\n    readonly activities: BidRunActivityScope;\n    reportProgress(progress: BidRunProgressInput): void;\n    bindMainAgent(scope: BidMainAgentScope): () => void;\n}',
+  },
+  {
+    name: 'BidRunData',
+    declaration: 'export interface BidRunData {\n    readonly runId: string;\n    readonly interactionSessionId?: string | undefined;\n    readonly executionSessionId?: string | undefined;\n    readonly epoch: number;\n    readonly baseProjectRevision: number;\n    readonly controlRevision?: number | undefined;\n    readonly work: BidWorkDescriptor;\n    readonly resumeOf?: BidRunResumeIdentity | undefined;\n    readonly progress?: BidRunProgress | undefined;\n    readonly startedAt: number;\n    readonly updatedAt: number;\n}',
+  },
+  {
+    name: 'BidRunProgress',
+    declaration: 'export interface BidRunProgress {\n    readonly phase: string;\n    readonly summary: string;\n    readonly completed?: number | undefined;\n    readonly total?: number | undefined;\n    readonly details?: readonly string[] | undefined;\n    readonly updatedAt: number;\n}',
+  },
+  {
+    name: 'BidRunProgressInput',
+    declaration: 'export type BidRunProgressInput = Omit<BidRunProgress, \'updatedAt\'>;',
+  },
+  {
+    name: 'BidRunResumeIdentity',
+    declaration: 'export interface BidRunResumeIdentity {\n    readonly runId: string;\n    readonly cause: BidRunSuspensionCause;\n}',
+  },
+  {
+    name: 'BidRunScheduler',
+    declaration: 'export interface BidRunScheduler {\n    paused(): boolean;\n    close(): void;\n    waitUntilRunnable(signal: AbortSignal): Promise<void>;\n}',
+  },
+  {
+    name: 'BidRunSuspensionCause',
+    declaration: 'export type BidRunSuspensionCause = \'user_stop\' | \'retry_exhausted\' | \'executor_error\' | \'host_restart\' | \'awaiting_input\';',
+  },
+  {
+    name: 'BidStage',
+    declaration: 'export type BidStage = typeof BID_STAGES[number];',
+  },
+  {
+    name: 'BidTaskFailure',
+    declaration: 'export interface BidTaskFailure {\n    readonly code?: string | undefined;\n    readonly message: string;\n    readonly issues?: readonly StageValidationIssue[] | undefined;\n    readonly recovery?: {\n        readonly kind: \'retry\' | \'repair\' | \'blocked\';\n        readonly unit: string;\n        readonly reason: string;\n        readonly candidateSha256?: string | undefined;\n    } | undefined;\n}',
+  },
+  {
+    name: 'BidTaskState',
+    declaration: 'export type BidTaskState = {\n    readonly stage: BidStage;\n    readonly status: \'ready\';\n    readonly run: null;\n} | {\n    readonly stage: BidStage;\n    readonly status: \'running\';\n    readonly run: BidRunData;\n} | {\n    readonly stage: BidStage;\n    readonly status: \'waiting_user\';\n    readonly run: null;\n    readonly reason?: string | undefined;\n    readonly issues?: readonly StageValidationIssue[] | undefined;\n} | {\n    readonly stage: BidStage;\n    readonly status: \'suspended\';\n    readonly run: BidRunData & {\n        readonly cause: BidRunSuspensionCause;\n        readonly error?: BidTaskFailure | undefined;\n    };\n} | {\n    readonly stage: BidStage;\n    readonly status: \'failed\';\n    readonly run: null;\n    readonly failure: BidTaskFailure;\n} | {\n    readonly stage: BidStage;\n    readonly status: \'completed\';\n    readonly run: null;\n};',
+  },
+  {
+    name: 'BidTenderAnalysisConfirmationResult',
+    declaration: 'export type BidTenderAnalysisConfirmationResult = {\n    readonly ok: true;\n    readonly value: BidTaskState;\n} | {\n    readonly ok: false;\n    readonly error: {\n        readonly code: \'BID_SESSION_REQUIRED\' | \'BID_OPERATION_IN_PROGRESS\' | \'BID_CONFIRM_NOT_ALLOWED\' | \'BID_INVALID_TENDER_ANALYSIS_EDIT\' | \'BID_CONFIRM_FAILED\';\n        readonly message: string;\n        readonly issues?: readonly StageValidationIssue[];\n    };\n};',
+  },
+  {
+    name: 'BidUpdateRevisionIssueRequest',
+    declaration: 'export interface BidUpdateRevisionIssueRequest {\n    readonly issue_id: string;\n    readonly expected_queue_revision: number;\n    readonly instruction?: string;\n    readonly suggestion?: string | null;\n    readonly reference?: BidRevisionIssueReference;\n    readonly scope?: \'paragraphs\' | \'chapter\';\n}',
+  },
+  {
+    name: 'BidUploadFile',
+    declaration: 'export interface BidUploadFile {\n    readonly name: string;\n    readonly role: BidDocumentRole;\n    readonly mediaType?: string;\n    readonly size: number;\n    readonly data: string;\n}',
+  },
+  {
+    name: 'BidWorkDescriptor',
+    declaration: 'export interface BidWorkDescriptor {\n    readonly kind: BidWorkKind;\n    readonly workId: string;\n    readonly stage: BidStage;\n    readonly requestRef: string;\n    readonly requestSha256: string;\n    readonly inputFingerprint: string;\n}',
+  },
+  {
+    name: 'BidWorkKind',
+    declaration: 'export type BidWorkKind = typeof BID_WORK_KINDS[number];',
+  },
+  {
+    name: 'BidWorkspace',
+    declaration: 'export class BidWorkspace {\n    readonly root: string;\n    readonly projectRoot: string;\n    readonly inputRoot: string;\n    readonly corpusRoot: string;\n    readonly outputRoot: string;\n    readonly manifestPath: string;\n    readonly projectStatePath: string;\n    readonly config: BidConfig;\n    constructor(workspaceRoot: string, options?: BidConfig);\n    async import(files: readonly IncomingFile[], run?: BidRunContext): Promise<ImportedFile[]>;\n    async readManifest(): Promise<BidManifest>;\n    async messageInventory(request: string): Promise<string>;\n    async exportDocx(source: string, destination: string = `${this.config.outputDirectory}/技术标.docx`, templateId?: DocxTemplateId | null, commits?: BidCommitScope, nativeExport?: NativeVisioExport): Promise<string>;\n    async exportDocxMarkdown(markdown: string, destination: string = `${this.config.outputDirectory}/技术标.docx`, templateId?: DocxTemplateId | null, commits?: BidCommitScope, sourceSnapshot?: string, nativeExport?: NativeVisioExport, technicalDeviation?: TechnicalDeviationComposition, visualReviewer?: VisualReviewModel, visualReviewSignal: AbortSignal = new AbortController().signal): Promise<string>;\n}',
+  },
+  {
     name: 'Branded',
     declaration: 'export type Branded<B extends string> = string & {\n    readonly [BRAND]: B;\n};',
   },
   {
     name: 'CancelOptions',
     declaration: 'export interface CancelOptions {\n    keepInbox?: boolean | undefined;\n}',
+  },
+  {
+    name: 'CapabilityTaskDispatcher',
+    declaration: 'export interface CapabilityTaskDispatcher {\n    allowedWrites(call: BidCapabilityCall, sectionIds: ReadonlySet<string> | null, working: BidWorkspace, stepId: string): Promise<ReadonlySet<string>>;\n    allowedWritesAfter?(call: BidCapabilityCall, working: BidWorkspace): Promise<ReadonlySet<string>>;\n    execute(call: BidCapabilityCall, context: BidCapabilityExecutionContext): Promise<{\n        readonly result: BidCapabilityResult;\n        readonly removedPaths?: readonly string[];\n    }>;\n    validate(call: BidCapabilityCall, context: BidCapabilityExecutionContext, result: BidCapabilityResult): Promise<void>;\n}',
+  },
+  {
+    name: 'CapabilityTaskRequest',
+    declaration: 'export type CapabilityTaskRequest = z.infer<typeof capabilityTaskRequestSchema>;',
   },
   {
     name: 'ClientResponse',
@@ -3254,6 +3879,58 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export interface DirectoryRegistrationHandle {\n    (): void;\n    replace(entries: readonly LlmConfigurableProvider[]): void;\n}',
   },
   {
+    name: 'DocumentChunkConfig',
+    declaration: 'export interface DocumentChunkConfig {\n    minChars: number;\n    targetChars: number;\n    maxChars: number;\n}',
+  },
+  {
+    name: 'DocxFormatCoreView',
+    declaration: 'export interface DocxFormatCoreView {\n    state: DocxFormatState;\n    templateMaxBytes: number;\n    fields: FormatField[];\n    values: FormatValues;\n    warnings: string[];\n    fingerprint?: string;\n    previewHtml?: string;\n}',
+  },
+  {
+    name: 'DocxFormatExtraction',
+    declaration: 'export interface DocxFormatExtraction {\n    values: FormatValues;\n    candidates: FormatCandidate[];\n    paragraphs: string[];\n    evidence: FormatEvidence[];\n    warnings: string[];\n}',
+  },
+  {
+    name: 'DocxFormatInterpretation',
+    declaration: 'export interface DocxFormatInterpretation {\n    values: FormatValues;\n    mapping: Partial<Record<FormatRole, string>>;\n    evidence: FormatEvidence[];\n}',
+  },
+  {
+    name: 'DocxFormatRequest',
+    declaration: 'export interface DocxFormatRequest {\n    revision: number;\n    userConfirmed: FormatValues;\n}',
+  },
+  {
+    name: 'DocxFormatState',
+    declaration: 'export interface DocxFormatState {\n    version: 2;\n    revision: number;\n    opened: boolean;\n    template?: {\n        parserVersion: number;\n        hash: DocxTemplateId;\n        name: string;\n    } | undefined;\n    extracted: DocxFormatExtraction;\n    modelInterpreted: DocxFormatInterpretation;\n    conflicts: FormatConflict[];\n    resolved: FormatValues;\n    userConfirmed: FormatValues;\n    lastExport?: DocxLastExport | undefined;\n}',
+  },
+  {
+    name: 'DocxFormatSuggestion',
+    declaration: 'export interface DocxFormatSuggestion {\n    values: FormatValues;\n    mapping: Partial<Record<FormatRole, string>>;\n    evidence: FormatEvidence[];\n}',
+  },
+  {
+    name: 'DocxFormatView',
+    declaration: 'export interface DocxFormatView extends DocxFormatCoreView {\n    templateId: DocxTemplateId | null;\n    library: DocxTemplateLibraryView;\n}',
+  },
+  {
+    name: 'DocxLastExport',
+    declaration: 'export interface DocxLastExport {\n    path: string;\n    fingerprint: string;\n    mode?: \'editable\' | \'image_fallback\' | undefined;\n    reasons?: readonly string[] | undefined;\n    summary?: string | undefined;\n    tocUpdateDeferred?: boolean | undefined;\n}',
+  },
+  {
+    name: 'DocxTemplateId',
+    declaration: 'export type DocxTemplateId = Branded<\'DocxTemplateId\'>;',
+  },
+  {
+    name: 'DocxTemplateLibraryView',
+    declaration: 'export interface DocxTemplateLibraryView {\n    version: 1;\n    revision: number;\n    estimateTemplateId: DocxTemplateId | null;\n    templateMaxBytes: number;\n    templates: DocxTemplateSummary[];\n}',
+  },
+  {
+    name: 'DocxTemplateRecord',
+    declaration: 'export interface DocxTemplateRecord {\n    id: DocxTemplateId;\n    hash: DocxTemplateId;\n    name: string;\n    parserVersion: number;\n    createdAt: string;\n}',
+  },
+  {
+    name: 'DocxTemplateSummary',
+    declaration: 'export interface DocxTemplateSummary extends DocxTemplateRecord {\n    formatRevision: number;\n    conflictCount: number;\n}',
+  },
+  {
     name: 'Domain',
     declaration: 'export interface Domain<S extends DomainSpec> {\n    readonly name: string;\n    readonly global: DomainGlobalHandleOf<S>;\n    table<N extends keyof S[\'tables\'] & string>(name: N): KvTable<TableKeyOf<S, N>, TableValueOf<S, N>>;\n    close(): Promise<void>;\n}',
   },
@@ -3338,6 +4015,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export interface EpochHeader {\n    config: LlmCallConfig;\n    adapterDefaults?: LlmCallConfigAdapterDefaults;\n    system?: string;\n    tools?: ToolSchema[];\n}',
   },
   {
+    name: 'EvidenceMapArtifact',
+    declaration: 'export type EvidenceMapArtifact = z.infer<typeof evidenceMapSchema>;',
+  },
+  {
     name: 'FileDiff',
     declaration: 'export interface FileDiff {\n    path: string;\n    oldText: string | null;\n    newText: string;\n}',
   },
@@ -3356,6 +4037,62 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'FinishReasonMap',
     declaration: 'export interface FinishReasonMap {\n    \'stop\': {\n        kind: \'stop\';\n    };\n    \'tool-calls\': {\n        kind: \'tool-calls\';\n    };\n    \'max-tokens\': {\n        kind: \'max-tokens\';\n    };\n    \'aborted\': {\n        kind: \'aborted\';\n        failure: LlmFailure;\n    };\n    \'error\': {\n        kind: \'error\';\n        failure: LlmFailure;\n    };\n}',
+  },
+  {
+    name: 'FlowchartBlock',
+    declaration: 'export interface FlowchartBlock {\n    readonly type: \'flowchart\';\n    readonly schema_version: number;\n    readonly id: string;\n    readonly key?: string | undefined;\n    readonly title: string;\n    readonly purpose?: string | undefined;\n    readonly direction: FlowchartDirection;\n    readonly nodes: readonly FlowchartNode[];\n    readonly edges: readonly FlowchartEdge[];\n}',
+  },
+  {
+    name: 'FlowchartDirection',
+    declaration: 'export type FlowchartDirection = \'TB\' | \'LR\';',
+  },
+  {
+    name: 'FlowchartEdge',
+    declaration: 'export interface FlowchartEdge {\n    readonly from: string;\n    readonly to: string;\n    readonly label?: string | undefined;\n}',
+  },
+  {
+    name: 'FlowchartNode',
+    declaration: 'export interface FlowchartNode {\n    readonly id: string;\n    readonly type: FlowchartNodeType;\n    readonly text: string;\n}',
+  },
+  {
+    name: 'FlowchartNodeType',
+    declaration: 'export type FlowchartNodeType = \'start\' | \'end\' | \'process\' | \'decision\' | \'document\' | \'subprocess\';',
+  },
+  {
+    name: 'FlowchartSpec',
+    declaration: 'export type FlowchartSpec = FlowchartBlock;',
+  },
+  {
+    name: 'FormatCandidate',
+    declaration: 'export interface FormatCandidate {\n    id: string;\n    name: string;\n    values: FormatValues;\n    roles: FormatRole[];\n    samples: string[];\n    evidence: FormatEvidence[];\n}',
+  },
+  {
+    name: 'FormatConflict',
+    declaration: 'export interface FormatConflict {\n    key: string;\n    resolvedValue: FormatValue;\n    status: \'conflict\' | \'confirmed\';\n    evidence: FormatEvidence[];\n}',
+  },
+  {
+    name: 'FormatEvidence',
+    declaration: 'export interface FormatEvidence {\n    key: string;\n    source: FormatEvidenceSource;\n    value: FormatValue;\n    text?: string | undefined;\n    candidateId?: string | undefined;\n}',
+  },
+  {
+    name: 'FormatEvidenceSource',
+    declaration: 'export type FormatEvidenceSource = \'system_default\' | \'doc_defaults\' | \'theme\' | \'named_style\' | \'direct_format\' | \'template_instruction\' | \'user_requirement\' | \'user_confirmed\';',
+  },
+  {
+    name: 'FormatField',
+    declaration: 'export interface FormatField {\n    key: string;\n    group: string;\n    label: string;\n    value: FormatValue;\n    options?: string[];\n    min?: number;\n    max?: number;\n}',
+  },
+  {
+    name: 'FormatRole',
+    declaration: 'export type FormatRole = \'title\' | `heading${1 | 2 | 3 | 4 | 5 | 6}` | \'body\' | \'tableHeader\' | \'tableCell\' | \'figureCaption\' | \'tableCaption\' | \'header\' | \'footer\';',
+  },
+  {
+    name: 'FormatValue',
+    declaration: 'export type FormatValue = string | number | boolean;',
+  },
+  {
+    name: 'FormatValues',
+    declaration: 'export type FormatValues = Record<string, FormatValue>;',
   },
   {
     name: 'FsDirEntry',
@@ -3406,6 +4143,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export interface GenerateOptions {\n    provider: string;\n    model: string;\n    reasoningEffort?: ReasoningEffortId;\n    messages: Message[];\n    system?: string;\n    tools?: ToolSchema[];\n    temperature?: number;\n    maxTokens?: number;\n    stop?: string[];\n    signal?: AbortSignal;\n    sessionId?: Branded<\'SessionId\'>;\n    purpose?: \'compaction\' | \'session-title\';\n}',
   },
   {
+    name: 'GenerateResult',
+    declaration: 'export interface GenerateResult {\n    message: Message;\n    finish: FinishReason;\n    usage?: TokenUsage;\n}',
+  },
+  {
     name: 'GenericCallView',
     declaration: 'export interface GenericCallView {\n    card: \'generic\';\n    title: string;\n    kind?: ToolCallKind;\n    rawInput?: unknown;\n    content?: ContentBlock[];\n    locations?: FileLocation[];\n}',
   },
@@ -3446,6 +4187,18 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export interface GrantRecord {\n    readonly kind: \'grant\';\n    readonly payload: unknown;\n}',
   },
   {
+    name: 'HostedSearchOptions',
+    declaration: 'export interface HostedSearchOptions {\n    readonly model: string;\n    readonly maxUses: number;\n    readonly signal?: AbortSignal;\n    readonly recordRequest: (request: HostedSearchRequest) => void;\n}',
+  },
+  {
+    name: 'HostedSearchRequest',
+    declaration: 'export interface HostedSearchRequest {\n    readonly provider: string;\n    readonly endpoint: string;\n    readonly apiVersion?: string;\n    readonly body: Readonly<Record<string, unknown>>;\n}',
+  },
+  {
+    name: 'HostedWebSearch',
+    declaration: 'export type HostedWebSearch = (request: WebSearchRequest, options: HostedSearchOptions) => Promise<WebSearchResult>;',
+  },
+  {
     name: 'ImageAttachmentLimits',
     declaration: 'export interface ImageAttachmentLimits {\n    maxImageBytes: number;\n    maxImagesPerMessage: number;\n    maxMessageImageBytes: number;\n    maxImagePixels: number;\n    maxImageDimension: number;\n    mediaTypes: readonly ImageMediaType[];\n}',
   },
@@ -3470,6 +4223,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export type ImageVariantId = Branded<\'ImageVariantId\'>;',
   },
   {
+    name: 'ImportedFile',
+    declaration: 'export interface ImportedFile extends ManifestFile {\n    absoluteInputPath: string;\n    absoluteDocumentPath: string | null;\n    absoluteStructurePath: string | null;\n    absoluteMetadataPath: string | null;\n    absoluteChunksPath: string | null;\n    absoluteChunkIndexPath: string | null;\n}',
+  },
+  {
     name: 'Inbox',
     declaration: 'export class Inbox {\n    constructor(private readonly session: Session, private readonly notifications: InboxNotifications);\n    get nextTurn(): readonly UserMessage[];\n    get nextStep(): readonly UserMessage[];\n    get hasPending(): boolean;\n    clear(): void;\n    claim(target: InboxTarget, turn: number): UserMessage[];\n    append(target: InboxTarget, message: UserMessage): void;\n    prepend(target: InboxTarget, message: UserMessage): void;\n    replace(messageId: MessageId, newMessage: UserMessage): boolean;\n    remove(messageId: MessageId): boolean;\n    splice(target: InboxTarget, start: number, deleteCount: number, inserted: UserMessage[]): UserMessage[];\n}',
   },
@@ -3480,6 +4237,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'InboxTarget',
     declaration: 'export type InboxTarget = \'next-turn\' | \'next-step\';',
+  },
+  {
+    name: 'IncomingFile',
+    declaration: 'export interface IncomingFile {\n    name: string;\n    role?: import(\'./control-plane-contract.ts\').BidDocumentRole;\n    type?: string;\n    bytes: Uint8Array;\n}',
   },
   {
     name: 'IndexInjection',
@@ -3606,6 +4367,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export interface LlmCallConfigAdapterDefaults {\n    reasoningEffort?: true;\n    maxTokens?: true;\n}',
   },
   {
+    name: 'LlmCapability',
+    declaration: 'export type LlmCapability = \'chat\' | \'tools\' | \'web_search\';',
+  },
+  {
     name: 'LlmConfigurableProvider',
     declaration: 'export interface LlmConfigurableProvider {\n    provider: string;\n    displayName: string;\n    settingsNs: string;\n    settingsPath: readonly string[];\n    declared?: boolean;\n}',
   },
@@ -3647,7 +4412,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'LlmRuntime',
-    declaration: 'export class LlmRuntime extends Service {\n    constructor(ctx: Context);\n    registerAdapter(providers: string[], adapter: LlmAdapter): AdapterRegistrationHandle;\n    listProviders(): LlmProviderInfo[];\n    registerConfigurableProviders(entries: readonly LlmConfigurableProvider[]): DirectoryRegistrationHandle;\n    listConfigurableProviders(): LlmConfigurableProvider[];\n    registerModelDiscovery(settingsNs: string, discover: (request: LlmModelDiscoveryRequest) => Promise<readonly LlmDiscoveredModel[]>): () => void;\n    async discoverModels(settingsNs: string, request: LlmModelDiscoveryRequest): Promise<LlmDiscoveredModel[]>;\n    providerRetryPolicy(provider: string): ResolvedRetryPolicy;\n    async listModels(provider: string): Promise<LlmModelInfo[]>;\n    async resolveModelInfo(provider: string, model: string, signal?: AbortSignal): Promise<LlmResolvedModelInfo>;\n    async resolveCallConfig(config: LlmCallConfig, signal?: AbortSignal): Promise<LlmCallConfig>;\n    async prepareCall(config: LlmCallConfig, signal?: AbortSignal): Promise<PreparedLlmCall>;\n    stream(options: GenerateOptions): AsyncIterable<StreamChunk>;\n}',
+    declaration: 'export class LlmRuntime extends Service {\n    constructor(ctx: Context);\n    registerAdapter(providers: string[], adapter: LlmAdapter): AdapterRegistrationHandle;\n    listProviders(): LlmProviderInfo[];\n    registerWebSearch(provider: string, search: HostedWebSearch): () => void;\n    supports(provider: string, capability: LlmCapability): boolean;\n    webSearch(provider: string, request: WebSearchRequest, options: HostedSearchOptions): Promise<WebSearchResult>;\n    registerConfigurableProviders(entries: readonly LlmConfigurableProvider[]): DirectoryRegistrationHandle;\n    listConfigurableProviders(): LlmConfigurableProvider[];\n    registerModelDiscovery(settingsNs: string, discover: (request: LlmModelDiscoveryRequest) => Promise<readonly LlmDiscoveredModel[]>): () => void;\n    async discoverModels(settingsNs: string, request: LlmModelDiscoveryRequest): Promise<LlmDiscoveredModel[]>;\n    providerRetryPolicy(provider: string): ResolvedRetryPolicy;\n    async listModels(provider: string): Promise<LlmModelInfo[]>;\n    async resolveModelInfo(provider: string, model: string, signal?: AbortSignal): Promise<LlmResolvedModelInfo>;\n    async resolveCallConfig(config: LlmCallConfig, signal?: AbortSignal): Promise<LlmCallConfig>;\n    async prepareCall(config: LlmCallConfig, signal?: AbortSignal): Promise<PreparedLlmCall>;\n    stream(options: GenerateOptions): AsyncIterable<StreamChunk>;\n    async generate(options: GenerateOptions): Promise<import(\'./types.ts\').GenerateResult>;\n}',
   },
   {
     name: 'LspHover',
@@ -3688,6 +4453,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'LspRange',
     declaration: 'export interface LspRange {\n    readonly start: LspPosition;\n    readonly end: LspPosition;\n}',
+  },
+  {
+    name: 'ManifestFile',
+    declaration: 'export interface ManifestFile {\n    id: BidFileId;\n    role: import(\'./control-plane-contract.ts\').BidDocumentRole;\n    originalName: string;\n    inputPath: string;\n    corpusPath: string | null;\n    documentPath: string | null;\n    structurePath: string | null;\n    metadataPath: string | null;\n    chunksPath: string | null;\n    chunkIndexPath: string | null;\n    mediaType: string;\n    size: number;\n    sha256: string;\n    parseStatus: ParseStatus;\n    parseError: string | null;\n}',
   },
   {
     name: 'ManualCompactAgentContext',
@@ -3798,12 +4567,52 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export interface ModelModalityMap {\n    text: \'text\';\n    image: \'image\';\n}',
   },
   {
+    name: 'NativeVisioExport',
+    declaration: 'export interface NativeVisioExport {\n    readonly visio: VisioBackend;\n    readonly word: WordVisioEmbedder;\n    readonly finalizer?: WordDocumentFinalizer;\n}',
+  },
+  {
     name: 'ObjectJsonSchema',
     declaration: 'export type ObjectJsonSchema = JsonSchemaNode & {\n    type: \'object\';\n};',
   },
   {
     name: 'OneShotSubagentDescriptorData',
     declaration: 'export interface OneShotSubagentDescriptorData extends SubagentDescriptorBase {\n    readonly mode: \'one-shot\';\n    readonly label?: string;\n}',
+  },
+  {
+    name: 'OutlineArtifact',
+    declaration: 'export type OutlineArtifact = z.infer<typeof outlineArtifactSchema>;',
+  },
+  {
+    name: 'OutlineBusinessBinding',
+    declaration: 'export type OutlineBusinessBinding = z.infer<typeof outlineBusinessBindingSchema>;',
+  },
+  {
+    name: 'OutlineDraftIdentityRequest',
+    declaration: 'export interface OutlineDraftIdentityRequest {\n    readonly expected_revision: number;\n    readonly expected_draft_sha256: string;\n}',
+  },
+  {
+    name: 'OutlineDraftMutationRequest',
+    declaration: 'export interface OutlineDraftMutationRequest {\n    readonly expected_revision: number;\n    readonly expected_draft_sha256: string;\n    readonly operations: readonly OutlineEditOperation[];\n    readonly business_bindings?: readonly OutlineBusinessBinding[];\n}',
+  },
+  {
+    name: 'OutlineDraftMutationResult',
+    declaration: 'export type OutlineDraftMutationResult = {\n    readonly ok: true;\n    readonly value: OutlineDraftView;\n} | {\n    readonly ok: false;\n    readonly error: {\n        readonly code: \'BID_OUTLINE_DRAFT_CONFLICT\' | \'BID_INVALID_USER_OUTLINE\' | \'BID_OUTLINE_DRAFT_PERSIST_FAILED\';\n        readonly message: string;\n        readonly issues?: readonly StageValidationIssue[];\n        readonly current: OutlineDraftView;\n    };\n};',
+  },
+  {
+    name: 'OutlineDraftView',
+    declaration: 'export type OutlineDraftView = z.infer<typeof outlineDraftSchema>;',
+  },
+  {
+    name: 'OutlineEditOperation',
+    declaration: 'export type OutlineEditOperation = {\n    readonly type: \'update_section\';\n    readonly section_id: string;\n    readonly title?: string;\n    readonly purpose?: string;\n    readonly summary?: string;\n    readonly must_answer?: readonly string[];\n} | {\n    readonly type: \'add_section\';\n    readonly parent_id: string | null;\n    readonly order: number;\n    readonly writable: boolean;\n    readonly title: string;\n    readonly purpose: string;\n    readonly summary?: string;\n    readonly must_answer?: readonly string[];\n} | {\n    readonly type: \'delete_section\';\n    readonly section_id: string;\n} | {\n    readonly type: \'split_section\';\n    readonly section_id: string;\n    readonly children: readonly {\n        readonly title: string;\n        readonly purpose: string;\n        readonly must_answer: readonly string[];\n    }[];\n} | {\n    readonly type: \'merge_sections\';\n    readonly section_ids: readonly string[];\n    readonly title: string;\n    readonly purpose: string;\n} | {\n    readonly type: \'move_section\';\n    readonly section_id: string;\n    readonly parent_id: string | null;\n    readonly order: number;\n};',
+  },
+  {
+    name: 'OutlineReviewContext',
+    declaration: 'export interface OutlineReviewContext {\n    readonly baseline: OutlineArtifact | null;\n    readonly requirements: TenderRequirementsArtifact;\n    readonly scoring: TenderScoringArtifact;\n    readonly evidence: EvidenceMapArtifact | null;\n}',
+  },
+  {
+    name: 'ParseStatus',
+    declaration: 'export type ParseStatus = \'pending\' | \'success\' | \'needs_ocr\' | \'failed\';',
   },
   {
     name: 'PermissionSelect',
@@ -3874,6 +4683,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export interface PromptAssembly {\n    sections: AssembledSection[];\n    contexts: AssembledContext[];\n    tools: ToolSchema[];\n    variables: Record<string, string | undefined>;\n}',
   },
   {
+    name: 'PromptContentPart',
+    declaration: 'export type PromptContentPart = {\n    type: \'text\';\n    text: string;\n} | {\n    type: \'image\';\n    mediaType: ImageMediaType;\n    data: string;\n    name?: string;\n};',
+  },
+  {
     name: 'PromptContext',
     declaration: 'export interface PromptContext {\n    readonly name: string;\n    readonly order: number;\n    readonly text: string | ((context: AssembleContext) => string);\n}',
   },
@@ -3912,6 +4725,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'RedactedSecret',
     declaration: 'export interface RedactedSecret {\n    path: string[];\n    set: boolean;\n}',
+  },
+  {
+    name: 'RenderedPdfPage',
+    declaration: 'export interface RenderedPdfPage {\n    readonly page: number;\n    readonly pageCount: number;\n    readonly data: Uint8Array;\n}',
   },
   {
     name: 'ReplayEnvelope',
@@ -4198,6 +5015,14 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export interface SessionProjectionStateMap {\n}',
   },
   {
+    name: 'SessionPromptAdmissionRejection',
+    declaration: 'export interface SessionPromptAdmissionRejection {\n    reason: string;\n    message: string;\n}',
+  },
+  {
+    name: 'SessionPromptAdmissionRequest',
+    declaration: 'export interface SessionPromptAdmissionRequest {\n    session: Session;\n    mode: \'queue\' | \'steer\';\n    content: readonly PromptContentPart[];\n}',
+  },
+  {
     name: 'SessionRawArtifact',
     declaration: 'export interface SessionRawArtifact {\n    readonly meta: SessionHeader;\n    readonly filename: string;\n    readonly content: string;\n}',
   },
@@ -4446,6 +5271,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export interface SpillSource {\n    toolName: string;\n    callId: CallId;\n    label: string;\n}',
   },
   {
+    name: 'StageValidationIssue',
+    declaration: 'export interface StageValidationIssue {\n    code: string;\n    message: string;\n    artifact?: string | undefined;\n    path?: string | undefined;\n}',
+  },
+  {
     name: 'StorageBackend',
     declaration: 'export interface StorageBackend {\n    readonly kv?: KvFacet;\n    close(): Promise<void>;\n}',
   },
@@ -4644,6 +5473,42 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'TeamWaitResult',
     declaration: 'export interface TeamWaitResult {\n    readonly timedOut: boolean;\n}',
+  },
+  {
+    name: 'TechnicalDeviationComposition',
+    declaration: 'export type TechnicalDeviationComposition = {\n    mode: \'fill\';\n    table: TechnicalDeviationTable;\n} | {\n    mode: \'clear\';\n};',
+  },
+  {
+    name: 'TechnicalDeviationRow',
+    declaration: 'export interface TechnicalDeviationRow {\n    readonly index: string;\n    readonly subject: string;\n    readonly requirement: string;\n    readonly response: string;\n    readonly deviation: string;\n    readonly remark: string;\n}',
+  },
+  {
+    name: 'TechnicalDeviationTable',
+    declaration: 'export interface TechnicalDeviationTable {\n    readonly rows: TechnicalDeviationRow[];\n}',
+  },
+  {
+    name: 'TenderAnalysisConfirmationView',
+    declaration: 'export interface TenderAnalysisConfirmationView {\n    readonly project: TenderProjectArtifact;\n    readonly requirements: TenderRequirementsArtifact;\n    readonly scoring: TenderScoringArtifact;\n    readonly selected_scoring_ids: readonly string[];\n    readonly compliance: TenderComplianceArtifact;\n}',
+  },
+  {
+    name: 'TenderAnalysisEditOperation',
+    declaration: 'export type TenderAnalysisEditOperation = {\n    readonly type: \'update_project\';\n    readonly fields: Partial<Pick<TenderProjectArtifact, \'project_name\' | \'tender_name\' | \'purchaser\' | \'owner\' | \'project_background\' | \'project_objectives\' | \'project_scope\' | \'technical_scope\' | \'delivery_scope\' | \'implementation_constraints\' | \'key_technical_points\'>>;\n} | {\n    readonly type: \'update_requirement\';\n    readonly requirement_id: string;\n    readonly fields: Partial<Pick<TenderRequirementsArtifact[\'requirements\'][number], \'category\' | \'normalized_requirement\' | \'mandatory\'>>;\n} | {\n    readonly type: \'update_scoring_item\';\n    readonly scoring_id: string;\n    readonly fields: Partial<Pick<TenderScoringArtifact[\'scoring_items\'][number], \'title\' | \'criterion\' | \'must_answer\'>>;\n} | {\n    readonly type: \'update_compliance\';\n    readonly compliance_id: string;\n    readonly fields: Partial<Pick<TenderComplianceArtifact[\'compliance_items\'][number], \'type\' | \'normalized_rule\' | \'severity\'>>;\n};',
+  },
+  {
+    name: 'TenderComplianceArtifact',
+    declaration: 'export type TenderComplianceArtifact = z.infer<typeof complianceSchema>;',
+  },
+  {
+    name: 'TenderProjectArtifact',
+    declaration: 'export type TenderProjectArtifact = z.infer<typeof projectSchema>;',
+  },
+  {
+    name: 'TenderRequirementsArtifact',
+    declaration: 'export type TenderRequirementsArtifact = z.infer<typeof requirementsSchema>;',
+  },
+  {
+    name: 'TenderScoringArtifact',
+    declaration: 'export type TenderScoringArtifact = z.infer<typeof scoringSchema>;',
   },
   {
     name: 'TerminalBackend',
@@ -4938,6 +5803,38 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export interface UserQuestionProvider {\n    ask(request: AskUserQuestionRequest): Promise<AskUserQuestionAnswer>;\n}',
   },
   {
+    name: 'VisioBackend',
+    declaration: 'export interface VisioBackend {\n    isAvailable(): Promise<boolean>;\n    createDiagram(spec: FlowchartSpec, outputPath: string): Promise<VisioDiagramResult>;\n}',
+  },
+  {
+    name: 'VisioDiagramResult',
+    declaration: 'export interface VisioDiagramResult {\n    readonly path: string;\n    readonly nodeCount: number;\n    readonly connectorCount: number;\n}',
+  },
+  {
+    name: 'VisualBlockAdjustment',
+    declaration: 'export type VisualBlockAdjustment = {\n    readonly scale: number;\n} | {\n    readonly fontScale: number;\n};',
+  },
+  {
+    name: 'VisualBlockKind',
+    declaration: 'export type VisualBlockKind = \'flowchart\' | \'table\' | \'image\';',
+  },
+  {
+    name: 'VisualReviewDecision',
+    declaration: 'export type VisualReviewDecision = z.infer<typeof decisionSchema>;',
+  },
+  {
+    name: 'VisualReviewInput',
+    declaration: 'export interface VisualReviewInput {\n    readonly block: VisualSensitiveBlock;\n    readonly pages: readonly RenderedPdfPage[];\n    readonly adjustment?: VisualBlockAdjustment;\n}',
+  },
+  {
+    name: 'VisualReviewModel',
+    declaration: 'export interface VisualReviewModel {\n    readonly imageLimits: ImageAttachmentLimits;\n    review(input: VisualReviewInput): Promise<VisualReviewDecision>;\n}',
+  },
+  {
+    name: 'VisualSensitiveBlock',
+    declaration: 'export interface VisualSensitiveBlock {\n    readonly blockId: string;\n    readonly kind: VisualBlockKind;\n    readonly inputHash: string;\n    readonly anchor: string;\n    readonly boundary: \'within-page\' | \'overflow\';\n}',
+  },
+  {
     name: 'WebBootEntry',
     declaration: 'export interface WebBootEntry {\n    id: string;\n    url: string;\n    rev: string;\n    inject?: string[];\n    immediately?: boolean;\n    external?: string[];\n}',
   },
@@ -4946,12 +5843,16 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export interface WebBootGraph {\n    rev: string;\n    entries: WebBootEntry[];\n}',
   },
   {
+    name: 'WebCapabilityDiagnostic',
+    declaration: 'export interface WebCapabilityDiagnostic {\n    readonly configuredId?: string;\n    readonly selectedProviderId?: string;\n    readonly providers: readonly {\n        readonly id: string;\n        readonly diagnostic: WebProviderDiagnostic;\n    }[];\n}',
+  },
+  {
     name: 'WebFetchBody',
     declaration: 'export type WebFetchBody = {\n    readonly kind: \'html\';\n    readonly content: string;\n} | {\n    readonly kind: \'text\';\n    readonly content: string;\n};',
   },
   {
     name: 'WebFetchProvider',
-    declaration: 'export interface WebFetchProvider {\n    readonly id: string;\n    available(): boolean;\n    fetch(request: WebFetchRequest, signal?: AbortSignal): Promise<WebFetchResult>;\n}',
+    declaration: 'export interface WebFetchProvider {\n    readonly id: string;\n    available(): boolean | Promise<boolean>;\n    diagnose?(): WebProviderDiagnostic | Promise<WebProviderDiagnostic>;\n    fetch(request: WebFetchRequest, signal?: AbortSignal): Promise<WebFetchResult>;\n}',
   },
   {
     name: 'WebFetchRequest',
@@ -4978,8 +5879,12 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export type WebRouteKind = \'exact\' | \'prefix\';',
   },
   {
+    name: 'WebRuntimeDiagnostics',
+    declaration: 'export interface WebRuntimeDiagnostics {\n    readonly search: WebCapabilityDiagnostic;\n    readonly fetch: WebCapabilityDiagnostic;\n}',
+  },
+  {
     name: 'WebSearchProvider',
-    declaration: 'export interface WebSearchProvider {\n    readonly id: string;\n    available(): boolean;\n    search(request: WebSearchRequest, signal?: AbortSignal): Promise<WebSearchResult>;\n}',
+    declaration: 'export interface WebSearchProvider {\n    readonly id: string;\n    available(): boolean | Promise<boolean>;\n    diagnose?(): WebProviderDiagnostic | Promise<WebProviderDiagnostic>;\n    search(request: WebSearchRequest, signal?: AbortSignal): Promise<WebSearchResult>;\n}',
   },
   {
     name: 'WebSearchRequest',
@@ -5004,6 +5909,14 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'WebUpgradeRoute',
     declaration: 'export interface WebUpgradeRoute {\n    path: string;\n    handler: (req: IncomingMessage, socket: Duplex, head: Buffer) => void | Promise<void>;\n}',
+  },
+  {
+    name: 'WordDocumentFinalizer',
+    declaration: 'export interface WordDocumentFinalizer {\n    isAvailable(): Promise<boolean>;\n    updateFields(docxPath: string): Promise<void>;\n}',
+  },
+  {
+    name: 'WordVisioEmbedder',
+    declaration: 'export interface WordVisioEmbedder {\n    isAvailable(): Promise<boolean>;\n    embed(docxPath: string, replacements: readonly {\n        placeholder: string;\n        visioPath: string;\n        scale?: number;\n    }[]): Promise<void>;\n    countVisioObjects(docxPath: string): Promise<number>;\n}',
   },
   {
     name: 'WorkflowAgentEndInfo',
@@ -5052,6 +5965,18 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'WorkflowStopReason',
     declaration: 'export type WorkflowStopReason = \'completed\' | \'cancelled\' | \'error\';',
+  },
+  {
+    name: 'WritingEntryIntent',
+    declaration: 'export type WritingEntryIntent = z.infer<typeof writingEntryIntentSchema>;',
+  },
+  {
+    name: 'WritingMessageSession',
+    declaration: 'export interface WritingMessageSession {\n    readonly id: string;\n    readonly events: readonly unknown[];\n}',
+  },
+  {
+    name: 'WritingRequest',
+    declaration: 'export type WritingRequest = z.infer<typeof writingRequestSchema>;',
   },
 ]
 

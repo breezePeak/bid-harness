@@ -68,6 +68,8 @@ export function emptyChapterContext(section: ReturnType<typeof outlineFixture>['
     )),
     contentPath: 'chapters/sections/0001.md',
     metadataPath: 'chapters/meta/0001.json',
+    reviewPath: 'chapters/reviews/0001.json',
+    storageSerial: 1,
     project: parseTenderProjectArtifact({
       schema_version: 1,
       project_name: '测试项目',

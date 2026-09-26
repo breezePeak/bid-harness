@@ -28,6 +28,7 @@ export const revisionComparisonArtifactSchema = z.object({
   created_at: z.number().int().nonnegative(),
 }).strict()
 
+/** 一次批次修订提交前后正文及其摘要的持久化记录。 */
 export type RevisionComparisonArtifact = z.infer<typeof revisionComparisonArtifactSchema>
 
 function markdownSha256(markdown: string): string {
@@ -58,7 +59,11 @@ export function parseRevisionComparisonArtifact(value: unknown): RevisionCompari
   return artifact
 }
 
-/** 创建一次成功 batch task 的 comparison artifact。 */
+/**
+ * 创建一次成功 batch task 的 comparison artifact。
+ * @param input 批次任务身份、章节、意见及前后正文。
+ * @returns 带可校验正文摘要的比较记录。
+ */
 export function createRevisionComparisonArtifact(input: {
   readonly batchId: string
   readonly taskId: string
@@ -82,7 +87,13 @@ export function createRevisionComparisonArtifact(input: {
   })
 }
 
-/** 读取指定 batch task 的 comparison；文件不存在时返回 null。 */
+/**
+ * 读取指定 batch task 的 comparison；文件不存在时返回 null。
+ * @param workspace 持有比较记录的项目工作区。
+ * @param batchId 批次身份。
+ * @param taskId 批次内任务身份。
+ * @returns 已校验的比较记录；文件不存在时为 null。
+ */
 export async function readRevisionComparison(
   workspace: RevisionQueueWorkspace,
   batchId: string,
@@ -98,7 +109,11 @@ export async function readRevisionComparison(
   }
 }
 
-/** 拒绝同一 batch task 被不同正文或身份覆盖。 */
+/**
+ * 拒绝同一 batch task 被不同正文或身份覆盖。
+ * @param existing 已提交的比较记录。
+ * @param expected 本次拟提交的同一任务记录。
+ */
 export function assertRevisionComparisonEquivalent(
   existing: RevisionComparisonArtifact,
   expected: RevisionComparisonArtifact,

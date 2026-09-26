@@ -71,6 +71,9 @@ try {
         steps: exportEvents.map(event => `${event.data.operation.status}:${event.data.operation.phase}`),
         oneId: new Set(exportEvents.map(event => event.data.operation.operationId)).size === 1,
         resultMatches: operation?.status === 'completed' && operation.path === generated.value.path,
+        filePathMatches: operation?.status === 'completed'
+          && operation.filePath?.toLocaleLowerCase('en-US')
+            === join(exportWorkspace.projectRoot, generated.value.path).toLocaleLowerCase('en-US'),
         projectionStatus: operation?.status,
       },
       automaticExport, beforeGenerate, formatRestored: JSON.stringify(restoredFormat.state.resolved) === JSON.stringify(startingFormat.state.resolved), previewIsFixedSample: preview.previewHtml?.includes('这是一段正文示例'),

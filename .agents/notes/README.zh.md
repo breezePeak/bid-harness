@@ -39,9 +39,9 @@
 
 当一份 implemented Agent Note 记录的交付决策已经完整落地，且其决策依据不太可能再指导未来工作时，将其归档。如果其中的备选方案、归属边界、否定性保证、持久化语义或协议语义、安全规则，或者重新引入条件仍有价值，则继续作为活跃记录保留。绝不归档 proposed Agent Note：过时的提案应转为 rejected。仅当 rejected Agent Note 仍能避免一种可能发生的错误时保留；否则删除该记录。请使用经过校准的 [`dsh-archive-agent-notes`](../skills/dsh-archive-agent-notes/SKILL.md) 工作流，不要根据字数、存续时间或目标配额来判断。
 
-归档路径编码为 `archived/{class}/yyyy-mm-dd-topic-title.md`；其中有意省略 `implemented`，因为只有 implemented Agent Note 可以进入归档。归档变更会移动记录文件，保留 `Status: implemented`，紧接该状态行插入 `Archived: YYYY-MM-DD`，并修复或删除入站链接。已经封存的旧翻译文件和伴随记录继续保持冻结。归档时只允许对内容做这些更改。
+归档路径编码为 `archived/{class}/yyyy-mm-dd-topic-title.md`；其中有意省略 `implemented`，因为只有 implemented Agent Note 可以进入归档。归档变更会移动记录文件，保留 `Status: implemented`，紧接该状态行插入 `Archived: YYYY-MM-DD`，并修复或删除入站链接。已经封存的 Markdown 正文继续保持冻结。归档时只允许对内容做这些更改。
 
-封存后，每组归档记录都永久冻结。禁止编辑、翻译、重新格式化、更新、移动或删除，也不得将其视为当前行为的权威依据。文档门禁会跳过归档源文件，包括其中的出站链接；当活跃文档有意引用历史时，仍可链接到归档 Agent Note。[`verify-archived-agent-notes`](../../scripts/verify-archived-agent-notes.ts) 强制执行封闭的类别目录树、归档元数据、旧记录完整性，以及仅追加的冻结内容 manifest（元数据清单）。[归档政策 Agent Note](implemented/process/2026-07-26-frozen-agent-note-archive.zh.md) 记录了设计依据。
+封存后，每组归档记录都永久冻结。禁止编辑、翻译、重新格式化、更新、移动或删除，也不得将其视为当前行为的权威依据。文档门禁会跳过归档源文件，包括其中的出站链接；当活跃文档有意引用历史时，仍可链接到归档 Agent Note。[`verify-archived-agent-notes`](../../scripts/verify-archived-agent-notes.ts) 强制执行封闭的类别目录树、归档元数据、归档正文头部，以及仅追加的冻结内容 manifest（元数据清单）。[归档政策 Agent Note](implemented/process/2026-07-26-frozen-agent-note-archive.zh.md) 记录了设计依据。
 
 <a id="when-to-write-one"></a>
 
@@ -128,4 +128,4 @@ Status: <status>
 
 ### 语言
 
-新增和修改的 Agent Note 使用一个 `.md` 文件承载中文内容。当前工作不得创建语言对侧文件、一致性伴随记录或语言切换链接；已有配对记录可以作为历史兼容文件保持不变。
+新增和修改的 Agent Note 使用一个 `.md` 文件承载中文内容。当前工作不得创建语言对侧文件、一致性伴随记录或语言切换链接；现有英文 Markdown 正文保留；翻译记录与配对工具已经退出维护。

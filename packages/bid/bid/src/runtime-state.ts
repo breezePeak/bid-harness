@@ -15,6 +15,7 @@ import type {
   BidTaskState,
   StageValidationIssue,
 } from './control-plane-contract.ts'
+import { defaultBidNextStage, defaultBidUserGate } from './default-route.ts'
 
 const stageValidationIssueSchema = z.object({
   code: z.string(),
@@ -60,7 +61,7 @@ export const bidRunDataSchema = z.object({
   }).strict(),
   resumeOf: z.object({
     runId: z.string().min(1),
-    cause: z.enum(['user_stop', 'retry_exhausted', 'executor_error', 'host_restart']),
+    cause: z.enum(['user_stop', 'retry_exhausted', 'executor_error', 'host_restart', 'awaiting_input']),
   }).strict().optional(),
   progress: bidRunProgressSchema.optional(),
   startedAt: z.number().int().nonnegative(),
@@ -78,7 +79,7 @@ export const bidTaskStateSchema: z.ZodType<BidTaskState> = z.discriminatedUnion(
   z.object({
     stage: z.enum(BID_STAGES), status: z.literal('suspended'),
     run: bidRunDataSchema.extend({
-      cause: z.enum(['user_stop', 'retry_exhausted', 'executor_error', 'host_restart']),
+      cause: z.enum(['user_stop', 'retry_exhausted', 'executor_error', 'host_restart', 'awaiting_input']),
       error: bidTaskFailureSchema.optional(),
     }),
   }).strict(),
@@ -97,7 +98,7 @@ export const BID_INITIAL_TASK_STATE: BidTaskState = Object.freeze({
   stage: 'file_intake', status: 'waiting_user', run: null,
 })
 
-/** @deprecated Legacy runtime shape accepted only while replaying v3 project and Session records. */
+/** 重放旧版项目与 Session 记录时接纳的运行态结构。 @deprecated 仅用于 v3 兼容读取。 */
 export const legacyBidRuntimeSchema = z.object({
   stage: z.enum(BID_STAGES),
   status: z.enum(['pending', 'waiting_start', 'running', 'waiting_user', 'suspended', 'attention_required', 'failed', 'completed']),
@@ -108,11 +109,11 @@ export const legacyBidRuntimeSchema = z.object({
 const legacyBidRunSchema = bidRunDataSchema.extend({
   stage: z.enum(BID_STAGES),
   status: z.enum(['running', 'cancelling', 'suspended', 'completed']),
-  cause: z.enum(['user_stop', 'retry_exhausted', 'executor_error', 'host_restart']).optional(),
+  cause: z.enum(['user_stop', 'retry_exhausted', 'executor_error', 'host_restart', 'awaiting_input']).optional(),
   error: bidTaskFailureSchema.optional(),
 }).strict()
 
-/** @deprecated Legacy v3 control shape accepted only at compatibility boundaries. */
+/** 旧版项目控制记录的读取结构。 @deprecated 仅用于 v3 兼容读取。 */
 export const legacyBidControlStateSchema = z.object({
   workflow: z.object({
     stage: z.enum(BID_STAGES),
@@ -124,27 +125,29 @@ export const legacyBidControlStateSchema = z.object({
   lastRun: legacyBidRunSchema.nullable(),
 }).strict()
 
+/** 旧版 Session 投影中的阶段运行态，仅供兼容读取。 */
 export type LegacyBidRuntimeState = z.infer<typeof legacyBidRuntimeSchema>
+/** 旧版项目控制记录，仅供兼容读取。 */
 export type LegacyBidControlState = z.infer<typeof legacyBidControlStateSchema>
 
 const POLICIES: { readonly [K in BidStage]: Readonly<BidStagePolicy> } = {
   file_intake: {
     stage: 'file_intake', executor: 'program', requiredInputs: [], allowedTools: [],
     forbiddenTools: ['grep', 'read', 'write', 'bash', 'web_search'], requiredArtifacts: ['manifest.json'],
-    validator: 'file-intake-validator', userGate: 'none', nextStage: 'tender_analysis',
+    validator: 'file-intake-validator', userGate: defaultBidUserGate('file_intake'), nextStage: defaultBidNextStage('file_intake'),
   },
   tender_analysis: {
     stage: 'tender_analysis', executor: 'agent', requiredInputs: ['manifest.json'], allowedTools: ['grep', 'read', 'view_pdf_page'],
     forbiddenTools: ['write', 'bash', 'web_search', 'web_fetch', 'subagent'], requiredArtifacts: [
       'analysis/project.json', 'analysis/requirements.json', 'analysis/scoring-origin.json', 'analysis/compliance.json',
-    ], validator: 'tender-analysis-validator', userGate: 'after_validation', nextStage: 'outline_generation',
+    ], validator: 'tender-analysis-validator', userGate: defaultBidUserGate('tender_analysis'), nextStage: defaultBidNextStage('tender_analysis'),
   },
   outline_generation: {
     stage: 'outline_generation', executor: 'agent', requiredInputs: [
       'manifest.json', 'analysis/project.json', 'analysis/requirements.json', 'analysis/scoring.json', 'analysis/compliance.json',
     ], allowedTools: ['read', 'write'], forbiddenTools: ['grep', 'bash', 'web_search'], requiredArtifacts: [
       'analysis/scoring-response-points.json', 'outline/outline.json', 'outline/quality-report.json',
-    ], validator: 'outline-generation-validator', userGate: 'after_validation', nextStage: 'evidence_mapping',
+    ], validator: 'outline-generation-validator', userGate: defaultBidUserGate('outline_generation'), nextStage: defaultBidNextStage('outline_generation'),
   },
   evidence_mapping: {
     stage: 'evidence_mapping', executor: 'agent', requiredInputs: [
@@ -152,7 +155,7 @@ const POLICIES: { readonly [K in BidStage]: Readonly<BidStagePolicy> } = {
       'analysis/scoring-response-points.json', 'analysis/compliance.json', 'outline/initial-confirmed-outline.json',
     ], allowedTools: ['read', 'write'], forbiddenTools: ['bash'], requiredArtifacts: [
       'analysis/evidence-map.json', 'analysis/web-evidence-sources.json', 'outline/outline.json', 'outline/quality-report.json',
-    ], validator: 'evidence-mapping-validator', userGate: 'after_validation', nextStage: 'chapter_writing',
+    ], validator: 'evidence-mapping-validator', userGate: defaultBidUserGate('evidence_mapping'), nextStage: defaultBidNextStage('evidence_mapping'),
   },
   chapter_writing: {
     stage: 'chapter_writing', executor: 'agent', requiredInputs: [
@@ -161,12 +164,12 @@ const POLICIES: { readonly [K in BidStage]: Readonly<BidStagePolicy> } = {
       'analysis/web-evidence-sources.json', 'outline/confirmed-outline.json',
     ], allowedTools: ['grep', 'read', 'web_search', 'web_fetch'], forbiddenTools: ['bash', 'write'], requiredArtifacts: [
       'chapters/execution-plan.json', 'chapters/execution-log.json', 'chapters/manifest.json', 'chapters/global-compliance-review.json',
-    ], validator: 'chapter-writing-validator', userGate: 'before_execution', nextStage: null,
+    ], validator: 'chapter-writing-validator', userGate: defaultBidUserGate('chapter_writing'), nextStage: defaultBidNextStage('chapter_writing'),
   },
   docx_export: {
     stage: 'docx_export', executor: 'program', requiredInputs: ['outline/confirmed-outline.json', 'chapters/manifest.json'],
     allowedTools: [], forbiddenTools: ['grep', 'read', 'write', 'bash', 'web_search'], requiredArtifacts: ['output/bid.docx'],
-    validator: 'docx-export-validator', userGate: 'none', nextStage: null,
+    validator: 'docx-export-validator', userGate: defaultBidUserGate('docx_export'), nextStage: defaultBidNextStage('docx_export'),
   },
 }
 
@@ -260,12 +263,19 @@ function cloneFailure(failure: BidTaskFailure): BidTaskFailure {
   }
 }
 
-/** Return a detached task state for a projection or transition result. */
+/** 返回用于投影或状态迁移的独立任务状态。
+ * @param task 当前任务状态。
+ * @returns 通过当前结构校验的独立状态。
+ */
 export function cloneBidTaskState(task: BidTaskState): BidTaskState {
   return bidTaskStateSchema.parse(task)
 }
 
-/** Convert an orphaned durable Run into the only restart-safe state. */
+/** 将宿主重启时遗留的运行中 Run 转为可恢复状态。
+ * @param task 磁盘中的任务状态。
+ * @param updatedAt 恢复状态的更新时间。
+ * @returns 原状态或带宿主重启原因的挂起状态。
+ */
 export function suspendForHostRestart(task: BidTaskState, updatedAt = Date.now()): BidTaskState {
   if (task.status !== 'running') return task
   return {
@@ -312,7 +322,10 @@ function runDataFromLegacy(run: NonNullable<LegacyBidControlState['run']>): BidR
   })
 }
 
-/** Normalize a legacy flat Session projection without retaining its status vocabulary. */
+/** 将旧版扁平 Session 投影归一为当前任务状态。
+ * @param runtime 旧版阶段运行态。
+ * @returns 当前结构的任务状态。
+ */
 export function normalizeLegacyBidRuntime(runtime: LegacyBidRuntimeState): BidTaskState {
   const failure = legacyFailure(runtime.failureReason, runtime.failureIssues)
   switch (runtime.status) {
@@ -327,7 +340,10 @@ export function normalizeLegacyBidRuntime(runtime: LegacyBidRuntimeState): BidTa
   }
 }
 
-/** Normalize one legacy v3 control record into the single task state. */
+/** 将旧版 v3 项目控制记录归一为单一任务状态。
+ * @param legacy 旧版控制记录。
+ * @returns 当前结构的任务状态。
+ */
 export function normalizeLegacyBidControlState(legacy: LegacyBidControlState): BidTaskState {
   const { workflow, run } = legacy
   if (run?.status === 'running') return startRun(markReady(workflow.stage), runDataFromLegacy(run))
@@ -347,18 +363,31 @@ export function normalizeLegacyBidControlState(legacy: LegacyBidControlState): B
   }
 }
 
-/** Create a durable ready checkpoint for an automatic stage. */
+/** 为自动阶段创建可持久化的就绪检查点。
+ * @param stage 待运行阶段。
+ * @returns 没有关联 Run 的就绪状态。
+ */
 export function markReady(stage: BidStage): BidTaskState {
   return { stage, status: 'ready', run: null }
 }
 
-/** Start one Run whose Work Descriptor belongs to the current stage. */
+/** 启动 Work 所属阶段与当前阶段一致的 Run。
+ * @param state 当前阶段状态。
+ * @param run 即将运行的 Run 记录。
+ * @returns 包含独立 Run 数据的运行中状态。
+ */
 export function startRun(state: BidTaskState, run: BidRunData): BidTaskState {
   if (run.work.stage !== state.stage) throw new Error('BID_RUN_STAGE_MISMATCH')
   return { stage: state.stage, status: 'running', run: cloneRun(run) }
 }
 
-/** Publish a resumable state only after the Run has fully drained. */
+/** 在 Run 完全收敛后记录可恢复的挂起状态。
+ * @param state 当前阶段状态。
+ * @param run 已收敛的 Run 记录。
+ * @param cause 挂起原因。
+ * @param error 可保留的失败诊断。
+ * @returns 保留 Run 身份与挂起原因的任务状态。
+ */
 export function suspendRun(
   state: BidTaskState,
   run: BidRunData,
@@ -373,7 +402,12 @@ export function suspendRun(
   }
 }
 
-/** Stop automatic work and wait for an explicit user action. */
+/** 停止自动执行并等待用户明确操作。
+ * @param stage 等待输入的阶段。
+ * @param reason 展示给用户的等待原因。
+ * @param issues 待处理的校验问题。
+ * @returns 不携带运行中 Run 的等待状态。
+ */
 export function waitForUser(
   stage: BidStage,
   reason?: string,
@@ -386,17 +420,28 @@ export function waitForUser(
   }
 }
 
-/** Record a fatal project failure that cannot retain a Run. */
+/** 记录无法保留 Run 的项目失败。
+ * @param stage 失败阶段。
+ * @param failure 持久化的失败诊断。
+ * @returns 带独立失败诊断的终止状态。
+ */
 export function markFailed(stage: BidStage, failure: BidTaskFailure): BidTaskState {
   return { stage, status: 'failed', run: null, failure: cloneFailure(failure) }
 }
 
-/** Record final completion without retaining Run data. */
+/** 记录不再保留 Run 的最终完成状态。
+ * @param stage 已完成阶段。
+ * @returns 完成状态。
+ */
 export function markCompleted(stage: BidStage): BidTaskState {
   return { stage, status: 'completed', run: null }
 }
 
-/** Advance a completed stage to the next automatic ready checkpoint. */
+/** 将已完成阶段推进到下一自动阶段的就绪检查点。
+ * @param _current 已完成的当前任务状态。
+ * @param next 下一阶段。
+ * @returns 下一阶段的就绪状态。
+ */
 export function advanceStage(_current: BidTaskState, next: BidStage): BidTaskState {
   return markReady(next)
 }

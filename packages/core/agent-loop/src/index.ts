@@ -121,7 +121,6 @@ async function raceAbortCall<T>(
   try {
     return await raceAbort(pending, signal, id)
   } catch (error: unknown) {
-    // oxlint-disable-next-line typescript/no-unnecessary-condition -- the signal can abort while the operation is awaited.
     if (signal.aborted && releaseAbandoned !== undefined) {
       void pending.then(releaseAbandoned, () => undefined)
     }
@@ -661,7 +660,10 @@ export class AgentLoop extends Service implements AgentFactory {
     return this.resumeWith(ownerCtx, persistence, options)
   }
 
-  /** Stop one factory-owned live Agent by its shared Session identity. */
+  /** Stop one factory-owned live Agent by its shared Session identity.
+   * @param id - Session identity of the live Agent.
+   * @returns Whether a live Agent was found and disposed.
+   */
   async disposeAgent(id: SessionId): Promise<boolean> {
     const dispose = this.liveDisposers.get(id)
     if (dispose === undefined) return false

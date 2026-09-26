@@ -33,6 +33,20 @@ it('keeps repairable candidate issues distinct from provider and input faults', 
   }]).recovery?.kind).toBe('blocked')
 })
 
+it.each(['awaiting_input', 'user_stop', 'host_restart'] as const)(
+  '能力任务 %s 边界不由 Goal 自动续行', async (cause) => {
+    const ctx = new Context()
+    cleanup.push(() => ctx.fiber.dispose())
+    await ctx.plugin(SessionStore)
+    const session = ctx.sessions.create()
+    session.append('bid.goal.bound', { goalId: 'goal-input', ownerSessionId: String(session.id), initialS2WorkId: 's2-work' })
+    session.append('bid.task.changed', { state: { stage: 'chapter_writing', status: 'suspended',
+      run: { ...run('run-input'), work: { ...work, kind: 'capability_task', stage: 'chapter_writing' },
+        cause, error: { message: '需要补充资料', recovery: { kind: 'retry', unit: 'step-one', reason: '需要补充资料' } } } } })
+    expect(bidRunRecoveryEligibility(session, 'goal-input')).toMatchObject({ eligible: false, attempts: 0,
+      reason: '用户停止、Host 重启或等待输入需用户明确继续。' })
+  })
+
 it('reads a suspended recovery diagnosis despite a corrupt formal outline and stops unchanged repeats', async () => {
   const root = await mkdtemp(join(tmpdir(), 'dsh-bid-recovery-'))
   cleanup.push(() => rm(root, { recursive: true, force: true }))
@@ -94,7 +108,7 @@ it('permits a changed candidate once but keeps the two-acceptance budget across 
     unit: 'outline/outline.json', instruction: '补全目录', progressFingerprint: second.fingerprint!,
   })
   session.append('bid.task.changed', { state: { stage: 'outline_generation', status: 'suspended',
-    run: { ...run('run-three'), cause: 'retry_exhausted', error: { ...failureB, recovery: { ...failureB.recovery!, candidateSha256: 'c'.repeat(64) } } } } })
+    run: { ...run('run-three'), cause: 'retry_exhausted', error: { ...failureB, recovery: { ...failureB.recovery, candidateSha256: 'c'.repeat(64) } } } } })
   expect(bidRunRecoveryEligibility(session, 'goal-one')).toMatchObject({ eligible: false, attempts: 2,
     reason: '当前 work 的自动接管次数已耗尽。' })
 })

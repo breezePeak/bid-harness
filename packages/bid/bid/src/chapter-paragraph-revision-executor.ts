@@ -5,6 +5,7 @@ import { SessionId } from '@deepseek-ai/dsh-session'
 import type { BidCustomerTextContext } from './customer-facing-prose.ts'
 import { findBidInternalIdentifiers } from './customer-facing-prose.ts'
 import type { BidWorkspace } from './index.ts'
+import type { ChapterLocation } from './chapter-storage.ts'
 import type { RevisionBatchTaskExecution } from './chapter-revision-batch.ts'
 import { assertChapterRevisionBatchScope, type BatchRevisionScope } from './chapter-revision.ts'
 import {
@@ -63,7 +64,7 @@ export interface ExecuteParagraphRevisionTaskInput {
   readonly workspace: BidWorkspace
   readonly batchId: string
   readonly task: RevisionBatchTaskExecution
-  readonly serial: string
+  readonly location: ChapterLocation
   readonly title: string
   readonly writerId: string
   readonly signal: AbortSignal
@@ -102,9 +103,10 @@ function hostValidationIssues(
 export async function executeParagraphRevisionTask(
   input: ExecuteParagraphRevisionTaskInput,
 ): Promise<ParagraphRevisionTaskResult> {
-  const contentPath = within(input.workspace.projectRoot, `chapters/sections/${input.serial}.md`)
-  const metadataPath = within(input.workspace.projectRoot, `chapters/meta/${input.serial}.json`)
-  const reviewPath = within(input.workspace.projectRoot, `chapters/reviews/${input.serial}.json`)
+  const contentPath = within(input.workspace.projectRoot, input.location.contentPath)
+  const metadataPath = within(input.workspace.projectRoot, input.location.metadataPath)
+  const reviewPath = within(input.workspace.projectRoot, input.location.reviewPath)
+  const serial = String(input.location.storageSerial).padStart(4, '0')
   const manifestPath = within(input.workspace.projectRoot, 'chapters/manifest.json')
   await Promise.all([contentPath, metadataPath, reviewPath, manifestPath].map(path => assertNoLinkedPath(input.workspace.root, path)))
   const [original, metadataRaw, reviewRaw, manifestRaw] = await Promise.all([
@@ -195,7 +197,7 @@ export async function executeParagraphRevisionTask(
         })),
         created_at: createdAt,
       })
-      const currentLineage = await readChapterRevisionLineage(input.workspace, input.serial)
+      const currentLineage = await readChapterRevisionLineage(input.workspace, serial)
       const lineage = appendSemanticRevision(currentLineage, {
         sectionId: input.task.section_id,
         baseReviewCandidateSha256: baseReview.candidate_sha256,
@@ -218,7 +220,7 @@ export async function executeParagraphRevisionTask(
         const deltaReviewPath = buildParagraphRevisionReviewPath(input.batchId, input.task.task_id)
         await lease.writeJson(within(input.workspace.projectRoot, comparisonPath), comparison)
         await lease.writeJson(within(input.workspace.projectRoot, deltaReviewPath), revisionReview)
-        await lease.writeJson(within(input.workspace.projectRoot, buildChapterRevisionLineagePath(input.serial)), lineage)
+        await lease.writeJson(within(input.workspace.projectRoot, buildChapterRevisionLineagePath(serial)), lineage)
         await lease.writeJson(manifestPath, nextManifest)
       })
       return { status: 'completed' }
