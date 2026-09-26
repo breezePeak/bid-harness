@@ -394,6 +394,12 @@ export async function runEvidenceMappingLoop(ctx: Context, root: string, repair:
     ),
     writing_dimensions: ['身份鉴别与访问控制', '安全审计'], missing_topics: [],
   }
+  const answerPlan = {
+    section_id: 'SEC-SECURITY', basis: blueprint.basis,
+    answer_plan: ['R1', 'R2', 'R3'].map(ref => ({ target_refs: [ref], mode: 'proposal',
+      content: '拟采用身份鉴别、分级授权和可追溯审计方法。',
+      basis: [{ kind: 'section_responsibility' }], boundary: '具体既有能力与指标须以本项目核实资料为准。' })),
+  }
   const structure = { decision: 'keep', reason: '本章聚焦权限执行与追溯验证，不同操作通过同一权限记录闭环说明。',
     navigation_analysis: '读者通过访问控制与安全审计标题可定位本项安全任务；账号核验、授权、记录属于同一方法的普通步骤，无需独立成果章节。',
     hidden_heading_pressure: false, topic_dispositions: [{ finding_index: 1, placement: 'within_section', reason: '段落和角色权限表可完整表达授权与追溯关系，无需隐藏正式子标题。' }],
@@ -423,6 +429,7 @@ export async function runEvidenceMappingLoop(ctx: Context, root: string, repair:
     ] : []),
     toolCall('research-ready', 'submit_section_research_assessment', researchAssessment(true, false)),
     toolCall('update-task', 'update_section_task', blueprint),
+    toolCall('prepare-answer-plan', 'update_section_task', answerPlan),
     toolCall('assess-structure', 'submit_section_structure_assessment', structure),
     ...(repair ? [
       toolCall('lock-without-comparison', 'lock_section_outline', {}),
@@ -441,6 +448,7 @@ export async function runEvidenceMappingLoop(ctx: Context, root: string, repair:
       toolCall('revise-blueprint', 'update_section_task', { ...blueprint, writing_dimensions: ['授权方法与条件', '安全审计'] }),
       toolCall('reject-stale-lock', 'lock_section_outline', { comparison: '必须重新核对新 Blueprint。' }),
       toolCall('restore-blueprint', 'update_section_task', blueprint),
+      toolCall('restore-answer-plan', 'update_section_task', answerPlan),
       toolCall('reassess-current-structure', 'submit_section_structure_assessment', structure),
       toolCall('lock-current-structure', 'lock_section_outline', { comparison: '当前 Blueprint 的目录承载判断有效。' }),
     ] : []),
@@ -523,6 +531,11 @@ export async function runChapterWritingLoop(ctx: Context, root: string) {
       chunk_refs: [`W:${missing.source_id}:C0001`],
       usage: 'reference', summary: 'S4 已映射的公开审计资料。', supports: '安全审计要求' }],
     missing_topics: ['缺少实施流程参考资料。'], writing_dimensions: ['身份鉴别与访问控制', '安全审计'],
+    answer_plan: [{ targets: [{ kind: 'must_answer', position: 0, text: section.must_answer[0] },
+      { kind: 'requirement', id: 'REQ-1' }, { kind: 'response_point', id: 'RP-000001' }],
+    mode: 'proposal', content: '按访问控制任务设计权限授予、检查与审计留存流程。',
+    basis: [{ kind: 'section_responsibility', section_id: section.id }],
+    boundary: '实际系统能力和实施参数仍以本项目资料核实。' }],
   }] })
   await Promise.all([
     writeFile(join(workspace.projectRoot, 'outline/confirmed-outline.json'), JSON.stringify(outline)),

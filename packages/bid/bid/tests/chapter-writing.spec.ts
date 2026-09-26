@@ -63,6 +63,7 @@ import {
 import { createTestBidRunContext } from '../src/run-coordinator.ts'
 import { validateWritingCapability } from '../src/bid-writing-capability.ts'
 import { createBidCapabilityDispatcher } from '../src/bid-capability-dispatcher.ts'
+import { BidStageAttentionRequiredError } from '../src/control-plane-contract.ts'
 
 const executeChapterWriting = (
   agent: Agent,
@@ -814,7 +815,12 @@ describe('chapter-writing executor', () => {
     const evidence = parseEvidenceMapArtifact(JSON.parse(await readFile(evidencePath, 'utf8')))
     await writeFile(evidencePath, `${JSON.stringify({ section_mappings: [...evidence.section_mappings,
       ...newSections.map(section => ({ section_id: section.id, local_materials: [], web_materials: [],
-        missing_topics: [], writing_dimensions: [] }))] })}\n`)
+        missing_topics: [], writing_dimensions: [], answer_plan: [{
+          targets: [{ kind: 'must_answer', position: 0, text: section.must_answer[0] }],
+          mode: 'proposal', content: `拟采用${section.purpose}的实施方案。`,
+          basis: [{ kind: 'section_responsibility', section_id: section.id }],
+          boundary: '方案设计不证明既有能力或未经核实的指标。',
+        }] }))] })}\n`)
     const plan = parseChapterExecutionPlan(JSON.parse(await readFile(join(workspace.projectRoot, 'chapters/execution-plan.json'), 'utf8')))
     await writeFile(join(workspace.projectRoot, 'chapters/execution-plan.json'), `${JSON.stringify({ ...plan,
       confirmed_outline_sha256: hash, writing_plan_version: 2,
@@ -836,7 +842,7 @@ describe('chapter-writing executor', () => {
       sections: [...basePlan.sections, ...newSections.map(section => ({ section_id: section.id,
         task: section.purpose, user_message_refs: [], user_requirements: [],
         writing_instructions: [], acceptance_criteria: [{
-          id: `AC-${String(Number(section.order) - 2).padStart(6, '0')}`,
+          id: `AC-${String(section.order - 2).padStart(6, '0')}`,
           scope: { kind: 'section', section_id: section.id },
           description: `完成${section.title}任务。`, priority: 'required', evaluator: { kind: 'semantic' },
         }] }))],
@@ -1078,7 +1084,7 @@ describe('chapter-writing executor', () => {
     expect(fixture.subagents.start).toHaveBeenCalledTimes(3)
   })
 
-  it('外部资质是唯一原因时跳过 Writer 修订并保留黄色关注结论', async () => {
+  it('外部资质缺口不能遮盖同时存在的正文质量问题', async () => {
     const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-s5-external-input-')))
     const outline = await writeInputs(workspace)
     const fixture = fixtureAgent(workspace, outline)
@@ -1101,16 +1107,13 @@ describe('chapter-writing executor', () => {
       maxRepairAttempts: 3, maxConcurrency: 3,
     })
 
-    expect(fixture.starts).toHaveLength(3)
-    expect(fixture.subagents.start).toHaveBeenCalledTimes(3)
-    expect(fixture.subagents.start.mock.calls.map(call => call[1].label).sort()).toEqual([
-      '1.1 - 审查',
-      '1.2 - 审查',
-      '1.3 - 审查',
-    ])
-    expect(parseChapterReviewArtifact(JSON.parse(await readFile(
+    expect(fixture.starts.length).toBeGreaterThan(3)
+    expect(fixture.subagents.start).toHaveBeenCalledTimes(fixture.starts.length)
+    const review = parseChapterReviewArtifact(JSON.parse(await readFile(
       join(workspace.projectRoot, 'chapters/reviews/0001.json'), 'utf8',
-    )))).toMatchObject({ verdict: 'attention', blocking_issues: [] })
+    )))
+    expect(review.verdict).toBe('repair')
+    expect(review.blocking_issues.join('；')).toContain('placeholder_free')
   })
 
   it.each(['损坏', '未完成'])('恢复按强依赖传递失效，%s 前置章节时保留弱关联章节', async (damage) => {
@@ -1126,7 +1129,11 @@ describe('chapter-writing executor', () => {
     await writeWritingPlan(workspace, outline)
     const evidencePath = join(workspace.projectRoot, 'analysis/evidence-map.json')
     const evidence = parseEvidenceMapArtifact(JSON.parse(await readFile(evidencePath, 'utf8')))
-    evidence.section_mappings.push({ ...evidence.section_mappings[2]!, section_id: 'SEC-4' })
+    evidence.section_mappings.push({ ...evidence.section_mappings[2]!, section_id: 'SEC-4',
+      answer_plan: evidence.section_mappings[2]!.answer_plan?.map(item => ({ ...item,
+        basis: item.basis.map(basis => basis.kind === 'section_responsibility'
+          ? { ...basis, section_id: 'SEC-4' } : basis),
+      })) })
     await writeFile(evidencePath, JSON.stringify(evidence))
     const first = fixtureAgent(workspace, outline, { 'SEC-2': ['SEC-1'], 'SEC-3': ['SEC-2'] })
     await executeChapterWriting(first.agent, workspace, buildBidStageTask('chapter_writing'))
@@ -1514,6 +1521,29 @@ describe('chapter-writing executor', () => {
     expect(promptText(fixture.starts[1]!.request)).toContain('未覆盖：回答1')
   })
 
+  it('全节只有真实缺口时跳过该 Writer，保留其他独立章节与待输入状态', async () => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-chapter-input-gap-')))
+    const outline = await writeInputs(workspace)
+    const path = join(workspace.projectRoot, 'analysis/evidence-map.json')
+    const evidence = parseEvidenceMapArtifact(JSON.parse(await readFile(path, 'utf8')))
+    evidence.section_mappings[0]!.answer_plan = evidence.section_mappings[0]!.answer_plan!.map(item => ({
+      ...item, mode: 'gap', content: '尚缺我方实际资质与人员信息。', basis: [],
+      boundary: '不能据此写成我方已具备的事实。', required_input: '我方资质与人员履历',
+    }))
+    await writeFile(path, `${JSON.stringify(evidence)}\n`)
+    const fixture = fixtureAgent(workspace, outline)
+    await expect(executeChapterWriting(fixture.agent, workspace, buildBidStageTask('chapter_writing'),
+      { maxRepairAttempts: 1, maxConcurrency: 2 })).rejects.toBeInstanceOf(BidStageAttentionRequiredError)
+    const log = parseChapterExecutionLog(JSON.parse(await readFile(
+      join(workspace.projectRoot, 'chapters/execution-log.json'), 'utf8')))
+    expect(log.sections.find(section => section.section_id === 'SEC-1')?.status).toBe('pending')
+    expect(log.sections.filter(section => section.status === 'completed')).toHaveLength(2)
+    const manifest = parseChapterWritingManifest(JSON.parse(await readFile(
+      join(workspace.projectRoot, 'chapters/manifest.json'), 'utf8')))
+    expect(manifest.chapters.map(chapter => chapter.section_id)).toEqual(['SEC-2', 'SEC-3'])
+    expect(fixture.starts.some(run => run.request.label?.includes('章节1'))).toBe(false)
+  })
+
   it('required 动态验收失败只回到原 Writer，并把具体条件带入修复轮次', async () => {
     const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-chapter-dynamic-acceptance-repair-')))
     const outline = await writeInputs(workspace)
@@ -1785,6 +1815,17 @@ describe('chapter-writing executor', () => {
     const outlineSha256 = outlineArtifactSha256(outline)
     await writeFile(join(workspace.projectRoot, 'outline/confirmation.json'), JSON.stringify({ schema_version: 2, scope: 'technical_bid', decision: 'confirmed', source_outline_sha256: outlineSha256, confirmed_outline_sha256: outlineSha256, confirmed_draft_revision: 1, confirmed_draft_sha256: outlineSha256 }))
     await writeWritingPlan(workspace, outline)
+    const evidencePath = join(workspace.projectRoot, 'analysis/evidence-map.json')
+    const evidence = parseEvidenceMapArtifact(JSON.parse(await readFile(evidencePath, 'utf8')))
+    for (const mapping of evidence.section_mappings) {
+      const section = outline.sections.find(item => item.id === mapping.section_id)!
+      mapping.answer_plan = mapping.answer_plan?.map(item => ({ ...item,
+        targets: item.targets.map(target => target.kind === 'must_answer'
+          ? { ...target, text: section.must_answer[target.position]! } : target),
+        content: `拟采用${section.purpose}的实施方案。`,
+      }))
+    }
+    await writeFile(evidencePath, `${JSON.stringify(evidence)}\n`)
     const fixture = fixtureAgent(workspace, outline)
     await executeChapterWriting(fixture.agent, workspace, buildBidStageTask('chapter_writing'), { maxRepairAttempts: 0, maxConcurrency: 3 })
     const responsibilities = outline.sections.map(({ id, parent_id, title, purpose, must_answer }) => (

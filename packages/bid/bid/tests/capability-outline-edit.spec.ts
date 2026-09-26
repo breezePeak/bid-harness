@@ -8,7 +8,7 @@ import SessionStore from '@deepseek-ai/dsh-session'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { BidWorkspace } from '../src/index.ts'
 import type { BidCapabilityExecutionContext } from '../src/bid-capability-contract.ts'
-import { bidCapabilityInputSchema } from '../src/bid-capability-contract.ts'
+import { bidCapabilityInputSchema, bidCapabilityTaskSchema } from '../src/bid-capability-contract.ts'
 import { executeCapabilityTask, persistCapabilityTaskRequest,
   type CapabilityTaskDispatcher } from '../src/bid-capability-task.ts'
 import { validateCapabilityResult } from '../src/bid-capability-registry.ts'
@@ -52,15 +52,11 @@ async function fixture() {
 }
 
 describe('目录能力候选', () => {
-  it.each(['outline.refine', 'outline.update'] as const)('%s 对 Host 新 ID 分配真实业务引用', async (capability) => {
+  it('outline.update 对 Host 新 ID 分配真实业务引用', async () => {
     const { workspace, context, stepId } = await fixture()
     const prefix = createHash('sha256').update(stepId).digest('hex').slice(0, 12)
     const childId = `SEC-${prefix}-1`
     const outputs = [
-      JSON.stringify([{ type: 'split_section', section_id: 'SEC-1', children: [
-        { title: '设计流程', purpose: '设计', must_answer: ['设计'] },
-        { title: '交付流程', purpose: '交付', must_answer: ['交付'] },
-      ] }]),
       JSON.stringify([{ section_id: childId, requirement_ids: ['REQ-1'],
         scoring_ids: ['SCORE-1'], scoring_response_point_ids: ['RP-000001'], compliance_ids: [] }]),
     ]
@@ -73,14 +69,17 @@ describe('目录能力候选', () => {
         dispose: async () => {} }
     })
     const agent = { ctx: { get: () => ({ getProvider: () => ({ inheritsParentContext: false }), start }) } } as unknown as BidCapabilityExecutionContext['agent']
-    const call = bidCapabilityInputSchema.parse(capability === 'outline.refine'
-      ? { capability, input: { feedback: '把流程拆成两个章节' } }
-      : { capability, input: { operations: JSON.parse(outputs.shift()!) as unknown, defer_content_migration: true } })
-    if (call.capability !== 'outline.refine' && call.capability !== 'outline.update') throw new Error('test call mismatch')
+    const call = bidCapabilityInputSchema.parse({ capability: 'outline.update', input: {
+      operations: [{ type: 'split_section', section_id: 'SEC-1', children: [
+        { title: '设计流程', purpose: '设计', must_answer: ['设计'] },
+        { title: '交付流程', purpose: '交付', must_answer: ['交付'] },
+      ] }], defer_content_migration: true,
+    } })
+    if (call.capability !== 'outline.update') throw new Error('test call mismatch')
     const scoped = { ...context, agent,
       allowedWrites: await allowedOutlineCapabilityWrites(call, workspace, stepId, context.sectionIds) }
     const { result } = await executeOutlineCapability(call, scoped)
-    expect(start).toHaveBeenCalledTimes(capability === 'outline.refine' ? 2 : 1)
+    expect(start).toHaveBeenCalledOnce()
     expect(JSON.stringify(prompts.at(-1))).toContain(childId)
     const outline = parseOutlineArtifact(await readJson(workspace, 'outline/confirmed-outline.json'))
     expect(outline.sections.find(section => section.id === childId)?.requirement_ids).toEqual(['REQ-1'])
@@ -337,29 +336,35 @@ describe('目录能力候选', () => {
         source: { kind: 'user' } })
       session.append('user/message', message, { surfaceOp: 'append' })
       const deferred = interrupt === 'missing_followup' || interrupt === 'user_deferred'
-      const task = { goal: '拆分并迁移第一章', allow_pending_content: interrupt === 'user_deferred',
+      const task = bidCapabilityTaskSchema.parse({ goal: '拆分并迁移第一章', allow_pending_content: interrupt === 'user_deferred',
         scope: { kind: 'sections' as const, section_ids: ['SEC-1'] }, steps: [
-          { scope: { source: 'task' as const }, call: { capability: 'outline.refine' as const,
-            input: { feedback: '拆成准备和实施两个子章' } } },
+          { scope: { source: 'task' as const }, call: { capability: 'outline.update' as const,
+            input: { operations: [{ type: 'split_section' as const, section_id: 'SEC-1', children: [
+              { title: '准备', purpose: '准备', must_answer: ['准备'] },
+              { title: '实施', purpose: '实施', must_answer: ['实施'] },
+            ] }], defer_content_migration: true } } },
           ...deferred ? [] : [{ scope: { source: 'task' as const }, call: { capability: 'chapter.reorganize' as const,
             input: { instruction: '保留并分配旧章所有正文块', source_section_ids: ['SEC-1'], allow_content_deletion: false } } }],
-          ...interrupt === 'before_review' ? [{ scope: { source: 'task' as const },
-            call: { capability: 'chapter.review' as const, input: { reason: '审核原文迁移结果' } } }] : [],
-        ] }
+          ...deferred ? [] : [{ scope: { source: 'task' as const },
+            call: { capability: 'chapter.review' as const, input: { reason: '审核原文迁移结果' } } }],
+        ] })
       const authorization = { session_id: String(session.id), message_id: String(message.id) }
-      const descriptor = await persistCapabilityTaskRequest(workspace, session, 'chapter_writing', task,
+      const formalBeforeAdmission = await readJson(workspace, 'outline/confirmed-outline.json')
+      const admission = persistCapabilityTaskRequest(workspace, session, 'chapter_writing', task,
         authorization, ['outline/confirmed-outline.json', 'analysis/requirements.json'],
         { stage: 'chapter_writing', status: 'completed', run: null })
+      if (interrupt === 'missing_followup') {
+        await expect(admission).rejects.toThrow('BID_CAPABILITY_CONTENT_FOLLOWUP_REQUIRED')
+        expect(await readJson(workspace, 'outline/confirmed-outline.json')).toEqual(formalBeforeAdmission)
+        return
+      }
+      const descriptor = await admission
       const firstStepId = `step-${createHash('sha256').update(descriptor.workId).digest('hex').slice(0, 24)}-0001`
       const prefix = createHash('sha256').update(firstStepId).digest('hex').slice(0, 12)
       const children = [1, 2].map(index => `SEC-${prefix}-${String(index)}`)
       const original = await readFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), 'utf8')
       const blocks = indexChapterContentBlocks('SEC-1', original)
       const outputs = [
-        JSON.stringify([{ type: 'split_section', section_id: 'SEC-1', children: [
-          { title: '准备', purpose: '准备', must_answer: ['准备'] },
-          { title: '实施', purpose: '实施', must_answer: ['实施'] },
-        ] }]),
         JSON.stringify([{ section_id: children[0], requirement_ids: ['REQ-1'],
           scoring_ids: ['SCORE-1'], scoring_response_point_ids: ['RP-000001'], compliance_ids: [] }]),
         JSON.stringify(blocks.map((block, index) => ({
@@ -379,7 +384,7 @@ describe('目录能力候选', () => {
       const dispatcher: CapabilityTaskDispatcher = {
         allowedWrites: async (call, ids, working, stepId) => {
           if (call.capability === 'chapter.review') return new Set(['chapters/local-review.json'])
-          if (call.capability !== 'outline.refine' && call.capability !== 'chapter.reorganize') {
+          if (call.capability !== 'outline.update' && call.capability !== 'chapter.reorganize') {
             throw new Error('unexpected capability')
           }
           return allowedOutlineCapabilityWrites(call, working, stepId, ids)
@@ -395,7 +400,7 @@ describe('目录能力候选', () => {
             return { result: { target_section_ids: [], changed_artifacts: ['chapters/local-review.json'],
               change_summary: '已审核原文迁移结果', warnings: [], missing_topics: [], needs_input: false } }
           }
-          if (call.capability !== 'outline.refine' && call.capability !== 'chapter.reorganize') {
+          if (call.capability !== 'outline.update' && call.capability !== 'chapter.reorganize') {
             throw new Error('unexpected capability')
           }
           if (interrupt === 'before_reorganize' && call.capability === 'chapter.reorganize' && !interrupted) {
@@ -411,26 +416,18 @@ describe('目录能力候选', () => {
       const run = createTestBidRunContext({ work: descriptor })
       if (deferred) {
         const execution = executeCapabilityTask(workspace, run, dispatcher, agent, session)
-        if (interrupt === 'missing_followup') {
-          await expect(execution).rejects.toThrow('BID_CAPABILITY_CONTENT_FOLLOWUP_REQUIRED')
-          const formal = parseOutlineArtifact(await readJson(workspace, 'outline/confirmed-outline.json'))
-          expect(children.some(id => formal.sections.some(section => section.id === id))).toBe(false)
-          await expect(readFile(join(workspace.projectRoot, `requests/${descriptor.workId}/result.json`)))
-            .rejects.toMatchObject({ code: 'ENOENT' })
-        } else {
-          await expect(execution).resolves.toMatchObject({ status: 'completed' })
-          expect(await readJson(workspace, 'chapters/pending-reorganization.json'))
-            .toMatchObject({ pending_source_section_ids: ['SEC-1'] })
-        }
+        await expect(execution).resolves.toMatchObject({ status: 'completed' })
+        expect(await readJson(workspace, 'chapters/pending-reorganization.json'))
+          .toMatchObject({ pending_source_section_ids: ['SEC-1'] })
         expect(await readFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), 'utf8')).toBe(original)
-        expect(start).toHaveBeenCalledTimes(2)
+        expect(start).toHaveBeenCalledOnce()
         return
       }
       if (interrupt !== 'none') {
         await expect(executeCapabilityTask(workspace, run, dispatcher, agent, session))
           .rejects.toThrow(interrupt === 'before_reorganize'
             ? '目录候选已合并，正文迁移前中断' : '原文迁移候选已合并，审核前中断')
-        expect(start).toHaveBeenCalledTimes(interrupt === 'before_reorganize' ? 2 : 3)
+        expect(start).toHaveBeenCalledTimes(interrupt === 'before_reorganize' ? 1 : 2)
         const formal = parseOutlineArtifact(await readJson(workspace, 'outline/confirmed-outline.json'))
         expect(children.some(id => formal.sections.some(section => section.id === id))).toBe(false)
         expect(await readFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), 'utf8')).toBe(original)
@@ -446,7 +443,7 @@ describe('目录能力候选', () => {
       const outcome = await executeCapabilityTask(workspace,
         interrupt === 'none' ? run : createTestBidRunContext({ work: descriptor }), dispatcher, agent, session)
       expect(outcome.status).toBe('completed')
-      expect(start).toHaveBeenCalledTimes(3)
+      expect(start).toHaveBeenCalledTimes(2)
       const outline = parseOutlineArtifact(await readJson(workspace, 'outline/confirmed-outline.json'))
       expect(children.every(id => outline.sections.some(section => section.id === id))).toBe(true)
       const seeds = chapterReuseSeedsSchema.parse(await readJson(workspace, 'chapters/reuse-seeds.json'))

@@ -8,6 +8,18 @@ import { readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { parseChapterExecutionLog } from '../../../../packages/bid/bid/src/chapter-writing-plan-artifacts.ts'
 
+async function withFixedExportDate<T>(run: () => Promise<T>): Promise<T> {
+  const systemDate = Date
+  const fixedExportTime = Date.parse('2026-09-26T12:00:00Z')
+  globalThis.Date = class extends systemDate {
+    constructor(...args: unknown[]) {
+      super(args.length === 0 ? fixedExportTime : (Reflect.construct(systemDate, args) as Date).getTime())
+    }
+    static override now(): number { return fixedExportTime }
+  } as DateConstructor
+  try { return await run() } finally { globalThis.Date = systemDate }
+}
+
 const configPath = process.argv[2]
 if (configPath === undefined) throw new Error('缺少 S5 回放配置路径')
 let ctx: Context | undefined
@@ -27,7 +39,7 @@ try {
   const runtime = await orchestrator.drive()
   const askedForRequirements = agent.session.events.some(event =>
     event.type === 'bid.user_confirmation.required' && event.data.stage === 'chapter_writing')
-  await executeDocxExport(workspace, createTestBidRunContext())
+  await withFixedExportDate(() => executeDocxExport(workspace, createTestBidRunContext()))
   const logPath = join(workspace.projectRoot, 'chapters/execution-log.json')
   const log = parseChapterExecutionLog(JSON.parse(await readFile(logPath, 'utf8')))
   for (const section of log.sections) {
@@ -38,7 +50,7 @@ try {
     section.final_reviewer_child_session_id = null
   }
   await writeFile(logPath, JSON.stringify(log))
-  await executeDocxExport(workspace, createTestBidRunContext(), 'output/saved.docx')
+  await withFixedExportDate(() => executeDocxExport(workspace, createTestBidRunContext(), 'output/saved.docx'))
   process.stdout.write(`${JSON.stringify({ artifacts, evidence_unchanged: true, askedForRequirements, runtime, allowed_actions: getBidClientProjection(runtime).allowedActions })}\n`)
 } finally {
   await ctx?.fiber.dispose()

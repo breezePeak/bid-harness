@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { sectionAnswerPlanSchema } from './section-answer-plan.ts'
 
 /** Allowed ways a later technical proposal may use a local material. */
 export const MATERIAL_USAGES = ['reuse', 'adapt', 'reference', 'background'] as const
@@ -75,12 +76,14 @@ const mappingSchema = z.object({
   local_materials: z.array(localEvidenceMaterialSchema),
   web_materials: z.array(webEvidenceMaterialSchema),
   missing_topics: z.array(z.string().min(1)),
+  answer_plan: sectionAnswerPlanSchema.optional(),
 }).strict()
 
 const partialMappingSchema = z.object({
   local_materials: z.array(localEvidenceMaterialSchema),
   web_materials: z.array(transientWebChunkEvidenceMaterialSchema),
   missing_topics: z.array(z.string().min(1)),
+  answer_plan: sectionAnswerPlanSchema.optional(),
 }).strict()
 
 /** Evidence available to one final writable outline section. */

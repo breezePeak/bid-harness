@@ -43,9 +43,9 @@ S2 Run 首次通过 running 检查点后，Host 把一个原生 Goal 绑定到�
 
 主 Agent 在所有 Bid 阶段都可用 `bid_project_inspect` 读取项目，用 `bid_run_task` 提交有序能力步骤。段落范围只接纳引用同一选区的单步 `chapter.revise`，后续计划补丁也不能扩大为整章或结构写入。挂起的能力 Work 可由后续真实用户消息调用 `bid_plan_task` 替换尚未开始的后缀；Host 保留已完成步骤和原任务范围，保存计划后仍等待明确恢复。旧目录、资料、写作计划及章节修订工具在原生确认或 S5 热插入边界保留既有处理，其余阶段按相同能力适配器执行；目录旧参数仍要匹配当前确认目录的 CAS 身份。运行中跨能力请求先保存到当前 Work 命令日志，收敛后由独立 Work 顺序执行。
 
-目录能力以当前确认目录为已写项目的基线，首次确认前读取当前 Draft。`outline.update` 同时应用结构操作与经过真实招标 ID 校验的业务归属；拆分子章不会机械继承父章的全部要求。`outline.refine` 先由独立子会话提出结构操作，再基于 Host 分配的新章节 ID 分配业务引用。`chapter.reorganize` 把旧正文按完整 Markdown 块交由子会话分配，Host 核对源正文 SHA、块身份、目标范围、完整覆盖及显式共享或删减。迁移成果写入 `chapters/reuse-seeds.json` 并保持待写、待审；退役章节的计划、资料和旧 Manifest 归属保存在 `outline/reassignment.json`，未分配的旧正文由 `chapters/pending-reorganization.json` 指明。目录、Draft、授权来源为 `user_task` 的 confirmation、Evidence、Writing Plan、执行索引及 Manifest 在同一步候选中校验，再由能力 Work 发布实际改变的精确文件。
+目录能力以当前确认目录为已写项目的基线，首次确认前读取当前 Draft。`outline.update` 同时应用结构操作与经过真实招标 ID 校验的业务归属；拆分子章不会机械继承父章的全部要求。`outline.refine` 使用 S4 的章节研究、结构判断和终审，依据实际资料决定是否深化目录；新叶节由 Host 分配 ID 并独立形成任务级依据。`chapter.reorganize` 把旧正文按完整 Markdown 块交由子会话分配，Host 核对源正文 SHA、块身份、目标范围、完整覆盖及显式共享或删减。迁移成果写入 `chapters/reuse-seeds.json` 并保持待写、待审；退役章节的计划、资料和旧 Manifest 归属保存在 `outline/reassignment.json`，未分配的旧正文由 `chapters/pending-reorganization.json` 指明。目录、Draft、授权来源为 `user_task` 的 confirmation、Evidence、Writing Plan、执行索引及 Manifest 在同一步候选中校验，再由能力 Work 发布实际改变的精确文件。
 
-`evidence.research` 的局部能力复用 S4 remap：`supplement` 保留并去重旧材料，`replace` 只替换目标章节；范围外映射和既有 Web 来源顺序保持原样。拆分后的退役章节资料只作为待判断候选，当前正文草稿只辅助检索意图，二者都不自动成为 Evidence。研究不开放目录结构工具；需要深化时先执行独立目录步骤。研究更新章节写作说明后同步当前确认目录及相关写作索引，新增 Web 快照从严格来源账本取得精确文件许可；阶段映射计划与检查点留在步骤候选内，不随能力结果发布。
+`evidence.research` 与默认 S4 使用同一章节研究执行器：`supplement` 保留并去重旧材料，`replace` 只替换目标章节；范围外映射和既有 Web 来源顺序保持原样。首次调用可从空 Evidence Map 和 Web Ledger 建立资料。`allow_outline_refinement=false` 保持确认目录的结构、职责与必答项；明确授权为 `true` 时，研究后的结构判断可在授权子树内深化目录。拆分后的退役章节资料只作为待判断候选，当前正文草稿只辅助检索意图，二者都不自动成为 Evidence。每个当前可写叶节的 `answer_plan` 逐项记录具体回应、依据边界或真实缺口；历史映射仍可读取，写作前会定向补齐缺失计划。写作和审核保留缺口及修复结论，全节缺少可成文内容时等待真实输入。新增 Web 快照从严格来源账本取得精确文件许可；阶段映射计划和检查点留在步骤候选内，等待输入时由原 Work 校验并复用。
 
 全新项目的文件接入必须等待专用上传操作，因为其 Executor 需要已准入的文件批次。S2 的 Stage Policy 声明 `requiresUserConfirmationAfterValidation`；初次校验通过后记录 `bid.user_confirmation.required`，不记录完成事件。`confirmValidatedStage()` 在正式 Artifact 再次通过 Validator 后才记录用户确认和阶段完成。
 

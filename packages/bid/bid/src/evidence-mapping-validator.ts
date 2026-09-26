@@ -167,8 +167,20 @@ export async function validateEvidenceMapping(
       : { ...quality, reviewed_section_ids: quality.reviewed_section_ids.filter(id => scope.includes(id)) }
     validateOutlineGenerationQuality(reviewedOutline, scopedQuality, requirements, scoring, catalog, issues)
     // Draft 中尚未研究的其他新增叶节由确认前复核补齐；现存映射仍验证身份、重复和全部来源。
-    const coverageOutline = scope === undefined ? outline : { ...outline, sections: outline.sections.filter(section =>
-      scope.includes(section.id) || map.section_mappings.some(mapping => mapping.section_id === section.id)) }
+    const coveredIds = new Set(scope ?? outline.sections.map(section => section.id))
+    if (scope !== undefined) {
+      for (const mapping of map.section_mappings) coveredIds.add(mapping.section_id)
+      const sectionsById = new Map(outline.sections.map(section => [section.id, section]))
+      for (const id of [...coveredIds]) {
+        let parentId = sectionsById.get(id)?.parent_id
+        while (parentId != null) {
+          coveredIds.add(parentId)
+          parentId = sectionsById.get(parentId)?.parent_id
+        }
+      }
+    }
+    const coverageOutline = scope === undefined ? outline
+      : { ...outline, sections: outline.sections.filter(section => coveredIds.has(section.id)) }
     issues.push(...validateSectionEvidenceCoverage(coverageOutline, map))
     const mappings = new Map(map.section_mappings.map(mapping => [mapping.section_id, mapping]))
     for (const section of reviewedOutline.sections) {
@@ -199,7 +211,7 @@ export async function validateEvidenceMapping(
   } catch (error) {
     if (error instanceof ZodError) {
       for (const issue of error.issues.slice(0, 12)) reject(issues, 'EVIDENCE_MAPPING_ARTIFACT_INVALID', issue.message, MAP_PATH, issue.path.join('.'))
-    } else reject(issues, 'EVIDENCE_MAPPING_ARTIFACT_INVALID', 'An evidence-mapping Artifact has invalid fields.', MAP_PATH)
+    } else reject(issues, 'EVIDENCE_MAPPING_ARTIFACT_INVALID', error instanceof Error ? error.message : String(error), MAP_PATH)
   }
   return issues.length === 0 ? { ok: true } : { ok: false, issues }
 }

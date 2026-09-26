@@ -13,7 +13,7 @@ it('章节能力只授权目标正文、审核与共享索引，不授权范围�
   expect(paths).toEqual(new Set([
     'chapters/sections/0002.md', 'chapters/meta/0002.json', 'chapters/reviews/0002.json',
     'chapters/execution-plan.json', 'chapters/execution-log.json', 'chapters/manifest.json',
-    'analysis/web-evidence-sources.json',
+    'analysis/evidence-map.json', 'analysis/web-evidence-sources.json', 'outline/quality-report.json',
   ]))
   expect(await allowedWritingCapabilitySourceWrites(workspace)).toEqual(new Set())
 })

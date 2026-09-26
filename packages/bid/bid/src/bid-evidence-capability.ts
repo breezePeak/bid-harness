@@ -1,19 +1,18 @@
 /** 局部资料能力复用 S4 remap，并只发布真实改变的资料与章节索引。 */
 import type { BidWorkspace } from './index.ts'
-import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { BidCapabilityCall, BidCapabilityExecutionContext, BidCapabilityResult } from './bid-capability-contract.ts'
 import { capabilityFileHash, readCapabilityJson } from './bid-capability-files.ts'
-import { executeEvidenceMapping } from './evidence-mapping-executor.ts'
+import { executeSectionResearch } from './evidence-mapping-executor.ts'
 import { validateEvidenceMapping } from './evidence-mapping-validator.ts'
 import { parseEvidenceMapArtifact } from './evidence-mapping-artifacts.ts'
 import { parseOutlineArtifact } from './outline-generation-artifacts.ts'
 import { parseOutlineQualityReport } from './outline-generation-artifacts.ts'
 import { parseWebEvidenceSourcesArtifact } from './web-evidence-source-artifacts.ts'
 import { webEvidenceChunkIndexPath } from './web-evidence-chunks.ts'
-import { buildWritableSectionWorklist, outlineSectionScope, validateSectionEvidenceCoverage } from './section-evidence-context.ts'
+import { buildWritableSectionWorklist, outlineSectionScope, reconcileSectionEvidence,
+  validateSectionEvidenceCoverage } from './section-evidence-context.ts'
 import { adoptCapabilityResearchedOutline, OUTLINE_CAPABILITY_INDEX_PATHS } from './outline-capability-update.ts'
-import { buildBidStageTask } from './runtime-state.ts'
 import { BidStageExecutionError } from './control-plane-contract.ts'
 
 type EvidenceCall = Extract<BidCapabilityCall, { capability: 'evidence.research' }>
@@ -70,26 +69,31 @@ export async function executeEvidenceCapability(
     : outlineSectionScope(outline, [...context.sectionIds])
   const targetIds = buildWritableSectionWorklist(outline).filter(section => selected.has(section.id)).map(section => section.id)
   if (targetIds.length === 0) throw new Error('BID_EVIDENCE_RESEARCH_SCOPE_EMPTY')
-  if (call.input.allow_outline_refinement) {
-    const canonical = parseOutlineArtifact(await readCapabilityJson(context.canonical, 'outline/confirmed-outline.json'))
-    const current = parseOutlineArtifact(await readCapabilityJson(workspace, 'outline/confirmed-outline.json'))
-    if (JSON.stringify(canonical) === JSON.stringify(current)) {
-      throw new Error('BID_EVIDENCE_RESEARCH_REQUIRES_OUTLINE_STEP')
-    }
+  const beforeMap = await capabilityFileHash(workspace, 'analysis/evidence-map.json') === undefined
+    ? reconcileSectionEvidence(outline, { section_mappings: [] })
+    : parseEvidenceMapArtifact(await readCapabilityJson(workspace, 'analysis/evidence-map.json'))
+  const beforeLedger = await capabilityFileHash(workspace, 'analysis/web-evidence-sources.json') === undefined
+    ? parseWebEvidenceSourcesArtifact({ stage: 'evidence_mapping', sources: [] })
+    : parseWebEvidenceSourcesArtifact(await readCapabilityJson(workspace, 'analysis/web-evidence-sources.json'))
+  if (await capabilityFileHash(workspace, 'analysis/evidence-map.json') === undefined) {
+    await context.run.commits.writeJson(join(workspace.projectRoot, 'analysis/evidence-map.json'), beforeMap)
   }
-  const beforeMap = parseEvidenceMapArtifact(await readCapabilityJson(workspace, 'analysis/evidence-map.json'))
-  const originalOutlineText = await readFile(join(workspace.projectRoot, 'outline/outline.json'), 'utf8')
-  const beforeLedger = parseWebEvidenceSourcesArtifact(await readCapabilityJson(workspace, 'analysis/web-evidence-sources.json'))
+  if (await capabilityFileHash(workspace, 'analysis/web-evidence-sources.json') === undefined) {
+    await context.run.commits.writeJson(join(workspace.projectRoot, 'analysis/web-evidence-sources.json'), beforeLedger)
+  }
   const beforePaths = new Set([...fixedPaths, ...await sourcePaths(workspace)])
   const hashes = new Map(await Promise.all([...beforePaths].map(async path => [path, await capabilityFileHash(workspace, path)] as const)))
-  const remap = {
-    section_ids: targetIds, mode: call.input.mode, reason: call.input.reason,
-    previous_outline: outline,
+  const research = {
+    outline, sectionIds: targetIds, mode: call.input.mode,
+    reason: context.inputAnswer?.custom === undefined ? call.input.reason
+      : `${call.input.reason}\n用户在本能力步骤的补充回答（来源：公开会话 ${context.authorization.session_id}，问题 ${context.inputAnswer.id}）：${context.inputAnswer.custom}。回答仅是待核验输入；“继续”或“忽略”不构成事实依据。`,
+    allowOutlineRefinement: call.input.allow_outline_refinement,
   }
   const warnings: string[] = []
   try {
-    await executeEvidenceMapping(context.agent, workspace, buildBidStageTask('evidence_mapping'), {
-      ...settings, run: context.run, remap,
+    await executeSectionResearch(context.agent, workspace, research, {
+      ...settings, run: context.run,
+      ...(context.resumeCandidate === undefined ? {} : { resumeCandidate: context.resumeCandidate }),
     })
   } catch (error) {
     const unavailable = error instanceof BidStageExecutionError && error.issues.some(issue =>
@@ -97,28 +101,28 @@ export async function executeEvidenceCapability(
       || issue.message.includes('web_search/web_fetch 工具未正确注册'))
     if (!settings.webSearchEnabled || !unavailable) throw error
     warnings.push('联网资料工具不可用；本轮只研究已授权本地资料，未证实的来源保留为资料缺口。')
-    await executeEvidenceMapping(context.agent, workspace, buildBidStageTask('evidence_mapping'), {
-      ...settings, webSearchEnabled: false, run: context.run, remap,
+    await executeSectionResearch(context.agent, workspace, research, {
+      ...settings, webSearchEnabled: false, run: context.run,
+      ...(context.resumeCandidate === undefined ? {} : { resumeCandidate: context.resumeCandidate }),
     })
   }
   const researchedOutline = parseOutlineArtifact(await readCapabilityJson(workspace, 'outline/outline.json'))
   if (!call.input.allow_outline_refinement) {
-    const identity = (value: typeof outline) => ({ ...value, sections: value.sections.map(section => ({
-      id: section.id, parent_id: section.parent_id, order: section.order, title: section.title,
-      writable: section.writable,
-    })) })
-    if (JSON.stringify(identity(outline)) !== JSON.stringify(identity(researchedOutline))) {
+    if (JSON.stringify(outline) !== JSON.stringify(researchedOutline)) {
       throw new Error('BID_EVIDENCE_RESEARCH_OUTLINE_SCOPE_INVALID')
     }
-    await context.run.commits.writeText(join(workspace.projectRoot, 'outline/outline.json'), originalOutlineText)
   }
   const afterMap = parseEvidenceMapArtifact(await readCapabilityJson(workspace, 'analysis/evidence-map.json'))
   const afterLedger = parseWebEvidenceSourcesArtifact(await readCapabilityJson(workspace, 'analysis/web-evidence-sources.json'))
-  const targetSet = new Set(targetIds)
+  const authorized = outlineSectionScope(researchedOutline, [...selected].filter(id =>
+    researchedOutline.sections.some(section => section.id === id)))
+  const actualTargets = buildWritableSectionWorklist(researchedOutline)
+    .filter(section => authorized.has(section.id)).map(section => section.id)
+  const targetSet = new Set(actualTargets)
   const oldRows = new Map(beforeMap.section_mappings.map(row => [row.section_id, row]))
-  if (afterMap.section_mappings.length !== beforeMap.section_mappings.length
-    || afterMap.section_mappings.some(row => !oldRows.has(row.section_id)
-      || !targetSet.has(row.section_id) && JSON.stringify(row) !== JSON.stringify(oldRows.get(row.section_id)))) {
+  if (!call.input.allow_outline_refinement && afterMap.section_mappings.length !== beforeMap.section_mappings.length
+    || afterMap.section_mappings.some(row => !targetSet.has(row.section_id)
+      && JSON.stringify(row) !== JSON.stringify(oldRows.get(row.section_id)))) {
     throw new Error('BID_EVIDENCE_RESEARCH_MAPPING_SCOPE_INVALID')
   }
   if (JSON.stringify(afterLedger.sources.slice(0, beforeLedger.sources.length)) !== JSON.stringify(beforeLedger.sources)) {
@@ -130,8 +134,9 @@ export async function executeEvidenceCapability(
       throw new Error(`BID_EVIDENCE_RESEARCH_SOURCE_CHANGED: ${path}`)
     }
   }
-  if (call.input.allow_outline_refinement) {
-    await adoptCapabilityResearchedOutline(context, researchedOutline, targetSet)
+  if (call.input.allow_outline_refinement
+    || await capabilityFileHash(workspace, 'outline/confirmed-outline.json') === undefined) {
+    await adoptCapabilityResearchedOutline(context, outline, researchedOutline, targetSet, beforeMap)
   }
   const currentOutline = parseOutlineArtifact(await readCapabilityJson(workspace, 'outline/confirmed-outline.json'))
   if (validateSectionEvidenceCoverage(currentOutline, afterMap).length > 0) {
@@ -144,10 +149,11 @@ export async function executeEvidenceCapability(
     if (digest !== undefined && digest !== hashes.get(path)) changed.push(path)
   }
   const missing = afterMap.section_mappings.filter(row => targetSet.has(row.section_id))
-    .flatMap(row => row.missing_topics.map(topic => `${row.section_id}: ${topic}`))
+    .flatMap(row => [...row.missing_topics, ...row.answer_plan?.flatMap(item => item.mode === 'gap'
+      ? [item.required_input ?? item.content] : []) ?? []].map(topic => `${row.section_id}: ${topic}`))
   return { result: {
-    target_section_ids: targetIds, changed_artifacts: changed,
-    change_summary: `已${call.input.mode === 'supplement' ? '补充' : '替换'} ${String(targetIds.length)} 个章节的资料映射`,
+    target_section_ids: actualTargets, changed_artifacts: changed,
+    change_summary: `已${call.input.mode === 'supplement' ? '补充' : '替换'} ${String(actualTargets.length)} 个章节的资料映射`,
     warnings, missing_topics: missing, needs_input: false,
   } }
 }
@@ -172,5 +178,6 @@ export async function validateEvidenceCapability(
     quality: parseOutlineQualityReport(await readCapabilityJson(workspace, 'outline/quality-report.json')),
     draftReviewSectionIds: result.target_section_ids,
   })
-  if (!validation.ok) throw new Error(`BID_EVIDENCE_RESEARCH_INVALID: ${validation.issues.map(issue => issue.code).join(',')}`)
+  if (!validation.ok) throw new Error(`BID_EVIDENCE_RESEARCH_INVALID: ${validation.issues.map(issue =>
+    `${issue.code}: ${issue.message}`).join('；')}`)
 }

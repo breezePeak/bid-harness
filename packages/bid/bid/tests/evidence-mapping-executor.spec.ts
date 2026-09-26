@@ -61,6 +61,7 @@ import { writingPlanFixture } from './fixtures/chapter-writing-inputs.ts'
 import { allowedEvidenceCapabilitySourceWrites, allowedEvidenceCapabilityWrites, executeEvidenceCapability,
   validateEvidenceCapability } from '../src/bid-evidence-capability.ts'
 import type { BidCapabilityExecutionContext } from '../src/bid-capability-contract.ts'
+import { createBidCapabilityDispatcher } from '../src/bid-capability-dispatcher.ts'
 
 const executeEvidenceMapping = (
   agent: Agent,
@@ -564,7 +565,8 @@ function mappingFixture(
     return result
   }
   const mappingToolArgs = (mapping: Record<string, unknown>): Record<string, unknown> => {
-    const { writing_brief: _brief, writing_dimensions: _dimensions, missing_topics: _missing, ...materials } = mapping
+    const { writing_brief: _brief, writing_dimensions: _dimensions, missing_topics: _missing,
+      answer_plan: _plan, ...materials } = mapping
     return materials
   }
   const taskToolArgs = (mapping: Record<string, unknown>): Record<string, unknown> => {
@@ -577,6 +579,14 @@ function mappingFixture(
       coverage_override: { requirement_ids, scoring_ids, scoring_response_point_ids },
     }
   }
+  const planToolArgs = (sectionId: string, result: Readonly<ToolExecutionResult>) => ({
+    section_id: sectionId,
+    basis: { kind: 'section_responsibility', explanation: '按当前章节任务说明方案与边界。', requirement_ids: [] },
+    answer_plan: ((result.value as { answer_checklist: Array<{ item_ref: string; text: string }> }).answer_checklist ?? [])
+      .map(item => ({ target_refs: [item.item_ref], mode: 'proposal',
+        content: `针对“${item.text}”拟采用当前章节的实施方案。`,
+        basis: [{ kind: 'section_responsibility' }], boundary: '不证明我方现有能力或未经确认的具体参数。' })),
+  })
   const submitReply = async (request: ContinuableStartSpec, child: Agent): Promise<void> => {
     let parsed: unknown
     try {
@@ -609,13 +619,14 @@ function mappingFixture(
           scopedSections = JSON.parse(promptText(request.request).split('\n')
             .find(line => line.startsWith('current_section_scope：'))!.slice('current_section_scope：'.length)) as OutlineSection[]
           for (const section of scopedSections.filter(item => item.writable)) {
-            await invokeSubmissionTool(child, tools.get('update_section_task')!, taskToolArgs({ section_id: section.id,
+            const taskResult = await invokeSubmissionTool(child, tools.get('update_section_task')!, taskToolArgs({ section_id: section.id,
               writing_dimensions: ['技术响应'], missing_topics: [], writing_brief: {
                 purpose: section.purpose, must_answer: section.must_answer, writing_notes: section.writing_notes,
                 suggested_tables: section.suggested_tables, suggested_figures: section.suggested_figures,
                 requirement_ids: section.requirement_ids, scoring_ids: section.scoring_ids,
                 scoring_response_point_ids: section.scoring_response_point_ids ?? [],
               } }))
+            if (!taskResult.isError) await invokeSubmissionTool(child, tools.get('update_section_task')!, planToolArgs(section.id, taskResult))
           }
           await invokeSubmissionTool(child, tools.get('submit_section_structure_assessment')!, structureAssessment())
         }
@@ -626,13 +637,14 @@ function mappingFixture(
           } })).isError) break
           if (index < operations.length - 1) {
             for (const section of scopedSections.filter(item => item.writable)) {
-              await invokeSubmissionTool(child, tools.get('update_section_task')!, taskToolArgs({ section_id: section.id,
+              const taskResult = await invokeSubmissionTool(child, tools.get('update_section_task')!, taskToolArgs({ section_id: section.id,
                 writing_dimensions: ['技术响应'], missing_topics: [], writing_brief: {
                   purpose: section.purpose, must_answer: section.must_answer, writing_notes: section.writing_notes,
                   suggested_tables: section.suggested_tables, suggested_figures: section.suggested_figures,
                   requirement_ids: section.requirement_ids, scoring_ids: section.scoring_ids,
                   scoring_response_point_ids: section.scoring_response_point_ids ?? [],
                 } }))
+              if (!taskResult.isError) await invokeSubmissionTool(child, tools.get('update_section_task')!, planToolArgs(section.id, taskResult))
             }
             const assessment = structureAssessment('refine')
             assessment.topic_dispositions[0]!.placement = 'separate_section'
@@ -663,8 +675,26 @@ function mappingFixture(
           }
           const taskTool = tools.get('update_section_task')
           if (taskTool !== undefined) {
-            const result = await invokeSubmissionTool(child, taskTool, taskToolArgs(mapping as Record<string, unknown>))
+            const requested = taskToolArgs(mapping as Record<string, unknown>)
+            const fixed = promptText(request.request).includes('"task_kind":"section_remap"')
+            const scopeLine = promptText(request.request).split('\n').find(line => line.startsWith('current_section_scope：'))
+            const original = scopeLine === undefined ? undefined
+              : (JSON.parse(scopeLine.slice('current_section_scope：'.length)) as OutlineSection[])
+                .find(section => section.id === requested.section_id)
+            const changedCoverage = original !== undefined && JSON.stringify(
+              (requested.coverage_override as { requirement_ids: string[] }).requirement_ids,
+            ) !== JSON.stringify(original.requirement_ids)
+            const result = await invokeSubmissionTool(child, taskTool, fixed && !changedCoverage
+              ? { section_id: requested.section_id, basis: requested.basis,
+                writing_dimensions: requested.writing_dimensions, missing_topics: requested.missing_topics }
+              : requested)
             if (result.isError) {
+              rejected = true
+              break
+            }
+            const planArgs = planToolArgs(String((mapping as Record<string, unknown>).section_id), result)
+            const plan = await invokeSubmissionTool(child, taskTool, planArgs)
+            if (plan.isError) {
               rejected = true
               break
             }
@@ -1091,7 +1121,16 @@ describe('evidence-mapping Agent executor', () => {
       writing_brief: { purpose: deviation.purpose, must_answer: deviation.must_answer, writing_notes: [], suggested_tables: ['技术偏离表'], suggested_figures: [] },
       writing_dimensions: ['逐项技术响应'], missing_topics: [],
     }
-    expect((await invoke('update_section_task', blueprint)).isError).toBe(false)
+    const updated = await invoke('update_section_task', blueprint)
+    expect(updated.isError).toBe(false)
+    const checklist = (updated.value as { answer_checklist: Array<{ item_ref: string; text: string }> }).answer_checklist
+    expect((await invoke('update_section_task', {
+      section_id: TECHNICAL_DEVIATION_SECTION_ID,
+      basis: blueprint.basis,
+      answer_plan: checklist.map(item => ({ target_refs: [item.item_ref], mode: 'proposal',
+        content: `拟逐项回应“${item.text}”。`, basis: [{ kind: 'section_responsibility' }],
+        boundary: '具体指标仍按真实招标与投标资料核对。' })),
+    })).isError).toBe(false)
     expect((await invoke('submit_section_structure_assessment', structureAssessment())).isError).toBe(false)
     expect((await invoke('lock_section_outline', { comparison: '固定技术偏离表职责完整，无需调整目录。' })).isError).toBe(false)
     expect((await invoke('submit_section_mapping', { section_id: TECHNICAL_DEVIATION_SECTION_ID, local_materials: [], web_materials: [] })).isError).toBe(false)
@@ -1824,7 +1863,13 @@ describe('evidence-mapping Agent executor', () => {
     changedResearch.key_findings[0]!.explanation = '补充不同方法的适用边界。'
     expect(submittedFindingRef(await invoke('submit_section_research_assessment', changedResearch))).toBe(findingRef)
     expect((await lock()).isError).toBe(true)
-    await invoke('update_section_task', { ...blueprint, coverage_override: { requirement_ids: ['R-1'], scoring_ids: ['S-1'], scoring_response_point_ids: ['RP-000001'] } })
+    const finalTask = await invoke('update_section_task', { ...blueprint,
+      coverage_override: { requirement_ids: ['R-1'], scoring_ids: ['S-1'], scoring_response_point_ids: ['RP-000001'] } })
+    const finalChecklist = (finalTask.value as { answer_checklist: Array<{ item_ref: string; text: string }> }).answer_checklist
+    await invoke('update_section_task', { section_id: 'SEC-1', basis: blueprint.basis,
+      answer_plan: finalChecklist.map(item => ({ target_refs: [item.item_ref], mode: 'proposal',
+        content: `拟针对“${item.text}”执行核查。`, basis: [{ kind: 'section_responsibility' }],
+        boundary: '未确认的事实与参数不作承诺。' })) })
     await assess()
     await lock()
     await invoke('submit_section_mapping', { section_id: 'SEC-1', local_materials: [], web_materials: [] })
@@ -1941,14 +1986,14 @@ describe('evidence-mapping Agent executor', () => {
       }
     }
     expect(log.statistics).toMatchObject({
-      initial_leaf_count: 2, leaf_count: 3, refine_count: 1, sections_added: 2, sections_split: 1, structure_stale_count: 3,
+      initial_leaf_count: 2, leaf_count: 3, refine_count: 1, sections_added: 2, sections_split: 1, structure_stale_count: 5,
     })
     const report = await buildEvidenceMappingAcceptanceReport(workspace, ['SEC-1'])
     expect(report).toMatchObject({
       schema_version: 1,
       selection: { requested_section_ids: ['SEC-1'], reported_section_ids: ['SEC-1'] },
       summary: {
-        initial_leaf_count: 2, final_leaf_count: 3, refine_count: 1, structure_stale_count: 3,
+        initial_leaf_count: 2, final_leaf_count: 3, refine_count: 1, structure_stale_count: 5,
         operations: { added: 2, split: 1, moved: 0, deleted: 0 },
       },
       sections: [{
@@ -2319,6 +2364,82 @@ describe('evidence-mapping Agent executor', () => {
     expect(fixture.followup).not.toHaveBeenCalled()
   })
 
+  it('公共研究首次从空 Evidence 与 Web 基线建立逐项依据', async () => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-first-public-research-')))
+    const material = await writeInputs(workspace)
+    const initialOutline = await readFile(join(workspace.projectRoot, 'outline/initial-confirmed-outline.json'), 'utf8')
+    await writeFile(join(workspace.projectRoot, 'outline/outline.json'), initialOutline)
+    const fixture = mappingFixture(workspace, material)
+    const context: BidCapabilityExecutionContext = {
+      canonical: workspace, working: workspace, agent: fixture.agent,
+      run: createTestBidRunContext(), sectionIds: null, stepDirectory: workspace.root,
+      inputSources: new Map(), baselineHashes: new Map(), allowedWrites: allowedEvidenceCapabilityWrites(),
+      stepId: 'FIRST-RESEARCH', rootWorkId: 'FIRST-WORK',
+      authorization: { session_id: 'SESSION-1', message_id: 'MESSAGE-1' }, inputSha256: '0'.repeat(64),
+    }
+    const research = executeEvidenceCapability({ capability: 'evidence.research', input: {
+      mode: 'supplement', reason: '首次建立全书逐项依据', allow_outline_refinement: false,
+    } }, context, { maxRepairAttempts: 0, maxConcurrency: 2, webSearchEnabled: false })
+    await vi.waitFor(() => { expect(fixture.starts).toHaveLength(2) })
+    fixture.starts.forEach((start) => { start.resolve() })
+    const { result } = await research
+    expect(result.target_section_ids).toEqual(['SEC-1', 'SEC-2'])
+    expect(result.changed_artifacts).toContain('analysis/evidence-map.json')
+    const evidence = parseEvidenceMapArtifact(JSON.parse(await readFile(join(workspace.projectRoot,
+      'analysis/evidence-map.json'), 'utf8')))
+    expect(evidence.section_mappings.every(mapping => mapping.answer_plan?.length)).toBe(true)
+    await expect(validateEvidenceCapability(context, result)).resolves.toBeUndefined()
+  })
+
+  it.each(['evidence.research', 'outline.refine'] as const)('%s 在授权子树内研究后拆分，并返回真实新叶', async (capability) => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-public-refine-')))
+    const material = await writeInputs(workspace)
+    const first = mappingFixture(workspace, material)
+    const initial = executeEvidenceMapping(first.agent, workspace, buildBidStageTask('evidence_mapping'))
+    await vi.waitFor(() => { expect(first.starts).toHaveLength(2) })
+    first.starts.forEach((start) => { start.resolve() })
+    await initial
+    const oldOutline = parseOutlineArtifact(JSON.parse(await readFile(join(workspace.projectRoot,
+      'outline/outline.json'), 'utf8')))
+    await writeFile(join(workspace.projectRoot, 'outline/confirmed-outline.json'), `${JSON.stringify(oldOutline)}\n`)
+    const oldEvidence = parseEvidenceMapArtifact(JSON.parse(await readFile(join(workspace.projectRoot,
+      'analysis/evidence-map.json'), 'utf8')))
+    const split: OutlineEditOperation = { type: 'split_section', section_id: 'SEC-1', children: [
+      { title: '实施方法', purpose: '说明实施方法。', must_answer: ['如何实施？'] },
+      { title: '成果验收', purpose: '说明成果验收。', must_answer: ['如何验收？'] },
+    ] }
+    const fixture = mappingFixture(workspace, material, false, { 'MAP-INIT-SEC-1': [split] })
+    const context: BidCapabilityExecutionContext = {
+      canonical: workspace, working: workspace, agent: fixture.agent,
+      run: createTestBidRunContext(), sectionIds: new Set(['SEC-1']), stepDirectory: workspace.root,
+      inputSources: new Map(), baselineHashes: new Map(), allowedWrites: allowedEvidenceCapabilityWrites(),
+      stepId: 'REFINE-STEP', rootWorkId: 'REFINE-WORK',
+      authorization: { session_id: 'SESSION-1', message_id: 'MESSAGE-1' }, inputSha256: '0'.repeat(64),
+    }
+    const call = capability === 'outline.refine'
+      ? { capability, input: { feedback: '根据研究拆分实施与验收' } }
+      : { capability, input: { mode: 'supplement' as const, reason: '根据研究拆分实施与验收',
+        allow_outline_refinement: true } }
+    const dispatcher = createBidCapabilityDispatcher({ modelStageRepairAttempts: 0,
+      evidenceMappingMaxConcurrency: 2, chapterWritingMaxConcurrency: 1, webSearchEnabled: false })
+    const research = dispatcher.execute(call, context)
+    await vi.waitFor(() => { expect(fixture.starts).toHaveLength(1) })
+    fixture.starts[0]!.resolve()
+    await vi.waitFor(() => { expect(fixture.starts.length).toBeGreaterThanOrEqual(3) })
+    fixture.starts.slice(1).forEach((start) => { start.resolve() })
+    const { result } = await research
+    const outline = parseOutlineArtifact(JSON.parse(await readFile(join(workspace.projectRoot,
+      'outline/confirmed-outline.json'), 'utf8')))
+    expect(result.target_section_ids).toHaveLength(2)
+    expect(result.target_section_ids.every(id => !oldOutline.sections.some(section => section.id === id))).toBe(true)
+    expect(outline.sections.find(section => section.id === 'SEC-2')).toEqual(oldOutline.sections.find(section => section.id === 'SEC-2'))
+    const evidence = parseEvidenceMapArtifact(JSON.parse(await readFile(join(workspace.projectRoot,
+      'analysis/evidence-map.json'), 'utf8')))
+    expect(evidence.section_mappings.find(item => item.section_id === 'SEC-2'))
+      .toEqual(oldEvidence.section_mappings.find(item => item.section_id === 'SEC-2'))
+    await expect(dispatcher.validate(call, context, result)).resolves.toBeUndefined()
+  })
+
   it('局部补资料保持当前目录不变，只返回受影响章节及真实文件', async () => {
     const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-capability-remap-')))
     const fixture = mappingFixture(workspace, await writeInputs(workspace))
@@ -2424,7 +2545,7 @@ describe('evidence-mapping Agent executor', () => {
     const remap = executeEvidenceMapping(fixture.agent, workspace, buildBidStageTask('evidence_mapping'), {
       maxRepairAttempts: 0, remap: { section_ids: ['SEC-2'], mode: 'replace' },
     })
-    const rejected = expect(remap).rejects.toThrow(failure === 'provider' ? 'provider unavailable' : 'OUTLINE_SHARED_REQUIREMENT_MISSING')
+    const rejected = expect(remap).rejects.toThrow(failure === 'provider' ? 'provider unavailable' : 'EVIDENCE_MAPPING_SUBAGENT_STRUCTURED_MISSING')
     if (failure === 'coverage') {
       await vi.waitFor(() => { expect(fixture.starts).toHaveLength(1) })
       fixture.starts[0]!.resolve()
@@ -3225,13 +3346,21 @@ describe('evidence-mapping Agent executor', () => {
     await expect(fixture.invokeSubmissionTool(childId, 'replace_section_mapping', {
       section_id: 'SEC-NEW', local_materials: [], web_materials: [],
     })).resolves.toMatchObject({ isError: false, value: { remaining_section_ids: [] } })
-    await expect(fixture.invokeSubmissionTool(childId, 'update_section_task', {
+    const updated = await fixture.invokeSubmissionTool(childId, 'update_section_task', {
       section_id: 'SEC-NEW', basis: { kind: 'user_change', explanation: '按用户新增章节明确响应。', requirement_ids: [] },
       writing_brief: {
         purpose: '给出用户新增章节的实施响应。', must_answer: ['如何响应新增章节？'], writing_notes: ['说明方法和验收。'],
         suggested_tables: [], suggested_figures: [],
       },
-    })).resolves.toMatchObject({ isError: false, value: { applied: true } })
+    })
+    expect(updated).toMatchObject({ isError: false, value: { applied: true } })
+    const checklist = (updated.value as { answer_checklist: Array<{ item_ref: string; text: string }> }).answer_checklist
+    await fixture.invokeSubmissionTool(childId, 'update_section_task', {
+      section_id: 'SEC-NEW', basis: { kind: 'user_change', explanation: '按新增任务准备依据。', requirement_ids: [] },
+      answer_plan: checklist.map(item => ({ target_refs: [item.item_ref], mode: 'proposal',
+        content: `拟说明“${item.text}”的实施与验收。`, basis: [{ kind: 'section_responsibility' }],
+        boundary: '不声称已有未经确认的项目事实。' })),
+    })
     await fixture.reviewAll(childId)
     await expect(fixture.invokeSubmissionTool(childId, 'finish_final_check', {})).resolves.toMatchObject({
       isError: false, value: { completed: true },

@@ -18,6 +18,8 @@ export async function capabilityRecoveryFixture() {
   const root = await mkdtemp(join(tmpdir(), 'dsh-capability-recovery-'))
   const workspace = new BidWorkspace(root)
   await mkdir(join(workspace.projectRoot, 'chapters'), { recursive: true })
+  await mkdir(join(workspace.projectRoot, 'analysis'), { recursive: true })
+  await writeFile(join(workspace.projectRoot, 'analysis/evidence-map.json'), '{"section_mappings":[]}\n')
   await writeFile(join(workspace.projectRoot, 'chapters/execution-log.json'), '{}\n')
   await writeFile(join(workspace.projectRoot, 'chapters/unrelated.md'), '范围外正文\n')
   const ctx = new Context()

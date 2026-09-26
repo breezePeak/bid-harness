@@ -58,16 +58,16 @@ export function createBidCapabilityDispatcher(settings: CapabilityDispatcherSett
         case 'outline.generate': return Promise.resolve(allowedGenerationWrites(call, sectionIds))
         case 'tender.update': return Promise.resolve(allowedTenderUpdateCapabilityWrites())
         case 'outline.update':
-        case 'outline.refine':
         case 'chapter.reorganize': return allowedOutlineCapabilityWrites(call, working, stepId, sectionIds)
+        case 'outline.refine': return Promise.resolve(allowedEvidenceCapabilityWrites())
         case 'evidence.research': return Promise.resolve(allowedEvidenceCapabilityWrites())
         case 'writing.plan': return Promise.resolve(allowedWritingPlanCapabilityWrites())
         case 'document.review': {
           if (sectionIds !== null) throw new Error('BID_DOCUMENT_REVIEW_PROJECT_SCOPE_REQUIRED')
           return Promise.resolve(allowedDocumentReviewWrites())
         }
-        case 'chapter.write':
-        case 'chapter.review': return allowedWritingCapabilityWrites(working, sectionIds)
+        case 'chapter.write': return allowedWritingCapabilityWrites(working, sectionIds)
+        case 'chapter.review': return allowedWritingCapabilityWrites(working, sectionIds, 'review')
         case 'chapter.revise': {
           const id = call.input.reference.section_id
           if (sectionIds !== null && !sectionIds.has(id)) throw new Error('BID_CHAPTER_REVISION_SCOPE_INVALID')
@@ -78,10 +78,11 @@ export function createBidCapabilityDispatcher(settings: CapabilityDispatcherSett
     },
     allowedWritesAfter(call, working) {
       switch (call.capability) {
+        case 'outline.refine':
         case 'evidence.research': return allowedEvidenceCapabilitySourceWrites(working)
         case 'chapter.write':
-        case 'chapter.revise':
-        case 'chapter.review': return allowedWritingCapabilitySourceWrites(working)
+        case 'chapter.revise': return allowedWritingCapabilitySourceWrites(working)
+        case 'chapter.review': return Promise.resolve(new Set<string>())
         default: return Promise.resolve(new Set<string>())
       }
     },
@@ -91,8 +92,14 @@ export function createBidCapabilityDispatcher(settings: CapabilityDispatcherSett
         case 'outline.generate': return executeGenerationCapability(call, context, settings.modelStageRepairAttempts)
         case 'tender.update': return executeTenderUpdateCapability(call, context)
         case 'outline.update':
-        case 'outline.refine':
         case 'chapter.reorganize': return executeOutlineCapability(call, context)
+        case 'outline.refine': return executeEvidenceCapability({ capability: 'evidence.research', input: {
+          mode: 'supplement', reason: call.input.feedback, allow_outline_refinement: true,
+        } }, context, {
+          maxRepairAttempts: settings.modelStageRepairAttempts,
+          maxConcurrency: settings.evidenceMappingMaxConcurrency,
+          webSearchEnabled: settings.webSearchEnabled,
+        })
         case 'evidence.research': return executeEvidenceCapability(call, context, {
           maxRepairAttempts: settings.modelStageRepairAttempts,
           maxConcurrency: settings.evidenceMappingMaxConcurrency,
@@ -116,14 +123,17 @@ export function createBidCapabilityDispatcher(settings: CapabilityDispatcherSett
         case 'outline.generate': return validateGenerationCapability(call, context)
         case 'tender.update': return validateTenderUpdateCapability(context)
         case 'outline.update':
-        case 'outline.refine':
         case 'chapter.reorganize': return validateOutlineCapability(context, result)
+        case 'outline.refine': {
+          await validateEvidenceCapability(context, result)
+          return validateOutlineCapability(context, result)
+        }
         case 'evidence.research': return validateEvidenceCapability(context, result)
         case 'writing.plan': return validateWritingPlanCapability(context)
         case 'document.review': return validateDocumentReviewCapability(context)
         case 'chapter.write':
         case 'chapter.revise':
-        case 'chapter.review': return validateWritingCapability(context, result.target_section_ids)
+        case 'chapter.review': return validateWritingCapability(context, result.target_section_ids, result.needs_input)
         default: throw new Error(`BID_CAPABILITY_ADAPTER_UNAVAILABLE: ${call.capability}`)
       }
     },

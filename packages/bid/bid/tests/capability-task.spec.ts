@@ -24,6 +24,8 @@ async function fixture() {
   roots.push(root)
   const workspace = new BidWorkspace(root)
   await mkdir(join(workspace.projectRoot, 'chapters'), { recursive: true })
+  await mkdir(join(workspace.projectRoot, 'analysis'), { recursive: true })
+  await writeFile(join(workspace.projectRoot, 'analysis/evidence-map.json'), '{"section_mappings":[]}\n')
   await writeFile(join(workspace.projectRoot, 'chapters/execution-log.json'), '{}\n')
   const ctx = new Context()
   await ctx.plugin(SessionStore)
@@ -248,15 +250,25 @@ describe('同一 Work 的能力序列', () => {
   it('需要用户输入时保留问题身份并等待，不重复调用执行器', async () => {
     const { ctx, workspace, session, descriptor, run, agent } = await fixture()
     try {
-      const execute = vi.fn<CapabilityTaskDispatcher['execute']>(async (call, context) => ({
-        result: { target_section_ids: [], changed_artifacts: [], change_summary: context.inputAnswer === undefined
-          ? '需要补充依据' : '依据已补充',
-        warnings: [], missing_topics: context.inputAnswer === undefined && call.capability === 'chapter.review'
-          ? ['缺少验收文件'] : [],
-        needs_input: context.inputAnswer === undefined && call.capability === 'chapter.review' },
-      }))
+      const execute = vi.fn<CapabilityTaskDispatcher['execute']>(async (call, context) => {
+        const waiting = context.inputAnswer === undefined && call.capability === 'chapter.review'
+        const path = 'chapters/local-review.json'
+        if (call.capability === 'chapter.review') {
+          if (!waiting) {
+            expect(context.resumeCandidate).toBe(true)
+            expect(JSON.parse(await readFile(join(context.working.projectRoot, path), 'utf8')))
+              .toEqual({ candidate: '保留的审核依据' })
+          }
+          await context.run.commits.writeJson(join(context.working.projectRoot, path),
+            waiting ? { candidate: '保留的审核依据' } : { candidate: '已补充验收文件' })
+        }
+        return { result: { target_section_ids: [], changed_artifacts: call.capability === 'chapter.review' ? [path] : [],
+          change_summary: waiting ? '需要补充依据' : '依据已补充',
+          warnings: [], missing_topics: waiting ? ['缺少验收文件'] : [], needs_input: waiting } }
+      })
       const adapter: CapabilityTaskDispatcher = {
-        allowedWrites: async () => new Set(), execute, validate: async () => {},
+        allowedWrites: async call => new Set(call.capability === 'chapter.review'
+          ? ['chapters/local-review.json'] : []), execute, validate: async () => {},
       }
       const first = await executeCapabilityTask(workspace, run, adapter, agent, session)
       expect(first).toMatchObject({ status: 'awaiting_input', result: { missing_topics: ['缺少验收文件'] } })

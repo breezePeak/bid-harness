@@ -18,6 +18,34 @@
         "missing_topics": [
           "缺少实施流程参考资料。"
         ],
+        "answer_plan": [
+          {
+            "targets": [
+              {
+                "kind": "must_answer",
+                "position": 0,
+                "text": "说明访问控制与安全审计措施。"
+              },
+              {
+                "kind": "requirement",
+                "id": "REQ-1"
+              },
+              {
+                "kind": "response_point",
+                "id": "RP-000001"
+              }
+            ],
+            "mode": "proposal",
+            "content": "按访问控制任务设计权限授予、检查与审计留存流程。",
+            "basis": [
+              {
+                "kind": "section_responsibility",
+                "section_id": "SEC-SECURITY"
+              }
+            ],
+            "boundary": "实际系统能力和实施参数仍以本项目资料核实。"
+          }
+        ],
         "section_id": "SEC-SECURITY",
         "writing_dimensions": [
           "身份鉴别与访问控制",

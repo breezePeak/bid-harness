@@ -78,6 +78,7 @@ export async function seedCapabilityProject(workspace: BidWorkspace, variant: 'c
       source_kind: 'reference', file_id: reference.id, chunk: referenceChunk, usage: 'reference', summary: `资料${index + 1}`,
     }], web_materials: [], missing_topics: index === 2 ? ['缺少第三章实施案例'] : [], writing_dimensions: [`主题${index + 1}`],
   })) })
+  await writeJson(workspace, 'analysis/web-evidence-sources.json', { stage: 'evidence_mapping', sources: [] })
   await writeJson(workspace, 'outline/outline.json', outline)
   await writeJson(workspace, 'outline/confirmed-outline.json', outline)
   await writeJson(workspace, 'chapters/writing-plan.json', {

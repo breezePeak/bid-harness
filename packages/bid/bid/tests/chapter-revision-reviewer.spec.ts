@@ -142,6 +142,26 @@ describe('任务 01: Reviewer 真正审核 RevisionIssue', () => {
     expect(runtime.captured()?.blocking_issues).toEqual([])
   })
 
+  it('段落修订新增的无依据事实仍阻断，即使同时存在外部输入缺口', async () => {
+    const { agent, call } = await harness()
+    const context = makeContext()
+    const claim = '我方已有三项资质。'
+    const runtime = attachChapterReview(agent, context, new Map([['Q1', claim]]), evidence, 0,
+      [], [], true, new Set([claim]))
+    const checklist = buildChapterReviewChecklist(context)
+    await call('review_coverage_items', { items: checklist.map((item, index) => index === 0
+      ? { item_ref: item.item_ref, status: 'missing', evidence_quote_refs: [], issue: '缺少人员履历。' }
+      : covered(item.item_ref)) })
+    await call('review_claims', { items: [{ claim_quote_ref: 'Q1', kind: 'project_fact', status: 'unsupported',
+      source_reference: null, issue: '资质没有项目资料证明。' }] })
+    await call('set_review_summary', { quality_checks: quality, blocking_issues: [], assignment_conflicts: [],
+      external_input_gaps: [{ item_ref: checklist[0]!.item_ref, required_material: '人员履历',
+        reason: '当前资料未提供。' }], external_input_only: true })
+    await call('finish_chapter_review', {})
+    expect(runtime.captured()?.verdict).toBe('repair')
+    expect(runtime.captured()?.blocking_issues.join()).toContain('声明无依据')
+  })
+
   it('3. unsatisfied 会被纳入 blocking_issues 并可被 validateChapterReview 正确接受', async () => {
     const { agent, call } = await harness()
     const context = makeContext()

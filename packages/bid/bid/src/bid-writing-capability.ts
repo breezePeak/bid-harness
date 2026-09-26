@@ -17,6 +17,7 @@ import { buildBidStageTask } from './runtime-state.ts'
 import { assertNoLinkedPath, within } from './workspace-path.ts'
 import { assertChapterRevisionScope, renderChapterRevisionTask,
   validateChapterRevisionReference } from './chapter-revision.ts'
+import { BidStageAttentionRequiredError, BidStageExecutionError } from './control-plane-contract.ts'
 
 type WritingCall = Extract<BidCapabilityCall, { capability: 'chapter.write' | 'chapter.revise' | 'chapter.review' }>
 
@@ -65,11 +66,12 @@ async function selectedLocations(
  * @returns 精确路径集合。
  */
 export async function allowedWritingCapabilityWrites(
-  workspace: BidWorkspace, sectionIds: ReadonlySet<string> | null,
+  workspace: BidWorkspace, sectionIds: ReadonlySet<string> | null, mode: 'write' | 'review' = 'write',
 ): Promise<ReadonlySet<string>> {
   const { paths } = await selectedLocations(workspace, sectionIds)
   return new Set([...paths, 'chapters/execution-plan.json', 'chapters/execution-log.json',
-    'chapters/manifest.json', 'analysis/web-evidence-sources.json'])
+    'chapters/manifest.json', ...(mode === 'review' ? [] : ['analysis/evidence-map.json',
+      'analysis/web-evidence-sources.json', 'outline/quality-report.json'])])
 }
 
 /**
@@ -108,7 +110,8 @@ export async function executeWritingCapability(
     validateChapterRevisionReference(call.input, revisionOriginal)
   }
   const beforePaths = new Set([...paths, 'chapters/execution-plan.json', 'chapters/execution-log.json',
-    'chapters/manifest.json', 'analysis/web-evidence-sources.json', ...await sourcePaths(workspace)])
+    'chapters/manifest.json', 'analysis/evidence-map.json', 'analysis/web-evidence-sources.json',
+    'outline/quality-report.json', ...await sourcePaths(workspace)])
   const before = new Map(await Promise.all([...beforePaths].map(async path => [path, await capabilityFileHash(workspace, path)] as const)))
   const seedBySectionId = new Map<string, string>()
   if (call.capability !== 'chapter.review') {
@@ -129,12 +132,17 @@ export async function executeWritingCapability(
     if (revisionOriginal === undefined) throw new Error('BID_CHAPTER_REVISION_BODY_MISSING')
     instruction = renderChapterRevisionTask(call.input, revisionOriginal)
   } else instruction = call.capability === 'chapter.write' ? call.input.instruction : call.input.reason
-  await executeChapterWriting(context.agent, workspace, buildBidStageTask('chapter_writing'), {
+  if (context.inputAnswer?.custom !== undefined) instruction += `\n用户在本能力步骤的补充回答（公开会话 ${context.authorization.session_id}、问题 ${context.inputAnswer.id}）：${context.inputAnswer.custom}。此回答是待核验输入；“继续”或“忽略”不证明事实。`
+  let attention: BidStageAttentionRequiredError | undefined
+  try { await executeChapterWriting(context.agent, workspace, buildBidStageTask('chapter_writing'), {
     ...settings, run: context.run,
     scoped: { targetSectionIds: ids, mode: call.capability === 'chapter.review' ? 'review' : 'write',
       instruction,
       seedBySectionId, affectedDependentIds: affected },
-  })
+  }) } catch (error) {
+    if (!(error instanceof BidStageAttentionRequiredError)) throw error
+    attention = error
+  }
   if (call.capability === 'chapter.revise') {
     const contentPath = [...paths].find(path => path.includes('/sections/') && path.endsWith('.md'))
     if (contentPath === undefined || revisionOriginal === undefined) throw new Error('BID_CHAPTER_REVISION_BODY_MISSING')
@@ -153,7 +161,7 @@ export async function executeWritingCapability(
       }
     }
   }
-  await validateWritingCapability(context, ids)
+  await validateWritingCapability(context, ids, attention !== undefined)
   const afterPaths = new Set([...beforePaths, ...await sourcePaths(workspace)])
   const changed: string[] = []
   for (const path of afterPaths) {
@@ -162,20 +170,35 @@ export async function executeWritingCapability(
   }
   const manifest = parseChapterWritingManifest(await readJson(workspace, 'chapters/manifest.json'))
   const selected = new Set(ids)
-  const reviewConcerns = call.capability === 'chapter.review' ? (await Promise.all(manifest.chapters
+  const reviews = (await Promise.all(manifest.chapters
     .filter(entry => selected.has(entry.section_id))
     .map(async (entry) => {
       const review = parseChapterReviewArtifact(await readJson(workspace, entry.review_path))
-      return review.verdict === 'pass' ? [] : [`${entry.section_id}: ${review.blocking_issues.join('；') || review.verdict}`]
-    }))).flat() : []
+      return { sectionId: entry.section_id, review }
+    })))
+  const repairs = reviews.filter(item => item.review.verdict === 'repair')
+  if (repairs.length > 0 && call.capability !== 'chapter.review') {
+    throw new BidStageExecutionError(repairs.map(item => ({ code: 'CHAPTER_WRITING_REPAIR_REQUIRED',
+      artifact: item.sectionId, message: `${item.sectionId}：${item.review.blocking_issues.join('；')}` })))
+  }
+  const reviewConcerns = reviews.filter(item => item.review.verdict !== 'pass').map(item =>
+    `${item.sectionId}: ${item.review.blocking_issues.join('；') || item.review.verdict}`)
+  const missingTopics = [...manifest.chapters.filter(entry => selected.has(entry.section_id))
+    .flatMap(entry => entry.unresolved_topics.map(topic => `${entry.section_id}: ${topic}`)),
+  ...reviews.flatMap(item => item.review.external_input_gaps.map(gap =>
+    `${item.sectionId}: ${gap.required_material}`)),
+  ...attention?.issues.map(issue => issue.message) ?? []]
+  const needsInput = attention !== undefined || reviews.some(item => item.review.verdict === 'attention')
   return { result: {
     target_section_ids: ids, changed_artifacts: changed,
-    change_summary: `${call.capability === 'chapter.review' ? '已审核' : '已编写并审核'} ${String(ids.length)} 个章节`,
+    change_summary: call.capability === 'chapter.review'
+      ? `已生成 ${String(reviews.length)} 个章节的审核报告${reviewConcerns.length === 0 ? '' : '，正文尚未全部通过'}`
+      : needsInput ? `已保留可用章节候选，仍需补充 ${missingTopics.slice(0, 3).join('；')}`
+        : `已编写并审核 ${String(ids.length)} 个章节`,
     warnings: [...affected].map(id => `强依赖章节 ${id} 的交接需要重新核查；本次未改写其正文。`)
       .concat(reviewConcerns),
-    missing_topics: manifest.chapters.filter(entry => selected.has(entry.section_id))
-      .flatMap(entry => entry.unresolved_topics.map(topic => `${entry.section_id}: ${topic}`)),
-    needs_input: reviewConcerns.length > 0,
+    missing_topics: missingTopics,
+    needs_input: needsInput,
   } }
 }
 
@@ -185,7 +208,7 @@ export async function executeWritingCapability(
  * @param targetIds 本次授权的可写叶节。
  */
 export async function validateWritingCapability(
-  context: Pick<BidCapabilityExecutionContext, 'working'>, targetIds: readonly string[],
+  context: Pick<BidCapabilityExecutionContext, 'working'>, targetIds: readonly string[], allowPending = false,
 ): Promise<void> {
   const workspace = context.working
   const outline = parseConfirmedOutlineArtifact(await readJson(workspace, 'outline/confirmed-outline.json'))
@@ -224,6 +247,7 @@ export async function validateWritingCapability(
   for (const id of targetIds) {
     const entry = entries.get(id)
     const logged = log.sections.find(section => section.section_id === id)
+    if (allowPending && entry === undefined && logged?.status === 'pending') continue
     if (entry === undefined || logged?.status !== 'completed'
       || logged.final_writer_child_session_id === null || logged.final_reviewer_child_session_id === null) {
       throw new Error(`BID_CHAPTER_WRITING_TARGET_INCOMPLETE: ${id}`)

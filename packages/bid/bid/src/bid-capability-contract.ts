@@ -124,6 +124,8 @@ export interface BidCapabilityExecutionContext {
   readonly authorization: { readonly session_id: string; readonly message_id: string }
   readonly inputSha256: string
   readonly inputAnswer?: AskUserQuestionAnswerItem
+  /** 相同步骤及输入摘要的候选已存在，可继续其业务检查点。 */
+  readonly resumeCandidate?: boolean
 }
 
 /** 已注册适配器接受的能力标识。 */
@@ -142,12 +144,16 @@ export type BidCapabilityTask = z.infer<typeof bidCapabilityTaskSchema>
 /**
  * 接纳新任务或修改后续计划时拒绝缺少正文迁移及复核的计划；读取历史请求不调用。
  * @param task 已解析的任务。
+ * @param hasExistingContent 授权范围内已有正文；研究深化可能需要迁移时由 Host 判定。
  * @throws 未明确暂缓正文且目录步骤缺少后续迁移和复核时拒绝。
  */
-export function validateCapabilityTaskContentFollowup(task: BidCapabilityTask): void {
+export function validateCapabilityTaskContentFollowup(task: BidCapabilityTask, hasExistingContent = false): void {
   if (task.allow_pending_content === true) return
   for (const [index, step] of task.steps.entries()) {
-    if (step.call.capability !== 'outline.update' || !step.call.input.defer_content_migration) continue
+    const needsFollowup = step.call.capability === 'outline.update' && step.call.input.defer_content_migration
+      || hasExistingContent && (step.call.capability === 'outline.refine'
+        || step.call.capability === 'evidence.research' && step.call.input.allow_outline_refinement)
+    if (!needsFollowup) continue
     const following = task.steps.slice(index + 1)
     const migration = following.findIndex(item => item.call.capability === 'chapter.reorganize')
     if (migration >= 0 && following.slice(migration + 1).some(item =>
