@@ -5,13 +5,14 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import JSZip from 'jszip'
 import { Context } from '@deepseek-ai/cordis'
-import AgentRegistry, { type Agent } from '@deepseek-ai/dsh-agent'
+import AgentRegistry, { emitAgentEvent, type Agent } from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import LlmRuntime, { CallId, createUserMessage, LlmAdapter, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import SessionStore, { SessionId, type Session } from '@deepseek-ai/dsh-session'
 import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import SubagentRuntime from '@deepseek-ai/dsh-subagent'
+import { GoalId } from '@deepseek-ai/dsh-goal'
 import * as spawn from '@deepseek-ai/dsh-subagent-spawn-in-process'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime, { type ToolDefinition } from '@deepseek-ai/dsh-tools'
@@ -743,7 +744,8 @@ describe('Workspace 项目与独立 Session', () => {
       expect(ctx.tools.schemas(agent).filter(tool => tool.name.startsWith('bid_')).map(tool => tool.name))
         .toEqual(['bid_stage_inspect', 'bid_project_inspect', 'bid_run_task', 'bid_plan_task',
           'bid_outline_apply_operations', 'bid_outline_regenerate_scope', 'bid_evidence_remap',
-          'bid_confirm_writing_plan', 'bid_revise_chapter'])
+          'bid_confirm_writing_plan', 'bid_revise_chapter',
+          ...(expectedStatus === 'suspended' ? ['bid_resume_current_run'] : [])])
       const project = await ctx.tools.execute({
         agent, name: 'bid_project_inspect', arguments: { query: { object: 'outline', page_size: 1 } },
         callId: CallId(`project-${stage}-${seedStatus}`), signal: new AbortController().signal,
@@ -2519,7 +2521,7 @@ describe('Workspace 项目与独立 Session', () => {
     } finally { gate.resolve(undefined); release(); await retry }
   })
 
-  it('后端中断的 running 在原阶段挂起，保留已有章节且不自动执行', async () => {
+  it('后端中断的 running 在原阶段挂起，保留已有章节且不自动提问或执行', async () => {
     const { ctx, workspace, fresh, executor } = await fixture()
     await seedProjectArtifacts(workspace)
     await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'running' })
@@ -2534,10 +2536,9 @@ describe('Workspace 项目与独立 Session', () => {
         stage: 'chapter_writing', status: 'suspended',
         run: { work: { stage: 'chapter_writing' }, cause: 'host_restart' },
       })
-      await vi.waitFor(() => {
-        expect(asked).toHaveBeenCalledOnce()
-        expect(asked.mock.calls[0]?.[0].questions[0]?.question).toContain('host_restart')
-      })
+      expect(asked).not.toHaveBeenCalled()
+      expect(b.session.events.some(event => event.type === 'bid.run.decision.required')).toBe(false)
+      expect(ctx.tools.schemas(b).map(tool => tool.name)).toContain('bid_resume_current_run')
       expect(b.session.events.find(event => event.type === 'bid.run.notice')).toMatchObject({
         data: { kind: 'interrupted', severity: 'error' },
       })
@@ -2601,7 +2602,7 @@ describe('Workspace 项目与独立 Session', () => {
     expect((await readBidProjectState(workspace))?.revision).toBe(saved.revision)
   })
 
-  it('挂起后的普通消息不自动恢复 Run，也不注册恢复工具', async () => {
+  it('挂起后的普通问答不自动恢复 Run，但提供明确继续的工具', async () => {
     const { workspace, fresh, executor, adapter, ctx } = await fixture()
     await seedProjectArtifacts(workspace)
     await checkpointBidProjectState(workspace, { stage: 'evidence_mapping', status: 'failed' })
@@ -2614,13 +2615,47 @@ describe('Workspace 项目与独立 Session', () => {
 
     expect(executor.execute).not.toHaveBeenCalled()
     expect((await readBidProjectState(workspace))?.run).toEqual(before?.run)
-    expect(ctx.tools.schemas(agent).map(tool => tool.name)).not.toContain('bid_resume_current_run')
+    expect(ctx.tools.schemas(agent).map(tool => tool.name)).toContain('bid_resume_current_run')
+    expect(agent.session.events.some(event => event.type === 'bid.run.decision.required')).toBe(false)
   })
 
-  it('挂起 Run 通过原生问题去重，明确停止后记录决策', async () => {
+  it('系统异常挂起后，用户明确继续沿用原 Work 恢复并返回接纳结果', async () => {
+    const { workspace, fresh, executor, adapter } = await fixture()
+    await seedProjectArtifacts(workspace)
+    const suspended = await checkpointBidProjectState(workspace, { stage: 'evidence_mapping', status: 'failed' })
+    if (suspended.status !== 'suspended') throw new Error('测试项目没有挂起 Run')
+    const agent = await fresh('suspended-chat-continue')
+    executor.canExecute = stage => stage === 'evidence_mapping'
+    adapter.script.push(
+      toolCall('bid_resume_current_run', {
+        run_id: suspended.run.runId,
+        expected_project_revision: suspended.revision,
+      }),
+      answer('已继续执行未完成任务。'),
+    )
+
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: '继续' }], source: { kind: 'user' } }))
+    await agent.whenIdle()
+
+    const result = agent.session.events.find(event => event.type === 'tool/result'
+      && event.data.message.source.kind === 'tool'
+      && event.data.message.source.callId === CallId('bid_resume_current_run'))
+    expect(result).toMatchObject({ type: 'tool/result', data: { message: { content: [{
+      isError: false, content: [{ type: 'text', text: expect.stringContaining('"accepted":true') }],
+    }] } } })
+    expect(agent.session.events.some(event => event.type === 'bid.run.started'
+      && event.data.run.resumeOf?.runId === suspended.run.runId
+      && event.data.run.work.workId === suspended.run.work.workId)).toBe(true)
+    expect(agent.session.events.some(event => event.type === 'bid.run.decision.required')).toBe(false)
+  })
+
+  it('用户主动停止的 Run 通过原生问题去重，明确停止后记录决策', async () => {
     const { ctx, workspace, fresh } = await fixture()
     await seedProjectArtifacts(workspace)
-    await checkpointBidProjectState(workspace, { stage: 'evidence_mapping', status: 'failed' })
+    const suspended = await checkpointBidProjectState(workspace, { stage: 'evidence_mapping', status: 'failed' })
+    if (suspended.status !== 'suspended') throw new Error('测试项目没有挂起 Run')
+    await checkpointStoredBidProjectState(workspace, { stage: suspended.stage, status: 'suspended',
+      run: { ...suspended.run, cause: 'user_stop' } })
     const response = Promise.withResolvers<AskUserQuestionAnswer>()
     const asked = vi.fn(async ({ questions }: { questions: AskUserQuestionItem[] }) => {
       expect(questions[0]?.question).toContain('目录生成/资料映射')
@@ -2654,10 +2689,38 @@ describe('Workspace 项目与独立 Session', () => {
     }
   })
 
-  it('原生继续选项沿用当前 Run 的恢复入口', async () => {
+  it('Bid 插件卸载时撤回待答的原生 Run 恢复问题', async () => {
     const { ctx, workspace, fresh } = await fixture()
     await seedProjectArtifacts(workspace)
-    await checkpointBidProjectState(workspace, { stage: 'evidence_mapping', status: 'failed' })
+    const suspended = await checkpointBidProjectState(workspace, { stage: 'evidence_mapping', status: 'failed' })
+    if (suspended.status !== 'suspended') throw new Error('测试项目没有挂起 Run')
+    await checkpointStoredBidProjectState(workspace, { stage: suspended.stage, status: 'suspended',
+      run: { ...suspended.run, cause: 'user_stop' } })
+    let signal: AbortSignal | undefined
+    const asked = vi.fn(({ signal: current }: { signal?: AbortSignal }) => {
+      signal = current
+      return new Promise<AskUserQuestionAnswer>((_resolve, reject) => {
+        current?.addEventListener('abort', () => { reject(new Error('BID_HOST_DISPOSED')) }, { once: true })
+      })
+    })
+    const release = ctx.userQuestions.registerProvider({ ask: asked })
+    try {
+      const agent = await fresh('native-recovery-dispose')
+      await vi.waitFor(() => { expect(asked).toHaveBeenCalledOnce() })
+      expect(agent.session.events.filter(event => event.type === 'bid.run.decision.required')).toHaveLength(1)
+      await ctx.fiber.dispose()
+      expect(signal?.aborted).toBe(true)
+      expect(agent.session.events.some(event => event.type === 'bid.run.decision.received')).toBe(false)
+    } finally { release() }
+  })
+
+  it('用户主动停止后的原生继续选项沿用当前 Run 的恢复入口', async () => {
+    const { ctx, workspace, fresh } = await fixture()
+    await seedProjectArtifacts(workspace)
+    const suspended = await checkpointBidProjectState(workspace, { stage: 'evidence_mapping', status: 'failed' })
+    if (suspended.status !== 'suspended') throw new Error('测试项目没有挂起 Run')
+    await checkpointStoredBidProjectState(workspace, { stage: suspended.stage, status: 'suspended',
+      run: { ...suspended.run, cause: 'user_stop' } })
     const resume = vi.spyOn(ctx.bid, 'resumeCurrentRun').mockResolvedValue(BID_INITIAL_TASK_STATE)
     const asked = vi.fn(async ({ questions }: { questions: AskUserQuestionItem[] }) => ({
       answers: [{ id: questions[0]!.id, selected: ['继续未完成任务（推荐）'] }],
@@ -2675,10 +2738,13 @@ describe('Workspace 项目与独立 Session', () => {
     }
   })
 
-  it('原生重跑选项通过 reset 在同一操作驱动当前阶段', async () => {
+  it('用户主动停止后的原生重跑选项通过 reset 在同一操作驱动当前阶段', async () => {
     const { ctx, workspace, fresh } = await fixture()
     await seedProjectArtifacts(workspace)
-    await checkpointBidProjectState(workspace, { stage: 'evidence_mapping', status: 'failed' })
+    const suspended = await checkpointBidProjectState(workspace, { stage: 'evidence_mapping', status: 'failed' })
+    if (suspended.status !== 'suspended') throw new Error('测试项目没有挂起 Run')
+    await checkpointStoredBidProjectState(workspace, { stage: suspended.stage, status: 'suspended',
+      run: { ...suspended.run, cause: 'user_stop' } })
     const reset = vi.spyOn(ctx.bid, 'resetStage').mockResolvedValue({ stage: 'evidence_mapping', status: 'waiting_user', run: null })
     const asked = vi.fn(async ({ questions }: { questions: AskUserQuestionItem[] }) => ({
       answers: [{ id: questions[0]!.id, selected: ['重新执行当前阶段'] }],
@@ -2746,10 +2812,23 @@ describe('Workspace 项目与独立 Session', () => {
     if (before?.status !== 'suspended') throw new Error('测试项目没有挂起 S5 Run')
     expect(ctx.tools.schemas(agent).map(tool => tool.name)).toContain('bid_set_flowchart_visual_review')
 
-    const result = await ctx.tools.execute({
+    agent.session.append('bid.goal.bound', {
+      goalId: 'visual-policy-goal', ownerSessionId: String(agent.id), initialS2WorkId: 'prior-s2-work',
+    })
+    emitAgentEvent(ctx, agent, 'agent/inbox/claimed', {
+      message: createUserMessage({ content: [{ type: 'text', text: '检查恢复方案' }],
+        source: { kind: 'goal', goalId: GoalId('visual-policy-goal'), revision: 1, round: 1 } }), turn: 1,
+    })
+    const policyRequest = {
       agent, name: 'bid_set_flowchart_visual_review', arguments: { policy: 'skip' },
       callId: CallId('suspended-s5-visual-policy'), signal: new AbortController().signal,
+    }
+    expect((await ctx.tools.execute(policyRequest)).isError).toBe(true)
+    emitAgentEvent(ctx, agent, 'agent/inbox/claimed', {
+      message: createUserMessage({ content: [{ type: 'text', text: '继续，不用视觉检查' }], source: { kind: 'user' } }), turn: 1,
     })
+
+    const result = await ctx.tools.execute(policyRequest)
     if (result.isError) throw new Error(JSON.stringify(result))
     expect(result.value).toMatchObject({ ok: true, policy: 'skip', workId: before.run.work.workId })
     const saved = await readBidProjectState(workspace)

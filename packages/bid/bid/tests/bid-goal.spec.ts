@@ -3,9 +3,9 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
-import AgentRegistry from '@deepseek-ai/dsh-agent'
+import AgentRegistry, { emitAgentEvent } from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
-import LlmRuntime, { CallId } from '@deepseek-ai/dsh-llm'
+import LlmRuntime, { CallId, createUserMessage } from '@deepseek-ai/dsh-llm'
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import SubagentRuntime from '@deepseek-ai/dsh-subagent'
@@ -14,7 +14,7 @@ import ToolRuntime from '@deepseek-ai/dsh-tools'
 import UserQuestionService from '@deepseek-ai/dsh-user-questions'
 import GoalService from '@deepseek-ai/dsh-goal'
 import * as GoalRoundDriver from '@deepseek-ai/dsh-goal-round-driver'
-import { BidHostRuntime, BidRunCoordinator, BidWorkspace, checkpointBidProjectState } from '../src/index.ts'
+import { BidHostRuntime, BidRunCoordinator, BidWorkspace, checkpointBidProjectState, readBidProjectState } from '../src/index.ts'
 import type { BidWorkDescriptor } from '../src/control-plane-contract.ts'
 import type { Session } from '@deepseek-ai/dsh-session'
 import { persistBidWorkRequest } from '../src/work-descriptor.ts'
@@ -229,6 +229,57 @@ it('accepts the exact failed Run once, returns after its durable checkpoint, and
     expect(agent.session.events.some(event => event.type === 'bid.project.resumed'
       && 'state' in event.data && event.data.state.status === 'running'
       && event.data.state.run.runId === value.run_id)).toBe(true)
+  } finally {
+    gate.resolve(undefined)
+    disposeGate()
+  }
+})
+
+it('allows a user continuation in the same turn as native Goal recovery', async () => {
+  const { ctx, host, agent, workspace } = await setup('tender_analysis')
+  const disposeGate = ctx.goalRoundDriver.registerGate(() => 'wait')
+  const payload = { stage: 'tender_analysis' }
+  const inputs = buildBidStageTask('tender_analysis').inputs.map(path => ({ path, sha256: null }))
+  const descriptor = await persistBidWorkRequest(workspace, 'stage_execution', 'tender_analysis', payload,
+    { stage: 'tender_analysis', inputs, payload })
+  const operation = host.beginOperation(agent.session)
+  await host.prepareOperation(operation)
+  const failed = await operation.runs.start(descriptor)
+  await operation.runs.suspend('retry_exhausted', safeRecoverableBidFailure(descriptor, new Error('missing submission'), [{
+    code: 'BID_TENDER_ANALYSIS_SUBMISSION_INCOMPLETE', artifact: 'analysis/project.json', message: '项目字段缺失',
+  }]))
+  await host.finishOperation(agent.session, operation)
+  const saved = await readBidProjectState(workspace)
+  if (saved?.status !== 'suspended') throw new Error('测试项目没有挂起 Run')
+  const gate = Promise.withResolvers<undefined>()
+  const original = host as unknown as { automaticOrchestrator: (...args: unknown[]) => unknown }
+  original.automaticOrchestrator = (_execution, _workspace, _signal, resumedOperation) => ({
+    resume: async (runId: string, onAccepted: ((run: Awaited<ReturnType<BidRunCoordinator['start']>>) => void) | undefined) => {
+      const current = resumedOperation as Operation
+      const run = await current.runs.start(descriptor, { runId, cause: 'retry_exhausted' })
+      onAccepted?.(run)
+      await gate.promise
+      return current.runs.suspend('user_stop')
+    },
+  })
+  try {
+    const goal = ctx.goals.get(agent)
+    if (goal === undefined) throw new Error('测试 Goal 未绑定')
+    emitAgentEvent(ctx, agent, 'agent/inbox/claimed', {
+      message: createUserMessage({ content: [{ type: 'text', text: '检查可恢复错误' }],
+        source: { kind: 'goal', goalId: goal.id, revision: goal.revision, round: 1 } }), turn: 1,
+    })
+    const request = { agent, name: 'bid_resume_current_run',
+      arguments: { run_id: failed.runId, expected_project_revision: saved.revision },
+      callId: CallId('goal-chat-continue'), signal: new AbortController().signal }
+    expect((await agent.ctx.tools.execute(request)).isError).toBe(true)
+    emitAgentEvent(ctx, agent, 'agent/inbox/claimed', {
+      message: createUserMessage({ content: [{ type: 'text', text: '继续' }], source: { kind: 'user' } }), turn: 1,
+    })
+    const result = await agent.ctx.tools.execute(request)
+    expect(result).toMatchObject({ isError: false, value: { accepted: true } })
+    expect(agent.session.events.some(event => event.type === 'bid.run.started'
+      && event.data.run.resumeOf?.runId === failed.runId)).toBe(true)
   } finally {
     gate.resolve(undefined)
     disposeGate()

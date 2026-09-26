@@ -4,6 +4,7 @@ import { useSyncExternalStore } from 'react'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { applyOutlineEdits, BID_DOCX_EXPORT_PROJECTION_KEY, BID_WRITING_ENTRY_PROJECTION_KEY, OUTLINE_CONFIRMATION_ISSUES, type BidClientProjection, type BidRunData, type BidStage, type BidTaskState, type DocxFormatView, type DocxTemplateId, type OutlineArtifact, type OutlineDraftMutationRequest, type OutlineDraftView, type StageValidationIssue, type WritingEntryIntent } from '@deepseek-ai/dsh-bid/control-plane'
+import type { BidCapabilityPlanView } from '@deepseek-ai/dsh-bid/control-plane'
 import type { ClientContext, SessionListState } from '@deepseek-ai/dsh-client-runtime/client'
 import { BidConfirmationModeControl, BidStagePanel, type BidStagePanelProps } from '../src/client/BidStagePanel.tsx'
 import { apply, BidActionError, OUTLINE_CONFIRMATION_REPAIR_ACTIONS } from '../src/client/index.ts'
@@ -129,7 +130,9 @@ function props(
   patch: Partial<BidStagePanelProps> & { writingEntry?: unknown; docxExport?: unknown } = {},
 ): BidStagePanelProps {
   const useProjection = (key: string, selector?: (item: unknown) => unknown) => {
-    if (key === BID_DOCX_EXPORT_PROJECTION_KEY) return selector === undefined ? patch.docxExport ?? null : selector(patch.docxExport ?? null)
+    if (key === BID_DOCX_EXPORT_PROJECTION_KEY) {
+      return selector === undefined ? patch.docxExport ?? null : selector(patch.docxExport ?? null)
+    }
     if (key === BID_WRITING_ENTRY_PROJECTION_KEY) {
       const entry = patch.writingEntry ?? {
         expected: { project_revision: 0, request_id: null, attempt_id: null, stop_id: null, plan_version: null },
@@ -485,7 +488,7 @@ describe('BidStagePanel', () => {
     expect(screen.getByText('文件接入完成，等待招标分析')).toBeTruthy()
   })
 
-  it('S4 运行计划表头显示研究任务计数，停止后保留同一计划并取消运行标记', async () => {
+  it('S4 运行时显示研究任务计数，挂起时隐藏计划并在恢复后重现', async () => {
     const getEvidenceMappingProgress = vi.fn(async () => ({
       total: 10,
       initial: 8,
@@ -527,7 +530,7 @@ describe('BidStagePanel', () => {
     expect(screen.getByTitle('分支数 10（初始 8，补充复核 2，失败 0）').textContent).toBe('10')
     expect(screen.getByRole('status').textContent).toBe('10/3/2/530%')
     expect(screen.getByTitle('完成百分比 30%（已完成 3 / 共 10）').textContent).toBe('30%')
-    const plan = screen.getByTestId('bid-stage-plan')
+    expect(screen.getByTestId('bid-stage-plan')).toBeTruthy()
     fireEvent.click(screen.getByRole('button', { expanded: true }))
     expect(screen.queryByText('逐章节资料研究与映射')).toBeNull()
     expect(screen.getByTitle('进行中 2')).toBeTruthy()
@@ -538,16 +541,15 @@ describe('BidStagePanel', () => {
         ...runningProjection.task.run!, cause: 'user_stop',
       } },
     }, { getEvidenceMappingProgress })} />)
-    expect(screen.getByTestId('bid-stage-plan')).toBe(plan)
-    expect(screen.getByRole('button', { expanded: false })).toBeTruthy()
-    expect(screen.getByTitle('待恢复 2')).toBeTruthy()
+    expect(screen.queryByTestId('bid-stage-plan')).toBeNull()
+    expect(screen.queryByTitle('待恢复 2')).toBeNull()
     expect(screen.queryByTitle('进行中 2')).toBeNull()
     expect(document.querySelector('[data-summary-status="running"]')).toBeNull()
     expect(document.querySelector('[data-bid-progress]')).toBeNull()
 
     view.rerender(<BidStagePanel {...props(runningProjection, { getEvidenceMappingProgress })} />)
     expect(await screen.findByTitle('进行中 2')).toBeTruthy()
-    expect(screen.getByTestId('bid-stage-plan')).toBe(plan)
+    expect(screen.getByTestId('bid-stage-plan')).toBeTruthy()
   })
 
   it('同步 S4 进度时不在运行计划旁显示旧进度卡', async () => {
@@ -622,7 +624,7 @@ describe('BidStagePanel', () => {
     expect(getEvidenceMappingProgress).not.toHaveBeenCalled()
   })
 
-  it('S4 复核失败时仍显示已读取的完成与失败进度', async () => {
+  it('S4 复核失败时隐藏计划并显示失败 Section', async () => {
     const getEvidenceMappingProgress = vi.fn(async () => ({
       total: 32, initial: 32, supplemental: 0, completed: 14, running: 0, not_started: 0, failed: 18,
       failed_section_ids: ['SEC-401'],
@@ -634,9 +636,9 @@ describe('BidStagePanel', () => {
       allowedActions: [], composer: { enabled: false, reason: 'bid.stage_failed' },
     }), { getEvidenceMappingProgress })} />)
 
-    expect(await screen.findByTitle('完成百分比 44%（已完成 14 / 共 32）')).toBeTruthy()
-    expect(screen.getByTitle('分支数 32（初始 32，补充复核 0，失败 18）')).toBeTruthy()
-    expect(screen.getByText('失败 Section：SEC-401')).toBeTruthy()
+    expect(screen.queryByTestId('bid-stage-plan')).toBeNull()
+    expect(screen.queryByTitle('分支数 32（初始 32，补充复核 0，失败 18）')).toBeNull()
+    expect(await screen.findByText('失败 Section：SEC-401')).toBeTruthy()
   })
 
   it('shows ready reset state without a stage action button', () => {
@@ -679,7 +681,7 @@ describe('BidStagePanel', () => {
     expect(screen.queryByRole('alert')).toBeNull()
   })
 
-  it('S4 挂起且 Main Agent 运行时保留进度、原因和失败 Section，不显示阶段处理中', async () => {
+  it('S4 挂起且 Main Agent 运行时隐藏计划并显示原因和失败 Section', async () => {
     const getEvidenceMappingProgress = vi.fn(async () => ({
       total: 32, initial: 32, supplemental: 0, completed: 14, running: 0, not_started: 0, failed: 18,
       failed_section_ids: ['SEC-401'],
@@ -710,13 +712,13 @@ describe('BidStagePanel', () => {
     expect(screen.queryByText('正在处理…')).toBeNull()
     expect(document.querySelector('[data-state="ongoing"]')).toBeNull()
     expect(document.querySelector('[data-state="warning"]')).toBeTruthy()
-    expect(await screen.findByTitle('完成百分比 44%（已完成 14 / 共 32）')).toBeTruthy()
-    expect(screen.getByText('失败 Section：SEC-401')).toBeTruthy()
+    expect(screen.queryByTestId('bid-stage-plan')).toBeNull()
+    expect(await screen.findByText('失败 Section：SEC-401')).toBeTruthy()
     expect(screen.getByRole('alert').textContent).toContain('SEC-401 映射失败')
     expect(screen.queryByRole('button', { name: '继续未完成任务' })).toBeNull()
   })
 
-  it('S4 同一工作身份读取失败时保留最后一次成功进度并继续同步', async () => {
+  it('S4 挂起后隐藏计划，进度读取失败仍继续同步', async () => {
     vi.useFakeTimers()
     try {
       let attempt = 0
@@ -736,12 +738,11 @@ describe('BidStagePanel', () => {
       }), { getEvidenceMappingProgress })} />)
 
       await act(async () => { await Promise.resolve(); await Promise.resolve() })
-      expect(screen.getByTitle('完成百分比 83%（已完成 34 / 共 41）')).toBeTruthy()
-      expect(screen.getByTitle('待恢复 1')).toBeTruthy()
+      expect(screen.queryByTestId('bid-stage-plan')).toBeNull()
 
       await act(async () => { await vi.advanceTimersByTimeAsync(5000) })
       expect(getEvidenceMappingProgress).toHaveBeenCalledTimes(2)
-      expect(screen.getByTitle('完成百分比 83%（已完成 34 / 共 41）')).toBeTruthy()
+      expect(screen.queryByTestId('bid-stage-plan')).toBeNull()
       expect(screen.getByText('进度同步暂时失败，当前显示上次成功读取的数据。')).toBeTruthy()
 
       await act(async () => { await vi.advanceTimersByTimeAsync(5000) })
@@ -1098,6 +1099,21 @@ describe('BidStagePanel', () => {
     expect(setReviewViewAvailable).toHaveBeenLastCalledWith(false)
   })
 
+  it('能力任务结束后隐藏计划', async () => {
+    const main = projection({ runtime: { stage: 'chapter_writing', status: 'completed' } })
+    const plan: BidCapabilityPlanView = {
+      workId: 'capability-work', title: '拆分目录', scope: 'project', status: 'running',
+      steps: [{ id: 'update-outline', capability: 'outline.update', status: 'running', detail: null }],
+    }
+    const view = render(<BidStagePanel {...props(main, { getCapabilityTaskPlan: async () => plan })} />)
+    expect(await screen.findByTestId('bid-capability-plan')).toBeTruthy()
+
+    view.rerender(<BidStagePanel {...props(main, { getCapabilityTaskPlan: async () => ({
+      ...plan, status: 'completed', steps: [{ ...plan.steps[0]!, status: 'completed' }],
+    }) })} />)
+    await waitFor(() => { expect(screen.queryByTestId('bid-capability-plan')).toBeNull() })
+  })
+
   it('S5 完成后只显示独立 S6 任务，S5 修改时保留两个真实计划', async () => {
     const exportOperation = { operationId: 'export-1', templateId: null, startedAt: 1, updatedAt: 2,
       status: 'running', phase: 'exporting', message: '正在生成 Word' }
@@ -1114,7 +1130,7 @@ describe('BidStagePanel', () => {
     expect(screen.getByTestId('bid-docx-export-plan')).toBeTruthy()
   })
 
-  it('导出进度和完成事件不抢回正文页签', async () => {
+  it('导出完成后移除阶段计划且不抢回正文页签', async () => {
     const selectReviewView = vi.fn()
     const main = projection({ runtime: { stage: 'chapter_writing', status: 'completed' },
       allowedActions: ['send_message', 'export_docx', 'revise_chapter'] })
@@ -1125,7 +1141,8 @@ describe('BidStagePanel', () => {
     view.rerender(<BidStagePanel {...props(main, { selectReviewView, docxExport: {
       ...base, status: 'completed', phase: 'finalizing', message: 'Word 导出完成', path: 'output/bid.docx', warnings: [],
     } })}/> )
-    await screen.findByText('Word 导出完成')
+    expect(screen.queryByTestId('bid-docx-export-plan')).toBeNull()
+    expect(screen.queryByText('Word 导出完成')).toBeNull()
     expect(selectReviewView).toHaveBeenCalledOnce()
   })
 
@@ -1344,7 +1361,7 @@ describe('ui-bid browser plugin', () => {
     } as unknown as ClientContext
 
     apply(ctx)
-    expect(conversationRegister).toHaveBeenCalledOnce()
+    expect(conversationRegister).toHaveBeenCalledTimes(2)
     expect(register).toHaveBeenCalledWith(expect.objectContaining({
       name: 'conversation.chat.node', key: 'bid-run-notice',
     }), expect.any(Function))

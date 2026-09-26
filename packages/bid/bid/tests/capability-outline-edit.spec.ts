@@ -52,7 +52,7 @@ async function fixture() {
 }
 
 describe('目录能力候选', () => {
-  it('局部深化先取得结构候选，再对 Host 新 ID 分配真实业务引用', async () => {
+  it.each(['outline.refine', 'outline.update'] as const)('%s 对 Host 新 ID 分配真实业务引用', async (capability) => {
     const { workspace, context, stepId } = await fixture()
     const prefix = createHash('sha256').update(stepId).digest('hex').slice(0, 12)
     const childId = `SEC-${prefix}-1`
@@ -73,18 +73,40 @@ describe('目录能力候选', () => {
         dispose: async () => {} }
     })
     const agent = { ctx: { get: () => ({ getProvider: () => ({ inheritsParentContext: false }), start }) } } as unknown as BidCapabilityExecutionContext['agent']
-    const call = bidCapabilityInputSchema.parse({ capability: 'outline.refine', input: { feedback: '把流程拆成两个章节' } })
-    if (call.capability !== 'outline.refine') throw new Error('test call mismatch')
+    const call = bidCapabilityInputSchema.parse(capability === 'outline.refine'
+      ? { capability, input: { feedback: '把流程拆成两个章节' } }
+      : { capability, input: { operations: JSON.parse(outputs.shift()!) as unknown, defer_content_migration: true } })
+    if (call.capability !== 'outline.refine' && call.capability !== 'outline.update') throw new Error('test call mismatch')
     const scoped = { ...context, agent,
       allowedWrites: await allowedOutlineCapabilityWrites(call, workspace, stepId, context.sectionIds) }
     const { result } = await executeOutlineCapability(call, scoped)
-    expect(start).toHaveBeenCalledTimes(2)
-    expect(JSON.stringify(prompts[1])).toContain(childId)
+    expect(start).toHaveBeenCalledTimes(capability === 'outline.refine' ? 2 : 1)
+    expect(JSON.stringify(prompts.at(-1))).toContain(childId)
     const outline = parseOutlineArtifact(await readJson(workspace, 'outline/confirmed-outline.json'))
     expect(outline.sections.find(section => section.id === childId)?.requirement_ids).toEqual(['REQ-1'])
     expect(await readJson(workspace, 'chapters/pending-reorganization.json'))
       .toMatchObject({ pending_source_section_ids: ['SEC-1'] })
     await expect(validateOutlineCapability(scoped, result)).resolves.toBeUndefined()
+  })
+
+  it('拆分生成的业务归属缺少响应点时拒绝候选并保留原目录和正文', async () => {
+    const { workspace, context } = await fixture()
+    const before = await readJson(workspace, 'outline/confirmed-outline.json')
+    const body = await readFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), 'utf8')
+    const start = vi.fn(async () => ({ result: Promise.resolve({ stopReason: 'completed',
+      output: [{ type: 'text', text: '[]' }] }), dispose: async () => {} }))
+    const agent = { ctx: { get: () => ({ getProvider: () => ({ inheritsParentContext: false }), start }) } } as unknown as BidCapabilityExecutionContext['agent']
+    const call = bidCapabilityInputSchema.parse({ capability: 'outline.update', input: {
+      operations: [{ type: 'split_section', section_id: 'SEC-1', children: [
+        { title: '准备', purpose: '准备', must_answer: ['准备'] },
+        { title: '实施', purpose: '实施', must_answer: ['实施'] },
+      ] }], defer_content_migration: true,
+    } })
+    if (call.capability !== 'outline.update') throw new Error('test call mismatch')
+    await expect(executeCapabilityOutlineUpdate({ ...context, agent }, call.input))
+      .rejects.toThrow('OUTLINE_SHARED_RESPONSE_POINT_MISSING')
+    expect(await readJson(workspace, 'outline/confirmed-outline.json')).toEqual(before)
+    expect(await readFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), 'utf8')).toBe(body)
   })
 
   it('适配器限定精确写入并复核真实候选', async () => {

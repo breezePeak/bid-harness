@@ -67,6 +67,7 @@ export const stageInteractionSchema = z.union([
   }).strict(),
   z.object({ action: z.literal('bid_recover_task'), target: z.literal('run'), run_id: z.string().min(1), instruction: recoveryInstruction }).strict(),
   z.object({ action: z.literal('bid_recover_task'), target: z.literal('writing_plan'), writing_request_id: z.string().min(1), attempt_id: z.string().min(1), instruction: recoveryInstruction }).strict(),
+  z.object({ action: z.literal('bid_resume_current_run'), run_id: z.string().min(1), expected_project_revision: z.number().int().nonnegative() }).strict(),
   z.object({ action: z.literal('bid_pause_stage') }).strict(),
   z.object({ action: z.literal('bid_resume_stage') }).strict(),
   z.object({ action: z.literal('bid_set_flowchart_visual_review'), policy: z.enum(['required', 'skip']) }).strict(),
@@ -105,6 +106,7 @@ const names = [
   'bid_project_inspect',
   'bid_run_task',
   'bid_plan_task',
+  'bid_resume_current_run',
 ] as const
 const MAX_INSPECT_CHAPTER_CHARS = 12_000
 const MAX_INSPECT_SECTIONS = 100
@@ -587,14 +589,19 @@ function renderIdleStageInteractionPrompt(
   ].join('\n')
 }
 
-function renderSuspendedRunPrompt(stage: string, runId: string, revision: number, workKind: string, reason?: string): string {
+function renderSuspendedRunPrompt(stage: string, runId: string, revision: number, workKind: string, cause: string, reason?: string): string {
+  const interrupted = cause !== 'user_stop' && cause !== 'awaiting_input'
   return [
     `当前 Bid 阶段：${stage}；Run 已挂起；suspended_run_id=${runId}；expected_project_revision=${String(revision)}。`,
     reason === undefined ? undefined : `中断原因：${reason}`,
     '先按用户完整语义判断：继续未完成任务、带新约束继续、修改当前阶段，或只进行问答。不得通过“继续”等关键词硬编码意图。',
-    '挂起 Run 的继续、当前阶段重跑或停止由 Host 通过 DSH 原生用户提问处理；普通消息不视为这些决策的答案。',
+    interrupted
+      ? '用户明确要求继续当前挂起任务时调用 bid_resume_current_run，传入当前 Run ID 和项目 revision；普通询问保持只读。'
+      : '挂起 Run 的继续、当前阶段重跑或停止由 Host 通过 DSH 原生用户提问处理；普通消息不视为这些决策的答案。',
     stage === 'chapter_writing' && workKind === 'stage_execution'
-      ? '用户在挂起状态下同时提出执行策略变化（如“继续，不用视觉检查”）时，先调用 bid_set_flowchart_visual_review 持久化策略；Run 的 continue/restart/stop 仍由原生 run_recovery 问题处理。不得只口头回复“已记录”。'
+      ? interrupted
+        ? '用户同时提出执行策略变化（如“继续，不用视觉检查”）时，先调用 bid_set_flowchart_visual_review 保存策略，再调用 bid_resume_current_run。不得只口头回复“已记录”。'
+        : '用户在挂起状态下同时提出执行策略变化（如“继续，不用视觉检查”）时，先调用 bid_set_flowchart_visual_review 持久化策略；Run 的 continue/restart/stop 仍由原生 run_recovery 问题处理。不得只口头回复“已记录”。'
       : undefined,
   ].filter(line => line !== undefined).join('\n')
 }
@@ -618,6 +625,8 @@ function renderCurrentRunProgress(run: BidRunData | null): string | undefined {
 const CAPABILITY_TASK_GUIDANCE = [
   '项目阶段只表示默认整本路线的进度。明确修改时可先用 bid_project_inspect 读取当前事实，再用 bid_run_task 提交目标、根范围和有序能力步骤；普通讨论与解释只读。',
   'tender.update 更正规范化理解或评分选择；outline.update/refine 调整目录，chapter.reorganize 分配旧正文；evidence.research 更新资料；writing.plan 更新写作要求；chapter.write/revise/review 处理正文。按用户真实目标选择最少步骤。',
+  '拆分或合并已有正文的章节时，先 inspect 目录、正文和写作要求，再用 bid_run_task 提交完整有序执行计划：目录调整、原文迁移、结果复核。用户明确只改目录时才可留下待迁移正文；不要把目录步骤完成说成整项任务完成。',
+  'outline.update 新增或拆分章节的 ID 由工具生成；未提供 business_bindings 时，工具按新章节职责分配真实业务引用。不要猜新 ID。拆分后 chapter.reorganize 使用 task 范围并提供原 source_section_ids，后续复核可使用 previous_targets；保留原文不等于重新写作。',
   '任务根范围用 project、实际 section_ids 或带原文哈希的 paragraphs；步骤可继承根范围，也可引用前一步真实 target_section_ids。不要从“全部”“流程”等字词机械扩大范围。',
   '初次整本确认仍由原生确认入口完成；局部任务只凭本次真实用户消息授权。工具返回的接受、执行和发布状态以 Host 结果为准。',
 ].join('\n')
@@ -638,6 +647,7 @@ export function installStageInteractionTools(
     const sync = (agent: Agent): void => {
       const task = agent.session.events.reduce(reduceBidTaskState, BID_INITIAL_TASK_STATE)
       const suspended = task.status === 'suspended' ? task.run : undefined
+      const chatResume = suspended !== undefined && suspended.cause !== 'user_stop' && suspended.cause !== 'awaiting_input'
       const stage = isBidMainSession(agent.session) ? task.stage : undefined
       const scope = stage === undefined ? undefined : `${stage}:${suspended === undefined ? task.status : `suspended:${suspended.runId}`}`
       const bound = agent.session.events.findLast(event => event.type === 'bid.goal.bound')
@@ -669,14 +679,15 @@ export function installStageInteractionTools(
                 : stage === 'evidence_mapping' ? names.slice(0, 4) : [names[0], names[4]]
       const installed = [...new Set([...available, 'bid_project_inspect', 'bid_run_task', 'bid_plan_task',
         'bid_outline_apply_operations', 'bid_outline_regenerate_scope', 'bid_evidence_remap',
-        'bid_confirm_writing_plan', 'bid_revise_chapter', ...(recoveryAvailable ? [recoveryTool] : [])])]
+        'bid_confirm_writing_plan', 'bid_revise_chapter', ...(chatResume ? ['bid_resume_current_run'] : []),
+        ...(recoveryAvailable ? [recoveryTool] : [])])]
       const disposers: Array<() => void> = []
       const text: JsonSchemaNode = { type: 'string' }
       const strings: JsonSchemaNode = { type: 'array', items: text }
       const cas = { expected_revision: { type: 'integer' as const }, expected_draft_sha256: text }
       try {
         for (const name of installed) {
-          const properties: Record<string, JsonSchemaNode> = name === 'bid_stage_inspect' || name === 'bid_project_inspect' || name === 'bid_run_task' || name === 'bid_plan_task' || name === 'bid_confirm_writing_plan'
+          const properties: Record<string, JsonSchemaNode> = name === 'bid_stage_inspect' || name === 'bid_project_inspect' || name === 'bid_run_task' || name === 'bid_plan_task' || name === 'bid_resume_current_run' || name === 'bid_confirm_writing_plan'
             || name === 'bid_revise_chapter' || name === 'bid_plan_revision_batch' || name === 'bid_execute_revision_batch' || name === 'bid_pause_stage' || name === 'bid_resume_stage' || name === 'bid_set_flowchart_visual_review' || name === recoveryTool
             ? {} : { ...cas }
           const required = Object.keys(properties)
@@ -712,6 +723,11 @@ export function installStageInteractionTools(
             properties.from_index = { type: 'integer' }
             properties.steps = { type: 'array', items: zodJsonSchema(bidCapabilityStepSchema) }
             required.push('work_id', 'from_index', 'steps')
+          }
+          if (name === 'bid_resume_current_run') {
+            properties.run_id = text
+            properties.expected_project_revision = { type: 'integer' }
+            required.push('run_id', 'expected_project_revision')
           }
           if (name === recoveryTool) {
             parameters = { oneOf: [{ type: 'object', properties: {
@@ -825,7 +841,8 @@ export function installStageInteractionTools(
           }
           const definition: ToolDefinition = {
             name,
-            description: name === recoveryTool ? '仅对 bid_stage_inspect(view=recovery) 返回的当前失败目标提交改进处理办法；Host 验证后异步恢复原任务。'
+            description: name === 'bid_resume_current_run' ? '仅在用户明确要求继续时，按当前 Run ID 和项目 revision 恢复挂起任务；Host 验证后异步执行。'
+              : name === recoveryTool ? '仅对 bid_stage_inspect(view=recovery) 返回的当前失败目标提交改进处理办法；Host 验证后异步恢复原任务。'
               : name === 'bid_stage_inspect' ? '读取当前阶段的有界权威快照；传正文引用时校验原文身份并返回受控正文。'
                 : name === 'bid_project_inspect' ? '按真实项目对象与章节 ID 分页读取已保存资料；不依赖当前阶段，也不修改项目。'
                   : name === 'bid_run_task' ? '用当前真实用户消息授权有序业务能力任务；Host 核对项目输入、范围和候选文件，再发布实际结果。提问与讨论不得调用。'
@@ -871,11 +888,13 @@ export function installStageInteractionTools(
       const session = subject?.session
       if (subject === undefined || session === undefined || !isBidMainSession(session)) return
       const task = session.events.reduce(reduceBidTaskState, BID_INITIAL_TASK_STATE)
-      if (claimState.get(subject)?.goalRound
+      const claim = claimState.get(subject)
+      if (claim?.goalRound && !claim.hasUser
         && !['get_goal', 'update_goal', 'bid_stage_inspect', 'bid_project_inspect', recoveryTool].includes(exec.name)) return 'BID_GOAL_RECOVERY_TOOL_REQUIRED'
+      if (exec.name === 'bid_resume_current_run' && !claim?.hasUser) return 'BID_USER_CONTINUATION_REQUIRED'
       const args = typeof exec.arguments === 'object' && exec.arguments !== null
         ? exec.arguments as Record<string, unknown> : undefined
-      if (claimState.get(subject)?.goalRound && exec.name === 'bid_stage_inspect'
+      if (claim?.goalRound && !claim.hasUser && exec.name === 'bid_stage_inspect'
         && args?.['view'] !== 'recovery') return 'BID_GOAL_RECOVERY_INSPECT_REQUIRED'
       if (exec.name === 'update_goal' && args?.['action'] === 'complete'
         && !(task.stage === 'chapter_writing' && task.status === 'completed')) return 'BID_GOAL_NOT_COMPLETE'
@@ -924,15 +943,17 @@ export function installStageInteractionTools(
       const task = agent.session.events.reduce(reduceBidTaskState, BID_INITIAL_TASK_STATE)
       if (decision.kind === 'reject' || !isBidMainSession(agent.session)) return decision
       const goalRound = messages.some(message => message.source.kind === 'goal' && message.source.round > 0)
-      if (!goalRound && !messages.some(message => message.source.kind === 'user')) return decision
+      const hasUser = messages.some(message => message.source.kind === 'user')
+      if (!goalRound && !hasUser) return decision
       const resumed = agent.session.events.findLast(event => event.type === 'bid.project.resumed')
       const suspended = task.status === 'suspended' ? task.run : undefined
-      const prompt = goalRound ? '你仍是当前主交互 Agent。当前阶段由 Host 持有的 subagent 执行，本轮只处理 Host 报告的失败。先调用 bid_stage_inspect(view="recovery")，根据真实问题提交简短改进办法到 bid_recover_task。不得重置阶段、改正式文件、代替用户确认。受理后只说明正在恢复；没有安全办法时说明阻碍。'
+      const prompt = goalRound && !hasUser ? '你仍是当前主交互 Agent。当前阶段由 Host 持有的 subagent 执行，本轮只处理 Host 报告的失败。先调用 bid_stage_inspect(view="recovery")，根据真实问题提交简短改进办法到 bid_recover_task。不得重置阶段、改正式文件、代替用户确认。受理后只说明正在恢复；没有安全办法时说明阻碍。'
         : suspended !== undefined ? renderSuspendedRunPrompt(
           task.stage,
           suspended.runId,
           resumed?.type === 'bid.project.resumed' ? resumed.data.revision : suspended.baseProjectRevision,
           suspended.work.kind,
+          suspended.cause,
           suspended.error?.message,
         ) : task.status === 'waiting_user' ? renderStageInteractionPrompt(task.stage)
           : (task.stage === 'chapter_writing' && (task.status === 'running' || task.status === 'completed')

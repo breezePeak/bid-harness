@@ -2,8 +2,8 @@
  * Bid Session browser plugin. It renders the Host-computed `bid.runtime` projection
  * in `conversation.input.dock`, mirrors `projection.composer` into the existing
  * per-session composer block registry, and carries selected files through
- * dedicated same-origin binary endpoints. It folds no Bid events and owns no
- * Bid business state.
+ * dedicated same-origin binary endpoints. It projects durable Bid notices into
+ * chat and owns no Bid business state.
  */
 import type { ClientContext, SessionId } from '@deepseek-ai/dsh-client-runtime/client'
 import type { BidCapabilityPlanView } from '@deepseek-ai/dsh-bid/control-plane'
@@ -23,6 +23,8 @@ import { BidReviewWorkbench, type BidReviewChapterView } from './BidReviewWorkbe
 import { BidComposerContext } from './BidComposerContext.tsx'
 import { BidRunNotice } from './BidRunNotice.tsx'
 import { bidRunNoticeDefinition } from './bid-run-notice-definition.ts'
+import { BidDocxExportNotice, type BidDocxExportNoticeInjected } from './BidDocxExportNotice.tsx'
+import { bidDocxExportNoticeDefinition } from './bid-docx-export-notice-definition.ts'
 import { createBidRevisionStore } from './revision-reference.ts'
 import { createBidConfirmationModeStore } from './confirmation-mode.ts'
 import { en, zh, type BidKey } from './locales.ts'
@@ -139,6 +141,7 @@ function actionFailure(error: {
  */
 export function apply(ctx: ClientContext): void {
   ctx.conversationEvents.register(bidRunNoticeDefinition)
+  ctx.conversationEvents.register(bidDocxExportNoticeDefinition)
   const revisionStore = createBidRevisionStore()
   const confirmationModeStore = createBidConfirmationModeStore()
   const pendingSectionLocate = new Map<string, string>()
@@ -264,6 +267,13 @@ export function apply(ctx: ClientContext): void {
     name: 'conversation.chat.node',
     key: 'bid-run-notice',
   }, BidRunNotice))
+  ctx.slots.inject('conversation.chat.node', () => ctx.slots.register({
+    name: 'conversation.chat.node',
+    key: 'bid-docx-export-notice',
+    inject: (sessionId: SessionId): BidDocxExportNoticeInjected => ({
+      showExport: () => { ctx.sessions.scope(sessionId)?.get('conversation')?.selectView('bid-word-export') },
+    }),
+  }, BidDocxExportNotice))
   ctx.slots.inject('conversation.input.left', () => ctx.slots.register({
     name: 'conversation.input.left',
     id: 'bid-confirmation-mode',

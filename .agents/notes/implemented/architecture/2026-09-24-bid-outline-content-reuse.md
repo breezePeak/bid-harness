@@ -8,7 +8,7 @@ Status: implemented
 
 ## Decision
 
-`outline.update` 在一个步骤候选中应用结构操作和显式业务归属，Host 从真实 Requirement、Scoring、RP 与 Compliance 清单核对 ID，然后对最终目录运行共享结构与覆盖校验。新章节 ID 由 Host 按步骤身份稳定分配；拆分子章起初不继承父章业务 ID。`outline.refine` 的独立子会话先产出结构操作，再根据 Host 新 ID 产出业务归属。
+`outline.update` 在一个步骤候选中应用结构操作和业务归属，Host 从真实 Requirement、Scoring、RP 与 Compliance 清单核对 ID，然后对最终目录运行共享结构与覆盖校验。新章节 ID 由 Host 按步骤身份稳定分配；拆分子章起初不继承父章业务 ID。新增或拆分且调用未提供归属时，执行器通过独立子会话按已分配的新 ID 生成归属；调用已提供的归属直接校验，不静默替换。`outline.refine` 的独立子会话先产出结构操作，再根据 Host 新 ID 产出业务归属。
 
 `chapter.reorganize` 读取原章节 Markdown 和 metadata，将顶层 Markdown 块连同原偏移、源正文 SHA 与块 SHA 提供给独立子会话。Host 要求每个块恰好分配一次，只有明确授权才接受删除，共享须显式标记；表格、代码和流程图 anchor 保持整块。迁移后的 metadata 保留来源资料与流程图规范，正文作为待复核草稿写入固定存储序号和 `chapters/reuse-seeds.json`，不继承旧 Writer 或 Reviewer 的完成身份。未分配原文和退役章节的旧任务、资料及 Manifest 归属分别保存在 `chapters/pending-reorganization.json` 和 `outline/reassignment.json`。
 
@@ -25,3 +25,5 @@ Status: implemented
 ## Consequences
 
 已写项目能够在同一能力 Work 中先深化目录再迁移原文；纯目录设计留下可见的待迁移与待写任务。旧正文文件保留为可恢复历史，不进入当前 Manifest。业务归属和原文块仍需要模型作语义判断，Host 只接受真实 ID、完整块和通过全局校验的结果；后续资料研究与写作能力消费重分配记录及草稿 seed。
+
+Main Agent 的任务说明要求已写章节的拆分或合并提交目录调整、原文迁移和复核的完整计划；用户明确只改目录时才留下待迁移正文。直接结构操作也可能请求一次模型分配业务引用，无法完成覆盖校验时不发布候选。能力测试覆盖自动分配及空分配的拒绝，源码 Loader 会话回放覆盖真实 `bid_run_task` 入口的拆分结果。

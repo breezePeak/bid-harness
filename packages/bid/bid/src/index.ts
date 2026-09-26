@@ -2176,7 +2176,7 @@ export class BidHostRuntime extends TypertRemoteService {
     const task = bidSessionTaskState(session)
     if (task.status !== 'suspended') return undefined
     const { run } = task
-    if (run.cause === 'awaiting_input') return undefined
+    if (run.cause !== 'user_stop') return undefined
     const decisionKey = runDecisionKey(session, task.stage, run.runId, 'run_recovery')
     const options = task.stage === 'file_intake'
       ? [{ label: RUN_DECISION_OPTIONS.continue }, { label: RUN_DECISION_OPTIONS.stop }]
@@ -3142,13 +3142,17 @@ export class BidHostRuntime extends TypertRemoteService {
       }), 'bid: DOCX template upload route')
     })
     ctx.effect(() => () => {
+      for (const controller of this.pendingRunDecisionControllers.values()) controller.abort(new Error('BID_HOST_DISPOSED'))
+      this.pendingRunDecisionControllers.clear()
+      for (const controller of this.pendingCapabilityInputControllers.values()) controller.abort(new Error('BID_HOST_DISPOSED'))
+      this.pendingCapabilityInputControllers.clear()
       for (const pending of this.pendingWritingQuestions.values()) pending.controller.abort(new Error('BID_HOST_DISPOSED'))
       this.pendingWritingQuestions.clear()
       for (const entry of this.processingWritingPlans.values()) {
         this.discardWritingPlanMessage(entry)
       }
       this.processingWritingPlans.clear()
-    }, 'bid: dispose native writing questions')
+    }, 'bid: dispose native questions')
   }
 
   /** Validate and durably commit one Main-Agent-submitted S5 writing plan. */
@@ -3339,6 +3343,32 @@ export class BidHostRuntime extends TypertRemoteService {
     }
     if (request.action === 'bid_pause_stage') return this.setStagePaused(session, true)
     if (request.action === 'bid_resume_stage') return this.setStagePaused(session, false)
+    if (request.action === 'bid_resume_current_run') {
+      if (this.ctx.agents.get(session.id) !== agent) {
+        throw new BidOrchestratorError('BID_ACTION_NOT_ALLOWED', '当前主会话无法恢复挂起任务。')
+      }
+      const current = bidSessionTaskState(session)
+      if (current.status !== 'suspended' || current.run.cause === 'user_stop'
+        || current.run.cause === 'awaiting_input') {
+        throw new BidOrchestratorError('BID_RESUME_NOT_ALLOWED', '当前任务不在可由聊天继续的挂起状态。')
+      }
+      this.cancelRunDecisions(session)
+      const accepted = Promise.withResolvers<{ accepted: true; run_id: string }>()
+      const task = this.ctx.agents.withoutInitiator(() => this.resumeCurrentRun(
+        session, request.run_id, request.expected_project_revision,
+        (run) => { accepted.resolve({ accepted: true, run_id: run.runId }) },
+      ))
+      this.recoveryTasks.add(task)
+      void task.then(() => {
+        accepted.reject(new Error('BID_RESUME_NOT_ADMITTED'))
+      }, (error: unknown) => {
+        accepted.reject(error)
+        this.ctx.logger.warn(`Bid 用户继续任务失败：${sanitizeBidErrorText(error instanceof Error ? error.message : String(error))}`)
+      }).finally(() => {
+        this.recoveryTasks.delete(task)
+      })
+      return accepted.promise
+    }
     if (request.action === 'bid_recover_task') {
       const bound = bidGoalBinding(session)
       const goalService = this.ctx.get('goals')
@@ -5947,6 +5977,7 @@ export class BidHostRuntime extends TypertRemoteService {
         } else {
           await publishOperation({ ...base, updatedAt: Date.now(), status: 'completed', phase: 'finalizing',
             message: 'Word 导出完成', path: result.value.path,
+            filePath: within(workspace.projectRoot, result.value.path),
             warnings: (result.value.warnings ?? []).slice(0, 20).map(warning => ({
               code: warning.code.slice(0, 100), message: warning.message.slice(0, 500),
             })) })

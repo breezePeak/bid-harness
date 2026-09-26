@@ -8,6 +8,7 @@ import { applyOutlineBusinessBindings, applyOutlineEdits, parseOutlineEditOperat
 import { readCapabilityOutlineBaseline } from './outline-draft-store.ts'
 import { parseOutlineArtifact, type OutlineArtifact } from './outline-generation-artifacts.ts'
 import { validateOutlineDraftForConfirmation } from './outline-confirmation-validator.ts'
+import { generateScopedOutlineBusinessBindings } from './outline-generation-executor.ts'
 import { parseTenderComplianceArtifact, parseTenderRequirementsArtifact, parseTenderScoringArtifact } from './tender-analysis-artifacts.ts'
 import { parseScoringResponsePointCatalog } from './scoring-response-point-artifacts.ts'
 import { parseEvidenceMapArtifact, sectionEvidenceMappingSchema } from './evidence-mapping-artifacts.ts'
@@ -151,11 +152,22 @@ export async function executeCapabilityOutlineUpdate(
   }
   const allocator = capabilitySectionAllocator(context.stepId, [...oldIds])
   const structural = applyOutlineEdits(old, parseOutlineEditOperations(input.operations), allocator)
-  const outline = parseOutlineArtifact(applyOutlineBusinessBindings(structural, input.business_bindings,
+  const bindings = input.business_bindings.length === 0
+    && input.operations.some(operation => ['split_section', 'add_section'].includes(operation.type))
+    ? await generateScopedOutlineBusinessBindings(context.agent, structural,
+      context.sectionIds === null ? structural.sections.filter(section => section.parent_id === null).map(section => section.id)
+        : [...context.sectionIds], {
+        requirements: requirements.requirements.map(item => ({ id: item.id, text: item.normalized_requirement })),
+        scoring: scoring.scoring_items.map(item => ({ id: item.id, text: item.criterion })),
+        compliance: compliance.compliance_items.map(item => ({ id: item.id, text: item.normalized_rule })),
+        response_points: catalog.points.map(item => ({ id: item.id, scoring_id: item.scoring_id, text: item.text })),
+      }, JSON.stringify(input.operations), context.run.signal)
+    : input.business_bindings
+  const outline = parseOutlineArtifact(applyOutlineBusinessBindings(structural, bindings,
     requirements, scoring, compliance, catalog))
   const validation = validateOutlineDraftForConfirmation(outline, requirements, scoring, compliance, catalog)
   if (!validation.ok) throw new Error(`BID_OUTLINE_CAPABILITY_INVALID: ${validation.issues.map(issue => issue.code).join(',')}`)
-  return coordinateCapabilityOutline(context, old, outline, input, new Set())
+  return coordinateCapabilityOutline(context, old, outline, { ...input, business_bindings: bindings }, new Set())
 }
 
 /**

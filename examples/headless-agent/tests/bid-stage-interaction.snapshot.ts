@@ -29,7 +29,7 @@ it('S4 waiting_user 通过源码 Loader 执行受控对话修改', async () => {
       expect(parent).not.toContain('bid.user_confirmation.received')
       const starts = events.filter(event => event.type === 'bid.run.started'
         && event.data.run.work.kind === 'capability_task')
-      expect(starts).toHaveLength(1)
+      expect(starts).toHaveLength(2)
       const workId = starts[0]?.type === 'bid.run.started' ? starts[0].data.run.work.workId : undefined
       expect(events.filter(event => event.type === 'bid.run.notice'
         && event.data.workId === workId && event.data.kind === 'completed')).toHaveLength(1)
@@ -50,9 +50,23 @@ it('S4 waiting_user 通过源码 Loader 执行受控对话修改', async () => {
         "bid_project_inspect",
         "bid_project_inspect",
         "bid_run_task",
+        "bid_run_task",
+      ],
+      "capabilitySplit": [
+        {
+          "responsePoints": [
+            "RP-000001",
+          ],
+          "title": "人员准备",
+        },
+        {
+          "responsePoints": [],
+          "title": "资源核查",
+        },
       ],
       "capabilityUpdates": 1,
       "concurrent": [
+        "BID_OPERATION_IN_PROGRESS",
         "BID_OPERATION_IN_PROGRESS",
         "BID_OPERATION_IN_PROGRESS",
       ],
@@ -114,6 +128,10 @@ it('S4 waiting_user 通过源码 Loader 执行受控对话修改', async () => {
         {
           "admitted": true,
           "input": "把第一条要求的理解改为明确实施边界",
+        },
+        {
+          "admitted": true,
+          "input": "将实施准备拆为人员准备和资源核查两个小节，只调整目录",
         },
       ],
       "untouchedEvidencePreserved": true,

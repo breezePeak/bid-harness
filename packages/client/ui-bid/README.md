@@ -2,11 +2,11 @@
 
 English | [中文](README.zh.md)
 
-Bid Session 浏览器 UI。插件向 Conversation 声明的 `conversation.input.dock` 列表注册 `BidStagePanel`，只在 Host 解析的 Session preset 为 `bid` 且存在 `bid.runtime` 投影时渲染。运行或取消中的阶段把当前 `run.progress.phase` 映射为 S1–S6 有序计划并使用共享 `PlanListPanel`；独立 Word 导出从 `bid.docx_export` 投影显示 S6，切换页签仍可见。插件不注册 Bid Run Chat Node，也不写入 `todo/write`。S5 完成后隐藏阶段状态行，审核与修订控件仍可用；挂起、失败和等待状态保留阶段状态行及适用控件。客户端不折叠 Bid 事件、不推进阶段、不推导权限，也不保存本地阶段或状态。
+Bid Session 浏览器 UI。插件向 Conversation 声明的 `conversation.input.dock` 列表注册 `BidStagePanel`，只在 Host 解析的 Session preset 为 `bid` 且存在 `bid.runtime` 投影时渲染。运行中的阶段把当前 `run.progress.phase` 映射为 S1–S6 有序计划并使用共享 `PlanListPanel`；独立 Word 导出的 S6 计划只在导出运行时显示。S5 完成后隐藏阶段状态行，审核与修订控件仍可用；挂起、失败和等待状态保留阶段状态行及适用控件。客户端不折叠 Bid 事件、不推进阶段、不推导权限，也不保存本地阶段或状态。
 
 S4 进度读取暂不可用时保留同一工作已读到的统计；首次读取由计划表头显示同步状态，正常同步不追加独立提示行。读取失败仍显示错误说明，后续轮询继续重试。
 
-能力任务计划从 Host 的 `getCapabilityTaskPlan` 读取当前 Work 检查点或已登记队列，按实际能力顺序显示，不按兼容阶段标签推断局部步骤。等待输入、失败和排队均保留未完成状态；阶段计划仍用于默认生成路线。正文与目录入口依据正式产物显示，拆章后按 `section_id` 重新定位正文。独立 Word 导出保留专用计划和停止状态，结果显示正文快照摘要。
+能力任务计划从 Host 的 `getCapabilityTaskPlan` 读取当前 Work 检查点，运行时按实际能力顺序显示，不按兼容阶段标签推断局部步骤；阶段计划仍用于默认生成路线。正文与目录入口依据正式产物显示，拆章后按 `section_id` 重新定位正文。独立 Word 导出运行时显示专用计划；完成或失败事件在发起导出的会话聊天时间线生成可重放的结果，成功时显示文件绝对路径，失败时显示原因。既有事件缺少绝对路径时，显示相对项目数据目录的路径并提供导出页入口。
 
 `projection.allowedActions` controls upload, retry, outline-confirmation, and Word-export controls, while the Host-projected file limits configure the picker and its rule text. File selection keeps browser `File` objects locally until the user explicitly uploads the batch. These actions use dedicated Bid Host entry points and never call `session.prompt()`.
 
@@ -22,7 +22,7 @@ S2–S4 reset clears downstream artifacts, publishes `ready`, and immediately dr
 
 正文工作台的“导出 Word”只打开同级详情页签，正文详情仍可切换。页签首次打开后随项目保存，新会话和刷新可恢复已保存配置；真实生成才创建可重放的 S6 导出记录。同一会话的重复请求共用执行中的导出，页面卸载不取消生成，恢复后从投影显示进度或结果。S5 运行或失败时，页面说明当前文件只包含已保存的章节；同项目任意会话均可上传模板、确认格式、预览和导出，不暂停正在执行的 Writer 或 Reviewer，也不阻止 S5 启动。上传、保存和预览不完成 S6，切换页签不重复解析或生成。修改配置后提示预览及文件需要更新，生成失败保留上一份下载。
 
-预览标注“样式预览，分页以 Word 为准”，缺失的标题、列表、表格、图片与题注采用明确标记的样例，不写入正文。样式映射按用途筛选候选，首行缩进可选择字符或毫米，文字颜色和正斜体可逐组编辑。导出页显示当前任务结果或错误，聊天 dock 显示三个真实步骤；用户确认模板内格式差异后才能生成。模型建议必须由用户应用；模型不可用时仍能手动编辑并生成。
+预览标注“样式预览，分页以 Word 为准”，缺失的标题、列表、表格、图片与题注采用明确标记的样例，不写入正文。样式映射按用途筛选候选，首行缩进可选择字符或毫米，文字颜色和正斜体可逐组编辑。导出页显示当前任务结果或错误，聊天 dock 仅在导出运行时显示三个真实步骤；用户确认模板内格式差异后才能生成。模型建议必须由用户应用；模型不可用时仍能手动编辑并生成。
 
 ## Model Experience
 

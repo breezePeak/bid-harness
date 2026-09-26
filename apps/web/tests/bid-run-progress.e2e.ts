@@ -186,7 +186,7 @@ describe('web e2e: Bid 后台 Run 进度', () => {
     }
   })
 
-  it('S4 运行和挂起共用计划表头统计，状态颜色与动画跟随 Host', async () => {
+  it('S4 运行时显示计划统计，挂起后隐藏计划', async () => {
     onTestFailed(() => saveFailureShot(page, 'web-e2e-bid-s4-summary'))
     const workspace = await startEvidenceMapping()
     const plan = page.getByTestId('bid-stage-plan')
@@ -215,31 +215,23 @@ describe('web e2e: Bid 后台 Run 进度', () => {
     await page.emulateMedia({ reducedMotion: 'reduce' })
     expect(await executing.evaluate(element => getComputedStyle(element).animationName)).toBe('none')
     const runningSnapshot = await captureStableAria(page, '[data-testid="bid-stage-plan"]', scaffold.workspaceCwd)
-    const artifacts = fileURLToPath(new URL('../../../.artifacts', import.meta.url))
-    await mkdir(artifacts, { recursive: true })
-    await plan.screenshot({ path: join(artifacts, 'bid-s4-summary-running.png') })
 
-    await plan.getByRole('button', { expanded: true }).click()
+    await page.setViewportSize({ width: 640, height: 900 })
+    expect(await plan.evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true)
+    await page.setViewportSize({ width: 1440, height: 900 })
+
     const stopped = await checkpointBidProjectState(workspace, {
       stage: 'evidence_mapping', status: 'suspended', run: { ...run, cause: 'user_stop' },
     })
     agent.session.append('bid.project.resumed', { revision: stopped.revision, state: bidProjectTaskState(stopped) })
-    await plan.getByTitle('待恢复 2', { exact: true }).waitFor({ timeout: 10_000 })
-    expect(await plan.getByRole('button', { expanded: false }).count()).toBe(1)
-    expect(await plan.getByTitle('待恢复 2', { exact: true }).evaluate(element => getComputedStyle(element).animationName)).toBe('none')
-    expect(await plan.locator('[data-bid-progress]').count()).toBe(0)
-    await plan.getByRole('button', { expanded: false }).click()
-    const stoppedSnapshot = await captureStableAria(page, '[data-testid="bid-stage-plan"]', scaffold.workspaceCwd)
-    await plan.screenshot({ path: join(artifacts, 'bid-s4-summary-stopped.png') })
-    await page.setViewportSize({ width: 640, height: 900 })
-    expect(await plan.evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true)
-    await plan.screenshot({ path: join(artifacts, 'bid-s4-summary-narrow.png') })
-    await page.setViewportSize({ width: 1440, height: 900 })
+    await expect.poll(() => plan.count()).toBe(0)
+    await page.getByText('已挂起', { exact: true }).waitFor({ timeout: 10_000 })
+    const stoppedSnapshot = await captureStableAria(page, '[aria-label="技术标生成"]', scaffold.workspaceCwd)
     await page.emulateMedia({ reducedMotion: 'no-preference' })
     const snapshots = fileURLToPath(new URL('./snapshots/bid-run-progress', import.meta.url))
     if (scaffold.mode === 'refresh') await mkdir(snapshots, { recursive: true })
     await compareOrRefreshGolden(join(snapshots, 's4-summary.expected.md'), [
-      '## 运行中', runningSnapshot, '## 已停止', stoppedSnapshot,
+      '## 运行中', runningSnapshot, '## 已停止（阶段计划隐藏）', stoppedSnapshot,
     ].join('\n\n'), scaffold.mode)
   })
 

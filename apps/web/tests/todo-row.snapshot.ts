@@ -3,8 +3,8 @@
 // client.js` bundles through AppWebEntry's ModuleLoader path against the
 // keyless FixtureApiClient transport, opens the fixture session, and pins the
 // two surfaces the fixture's parallel plan (turn 74, two items `in_progress`)
-// reaches — the `todo_write` tool row and the dock's plan strip — across the
-// fixture's running -> cancelled session transition.
+// reaches — the `todo_write` tool row and the dock's plan strip — while the
+// fixture runs, then checks that cancellation removes the plan strip.
 //
 // The row is pinned as three separate fields on purpose. `summary=` is the
 // ellipsized text and `suffix=` is ToolRow's non-shrinking `summarySuffix`
@@ -48,7 +48,7 @@ function todoShape(row: Element, panel: Element): string {
 }
 
 describe('assembled todo surfaces', () => {
-  it('renders the parallel plan as active only while its session is running', async () => {
+  it('执行时显示并行计划，停止后隐藏计划条', async () => {
     mountAssembledApp()
 
     const tree = await screen.findByRole('tree', { name: 'Sessions' }, { timeout: 10_000 })
@@ -78,10 +78,9 @@ describe('assembled todo surfaces', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Allow once' }))
     fireEvent.click(await screen.findByRole('button', { name: 'Stop generating' }))
     await waitFor(() => {
-      expect(panel.querySelectorAll('[data-active="false"]')).toHaveLength(2)
-      expect(panel.textContent).toContain('2 unfinished')
+      expect(screen.queryByTestId('todo-panel')).toBeNull()
     })
-    const shape = `running\n${active}\n\nstopped\n${todoShape(row, panel)}`
+    const shape = `running\n${active}\n\nstopped\npanel-count=${document.querySelectorAll('[data-testid="todo-panel"]').length}\n`
     if (REFRESHING_GOLDEN) {
       mkdirSync(dirname(EXPECTED), { recursive: true })
       writeFileSync(EXPECTED, shape)

@@ -915,8 +915,8 @@ export function BidStagePanel({
   const hostFailureReason = hostFailure?.message
   const hostFailureIssues = hostFailure?.issues ?? []
   const hasFailureInfo = isFailedOrSuspended && (Boolean(hostFailureReason) || hostFailureIssues.length > 0)
-  const showRunPlan = (projection.task.status === 'running' || mappingProgressObservable)
-    && projection.task.run?.work.kind !== 'capability_task'
+  const showRunPlan = projection.task.status === 'running'
+    && projection.task.run.work.kind !== 'capability_task'
   const planItems = buildBidStagePlan(projection, t)
   const planLabels: PlanListLabels = {
     title: t('plan.title', { stage: `S${String(BID_STAGES.indexOf(projection.task.stage) + 1)}`, name: t(stageKey(projection.task.stage)) }),
@@ -1136,35 +1136,30 @@ export function BidStagePanel({
       } : undefined}
     />
   ) : null
-  const capabilityRunPlan = capabilityPlan !== null ? (
+  const capabilityRunPlan = capabilityPlan?.status === 'running' ? (
     <div>
       <PlanListPanel
         items={buildCapabilityTaskPlan(capabilityPlan, t)}
-        running={capabilityPlan.status === 'running'}
+        running
         labels={{ ...planLabels, title: capabilityPlan.title }}
         testId="bid-capability-plan"
       />
-      <p role={capabilityPlan.status === 'failed' ? 'alert' : 'status'} className={css.agentStatus}>
-        {capabilityPlan.status === 'queued' ? t('capability.queued')
-          : capabilityPlan.status === 'awaiting_input' ? t('capability.awaiting_input')
-            : t(`status.${capabilityPlan.status}`)} · {capabilityPlan.scope === 'project'
+      <p role="status" className={css.agentStatus}>
+        {t('status.running')} · {capabilityPlan.scope === 'project'
           ? t('capability.scope.project') : capabilityPlan.scope}
         {capabilityPlan.steps.flatMap(step => step.detail === null ? [] : [step.detail]).join('；')}
       </p>
     </div>
   ) : null
-  const exportPlan = docxExport !== null && docxExport !== undefined ? (
+  const exportPlan = docxExport?.status === 'running' ? (
     <div>
       <PlanListPanel
         items={buildDocxExportPlan(docxExport, t)}
-        running={docxExport.status === 'running'}
+        running
         labels={{ ...planLabels, title: 'S6 · 导出 Word' }}
         testId="bid-docx-export-plan"
       />
-      <p role={docxExport.status === 'failed' ? 'alert' : 'status'} className={css.agentStatus}>
-        {docxExport.status === 'failed' ? docxExport.error : docxExport.message}
-        {docxExport.status === 'failed' && <Button size="sm" onClick={() => { selectReviewView('bid-word-export') }}>重试导出</Button>}
-      </p>
+      <p role="status" className={css.agentStatus}>{docxExport.message}</p>
     </div>
   ) : null
   const mappingSyncNotice = mappingProgressObservable && mappingReadState === 'stale' ? (

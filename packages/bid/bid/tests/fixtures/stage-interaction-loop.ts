@@ -184,6 +184,29 @@ export async function runStageInteractionLoop(ctx: Context, root: string, checkR
       const previous = priorMap.section_mappings.find(mapping => mapping.section_id === item.section_id)
       return JSON.stringify(item) === JSON.stringify(previous)
     })
+  childScript.push((options) => {
+    const candidate = JSON.parse(visibleTarget(options, /当前候选目录：([^\r\n]+)/u)) as typeof finalDraft.outline
+    const child = candidate.sections.find(section => section.parent_id === target.id)
+    if (child === undefined) throw new Error('拆分候选缺少新章节')
+    return answer(JSON.stringify([{ section_id: child.id, requirement_ids: target.requirement_ids,
+      scoring_ids: target.scoring_ids, scoring_response_point_ids: target.scoring_response_point_ids ?? [],
+      compliance_ids: target.compliance_ids }]))
+  })
+  await send('将实施准备拆为人员准备和资源核查两个小节，只调整目录', [
+    call('bid_run_task', { task: { goal: '拆分实施准备目录',
+      scope: { kind: 'sections', section_ids: [target.id] }, steps: [{ scope: { source: 'task' },
+        call: { capability: 'outline.update', input: {
+          operations: [{ type: 'split_section', section_id: target.id,
+            children: ['人员准备', '资源核查'].map(title => ({ title, purpose: title, must_answer: [`${title}的安排`] })) }],
+          defer_content_migration: true,
+        } } }],
+    } }), answer('正在拆分目录并分配业务要求。'),
+  ])
+  const capabilityDraft = await getOrCreateOutlineDraft(workspace)
+  const splitChildren = capabilityDraft.outline.sections.filter(section => section.parent_id === target.id)
+  const capabilitySplit = splitChildren.map(section => ({ title: section.title,
+    responsePoints: section.scoring_response_point_ids ?? [] }))
+  if (childScript.length !== 0 || splitChildren.length !== 2) throw new Error('目录能力未完成拆分与业务分配')
   const calls = agent.session.events.slice(before).filter(event => event.type === 'tool/call').map(event => event.data.name)
   const failures = agent.session.events.slice(before).filter(event => event.type === 'tool/result').filter(event => event.data.message.content.some(block => block.type === 'tool-result' && block.isError))
   const state = agent.session.events.reduce(reduceBidTaskState, BID_INITIAL_TASK_STATE)
@@ -193,7 +216,7 @@ export async function runStageInteractionLoop(ctx: Context, root: string, checkR
   releaseObserver()
   await hostFiber?.dispose()
   return { turns, calls, failures: failures.length, rawWriteBlocked, untouchedEvidencePreserved, confirmations, state,
-    readOnlyNoWork, planOnlyNoWork, capabilityUpdates,
+    readOnlyNoWork, planOnlyNoWork, capabilityUpdates, capabilitySplit,
     updatedRequirement: updatedRequirements.requirements.find(item => item.id === 'REQ-1')?.normalized_requirement,
     revision: finalDraft.revision, titles: finalDraft.outline.sections.map(section => section.title),
     visibleTools, concurrent: await Promise.all(concurrent), disposed: hostFiber === undefined ? null : !ctx.tools.schemas(agent).some(tool => tool.name.startsWith('bid_')) }

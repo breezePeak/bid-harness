@@ -12,14 +12,4 @@ item=in_progress active=true 跑后台构建
 item=pending 浏览器验收
 
 stopped
-row=todo_write
-title=Update to-do list
-summary=1/4 completed · 实现 fixture 样本
-suffix=+1
-panel=1 completed · 2 unfinished · 1 pending
-spinning-glyphs=0
-unfinished-glyphs=2
-item=completed 梳理需求
-item=in_progress active=false 实现 fixture 样本
-item=in_progress active=false 跑后台构建
-item=pending 浏览器验收
+panel-count=0

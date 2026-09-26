@@ -2434,6 +2434,9 @@ function mappingTaskVisibleTenderContext(task: EvidenceMappingTask, inputs: Evid
     sectionVisibleRequirements(section, inputs.requirements).map(item => item.id)))
   const scoringIds = new Set(contextSections.flatMap(section => section.scoring_ids))
   const responsePointIds = new Set(contextSections.flatMap(section => section.scoring_response_point_ids ?? []))
+  for (const id of task.coverage_candidates?.requirement_ids ?? []) requirementIds.add(id)
+  for (const id of task.coverage_candidates?.scoring_ids ?? []) scoringIds.add(id)
+  for (const id of task.coverage_candidates?.scoring_response_point_ids ?? []) responsePointIds.add(id)
   const complianceIds = new Set(contextSections.flatMap(section => sectionEvidenceContext(inputs.outline, section).compliance_ids))
   return {
     currentScope,

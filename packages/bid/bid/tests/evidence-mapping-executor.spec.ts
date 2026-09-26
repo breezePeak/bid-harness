@@ -1912,7 +1912,20 @@ describe('evidence-mapping Agent executor', () => {
     start.complete()
     for (let count = 2; count <= createdIds.length + 2; count++) {
       await vi.waitFor(() => { expect(fixture.starts).toHaveLength(count) })
-      fixture.starts[count - 1]!.resolve()
+      const leaf = fixture.starts[count - 1]!
+      if (count === 3) {
+        const prompt = promptText(leaf.request.request)
+        expect(prompt).toContain('相关 Requirements：[{"id":"R-1"')
+        expect(prompt).toContain('相关 Scoring：[{"id":"S-1"')
+        expect(prompt).toContain('相关 Response Points：[{"id":"RP-000001"')
+        expect(prompt).toContain('current_coverage_ownership：{"requirement_ids":["R-1"]')
+        const assessment = branchResearchAssessment(true, [], 'R-1')
+        assessment.key_findings[0]!.basis.push({ kind: 'scoring', ref: 'S-1' },
+          { kind: 'response_point', ref: 'RP-000001' })
+        expect(await fixture.invokeSubmissionTool(leaf.request.childId!, 'submit_section_research_assessment',
+          assessment)).toMatchObject({ isError: false, value: { research_ready: true } })
+      }
+      leaf.resolve()
     }
     await execution
     expect(promptText(fixture.starts[2]!.request.request)).toContain(`"local_material_refs":["M1:${material.chunk}"]`)

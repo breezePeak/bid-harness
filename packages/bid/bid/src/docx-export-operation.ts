@@ -15,10 +15,10 @@ const base = z.object({
   message: z.string().min(1).max(500),
 })
 
-/** 拒绝缺少结果的完成态及缺少原因的失败态。 */
+/** 完成态保留项目内相对路径，并为新导出记录绝对文件位置；旧日志可缺少 filePath。 */
 export const docxExportOperationSchema = z.discriminatedUnion('status', [
   base.extend({ status: z.literal('running') }).strict(),
-  base.extend({ status: z.literal('completed'), path: z.string().min(1).max(500), warnings: z.array(z.object({ code: z.string().max(100), message: z.string().max(500) }).strict()).max(20) }).strict(),
+  base.extend({ status: z.literal('completed'), path: z.string().min(1).max(500), filePath: z.string().min(1).max(8192).optional(), warnings: z.array(z.object({ code: z.string().max(100), message: z.string().max(500) }).strict()).max(20) }).strict(),
   base.extend({ status: z.literal('failed'), error: z.string().min(1).max(500) }).strict(),
 ])
 
