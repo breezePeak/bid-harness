@@ -16,7 +16,7 @@ const fixtureDir = fileURLToPath(new URL('./bid-chapter-writing-snapshots/', imp
 const configPath = fileURLToPath(new URL('../bid-evidence-mapping.cordis.snapshot.yml', import.meta.url))
 const binScript = fileURLToPath(new URL('./fixtures/bid-chapter-writing-driver.ts', import.meta.url))
 
-it('S5 通过真实 Loader 拒绝正文新建目录、隔离坏 Web 来源并保留 S4 map', async () => {
+it('S5 通过真实 Loader 拒绝正文新建目录、隔离坏 Web 来源并回流已使用资料', async () => {
   const result = await runLoaderSmoke({
     label: 'S5 当前章节本地补搜', tempDirPrefix: 'dsh-s5-local-snapshot-', binScript, configPath, mode: 'src',
     processTimeoutMs: 45_000,
@@ -57,12 +57,13 @@ it('S5 通过真实 Loader 拒绝正文新建目录、隔离坏 Web 来源并保
       expect(writerLog).not.toContain('EISDIR')
       const projectRoot = join(cwd, '.bid-harness')
       const map = parseEvidenceMapArtifact(JSON.parse(await readFile(join(projectRoot, 'analysis/evidence-map.json'), 'utf8')))
-      expect(map.section_mappings[0]!.local_materials).toEqual([])
       const metadata = parseChapterMetadata(JSON.parse(await readFile(join(projectRoot, 'chapters/meta/0001.json'), 'utf8')))
       expect(metadata.local_materials_used).toEqual([{
         source_kind: 'reference', file_id: metadata.local_materials_used[0]?.file_id, chunk: 'chunk_0001', usage: 'reference', summary: '支撑本章实施流程的组织与步骤安排。',
       }])
       expect(metadata.web_materials_used).toEqual([])
+      expect(map.section_mappings[0]!.local_materials).toEqual(metadata.local_materials_used)
+      expect(map.section_mappings[0]!.answer_plan).toBeUndefined()
       const manifest = parseChapterWritingManifest(JSON.parse(await readFile(join(projectRoot, 'chapters/manifest.json'), 'utf8')))
       expect(manifest.chapters).toHaveLength(1)
       expect(manifest.chapters[0]!.local_materials_used).toEqual(metadata.local_materials_used)
@@ -105,7 +106,7 @@ it('S5 通过真实 Loader 拒绝正文新建目录、隔离坏 Web 来源并保
     },
   })
   expect(JSON.parse(result.stdout)).toEqual({
-    evidence_unchanged: true,
+    evidence_synced: true,
     askedForRequirements: false,
     runtime: { stage: 'chapter_writing', status: 'completed', run: null },
     allowed_actions: ['send_message', 'export_docx', 'revise_chapter'],

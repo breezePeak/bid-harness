@@ -287,4 +287,48 @@ describe('同一 Work 的能力序列', () => {
       expect(execute).toHaveBeenCalledTimes(3)
     } finally { await ctx.fiber.dispose() }
   })
+
+  it('等待输入恢复将已生成文件和删除差异一起发布，重复缺口获得新问题身份', async () => {
+    const { ctx, workspace, session, descriptor, run, agent } = await fixture()
+    try {
+      await writeFile(join(workspace.projectRoot, 'chapters/deleted.json'), '旧文件\n')
+      let calls = 0
+      const adapter: CapabilityTaskDispatcher = {
+        allowedWrites: async call => new Set(call.capability === 'chapter.review'
+          ? ['chapters/kept.json', 'chapters/deleted.json'] : []),
+        execute: async (call, context) => {
+          if (call.capability !== 'chapter.review') return { result: { target_section_ids: [],
+            changed_artifacts: [], change_summary: '完成后续步骤', warnings: [], missing_topics: [], needs_input: false } }
+          calls++
+          if (calls === 1) {
+            await context.run.commits.writeJson(join(context.working.projectRoot, 'chapters/kept.json'), { writer: '原有成果' })
+            await context.run.commits.remove(join(context.working.projectRoot, 'chapters/deleted.json'))
+          } else {
+            expect(context.resumeCandidate).toBe(true)
+            expect(await readFile(join(context.working.projectRoot, 'chapters/kept.json'), 'utf8')).toContain('原有成果')
+          }
+          return { result: { target_section_ids: [], changed_artifacts: calls === 1 ? ['chapters/kept.json'] : [],
+            change_summary: '保留成果', warnings: [], missing_topics: calls < 3 ? ['仍缺企业资料'] : [],
+            needs_input: calls < 3 }, removedPaths: calls === 1 ? ['chapters/deleted.json'] : [] }
+        }, validate: async () => {},
+      }
+      const first = await executeCapabilityTask(workspace, run, adapter, agent, session)
+      if (first.status !== 'awaiting_input') throw new Error('缺少待答问题')
+      expect(await askCapabilityTaskInput(session, descriptor.workId, first,
+        async question => ({ id: question.id, selected: [], custom: '无关的补充。' }), async () => {})).toBe(true)
+      const second = await executeCapabilityTask(workspace, createTestBidRunContext({ work: descriptor }), adapter, agent, session)
+      if (second.status !== 'awaiting_input') throw new Error('缺口必须保留')
+      expect(second.questionId).not.toBe(first.questionId)
+      expect(await askCapabilityTaskInput(session, descriptor.workId, second,
+        async question => ({ id: question.id, selected: [], custom: '已提供真实资料。' }), async () => {})).toBe(true)
+      const final = await executeCapabilityTask(workspace, createTestBidRunContext({ work: descriptor }), adapter, agent, session)
+      expect(final.status).toBe('completed')
+      if (final.status !== 'completed') return
+      expect(final.receipt.files.map(file => file.path)).toContain('chapters/kept.json')
+      expect(final.receipt.removed_paths).toContain('chapters/deleted.json')
+      expect(await readFile(join(workspace.projectRoot, 'chapters/kept.json'), 'utf8')).toContain('原有成果')
+      await expect(readFile(join(workspace.projectRoot, 'chapters/deleted.json'))).rejects.toMatchObject({ code: 'ENOENT' })
+      expect(calls).toBe(3)
+    } finally { await ctx.fiber.dispose() }
+  })
 })

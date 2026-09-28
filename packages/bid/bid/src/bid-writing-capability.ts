@@ -136,6 +136,8 @@ export async function executeWritingCapability(
   let attention: BidStageAttentionRequiredError | undefined
   try { await executeChapterWriting(context.agent, workspace, buildBidStageTask('chapter_writing'), {
     ...settings, run: context.run,
+    ...(context.inputAnswer?.custom === undefined ? {} : { inputAnswer: context.inputAnswer.custom }),
+    ...(context.resumeCandidate === undefined ? {} : { resumeCandidate: context.resumeCandidate }),
     scoped: { targetSectionIds: ids, mode: call.capability === 'chapter.review' ? 'review' : 'write',
       instruction,
       seedBySectionId, affectedDependentIds: affected },

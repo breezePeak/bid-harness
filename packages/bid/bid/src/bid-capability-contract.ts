@@ -113,6 +113,8 @@ export interface BidCapabilityExecutionContext {
   readonly sourceSession?: WritingMessageSession
   readonly run: BidRunContext
   readonly sectionIds: ReadonlySet<string> | null
+  /** 用户选中的最小子树根；与可写叶节分开传入结构研究。 */
+  readonly sectionScopeRoots?: readonly string[]
   /** 结构操作产出并经 Host 核对属于任务根范围的新后代。 */
   readonly authorizedNewDescendants?: ReadonlySet<string>
   readonly stepDirectory: string

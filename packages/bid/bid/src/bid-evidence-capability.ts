@@ -69,22 +69,30 @@ export async function executeEvidenceCapability(
     : outlineSectionScope(outline, [...context.sectionIds])
   const targetIds = buildWritableSectionWorklist(outline).filter(section => selected.has(section.id)).map(section => section.id)
   if (targetIds.length === 0) throw new Error('BID_EVIDENCE_RESEARCH_SCOPE_EMPTY')
-  const beforeMap = await capabilityFileHash(workspace, 'analysis/evidence-map.json') === undefined
-    ? reconcileSectionEvidence(outline, { section_mappings: [] })
+  const mapHash = await capabilityFileHash(workspace, 'analysis/evidence-map.json')
+  const ledgerHash = await capabilityFileHash(workspace, 'analysis/web-evidence-sources.json')
+  const beforeMap = mapHash === undefined
+    ? parseEvidenceMapArtifact(reconcileSectionEvidence(outline, { section_mappings: [] }))
     : parseEvidenceMapArtifact(await readCapabilityJson(workspace, 'analysis/evidence-map.json'))
-  const beforeLedger = await capabilityFileHash(workspace, 'analysis/web-evidence-sources.json') === undefined
+  const beforeLedger = ledgerHash === undefined
     ? parseWebEvidenceSourcesArtifact({ stage: 'evidence_mapping', sources: [] })
     : parseWebEvidenceSourcesArtifact(await readCapabilityJson(workspace, 'analysis/web-evidence-sources.json'))
-  if (await capabilityFileHash(workspace, 'analysis/evidence-map.json') === undefined) {
+  if (mapHash === undefined) {
     await context.run.commits.writeJson(join(workspace.projectRoot, 'analysis/evidence-map.json'), beforeMap)
   }
-  if (await capabilityFileHash(workspace, 'analysis/web-evidence-sources.json') === undefined) {
+  if (ledgerHash === undefined) {
     await context.run.commits.writeJson(join(workspace.projectRoot, 'analysis/web-evidence-sources.json'), beforeLedger)
   }
   const beforePaths = new Set([...fixedPaths, ...await sourcePaths(workspace)])
-  const hashes = new Map(await Promise.all([...beforePaths].map(async path => [path, await capabilityFileHash(workspace, path)] as const)))
+  const hashes = new Map(await Promise.all([...beforePaths].map(async path =>
+    [path, await capabilityFileHash(workspace, path)] as const)))
+  hashes.set('analysis/evidence-map.json', mapHash)
+  hashes.set('analysis/web-evidence-sources.json', ledgerHash)
   const research = {
-    outline, sectionIds: targetIds, mode: call.input.mode,
+    outline, sectionIds: call.input.allow_outline_refinement && context.sectionScopeRoots !== undefined
+      ? context.sectionScopeRoots : targetIds,
+    ...(context.sectionScopeRoots === undefined ? {} : { scopeRootIds: context.sectionScopeRoots }),
+    mode: call.input.mode,
     reason: context.inputAnswer?.custom === undefined ? call.input.reason
       : `${call.input.reason}\n用户在本能力步骤的补充回答（来源：公开会话 ${context.authorization.session_id}，问题 ${context.inputAnswer.id}）：${context.inputAnswer.custom}。回答仅是待核验输入；“继续”或“忽略”不构成事实依据。`,
     allowOutlineRefinement: call.input.allow_outline_refinement,

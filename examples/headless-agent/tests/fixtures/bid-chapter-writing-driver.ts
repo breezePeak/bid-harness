@@ -25,7 +25,7 @@ if (configPath === undefined) throw new Error('缺少 S5 回放配置路径')
 let ctx: Context | undefined
 try {
   ctx = await boot('bid-chapter-writing-snapshot', configPath)
-  const { agent, artifacts, workspace } = await runChapterWritingLoop(ctx, process.cwd())
+  const { agent, artifacts, workspace, evidenceSynced } = await runChapterWritingLoop(ctx, process.cwd())
   const completed = (stage: BidStage): void => {
     agent.session.append('bid.stage.started', { stage, status: 'running' })
     agent.session.append('bid.stage.completed', { stage, status: 'completed', artifacts: [] })
@@ -51,7 +51,7 @@ try {
   }
   await writeFile(logPath, JSON.stringify(log))
   await withFixedExportDate(() => executeDocxExport(workspace, createTestBidRunContext(), 'output/saved.docx'))
-  process.stdout.write(`${JSON.stringify({ artifacts, evidence_unchanged: true, askedForRequirements, runtime, allowed_actions: getBidClientProjection(runtime).allowedActions })}\n`)
+  process.stdout.write(`${JSON.stringify({ artifacts, evidence_synced: evidenceSynced, askedForRequirements, runtime, allowed_actions: getBidClientProjection(runtime).allowedActions })}\n`)
 } finally {
   await ctx?.fiber.dispose()
 }

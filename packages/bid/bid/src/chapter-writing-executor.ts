@@ -84,6 +84,7 @@ import { resolveEvidenceChunk } from './evidence-chunk.ts'
 import { buildWritableSectionWorklist, sectionEvidenceContext, sectionVisibleRequirements, validateSectionEvidenceCoverage } from './section-evidence-context.ts'
 import { buildSectionAnswerChecklist, validateSectionAnswerPlan, type SectionAnswerPlan } from './section-answer-plan.ts'
 import { executeSectionResearch } from './evidence-mapping-executor.ts'
+import { parseEvidenceMappingPlan } from './evidence-mapping-artifacts.ts'
 import {
   buildWebEvidenceSnapshots,
   type CapturedWebResult,
@@ -180,6 +181,9 @@ export interface ChapterWritingControl {
 
 /** Host-owned S5 repair and concurrency limits. */
 interface ChapterWritingBaseOptions extends ModelStageExecutionOptions {
+  /** 仅公共能力恢复时提供的待核验用户回答。 */
+  inputAnswer?: string
+  resumeCandidate?: boolean
   /** Whether Chapter Writers may receive the registered Web tools. */
   webSearchEnabled?: boolean
   /** Maximum Chapter Subagents that may run simultaneously. */
@@ -308,6 +312,40 @@ function uniqueBy<T>(values: readonly T[], identity: (value: T) => string): T[] 
 
 function localIdentity(material: LocalEvidenceMaterial): string {
   return `${material.source_kind}\u0000${material.file_id}\u0000${material.chunk}`
+}
+
+/** 当前章节的业务依据身份；资料列表顺序、进程位置与 Child 身份不参与摘要。
+ * @param context 当前章节职责、计划及适用 S2/S4 记录。
+ * @param manifest 项目文件内容身份。
+ * @param sources 已持久化 Web 正文身份。
+ * @returns 当前 Writer 和 Reviewer 共用的 SHA-256 输入身份。
+ */
+export function chapterEvidenceInputFingerprint(
+  context: ChapterContext, manifest: BidManifest, sources: readonly WebEvidenceSource[],
+): string {
+  const local = [...context.relatedMaterials, ...context.referenceBidMaterials]
+    .map(material => ({ ...material, file_sha256: manifest.files.find(file => String(file.id) === material.file_id)?.sha256 }))
+    .sort((a, b) => localIdentity(a).localeCompare(localIdentity(b)))
+  const web = context.webMaterials.map(material => ({ ...material,
+    chunk_refs: [...material.chunk_refs].sort(),
+    content_sha256: sources.find(source => source.source_id === material.source_id)?.content_sha256 }))
+    .sort((a, b) => webMaterialIdentity(a).localeCompare(webMaterialIdentity(b)))
+  const section = context.section
+  return createHash('sha256').update(JSON.stringify({
+    section: { id: section.id, title: section.title, purpose: section.purpose,
+      heading_path: context.headingPath, must_answer: section.must_answer,
+      writing_notes: section.writing_notes, suggested_tables: section.suggested_tables,
+      suggested_figures: section.suggested_figures, framework_refs: section.framework_refs,
+      requirement_ids: [...section.requirement_ids].sort(), scoring_ids: [...section.scoring_ids].sort(),
+      scoring_response_point_ids: [...section.scoring_response_point_ids ?? []].sort(),
+      compliance_ids: [...section.compliance_ids].sort() },
+    answer_plan: context.answerPlan ?? null, local, web,
+    writing_dimensions: [...context.writingDimensions].sort(), missing_topics: [...context.missingTopics].sort(),
+    project: context.project,
+    requirements: context.requirements, scoring: context.scoring,
+    response_points: context.responsePoints, compliance: context.compliance,
+    global_compliance: context.globalCompliance,
+  })).digest('hex')
 }
 
 /**
@@ -714,6 +752,35 @@ async function readJson(workspace: BidWorkspace, path: string): Promise<unknown>
   const target = join(workspace.projectRoot, path)
   await assertNoLinkedPath(workspace.root, target)
   return JSON.parse(await readFile(target, 'utf8'))
+}
+
+async function readOptionalResearchLog(workspace: BidWorkspace, sectionIds: readonly string[]): Promise<boolean> {
+  try {
+    await readJson(workspace, 'analysis/evidence-mapping-log.json')
+    const plan = parseEvidenceMappingPlan(await readJson(workspace, 'analysis/evidence-mapping-plan.json'))
+    const initial = plan.tasks.filter(task => task.phase === 'initial' && task.generation === 0)
+    return initial.length === sectionIds.length && sectionIds.every(id =>
+      initial.some(task => task.task_id === `MAP-REMAP-${id}` && task.task_kind === 'section_remap'))
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false
+    throw error
+  }
+}
+
+/** 写前依据准备仅覆盖当前入口实际授权的叶节。
+ * @param outline 当前确认目录。
+ * @param options 全书、局部写作或单批修订入口。
+ * @returns 按目录顺序排列的可写章节 ID。
+ */
+export function resolveWritingPreparationSectionIds(
+  outline: OutlineArtifact,
+  options: Pick<ChapterWritingExecutionOptions, 'scoped' | 'revision' | 'revisionBatch'>,
+): string[] {
+  const selected = options.scoped?.targetSectionIds
+    ?? (options.revision === undefined ? undefined : [options.revision.reference.section_id])
+    ?? options.revisionBatch?.tasks.map(task => task.section_id)
+  return buildChapterWorklist(outline).filter(section => selected === undefined || selected.includes(section.id))
+    .map(section => section.id)
 }
 
 async function persistChapterWebSnapshots(
@@ -1206,6 +1273,7 @@ async function loadChapterCheckpoint(
   writingPlanInvalidations: ReadonlySet<string>,
   writingPlanVersion: number,
   recoverCompletedRevisionArtifacts: boolean,
+  activeSectionIds?: ReadonlySet<string>,
 ): Promise<ChapterCheckpoint | undefined> {
   try {
     const plan = parseChapterExecutionPlan(await readJson(workspace, PLAN_PATH))
@@ -1283,7 +1351,11 @@ async function loadChapterCheckpoint(
           || review.reviewer_child_session_id !== log.final_reviewer_child_session_id
           || !log.attempts.some(attempt => attempt.role === 'reviewer' && attempt.accepted
             && attempt.child_session_id === log.final_reviewer_child_session_id)
-          || validateChapterReview(context, reviewCandidate, review).length > 0) throw new Error('checkpoint-review-invalid')
+           || (activeSectionIds === undefined || activeSectionIds.has(section.id))
+             && log.attempts.findLast(attempt => attempt.role === 'reviewer' && attempt.accepted
+             && attempt.child_session_id === log.final_reviewer_child_session_id)?.input.evidence_sha256
+             !== chapterEvidenceInputFingerprint(context, manifest, sources)
+           || validateChapterReview(context, reviewCandidate, review).length > 0) throw new Error('checkpoint-review-invalid')
           completed.set(section.id, { candidate, entry: entryFor(context, candidate, reviewPath, candidateSha256) })
           drafts.delete(section.id)
           log.status = 'completed'
@@ -1962,8 +2034,8 @@ async function runChapterWriting(
   let webSources = parseWebEvidenceSourcesArtifact(webSourcesRaw)
   const manifest = await workspace.readManifest()
   if (scoped?.mode !== 'review') {
-    const preparationTargets = buildChapterWorklist(outline).filter(section => scoped === undefined
-      || scoped.targetSectionIds.includes(section.id))
+    const preparationIds = new Set(resolveWritingPreparationSectionIds(outline, options))
+    const preparationTargets = buildChapterWorklist(outline).filter(section => preparationIds.has(section.id))
     const stale = preparationTargets.filter((section) => {
       const mapping = evidence.section_mappings.find(item => item.section_id === section.id)
       if (mapping === undefined) return true
@@ -1990,6 +2062,7 @@ async function runChapterWriting(
           ? [`web:${basis.source_id}:${basis.chunk_refs.join(',')}`] : [])) ?? [],
       ])
       return validateSectionAnswerPlan(mapping.answer_plan, checklist, sourceKeys).length > 0
+        || options.inputAnswer !== undefined && mapping.answer_plan?.some(item => item.mode === 'gap') === true
     })
     if (stale.length > 0) {
       options.run.reportProgress({ phase: 'executing', summary: `正在补齐 ${String(stale.length)} 个章节的任务级依据` })
@@ -2001,6 +2074,8 @@ async function runChapterWriting(
         run: options.run, maxRepairAttempts: options.maxRepairAttempts,
         maxConcurrency: options.maxConcurrency,
         ...(options.webSearchEnabled === undefined ? {} : { webSearchEnabled: options.webSearchEnabled }),
+        ...(options.resumeCandidate === true && await readOptionalResearchLog(workspace, stale.map(section => section.id))
+          ? { resumeCandidate: true } : {}),
       })
       evidence = parseEvidenceMapArtifact(await readJson(workspace, 'analysis/evidence-map.json'))
       webSources = parseWebEvidenceSourcesArtifact(await readJson(workspace, 'analysis/web-evidence-sources.json'))
@@ -2070,14 +2145,17 @@ async function runChapterWriting(
   const checkpointVersion = writingPlanInvalidations.size > 0 && appliedWritingPlanVersion !== undefined
     ? appliedWritingPlanVersion
     : writingPlan.plan_version
+  const activeSectionIds = scoped === undefined && revision === undefined && revisionBatch === undefined ? undefined
+    : new Set(scoped?.targetSectionIds ?? (revision === undefined ? undefined : [revision.request.reference.section_id])
+      ?? revisionBatch?.tasks.map(task => task.section_id))
   let checkpoint = await loadChapterCheckpoint(
     workspace, outline, outlineHash, contexts, options.maxConcurrency, writingPlanInvalidations, checkpointVersion,
-    revision !== undefined || revisionBatch !== undefined,
+    revision !== undefined || revisionBatch !== undefined, activeSectionIds,
   )
   if (checkpoint === undefined && checkpointVersion !== writingPlan.plan_version) {
     checkpoint = await loadChapterCheckpoint(
       workspace, outline, outlineHash, contexts, options.maxConcurrency, new Set(), writingPlan.plan_version,
-      revision !== undefined || revisionBatch !== undefined,
+      revision !== undefined || revisionBatch !== undefined, activeSectionIds,
     )
   }
   const originalWriterId = revision === undefined ? undefined
@@ -2289,7 +2367,8 @@ async function runChapterWriting(
   const inputBlocked = new Map<string, string[]>()
   for (const sectionId of pending) {
     const answerPlan = contexts.get(sectionId)?.answerPlan
-    if (answerPlan === undefined || answerPlan.length === 0 || answerPlan.some(item => item.mode !== 'gap')) continue
+    if (checkpoint?.drafts.has(sectionId) || answerPlan === undefined || answerPlan.length === 0
+      || answerPlan.some(item => item.mode !== 'gap')) continue
     inputBlocked.set(sectionId, answerPlan.map(item => item.required_input ?? item.content))
     pending.delete(sectionId)
   }
@@ -2401,7 +2480,7 @@ async function runChapterWriting(
         }
         continue
       }
-      if (!completed.has(sectionId)) continue
+      if (!completed.has(sectionId) || options.resumeCandidate === true) continue
       const context = contexts.get(sectionId)
       if (context === undefined) throw new Error(`BID_CHAPTER_WRITING_SCOPE_INVALID: ${sectionId}`)
       const markdown = await readFile(join(workspace.projectRoot, context.contentPath), 'utf8')
@@ -2523,6 +2602,7 @@ async function runChapterWriting(
       const inputIdentity: ChapterExecutionAttempt['input'] = {
         plan_version: inputPlanVersion,
         section_epoch: inputEpoch,
+        evidence_sha256: chapterEvidenceInputFingerprint(context, manifest, [...durableWebSources.values()]),
         dependencies: planned.depends_on.map((dependency) => {
           const prior = completed.get(dependency.section_id)
           if (prior === undefined) throw new Error(`Bid chapter dependency ${dependency.section_id} is incomplete`)
@@ -2548,7 +2628,8 @@ async function runChapterWriting(
             return input?.section_id === dependency.section_id && input.handoff_sha256 === dependency.handoff_sha256
           })
         if (sectionEpochs.get(sectionId) !== inputIdentity.section_epoch
-          || !handoffsMatch) {
+          || chapterEvidenceInputFingerprint(context, manifest, [...durableWebSources.values()]) !== inputIdentity.evidence_sha256
+           || !handoffsMatch) {
           throw new Error('BID_CHAPTER_INPUT_STALE')
         }
       }
@@ -2615,12 +2696,36 @@ async function runChapterWriting(
         }
         logWrites = logWrites.then(async () => {
           assertCurrentInput()
+          const currentMap = parseEvidenceMapArtifact(await readJson(workspace, 'analysis/evidence-map.json'))
+          const mapping = currentMap.section_mappings.find(item => item.section_id === sectionId)
+          if (mapping === undefined) throw new Error(`EVIDENCE_MAPPING_SECTION_MISSING: ${sectionId}`)
+          const addedLocal = candidate.metadata.local_materials_used.filter(material =>
+            !mapping.local_materials.some(existing => localIdentity(existing) === localIdentity(material)))
+          const addedWeb = candidate.metadata.web_materials_used.filter(material =>
+            !mapping.web_materials.some(existing => webMaterialIdentity(existing) === webMaterialIdentity(material)))
+          const evidenceChanged = addedLocal.length > 0 || addedWeb.length > 0
+          const updatedMap = evidenceChanged ? parseEvidenceMapArtifact({
+            ...currentMap, section_mappings: currentMap.section_mappings.map(item => item.section_id === sectionId
+              ? { ...item, local_materials: [...item.local_materials, ...addedLocal],
+                web_materials: [...item.web_materials, ...addedWeb],
+                // 新材料的证明边界由下次定向研究判断，不能继承旧计划的语义结论。
+                answer_plan: undefined }
+              : item),
+          }) : currentMap
+          const refreshed = evidenceChanged ? pickChapterContext({
+            section: context.section, location: storageLocation(sectionId), project, requirements, scoring,
+            compliance, evidence: updatedMap, responsePointCatalog: responsePointCatalog.points,
+            outline, writingPlan,
+          }) : context
+          inputIdentity.evidence_sha256 = chapterEvidenceInputFingerprint(
+            refreshed, manifest, [...durableWebSources.values()])
           const committed = {
             ...log, status: 'completed' as const, phase: null, failure_phase: null,
             final_writer_child_session_id: writerChildSessionId,
             final_reviewer_child_session_id: reviewerChildSessionId,
           }
           await options.run.commits.publish(async (lease) => {
+            if (evidenceChanged) await lease.writeJson(join(workspace.projectRoot, 'analysis/evidence-map.json'), updatedMap)
             if (persistCandidate) {
               await lease.writeText(join(workspace.projectRoot, context.contentPath), afterMarkdown)
               await lease.writeJson(join(workspace.projectRoot, context.metadataPath), candidate.metadata)
@@ -2644,6 +2749,14 @@ async function runChapterWriting(
               ...executionLog, sections: executionLog.sections.map(section => section === log ? committed : section),
             })
           })
+          if (evidenceChanged) {
+            evidence = updatedMap
+            context.relatedMaterials = refreshed.relatedMaterials
+            context.referenceBidMaterials = refreshed.referenceBidMaterials
+            context.webMaterials = refreshed.webMaterials
+            if (refreshed.answerPlan === undefined) delete context.answerPlan
+            else context.answerPlan = refreshed.answerPlan
+          }
           assertCurrentInput()
           Object.assign(log, committed)
         })

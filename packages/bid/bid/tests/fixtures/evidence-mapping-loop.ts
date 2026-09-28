@@ -16,6 +16,7 @@ import {
   parseTenderComplianceArtifact, parseTenderProjectArtifact, parseTenderRequirementsArtifact,
   parseTenderScoringArtifact, parseTenderScoringSelection,
   webEvidenceContentSha256, webEvidenceSourceId, createTestBidRunContext,
+  parseEvidenceMapArtifact, parseChapterMetadata,
 } from '@deepseek-ai/dsh-bid'
 
 function toolCall(callId: string, name: string, args: object): StreamChunk[] {
@@ -638,8 +639,14 @@ export async function runChapterWritingLoop(ctx: Context, root: string) {
   const artifacts = await executeChapterWriting(agent, workspace, buildBidStageTask('chapter_writing'), {
     maxRepairAttempts: 0, maxConcurrency: 1, run: createTestBidRunContext(),
   })
-  if (await readFile(evidencePath, 'utf8') !== evidenceBefore) throw new Error('S5 补搜修改了 S4 evidence map')
-  return { agent, artifacts, workspace, requests: adapter.requests, parentScript, childScript,
+  const mapped = parseEvidenceMapArtifact(JSON.parse(await readFile(evidencePath, 'utf8')))
+  const metadata = parseChapterMetadata(JSON.parse(await readFile(join(workspace.projectRoot,
+    'chapters/meta/0001.json'), 'utf8')))
+  if (JSON.stringify(mapped.section_mappings[0]?.local_materials) !== JSON.stringify(metadata.local_materials_used)
+    || mapped.section_mappings[0]?.answer_plan !== undefined) {
+    throw new Error('S5 实际使用的补搜资料未回流当前 Evidence')
+  }
+  return { agent, artifacts, workspace, evidenceSynced: true, requests: adapter.requests, parentScript, childScript,
     reviewScript: adapter.reviewScript }
 }
 

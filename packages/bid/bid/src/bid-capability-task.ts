@@ -178,6 +178,7 @@ const EVIDENCE_RECOVERY_PATHS = [
   'analysis/evidence-mapping-quality.candidate.json', 'outline/refined-outline.candidate.json',
 ] as const
 const WRITING_RECOVERY_PATHS = [
+  ...EVIDENCE_RECOVERY_PATHS,
   'chapters/execution-plan.json', 'chapters/execution-log.json', 'chapters/manifest.json',
   'chapters/completion-review.json', 'chapters/global-compliance-review.json',
 ] as const
@@ -563,6 +564,9 @@ export async function executeCapabilityTask(
     }
     const scope = outline === undefined ? { sectionIds: null, paragraphs: null }
       : resolveCapabilityStepScope(request.task.scope, saved.step.scope, outline, previous)
+    const sectionScopeRoots = outline === undefined || scope.sectionIds === null ? undefined
+      : outline.sections.filter(section => scope.sectionIds?.has(section.id)
+        && (section.parent_id === null || !scope.sectionIds.has(section.parent_id))).map(section => section.id)
     const writes = await dispatcher.allowedWrites(saved.step.call, scope.sectionIds, working, saved.step_id)
     const baseline = new Map<string, string>()
     for (const path of writes) {
@@ -657,6 +661,7 @@ export async function executeCapabilityTask(
       }
     }
     const stepPaths = await prepareBidWorkingTree(working, stepWork, { reset: !resumeCandidate })
+    const reusedCandidate = resumeCandidate || awaitingSeed !== undefined
     const stepWorking = new BidWorkspace(stepPaths.root, canonical.config)
     const candidateRun = { ...run, work: stepWork, commits: run.commits.forPublication({
       workspaceRoot: stepWorking.root, projectRoot: stepWorking.projectRoot,
@@ -683,12 +688,13 @@ export async function executeCapabilityTask(
     const context: BidCapabilityExecutionContext = {
       canonical, working: stepWorking, agent, sourceSession: session,
       run: candidateRun, sectionIds: scope.sectionIds,
+      ...(sectionScopeRoots === undefined ? {} : { sectionScopeRoots }),
       authorizedNewDescendants,
       stepDirectory: stepPaths.root, inputSources, baselineHashes: baseline, allowedWrites: writes,
       stepId: saved.step_id, inputSha256: stepInputSha256,
       rootWorkId: run.work.workId, authorization: saved.authorization,
       ...(inputAnswer === undefined ? {} : { inputAnswer }),
-      ...(resumeCandidate || awaitingSeed !== undefined ? { resumeCandidate: true } : {}),
+      ...(reusedCandidate ? { resumeCandidate: true } : {}),
     }
     const execution = await dispatcher.execute(saved.step.call, context)
     const postWrites = await dispatcher.allowedWritesAfter?.(saved.step.call, stepWorking) ?? new Set<string>()
@@ -710,7 +716,7 @@ export async function executeCapabilityTask(
         authorizedNewDescendants.add(section.id)
       }
     }
-    const resumedChanges = resumeCandidate ? await Promise.all([...validatedContext.allowedWrites].map(async (path) => {
+    const resumedChanges = reusedCandidate ? await Promise.all([...validatedContext.allowedWrites].map(async (path) => {
       const before = await fileHash(working, path)
       const after = await fileHash(stepWorking, path)
       return before === after ? null : { path, removed: after === undefined }
@@ -744,7 +750,7 @@ export async function executeCapabilityTask(
           const digest = await fileHash(stepWorking, path)
           return digest === undefined ? null : { path, sha256: digest }
         }))).filter(file => file !== null)
-      const questionId = `capability:${run.work.workId}:${saved.step_id}`
+      const questionId = `capability:${run.work.workId}:${saved.step_id}:${stepInputSha256.slice(0, 12)}`
       const next = capabilityTaskCheckpointSchema.parse({ ...checkpoint, steps: checkpoint.steps.map((step, position) =>
         position === index ? { ...saved, status: 'awaiting_input', input_sha256: stepInputSha256,
           result, question_id: questionId, candidate_files: candidateFiles, removed_paths: removedPaths } : step) })

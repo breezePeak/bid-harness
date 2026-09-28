@@ -13,7 +13,7 @@ import SessionStore, { SessionId, snapshotJsonValue } from '@deepseek-ai/dsh-ses
 import { Context } from '@deepseek-ai/cordis'
 import type { ContinuableStartSpec, SubagentProvider } from '@deepseek-ai/dsh-subagent'
 import type { ToolDefinition, ToolExecution, ToolExecutionResult, ToolRunContext } from '@deepseek-ai/dsh-tools'
-import { CONTEXT_WINDOW_EXCEEDED_CODE } from '@deepseek-ai/dsh-llm'
+import { CONTEXT_WINDOW_EXCEEDED_CODE, createUserMessage } from '@deepseek-ai/dsh-llm'
 import {
   BidWorkspace,
   BidHostRuntime,
@@ -62,6 +62,9 @@ import { allowedEvidenceCapabilitySourceWrites, allowedEvidenceCapabilityWrites,
   validateEvidenceCapability } from '../src/bid-evidence-capability.ts'
 import type { BidCapabilityExecutionContext } from '../src/bid-capability-contract.ts'
 import { createBidCapabilityDispatcher } from '../src/bid-capability-dispatcher.ts'
+import { executeCapabilityTask, persistCapabilityTaskRequest } from '../src/bid-capability-task.ts'
+import { BID_CAPABILITIES } from '../src/bid-capability-registry.ts'
+import { allowedWritingCapabilityWrites } from '../src/bid-writing-capability.ts'
 
 const executeEvidenceMapping = (
   agent: Agent,
@@ -676,7 +679,7 @@ function mappingFixture(
           const taskTool = tools.get('update_section_task')
           if (taskTool !== undefined) {
             const requested = taskToolArgs(mapping as Record<string, unknown>)
-            const fixed = promptText(request.request).includes('"task_kind":"section_remap"')
+            const fixed = promptText(request.request).includes('allow_outline_refinement：false')
             const scopeLine = promptText(request.request).split('\n').find(line => line.startsWith('current_section_scope：'))
             const original = scopeLine === undefined ? undefined
               : (JSON.parse(scopeLine.slice('current_section_scope：'.length)) as OutlineSection[])
@@ -2391,6 +2394,49 @@ describe('evidence-mapping Agent executor', () => {
     await expect(validateEvidenceCapability(context, result)).resolves.toBeUndefined()
   })
 
+  it('首次离线公共研究把空 Web Ledger 与 Evidence 正式发布并开放章节写作', async () => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-public-evidence-publication-')))
+    const material = await writeInputs(workspace)
+    const outline = await readFile(join(workspace.projectRoot, 'outline/initial-confirmed-outline.json'), 'utf8')
+    await writeFile(join(workspace.projectRoot, 'outline/outline.json'), outline)
+    await writeFile(join(workspace.projectRoot, 'outline/confirmed-outline.json'), outline)
+    const sessionContext = new Context()
+    filesystemContexts.push(sessionContext)
+    await sessionContext.plugin(SessionStore)
+    const session = sessionContext.sessions.create()
+    const message = createUserMessage({ content: [{ type: 'text', text: '离线研究当前目录' }], source: { kind: 'user' } })
+    session.append('user/message', message, { surfaceOp: 'append' })
+    const task = { goal: '离线研究当前目录', scope: { kind: 'sections' as const, section_ids: ['SEC-1'] },
+      steps: [{ scope: { source: 'task' as const }, call: { capability: 'evidence.research' as const,
+        input: { mode: 'supplement' as const, reason: '离线研究当前章节', allow_outline_refinement: false } } }] }
+    const work = await persistCapabilityTaskRequest(workspace, session, 'evidence_mapping', task,
+      { session_id: String(session.id), message_id: String(message.id) },
+      BID_CAPABILITIES['evidence.research'].requires, { stage: 'evidence_mapping', status: 'completed', run: null })
+    const fixture = mappingFixture(workspace, material)
+    const dispatcher = createBidCapabilityDispatcher({ modelStageRepairAttempts: 0,
+      evidenceMappingMaxConcurrency: 2, chapterWritingMaxConcurrency: 1, webSearchEnabled: false })
+    const execution = executeCapabilityTask(workspace, createTestBidRunContext({ work }), dispatcher, fixture.agent, session)
+    await vi.waitFor(() => { expect(fixture.starts).toHaveLength(1) })
+    fixture.starts[0]!.resolve()
+    const outcome = await execution
+    expect(outcome.status).toBe('completed')
+    if (outcome.status !== 'completed') return
+    expect(outcome.receipt.files.map(file => file.path)).toEqual(expect.arrayContaining([
+      'analysis/evidence-map.json', 'analysis/web-evidence-sources.json',
+    ]))
+    expect(parseEvidenceMapArtifact(JSON.parse(await readFile(join(workspace.projectRoot,
+      'analysis/evidence-map.json'), 'utf8'))).section_mappings[0]?.answer_plan?.length).toBeGreaterThan(0)
+    expect(parseWebEvidenceSourcesArtifact(JSON.parse(await readFile(join(workspace.projectRoot,
+      'analysis/web-evidence-sources.json'), 'utf8'))).sources).toEqual([])
+    await mkdir(join(workspace.projectRoot, 'chapters'), { recursive: true })
+    await writeFile(join(workspace.projectRoot, 'chapters/writing-plan.json'),
+      JSON.stringify(writingPlanFixture(parseOutlineArtifact(JSON.parse(outline)))))
+    for (const path of BID_CAPABILITIES['chapter.write'].requires) {
+      await expect(readFile(join(workspace.projectRoot, path))).resolves.toBeDefined()
+    }
+    expect(await allowedWritingCapabilityWrites(workspace, new Set(['SEC-1']))).toContain('analysis/evidence-map.json')
+  })
+
   it.each(['evidence.research', 'outline.refine'] as const)('%s 在授权子树内研究后拆分，并返回真实新叶', async (capability) => {
     const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-public-refine-')))
     const material = await writeInputs(workspace)
@@ -2438,6 +2484,50 @@ describe('evidence-mapping Agent executor', () => {
     expect(evidence.section_mappings.find(item => item.section_id === 'SEC-2'))
       .toEqual(oldEvidence.section_mappings.find(item => item.section_id === 'SEC-2'))
     await expect(dispatcher.validate(call, context, result)).resolves.toBeUndefined()
+  })
+
+  it('选中非叶目录时先以整个子树作为结构研究任务，再研究新增叶节', async () => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-parent-refinement-')))
+    const material = await writeInputs(workspace)
+    const initial = mappingFixture(workspace, material)
+    const initialRun = executeEvidenceMapping(initial.agent, workspace, buildBidStageTask('evidence_mapping'))
+    await vi.waitFor(() => { expect(initial.starts).toHaveLength(2) })
+    initial.starts.forEach((start) => { start.resolve() })
+    await initialRun
+    const path = join(workspace.projectRoot, 'outline/outline.json')
+    const outline = parseOutlineArtifact(JSON.parse(await readFile(path, 'utf8')))
+    const parent = { ...outline.sections[0]!, id: 'ROOT', title: '第二章', writable: false,
+      must_answer: [], requirement_ids: [], scoring_ids: [], scoring_response_point_ids: [],
+      scoring_response_points: [], summary: '统筹技术方法与交付核验。' }
+    const grouped = parseOutlineArtifact({ ...outline, sections: [parent,
+      ...outline.sections.map((section, index) => ({ ...section, parent_id: 'ROOT',
+        level: 2, title: `2.${index + 1} ${section.title}` }))] })
+    await writeFile(path, JSON.stringify(grouped))
+    await writeFile(join(workspace.projectRoot, 'outline/confirmed-outline.json'), JSON.stringify(grouped))
+    const fixture = mappingFixture(workspace, material, false, { 'MAP-INIT-ROOT': [{
+      type: 'add_section', parent_id: 'ROOT', order: 3, writable: true,
+      title: '2.3 新增核验', purpose: '说明新增成果核验方法。', must_answer: ['如何核验新增成果？'],
+    }] })
+    const context: BidCapabilityExecutionContext = { canonical: workspace, working: workspace, agent: fixture.agent,
+      run: createTestBidRunContext(), sectionIds: new Set(['ROOT', 'SEC-1', 'SEC-2']), sectionScopeRoots: ['ROOT'],
+      stepDirectory: workspace.root, inputSources: new Map(), baselineHashes: new Map(),
+      allowedWrites: allowedEvidenceCapabilityWrites(), stepId: 'PARENT-REFINE', rootWorkId: 'PARENT-WORK',
+      authorization: { session_id: 'SESSION', message_id: 'MESSAGE' }, inputSha256: '0'.repeat(64) }
+    const call = { capability: 'evidence.research' as const, input: {
+      mode: 'supplement' as const, reason: '深化第二章整体结构', allow_outline_refinement: true } }
+    const execution = executeEvidenceCapability(call, context, { maxRepairAttempts: 0,
+      maxConcurrency: 2, webSearchEnabled: false })
+    await vi.waitFor(() => { expect(fixture.starts).toHaveLength(1) })
+    const firstPrompt = promptText(fixture.starts[0]!.request.request)
+    expect(firstPrompt).toContain('"outline_edit_scope_id":"ROOT"')
+    expect(firstPrompt).toContain('"id":"SEC-1"')
+    expect(firstPrompt).toContain('"id":"SEC-2"')
+    fixture.starts[0]!.resolve()
+    await vi.waitFor(() => { expect(fixture.starts).toHaveLength(2) })
+    fixture.starts[1]!.resolve()
+    const result = await execution
+    expect(result.result.target_section_ids).toHaveLength(3)
+    expect(fixture.starts[1]!.request.label).toContain('新增核验')
   })
 
   it('局部补资料保持当前目录不变，只返回受影响章节及真实文件', async () => {
@@ -2545,7 +2635,7 @@ describe('evidence-mapping Agent executor', () => {
     const remap = executeEvidenceMapping(fixture.agent, workspace, buildBidStageTask('evidence_mapping'), {
       maxRepairAttempts: 0, remap: { section_ids: ['SEC-2'], mode: 'replace' },
     })
-    const rejected = expect(remap).rejects.toThrow(failure === 'provider' ? 'provider unavailable' : 'EVIDENCE_MAPPING_SUBAGENT_STRUCTURED_MISSING')
+    const rejected = expect(remap).rejects.toThrow(failure === 'provider' ? 'provider unavailable' : 'OUTLINE_SHARED_REQUIREMENT_MISSING')
     if (failure === 'coverage') {
       await vi.waitFor(() => { expect(fixture.starts).toHaveLength(1) })
       fixture.starts[0]!.resolve()
@@ -3180,6 +3270,111 @@ describe('evidence-mapping Agent executor', () => {
     expect(prompt).toContain('pending_review_items：')
     expect(prompt).toContain('"kind":"task"')
     expect(prompt).toContain('"kind":"local_material"')
+  })
+
+  it('固定目录局部研究在 Final Check 中断后复用当前 candidate 且不重跑 initial', async () => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-fixed-remap-resume-')))
+    const material = await writeInputs(workspace)
+    const initial = mappingFixture(workspace, material)
+    const initialRun = executeEvidenceMapping(initial.agent, workspace, buildBidStageTask('evidence_mapping'))
+    await vi.waitFor(() => { expect(initial.starts).toHaveLength(2) })
+    initial.starts.forEach((start) => { start.resolve() })
+    await initialRun
+    const outline = await readFile(join(workspace.projectRoot, 'outline/outline.json'), 'utf8')
+    await writeFile(join(workspace.projectRoot, 'outline/confirmed-outline.json'), outline)
+    const first = mappingFixture(workspace, material)
+    first.serializeReply.mockImplementation(value => value.task_id === 'MAP-FINAL-CHECK' ? '{' : JSON.stringify(value))
+    const remap = { section_ids: ['SEC-1'], mode: 'supplement' as const,
+      reason: '仅复核第一章的依据', allow_outline_refinement: false }
+    const interrupted = executeEvidenceMapping(first.agent, workspace, buildBidStageTask('evidence_mapping'), {
+      maxRepairAttempts: 0, remap,
+    })
+    const rejected = expect(interrupted).rejects.toThrow()
+    await vi.waitFor(() => { expect(first.starts).toHaveLength(1) })
+    first.starts[0]!.resolve()
+    await rejected
+    const candidate = parseEvidenceMapArtifact(JSON.parse(await readFile(join(workspace.projectRoot,
+      'analysis/evidence-map.candidate.json'), 'utf8')))
+    expect(candidate.section_mappings).toHaveLength(2)
+    const resumed = mappingFixture(workspace, material)
+    await executeEvidenceMapping(resumed.agent, workspace, buildBidStageTask('evidence_mapping'), {
+      maxRepairAttempts: 0, remap, resumeCandidate: true,
+    })
+    expect(resumed.starts).toHaveLength(0)
+    expect(resumed.finalStarts).toHaveLength(1)
+    expect(parseEvidenceMapArtifact(JSON.parse(await readFile(join(workspace.projectRoot,
+      'analysis/evidence-map.json'), 'utf8'))).section_mappings).toHaveLength(2)
+  })
+
+  it('局部恢复的研究理由变化时不复用旧 candidate 或 initial task', async () => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-fixed-remap-new-reason-')))
+    const material = await writeInputs(workspace)
+    const initial = mappingFixture(workspace, material)
+    const initialRun = executeEvidenceMapping(initial.agent, workspace, buildBidStageTask('evidence_mapping'))
+    await vi.waitFor(() => { expect(initial.starts).toHaveLength(2) })
+    initial.starts.forEach((start) => { start.resolve() })
+    await initialRun
+    const outline = await readFile(join(workspace.projectRoot, 'outline/outline.json'), 'utf8')
+    await writeFile(join(workspace.projectRoot, 'outline/confirmed-outline.json'), outline)
+    const remap = { section_ids: ['SEC-1'], mode: 'supplement' as const,
+      reason: '先核验旧范围', allow_outline_refinement: false }
+    const first = mappingFixture(workspace, material)
+    first.serializeReply.mockImplementation(value => value.task_id === 'MAP-FINAL-CHECK' ? '{' : JSON.stringify(value))
+    const interrupted = executeEvidenceMapping(first.agent, workspace, buildBidStageTask('evidence_mapping'), {
+      maxRepairAttempts: 0, remap,
+    })
+    const rejected = expect(interrupted).rejects.toThrow()
+    await vi.waitFor(() => { expect(first.starts).toHaveLength(1) })
+    first.starts[0]!.resolve()
+    await rejected
+    const resumed = mappingFixture(workspace, material)
+    const next = executeEvidenceMapping(resumed.agent, workspace, buildBidStageTask('evidence_mapping'), {
+      maxRepairAttempts: 0, remap: { ...remap, reason: '用户新回答须重新核验' }, resumeCandidate: true,
+    })
+    await vi.waitFor(() => { expect(resumed.starts).toHaveLength(1) })
+    expect(promptText(resumed.starts[0]!.request.request)).toContain('用户新回答须重新核验')
+    resumed.starts[0]!.resolve()
+    await next
+    expect(resumed.starts).toHaveLength(1)
+  })
+
+  it('固定目录 Final Check 的任务修正直接拒绝 Blueprint 字段并接受依据计划', async () => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-fixed-final-permission-')))
+    const material = await writeInputs(workspace)
+    const initial = mappingFixture(workspace, material)
+    const initialRun = executeEvidenceMapping(initial.agent, workspace, buildBidStageTask('evidence_mapping'))
+    await vi.waitFor(() => { expect(initial.starts).toHaveLength(2) })
+    initial.starts.forEach((start) => { start.resolve() })
+    await initialRun
+    const outline = await readFile(join(workspace.projectRoot, 'outline/outline.json'), 'utf8')
+    await writeFile(join(workspace.projectRoot, 'outline/confirmed-outline.json'), outline)
+    const fixture = mappingFixture(workspace, material, false, {}, false)
+    const execution = executeEvidenceMapping(fixture.agent, workspace, buildBidStageTask('evidence_mapping'), {
+      maxRepairAttempts: 0, remap: { section_ids: ['SEC-1'], mode: 'supplement',
+        reason: '固定目录资料复核', allow_outline_refinement: false },
+    })
+    await vi.waitFor(() => { expect(fixture.starts).toHaveLength(1) })
+    fixture.starts[0]!.resolve()
+    await vi.waitFor(() => { expect(fixture.finalStarts).toHaveLength(1) })
+    const childId = fixture.finalStarts[0]!.request.childId!
+    const base = { section_id: 'SEC-1', basis: { kind: 'section_responsibility',
+      explanation: '核验章节职责。', requirement_ids: [] } }
+    for (const operation of [
+      { writing_brief: { purpose: '越界改变职责', must_answer: ['新增必答'], writing_notes: [],
+        suggested_tables: [], suggested_figures: [] } },
+      { coverage_override: { requirement_ids: [], scoring_ids: [], scoring_response_point_ids: [] } },
+    ]) {
+      const result = await fixture.invokeSubmissionTool(childId, 'update_section_task', { ...base, ...operation })
+      expect(result.isError).toBe(true)
+      if (result.isError) expect(result.error.message).toContain('固定目录研究')
+    }
+    const allowed = await fixture.invokeSubmissionTool(childId, 'update_section_task', {
+      ...base, writing_dimensions: ['按已确认章节职责说明材料边界'], missing_topics: ['真实参数待核验'],
+    })
+    expect(allowed.isError).toBe(false)
+    fixture.finalStarts[0]!.resolve()
+    await execution
+    expect(await readFile(join(workspace.projectRoot, 'outline/confirmed-outline.json'), 'utf8')).toBe(outline)
   })
 
   it('仅修改父总述时只复核该父节点，保留全部叶节任务及材料', async () => {
