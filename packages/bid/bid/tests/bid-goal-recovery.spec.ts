@@ -43,10 +43,16 @@ it('保留能力步骤的 Mapping 模型错误码，允许主 Agent 定向修复
   const infrastructure = safeRecoverableBidFailure(capabilityWork, new BidStageExecutionError([{
     code: 'EVIDENCE_MAPPING_SUBAGENT_INFRASTRUCTURE_ERROR', message: '子代理结果通道失败',
   }]))
-  expect(infrastructure.recovery?.kind).toBe('blocked')
+  expect(infrastructure.recovery?.kind).toBe('retry')
+  expect(safeRecoverableBidFailure(capabilityWork, new BidStageExecutionError([{
+    code: 'CHAPTER_SUBAGENT_INFRASTRUCTURE_ERROR', message: 'Writer Session 创建失败',
+  }])).recovery?.kind).toBe('retry')
+  expect(safeRecoverableBidFailure(capabilityWork, new BidStageExecutionError([{
+    code: 'BID_CAPABILITY_PLAN_PATCH_UNAUTHORIZED', message: '修改步骤超出当前授权',
+  }])).recovery?.kind).toBe('repair')
 })
 
-it('执行器失败不挂起，主 Agent 仍可读取实际错误', async () => {
+it('可修复执行器失败保留挂起 Run 和诊断', async () => {
   const root = await mkdtemp(join(tmpdir(), 'dsh-bid-executor-failure-'))
   cleanup.push(() => rm(root, { recursive: true, force: true }))
   const workspace = new BidWorkspace(root)
@@ -54,14 +60,15 @@ it('执行器失败不挂起，主 Agent 仍可读取实际错误', async () => 
   cleanup.push(() => ctx.fiber.dispose())
   await ctx.plugin(SessionStore)
   const session = ctx.sessions.create()
+  session.append('bid.task.changed', { state: { stage: 'outline_generation', status: 'ready', run: null } })
   const coordinator = new BidRunCoordinator(session,
     { paused: () => false, close: () => {}, waitUntilRunnable: async () => {} },
     { drain: async () => {} }, () => 0)
   await coordinator.start(work)
   await coordinator.suspend('executor_error', safeRecoverableBidFailure(work, new Error('BID_MIDDLEWARE_INVALID')))
-  expect(session.events.some(event => event.type === 'bid.run.suspended')).toBe(false)
+  expect(session.events.some(event => event.type === 'bid.run.suspended')).toBe(true)
   expect(await inspectBidStage(workspace, session, undefined, 'recovery')).toMatchObject({
-    task: { status: 'failed' }, eligible: false, failure: { message: 'BID_MIDDLEWARE_INVALID' },
+    task: { status: 'suspended' }, eligible: false, failure: { message: 'BID_MIDDLEWARE_INVALID' },
   })
 })
 
@@ -81,7 +88,7 @@ it('执行器的目录结构与响应点校验失败交给主 Agent，所有输�
 })
 
 it.each(['awaiting_input', 'user_stop', 'host_restart'] as const)(
-  '能力任务 %s 边界不由 Goal 自动续行', async (cause) => {
+  '能力任务 %s 边界不由 Goal 修复轮续行', async (cause) => {
     const ctx = new Context()
     cleanup.push(() => ctx.fiber.dispose())
     await ctx.plugin(SessionStore)
@@ -91,7 +98,7 @@ it.each(['awaiting_input', 'user_stop', 'host_restart'] as const)(
       run: { ...run('run-input'), work: { ...work, kind: 'capability_task', stage: 'chapter_writing' },
         cause, error: { message: '需要补充资料', recovery: { kind: 'retry', unit: 'step-one', reason: '需要补充资料' } } } } })
     expect(bidRunRecoveryEligibility(session, 'goal-input')).toMatchObject({ eligible: false, attempts: 0,
-      reason: '用户停止、Host 重启或等待输入需用户明确继续。' })
+      reason: '用户停止、Host 重启或等待输入由各自边界处理。' })
   })
 
 it('目录损坏与重复校验错误保留主 Agent 的继续修复权限', async () => {
@@ -125,7 +132,7 @@ it('目录损坏与重复校验错误保留主 Agent 的继续修复权限', asy
   expect(bidRunRecoveryEligibility(session, 'goal-one')).toMatchObject({ eligible: true, attempts: 1 })
 })
 
-it.each(['repair', 'retry'] as const)('%s 按故障类别决定是否限制两次自动接管', async (kind) => {
+it.each(['repair', 'retry'] as const)('%s 不因两次自动接管耗尽权限', async (kind) => {
   const ctx = new Context()
   cleanup.push(() => ctx.fiber.dispose())
   await ctx.plugin(SessionStore)
@@ -155,7 +162,33 @@ it.each(['repair', 'retry'] as const)('%s 按故障类别决定是否限制两�
   })
   session.append('bid.task.changed', { state: { stage: 'outline_generation', status: 'suspended',
     run: { ...run('run-three'), cause: 'retry_exhausted', error: { ...failureB, recovery: { ...failureB.recovery, candidateSha256: 'c'.repeat(64) } } } } })
-  expect(bidRunRecoveryEligibility(session, 'goal-one')).toMatchObject({ eligible: kind === 'repair', attempts: 2 })
+  expect(bidRunRecoveryEligibility(session, 'goal-one')).toMatchObject({ eligible: true, attempts: 2 })
+})
+
+it.each(['OUTLINE_SHARED_WRITABLE_NOT_LEAF', 'OUTLINE_SHARED_RESPONSE_POINT_MISSING',
+  'OUTLINE_GENERATION_REPAIR_EXHAUSTED', 'EVIDENCE_MAPPING_SUBAGENT_STRUCTURED_MISSING',
+  'EVIDENCE_MAPPING_INTERNAL_ID_VISIBLE', 'BID_UNKNOWN_INTERNAL_ERROR'])(
+  '%s 作为内部问题默认交给主 Agent 修复', (code) => {
+    expect(safeRecoverableBidFailure(work, new BidStageExecutionError([{ code, message: '候选不符合要求' }])).recovery?.kind)
+      .toBe('repair')
+  })
+
+it('相同检查点连续出现时仍准入并要求改变策略', async () => {
+  const ctx = new Context()
+  cleanup.push(() => ctx.fiber.dispose())
+  await ctx.plugin(SessionStore)
+  const session = ctx.sessions.create()
+  const failure = safeRecoverableBidFailure(work, new Error('candidate rejected'), [{ code: 'OUTLINE_SHARED_WRITABLE_NOT_LEAF', message: '父节不可写' }])
+  session.append('bid.task.changed', { state: { stage: 'outline_generation', status: 'suspended',
+    run: { ...run('run-one'), cause: 'retry_exhausted', error: failure } } })
+  const fingerprint = bidRunRecoveryEligibility(session, 'goal-one').fingerprint!
+  for (let index = 0; index < 3; index++) session.append('bid.goal.recovery.requested', {
+    goalId: 'goal-one', ownerSessionId: String(session.id),
+    target: { kind: 'run', workId: work.workId, runId: `run-${index}` },
+    unit: work.workId, instruction: `策略 ${index}`, progressFingerprint: fingerprint,
+  })
+  expect(bidRunRecoveryEligibility(session, 'goal-one')).toMatchObject({ eligible: true, attempts: 3,
+    sameProblemCount: 3, requiresStrategyChange: true, previousInstructions: ['策略 0', '策略 1', '策略 2'] })
 })
 
 it('records the digest of the exact failed candidate after a Run settles', async () => {

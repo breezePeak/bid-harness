@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
-import AgentRegistry, { emitAgentEvent } from '@deepseek-ai/dsh-agent'
+import AgentRegistry, { emitAgentEvent, type Agent } from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import LlmRuntime, { CallId, createUserMessage } from '@deepseek-ai/dsh-llm'
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
@@ -20,6 +20,8 @@ import type { Session } from '@deepseek-ai/dsh-session'
 import { persistBidWorkRequest } from '../src/work-descriptor.ts'
 import { buildBidStageTask } from '../src/runtime-state.ts'
 import { safeRecoverableBidFailure } from '../src/bid-recovery.ts'
+import type { BidGoalBridge } from '../src/bid-goal.ts'
+import { BID_INITIAL_TASK_STATE, reduceBidTaskState } from '../src/runtime-state.ts'
 
 interface Operation { runs: BidRunCoordinator }
 interface HostInternals {
@@ -185,6 +187,60 @@ it('removes recovery authority on native Goal pause and clear', async () => {
   } finally { disposeGate() }
 })
 
+it('仅重启已绑定且活跃的 Bid Goal，不恢复用户停止或暂停', async () => {
+  const { ctx, host, agent } = await setup('tender_analysis')
+  const disposeGate = ctx.goalRoundDriver.registerGate(() => 'wait')
+  try {
+    const operation = host.beginOperation(agent.session)
+    await host.prepareOperation(operation)
+    const descriptor = work('tender_analysis')
+    await operation.runs.start(descriptor)
+    await operation.runs.suspend('retry_exhausted', safeRecoverableBidFailure(descriptor, new Error('missing submission'), [{
+      code: 'TENDER_ANALYSIS_SUBMISSION_INCOMPLETE', message: '项目字段缺失',
+    }]))
+    await host.finishOperation(agent.session, operation)
+    const bridge = (ctx.bid as unknown as { bidGoalBridge: BidGoalBridge }).bidGoalBridge
+    const task = agent.session.events.reduce(reduceBidTaskState, BID_INITIAL_TASK_STATE)
+    if (task.status !== 'suspended') throw new Error('测试缺少挂起 Run')
+    ctx.goals.disarm(agent)
+    expect(ctx.goals.get(agent)?.activation).toBe('disarmed')
+    bridge.rearmBoundActiveGoal(agent.session, { ...task, run: { ...task.run, cause: 'user_stop' } })
+    expect(ctx.goals.get(agent)?.activation).toBe('disarmed')
+    bridge.rearmBoundActiveGoal(agent.session, { ...task, run: { ...task.run, cause: 'awaiting_input' } })
+    bridge.rearmBoundActiveGoal(agent.session, { stage: 'tender_analysis', status: 'waiting_user', run: null })
+    expect(ctx.goals.get(agent)?.activation).toBe('disarmed')
+    bridge.rearmBoundActiveGoal(agent.session, task)
+    expect(ctx.goals.get(agent)?.activation).toBe('armed')
+    const paused = ctx.goals.pause(agent, ctx.goals.get(agent)!)
+    bridge.rearmBoundActiveGoal(agent.session, task)
+    expect(ctx.goals.get(agent)).toMatchObject({ id: paused.id, phase: 'paused' })
+  } finally { disposeGate() }
+})
+
+it.each(['stage_execution', 'capability_task'] as const)(
+  'Host 重启后自动按原 Run 与项目 revision 续行 %s', async (kind) => {
+    const { ctx, host, agent, workspace } = await setup('tender_analysis')
+    const goal = ctx.goals.create(agent, { objective: '完成 S2～S5' })
+    agent.session.append('bid.goal.bound', {
+      goalId: goal.id, ownerSessionId: String(agent.session.id), initialS2WorkId: 'original-s2',
+    })
+    const descriptor = { ...work('tender_analysis'), kind }
+    const interrupted = { runId: `interrupted-${kind}`, epoch: 1, baseProjectRevision: 1,
+      work: descriptor, startedAt: 1, updatedAt: 1 }
+    await checkpointBidProjectState(workspace, { stage: 'tender_analysis', status: 'running', run: interrupted })
+    ctx.goals.disarm(agent)
+    const resume = vi.spyOn(ctx.bid, 'resumeCurrentRun').mockResolvedValue(BID_INITIAL_TASK_STATE)
+    const driver = host as unknown as { driveStartedSession(agent: Agent, cwd: string): Promise<void> }
+    await driver.driveStartedSession(agent, workspace.root)
+    const saved = await readBidProjectState(workspace)
+    expect(saved).toMatchObject({ status: 'suspended', run: { runId: interrupted.runId, cause: 'host_restart' } })
+    await vi.waitFor(() => { expect(resume).toHaveBeenCalledOnce() })
+    expect(resume).toHaveBeenCalledWith(agent.session, interrupted.runId, saved?.revision)
+    expect(ctx.goals.get(agent)?.activation).toBe('armed')
+    expect(agent.session.events.some(event => event.type === 'bid.run.decision.required')).toBe(false)
+  },
+)
+
 it('accepts the exact failed Run once, returns after its durable checkpoint, and retains the recovery event', async () => {
   const { ctx, host, agent, workspace } = await setup('tender_analysis')
   const disposeGate = ctx.goalRoundDriver.registerGate(() => 'wait')
@@ -207,7 +263,9 @@ it('accepts the exact failed Run once, returns after its durable checkpoint, and
       const run = await current.runs.start(descriptor, { runId, cause: 'retry_exhausted' })
       onAccepted?.(run)
       await gate.promise
-      return current.runs.suspend('user_stop')
+      return current.runs.suspend('retry_exhausted', safeRecoverableBidFailure(descriptor, new Error('missing submission'), [{
+        code: 'BID_TENDER_ANALYSIS_SUBMISSION_INCOMPLETE', artifact: 'analysis/project.json', message: '项目字段缺失',
+      }]))
     },
   })
   try {
@@ -229,6 +287,13 @@ it('accepts the exact failed Run once, returns after its durable checkpoint, and
     expect(agent.session.events.some(event => event.type === 'bid.project.resumed'
       && 'state' in event.data && event.data.state.status === 'running'
       && event.data.state.run.runId === value.run_id)).toBe(true)
+    gate.resolve(undefined)
+    await vi.waitFor(() => { expect(host.inFlight.size).toBe(0) })
+    const repeated = await readBidProjectState(workspace)
+    if (repeated?.status !== 'suspended') throw new Error('测试没有重复故障')
+    await expect(ctx.bid.resumeCurrentRun(agent.session, repeated.run.runId, repeated.revision, undefined,
+      { goalId: ctx.goals.get(agent)!.id, instruction: '  补齐项目字段并按原提交工具提交。  ' }))
+      .rejects.toMatchObject({ code: 'BID_RECOVERY_DUPLICATE_INSTRUCTION' })
   } finally {
     gate.resolve(undefined)
     disposeGate()

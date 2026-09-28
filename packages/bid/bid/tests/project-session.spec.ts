@@ -499,7 +499,7 @@ describe('Workspace 项目与独立 Session', () => {
     expect(third.adapter.requests.filter(request => request.sessionId !== again.session.id)).toHaveLength(0)
   })
 
-  it('Run 登记后程序错误结束为失败，新 Session 不自动恢复原 Work', async () => {
+  it('Run 登记后内部错误保留挂起 Work，未绑定 Goal 的新 Session 不自动恢复', async () => {
     const first = await fixture({ withPersistence: true })
     await seedProjectArtifacts(first.workspace)
     await checkpointBidProjectState(first.workspace, { stage: 'chapter_writing', status: 'completed' })
@@ -515,20 +515,20 @@ describe('Workspace 项目与独立 Session', () => {
       { session_id: String(agent.session.id), message_id: String(message.id) },
       ['chapters/execution-log.json'], async () => { throw new Error('登记后中断') }))
       .rejects.toThrow('登记后中断')
-    expect(await readBidProjectState(first.workspace)).toMatchObject({ status: 'failed' })
+    expect(await readBidProjectState(first.workspace)).toMatchObject({ status: 'suspended' })
     await expect(readFile(join(first.workspace.projectRoot, 'chapters/local-review.json')))
       .rejects.toMatchObject({ code: 'ENOENT' })
     await first.ctx.fiber.dispose()
 
     const second = await fixture({ root: first.workspace.root, withPersistence: true })
     const restored = await second.fresh('capability-admission-restart')
-    expect(await readBidProjectState(second.workspace)).toMatchObject({ status: 'failed' })
+    expect(await readBidProjectState(second.workspace)).toMatchObject({ status: 'suspended' })
     expect(restored.session.events.filter(event => event.type === 'bid.run.started')).toHaveLength(1)
     await expect(readFile(join(second.workspace.projectRoot, 'chapters/local-review.json')))
       .rejects.toMatchObject({ code: 'ENOENT' })
   })
 
-  it('首个能力步骤已保存后执行器失败，不在新 Session 自动重试', async () => {
+  it('首个能力步骤后内部错误保留挂起 Run，未绑定 Goal 不自动重试', async () => {
     const first = await fixture({ withPersistence: true })
     await seedProjectArtifacts(first.workspace)
     await checkpointBidProjectState(first.workspace, { stage: 'chapter_writing', status: 'completed' })
@@ -562,7 +562,7 @@ describe('Workspace 项目与独立 Session', () => {
         { scope: { source: 'task' }, call: { capability: 'document.review', input: { reason: '审核全书' } } },
       ] }, { session_id: String(agent.session.id), message_id: String(message.id) },
     ['chapters/execution-log.json'])
-    expect(result).toMatchObject({ status: 'failed' })
+    expect(result).toMatchObject({ status: 'suspended' })
     expect(calls).toEqual(['chapter.review', 'document.review'])
     await expect(readFile(join(first.workspace.projectRoot, 'chapters/local-review.json')))
       .rejects.toMatchObject({ code: 'ENOENT' })
@@ -570,7 +570,7 @@ describe('Workspace 项目与独立 Session', () => {
 
     const second = await fixture({ root: first.workspace.root, withPersistence: true })
     const restored = await second.fresh('capability-step-restart')
-    expect(await readBidProjectState(second.workspace)).toMatchObject({ status: 'failed' })
+    expect(await readBidProjectState(second.workspace)).toMatchObject({ status: 'suspended' })
     expect(restored.session.events.filter(event => event.type === 'bid.run.started')).toHaveLength(1)
     expect(calls).toEqual(['chapter.review', 'document.review'])
   })
@@ -2089,7 +2089,7 @@ describe('Workspace 项目与独立 Session', () => {
     executor.execute.mockRejectedValueOnce(new Error('mapping transport failed'))
 
     await expect(resumeRun(ctx, agent.session)).resolves.toMatchObject({ ok: true })
-    expect(runtime(agent.session)).toMatchObject({ stage: 'evidence_mapping', status: 'failed' })
+    expect(runtime(agent.session)).toMatchObject({ stage: 'evidence_mapping', status: 'suspended' })
     expect(drainChildren).not.toHaveBeenCalled()
     expect(drainDescendants).not.toHaveBeenCalled()
   })

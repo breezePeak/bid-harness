@@ -1879,12 +1879,11 @@ function attachMappingSubmissionRuntime(
       }).strict()),
     })
     register({
-      name: 'apply_section_outline_edit', description: '完成 Blueprint 和 Structure Assessment 后修改当前 Section 子树。basis 只需研究发现的 finding_indices 和业务理由；Host 分配 Section ID、保存 finding→章节绑定并返回实际节点。编辑完成后重新判断当前结构再锁定，无需重交 Research Assessment。',
+      name: 'apply_section_outline_edit', description: '完成 Blueprint 和 Structure Assessment 后修改当前 Section 子树；锁定后仅允许当前子树的 summary-only update_section。basis 只需研究发现的 finding_indices 和业务理由；Host 分配 Section ID、保存 finding→章节绑定并返回实际节点。结构编辑后重新判断再锁定。',
       parameters: editSchema as unknown as Record<string, unknown>, output,
       execute(args: unknown): Promise<unknown> {
         assertResearchReady(state)
         assertStructureCurrent(state, task)
-        if (state.locked) throw new ToolArgsError(['operation: 当前 Section 子树已经锁定。'])
         const violations = validateJsonSchemaValue(editSchema, args)
         if (violations.length > 0) throw new ToolArgsError(violations)
         const { basis: submittedBasis } = args as { basis: { explanation: string; finding_indices: number[] } }
@@ -1898,6 +1897,10 @@ function attachMappingSubmissionRuntime(
           if (error instanceof ZodError) throw new ToolArgsError(submissionViolations(error))
           throw error
         }
+        const summaryOnly = operation.type === 'update_section' && operation.summary !== undefined
+          && operation.title === undefined && operation.purpose === undefined && operation.must_answer === undefined
+        if (state.locked && !summaryOnly) throw new ToolArgsError(['operation: 当前 Section 子树已经锁定，只能修正 summary。'])
+        if (operation.type === 'update_section' && operation.summary !== undefined) assertCustomerFacingSummary(operation.summary)
         const beforeOutline = state.stagedOutline
         const before = new Set(beforeOutline.sections.map(section => section.id))
         const candidate = applyTaskOutlineOperations(beforeOutline, task, [operation])
@@ -1907,15 +1910,15 @@ function attachMappingSubmissionRuntime(
         if (issues.length > 0) throw new ToolArgsError(issues.map(issue => `${issue.code} ${issue.message}`))
         const scopedSections = mappingTaskOutlineSections(candidate, task)
         const writableSectionIds = mappingTaskSections(candidate, task).map(section => section.id)
-        invalidateChangedSectionDrafts(state, beforeOutline, candidate)
+        if (!state.locked) invalidateChangedSectionDrafts(state, beforeOutline, candidate)
         state.stagedOutline = candidate
         state.acceptedOperations.push(operation)
         const changedIds = structurallyChangedSectionIds(beforeOutline, candidate)
         const basis = outlineOperationBasisSchema.parse({ explanation: submittedBasis.explanation,
-          finding_refs: uniqueStrings(findingRefs), target_section_ids: created.length > 0 ? created
+          finding_refs: uniqueStrings(findingRefs), target_section_ids: summaryOnly && operation.type === 'update_section' ? [operation.section_id] : created.length > 0 ? created
             : candidate.sections.filter(section => changedIds.has(section.id) && section.writable).map(section => section.id) })
         state.outlineOperationBases.push(basis)
-        invalidateStructureAssessment(state, task)
+        if (!state.locked) invalidateStructureAssessment(state, task)
         state.lastIncompleteIssues = []
         return Promise.resolve({
           applied: true,
@@ -2727,6 +2730,8 @@ function renderEvidenceMappingSubagentRepairTask(
     basePrompt,
     '',
     '这是同一 Child Session 的语义修复轮次。保留已检索内容和工具内草稿，只修正下面的问题；不得复述分析过程。',
+    ...(issues.some(issue => issue.code === 'EVIDENCE_MAPPING_INTERNAL_ID_VISIBLE' && issue.path?.includes('.summary'))
+      ? ['客户可见总述含内部编号时，使用 apply_section_outline_edit 的 summary-only update_section 修正对应 Section；已锁定结构不需重做判断。修正后再次调用 finish_mapping_task，不要机械重复 finish。'] : []),
     ...renderStageRepairIssues(issues).slice(0, 24),
     'Host 当前进度要求按以下顺序完成：',
     ...renderEvidenceMappingRepairChecklist(task, state).map((step, index) => `${String(index + 1)}. ${step}`),

@@ -121,6 +121,7 @@ try {
     rounds: ctx.goals.get(agent)?.roundsStarted,
     goalPrompt: adapter.requests[0]?.messages.some(message => message.content.some(block => block.type === 'text' && block.text.includes('<goal_round>'))),
     recoveryPrompt: adapter.requests[0]?.messages.some(message => message.content.some(block => block.type === 'text' && block.text.includes('bid_stage_inspect(view="recovery")'))),
+    strategyPrompt: adapter.requests[0]?.messages.some(message => message.content.some(block => block.type === 'text' && block.text.includes('重复问题必须改变'))),
     calls: toolCalls.filter(name => name === 'bid_stage_inspect' || name === 'bid_recover_task'),
     acceptedEvents: events.filter(event => event.type === 'bid.goal.recovery.requested').length,
     recoveryUnit: events.find(event => event.type === 'bid.goal.recovery.requested')?.data.unit,

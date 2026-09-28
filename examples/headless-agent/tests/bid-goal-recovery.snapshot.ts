@@ -12,7 +12,7 @@ it.each(['tender_analysis', 'outline_generation', 'evidence_mapping'])('%s цабщк
     env: { DSH_BID_RECOVERY_STAGE: stage },
   })
   expect(JSON.parse(result.stdout)).toEqual({
-    boundToInitialS2: true, rounds: 1, goalPrompt: true, recoveryPrompt: true,
+    boundToInitialS2: true, rounds: 1, goalPrompt: true, recoveryPrompt: true, strategyPrompt: true,
     calls: ['bid_stage_inspect', 'bid_recover_task'], acceptedEvents: 1,
     recoveryUnit: stage === 'evidence_mapping' ? 'MAP-REPAIR-S2.1'
       : stage === 'outline_generation' ? 'outline/outline.json' : 'analysis/project.json',

@@ -1955,6 +1955,17 @@ describe('evidence-mapping Agent executor', () => {
       finding_bindings: [{ target_section_ids: createdIds }],
     } })
     expect(await invoke('lock_section_outline', { comparison: '目录已承接不同技术责任。' })).toMatchObject({ isError: false, value: { mapping_sections: [], queued_leaf_sections: createdIds.map(section_id => ({ section_id })) } })
+    const summaryEdit = { basis: edit.basis, operation: { type: 'update_section', section_id: 'SEC-1',
+      summary: '通过实施方法和成果验收形成可执行的交付安排。' } }
+    expect(await invoke('apply_section_outline_edit', summaryEdit)).toMatchObject({ isError: false,
+      value: { structure_assessment_stale: false } })
+    for (const operation of [
+      { ...summaryEdit.operation, summary: 'SEC-1' },
+      { ...summaryEdit.operation, title: '改写标题' },
+      { ...summaryEdit.operation, purpose: '改写职责' },
+      { ...summaryEdit.operation, must_answer: ['改写必答项'] },
+      edit.operation,
+    ]) expect((await invoke('apply_section_outline_edit', { ...summaryEdit, operation })).isError).toBe(true)
     expect((await invoke('submit_section_mapping', { section_id: createdIds[0], local_materials: [], web_materials: [] })).isError).toBe(true)
     expect(await invoke('finish_mapping_task', {})).toMatchObject({ isError: false, value: { completed: true } })
     start.complete()
@@ -2006,7 +2017,7 @@ describe('evidence-mapping Agent executor', () => {
       }],
     })
     expect(report.sections[0]!.research_findings).toHaveLength(1)
-    expect(report.sections[0]!.actual_structure_operations.map(item => item.operation.type)).toEqual(['split_section'])
+    expect(report.sections[0]!.actual_structure_operations.map(item => item.operation.type)).toEqual(['split_section', 'update_section'])
     expect(report.sections[0]!.final_blueprints).toHaveLength(2)
     await expect(buildEvidenceMappingAcceptanceReport(workspace, ['SEC-UNKNOWN']))
       .rejects.toThrow('BID_SECTION_SCOPE_INVALID:SEC-UNKNOWN')
@@ -3197,6 +3208,50 @@ describe('evidence-mapping Agent executor', () => {
     }
     secondController.abort()
     expect(await secondRejection).toBeInstanceOf(Error)
+  })
+
+  it('8 个任务保留 7 个完成 checkpoint，仅恢复含 SC-006 总述的失败任务', async () => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-evidence-summary-resume-')))
+    const sectionIds = [...Array.from({ length: 7 }, (_, index) => `SEC-${String(index + 1)}`), 'S2.5']
+    const material = await writeInputs(workspace, sectionIds)
+    const outlinePath = join(workspace.projectRoot, 'outline/initial-confirmed-outline.json')
+    const outline = parseOutlineArtifact(JSON.parse(await readFile(outlinePath, 'utf8')))
+    outline.sections[7]!.summary = Array.from({ length: 6 }, () => 'SC-006 内部编号').join('；')
+    await writeFile(outlinePath, JSON.stringify(outline))
+
+    const first = mappingFixture(workspace, material)
+    first.serializeReply.mockImplementation(value => value.task_id === 'MAP-INIT-S2.5' ? '{' : JSON.stringify(value))
+    const failed = executeEvidenceMapping(first.agent, workspace, buildBidStageTask('evidence_mapping'), {
+      maxRepairAttempts: 0, maxConcurrency: 1,
+    }).catch((error: unknown) => error)
+    for (let index = 0; index < 8; index++) {
+      await vi.waitFor(() => { expect(first.starts).toHaveLength(index + 1) })
+      first.starts[index]!.resolve()
+    }
+    expect(await failed).toBeInstanceOf(Error)
+    const checkpointPath = join(workspace.projectRoot, 'analysis/evidence-mapping-checkpoint.json')
+    const checkpoint = JSON.parse(await readFile(checkpointPath, 'utf8')) as {
+      tasks: Array<{ task_id: string; completed: boolean }>
+    }
+    expect(checkpoint.tasks.filter(task => task.completed)).toHaveLength(7)
+
+    const resumed = mappingFixture(workspace, material, false, {
+      'MAP-INIT-S2.5': [{ type: 'update_section', section_id: 'S2.5',
+        summary: '说明当前章节的实施安排、责任分工和交付条件。' }],
+    })
+    const completed = executeEvidenceMapping(resumed.agent, workspace, buildBidStageTask('evidence_mapping'), {
+      maxRepairAttempts: 0, maxConcurrency: 1, resume: true,
+    })
+    await vi.waitFor(() => { expect(resumed.starts).toHaveLength(1) })
+    expect(mappingTaskId(resumed.starts[0]!.request.request)).toBe('MAP-INIT-S2.5')
+    resumed.starts[0]!.resolve()
+    await completed
+    expect(resumed.taskAttempts.get('MAP-INIT-S2.5')).toBe(1)
+    for (const task of checkpoint.tasks.filter(task => task.completed)) expect(resumed.taskAttempts.has(task.task_id)).toBe(false)
+    const published = await readFile(join(workspace.projectRoot, 'outline/outline.json'), 'utf8')
+    expect(published).not.toContain('SC-006')
+    const settled = JSON.parse(await readFile(checkpointPath, 'utf8')) as { tasks: Array<{ task_id: string; completed: boolean }> }
+    expect(settled.tasks.filter(task => task.task_id.startsWith('MAP-INIT-') && task.completed)).toHaveLength(8)
   })
 
   it('恢复前目录输入变化会失效 completed checkpoint 并重跑受影响任务', async () => {

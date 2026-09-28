@@ -9,6 +9,7 @@ import type {
 import { publishBidBatch, type BidPublicationLease } from './publication-batch.ts'
 import { bidRunProgressSchema } from './runtime-state.ts'
 import { sanitizeBidErrorText } from './safe-error.ts'
+import { classifyBidRecovery } from './bid-recovery.ts'
 import { assertNoLinkedPath, within } from './workspace-path.ts'
 
 /** Run-owned admission gate for model tasks and child creation. */
@@ -401,7 +402,7 @@ export class BidRunCoordinator {
 
   /**
    * Retire, cancel, and drain before publishing a resumable suspension or terminal executor failure.
-   * @param cause - Stable settlement classification; executor_error ends the task as failed.
+   * @param cause - Stable settlement classification; recoverable executor errors retain their Run boundary.
    * @param error - Sanitized durable failure details when applicable.
    * @returns Settled snapshot, or undefined when no Run is active.
    */
@@ -439,10 +440,14 @@ export class BidRunCoordinator {
     await active.activities.whenDrained()
     await active.context.commits.whenDrained()
     if (this.active !== active) return undefined
-    const candidateSha256 = error?.recovery === undefined || this.publication === undefined
-      ? undefined : await this.candidateFingerprint(active.snapshot.work, error)
-    const observedError = error?.recovery === undefined || candidateSha256 === undefined ? error
-      : { ...error, recovery: { ...error.recovery, candidateSha256 } }
+    const recovery = error === undefined || cause !== 'executor_error' || error.recovery !== undefined
+      ? undefined : classifyBidRecovery(active.snapshot.work, error)
+    const classifiedError: BidTaskFailure | undefined = error === undefined ? undefined
+      : recovery === undefined ? error : { ...error, recovery }
+    const candidateSha256 = classifiedError?.recovery === undefined || this.publication === undefined
+      ? undefined : await this.candidateFingerprint(active.snapshot.work, classifiedError)
+    const observedError = classifiedError?.recovery === undefined || candidateSha256 === undefined ? classifiedError
+      : { ...classifiedError, recovery: { ...classifiedError.recovery, candidateSha256 } }
     const snapshot: BidRunData & { cause: BidRunSuspensionCause; error?: BidTaskFailure } = {
       ...active.snapshot,
       cause,
@@ -450,7 +455,8 @@ export class BidRunCoordinator {
       updatedAt: Date.now(),
     }
     this.active = undefined
-    if (cause === 'executor_error') {
+    const terminal = cause === 'executor_error' && (observedError?.recovery === undefined || observedError.recovery.kind === 'blocked')
+    if (terminal) {
       this.session.append('bid.task.changed', {
         state: { stage: snapshot.work.stage, status: 'failed', run: null,
           failure: observedError ?? { message: '执行器失败。' } },
@@ -461,7 +467,7 @@ export class BidRunCoordinator {
     const superseded = this.session.events.slice(active.eventStart).findLast(event =>
       event.type === 'turn/end' && event.data.reason.kind === 'error')
     const notice: BidRunNotice = {
-      noticeId: `run:${snapshot.runId}:${cause === 'executor_error' ? 'failed' : 'suspended'}`,
+      noticeId: `run:${snapshot.runId}:${terminal ? 'failed' : 'suspended'}`,
       supersedesTurn: superseded?.type === 'turn/end' ? superseded.data.turn : null,
       runId: snapshot.runId,
       stage: snapshot.work.stage,

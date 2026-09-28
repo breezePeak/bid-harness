@@ -2204,6 +2204,12 @@ export class BidHostRuntime extends TypertRemoteService {
   private ensureRunDecision(agent: Agent): void {
     const { session } = agent
     if (!isBidMainSession(session)) return
+    const state = bidSessionTaskState(session)
+    const bound = bidGoalBinding(session)
+    const goal = this.ctx.get('goals')?.get(agent)
+    if (state.status === 'suspended' && state.run.cause === 'host_restart'
+      && bound?.data.ownerSessionId === String(session.id) && goal?.id === bound.data.goalId
+      && goal.phase === 'active' && goal.activation === 'armed') return
     const current = this.currentRunDecision(session)
     if (current === undefined) {
       const task = bidSessionTaskState(session)
@@ -2604,6 +2610,9 @@ export class BidHostRuntime extends TypertRemoteService {
           || current.processing?.state !== 'failed'
           || !['BID_WRITING_PLAN_NOT_COMMITTED', 'BID_WRITING_PLAN_DISPATCH_FAILED'].includes(current.error?.code ?? '')) {
           throw new BidOrchestratorError('BID_RESUME_NOT_ALLOWED', 'S5 已保存答案不满足当前自动恢复条件。')
+        }
+        if (eligibility.requiresStrategyChange && eligibility.lastInstruction?.trim() === recovery.instruction.trim()) {
+          throw new BidOrchestratorError('BID_RECOVERY_DUPLICATE_INSTRUCTION', '同一问题不能重复提交相同修复指令。')
         }
         agent.session.append('bid.goal.recovery.requested', {
           goalId: recovery.goalId,
@@ -3395,6 +3404,9 @@ export class BidHostRuntime extends TypertRemoteService {
           || decision.target.attemptId !== request.attempt_id || this.inFlight.has(key)) {
           throw new BidOrchestratorError('BID_RESUME_NOT_ALLOWED', decision.reason)
         }
+        if (decision.requiresStrategyChange && decision.lastInstruction?.trim() === request.instruction.trim()) {
+          throw new BidOrchestratorError('BID_RECOVERY_DUPLICATE_INSTRUCTION', '同一问题不能重复提交相同修复指令。')
+        }
         const workspace = new BidWorkspace(key, workspaceConfig(this.config))
         const saved = await readWritingRequest(workspace)
         if (saved?.request_id !== request.writing_request_id || saved.attempt_id !== request.attempt_id
@@ -3413,6 +3425,9 @@ export class BidHostRuntime extends TypertRemoteService {
       const decision = bidRunRecoveryEligibility(session, goal.id)
       if (!decision.eligible || decision.target?.runId !== request.run_id) {
         throw new BidOrchestratorError('BID_RESUME_NOT_ALLOWED', decision.reason)
+      }
+      if (decision.requiresStrategyChange && decision.lastInstruction?.trim() === request.instruction.trim()) {
+        throw new BidOrchestratorError('BID_RECOVERY_DUPLICATE_INSTRUCTION', '同一问题不能重复提交相同修复指令。')
       }
       this.cancelRunDecisions(session)
       const resumed = session.events.findLast(event => event.type === 'bid.project.resumed')
@@ -4017,9 +4032,34 @@ export class BidHostRuntime extends TypertRemoteService {
     let driven = false
     try {
       const task = await this.prepareOperation(operation)
+      this.bidGoalBridge?.rearmBoundActiveGoal(session, task)
       const workspace = new BidWorkspace(cwd, workspaceConfig(this.config))
       if (task.status === 'suspended') {
-        this.ensureRunDecision(agent)
+        const bound = bidGoalBinding(session)
+        const goal = this.ctx.get('goals')?.get(agent)
+        if (task.run.cause === 'host_restart' && bound?.data.ownerSessionId === String(session.id)
+          && goal?.id === bound.data.goalId && goal.phase === 'active' && goal.activation === 'armed'
+          && task.run.work.kind !== 'file_intake'
+          && ['tender_analysis', 'outline_generation', 'evidence_mapping', 'chapter_writing'].includes(task.stage)) {
+          const { runId } = task.run
+          const revision = operation.projectRevision
+          const continuation = operation.done.then(async () => {
+            if (!this.isContextActive() || this.inFlight.has(key)) return
+            await this.ctx.agents.withoutInitiator(() => this.resumeCurrentRun(session, runId, revision))
+          })
+          this.recoveryTasks.add(continuation)
+          void continuation.catch((error: unknown) => {
+            const message = sanitizeBidErrorText(error instanceof Error ? error.message : String(error))
+            this.ctx.logger.warn(`Bid Host 重启续行失败：${message}`)
+            const current = bidSessionTaskState(session)
+            if (current.status !== 'suspended' || current.run.cause !== 'host_restart'
+              || current.run.runId !== runId || this.inFlight.has(key)) return
+            session.append('bid.run.notice', { noticeId: `run:${runId}:resume-failed`, supersedesTurn: null,
+              runId, stage: current.stage, kind: 'interrupted', severity: 'error', message })
+            this.bidGoalBridge?.pause(session)
+            this.ensureRunDecision(agent)
+          }).finally(() => { this.recoveryTasks.delete(continuation) })
+        } else this.ensureRunDecision(agent)
         return
       }
       if (task.stage === 'chapter_writing' && task.status !== 'running') {
@@ -5541,6 +5581,9 @@ export class BidHostRuntime extends TypertRemoteService {
           || suspended.work.stage === 'docx_export' || suspended.error?.recovery === undefined
           || eligibility.fingerprint === undefined) {
           throw new BidOrchestratorError('BID_RESUME_NOT_ALLOWED', '当前 Run 已失去自动恢复授权。')
+        }
+        if (eligibility.requiresStrategyChange && eligibility.lastInstruction?.trim() === recovery.instruction.trim()) {
+          throw new BidOrchestratorError('BID_RECOVERY_DUPLICATE_INSTRUCTION', '同一问题不能重复提交相同修复指令。')
         }
         session.append('bid.goal.recovery.requested', {
           goalId: recovery.goalId,

@@ -8,13 +8,13 @@ Status: implemented
 
 ## Decision
 
-`executor_error`、`retry_exhausted` 和 `host_restart` 挂起时不创建 `bid.run.decision.required`，Main Agent 在该状态下获得 `bid_resume_current_run`。用户明确要求继续后，模型传入当前 Run ID 和项目 revision；Host 要求调用来自该用户回合，并由 `resumeCurrentRun` 在项目操作内核对 Run、revision 与原 Work 输入身份。工具在新 Run 持久接纳后返回，后续执行由后台操作结算。普通问答不调用恢复工具，失败的身份校验不启动执行。
+`executor_error`、`retry_exhausted` 和 `host_restart` 挂起时不创建 `bid.run.decision.required`，Main Agent 在该状态下获得 `bid_resume_current_run`。用户明确要求继续后，模型传入当前 Run ID 和项目 revision；Host 要求调用来自该用户回合，并由 `resumeCurrentRun` 在项目操作内核对 Run、revision 与原 Work 输入身份。工具在新 Run 持久接纳后返回，后续执行由后台操作结算。普通问答不调用恢复工具，失败的身份校验不启动执行。已绑定且可继续的 S2～S5 Goal 由[Host 自动续行](2026-09-28-bid-host-recovery-continuation.md)处理重启挂起。
 
 `awaiting_input` 沿用能力任务的原生输入问题；`user_stop` 保留[原生恢复问题](2026-09-15-bid-native-recovery-questions.md)中的继续、当前阶段重跑和停止选项。聊天续行不隐式重跑或停止阶段。
 
 ## Alternatives considered
 
-**所有挂起原因都自动继续。** 宿主重启或重试耗尽后立即执行会消耗模型额度，也无法区分用户追问与执行授权。
+**不检查 Goal 归属就自动继续所有挂起原因。** 用户停止和等待输入仍需用户处理；意外挂起的手动续行仍区分普通追问与执行授权，已绑定的活动 Goal 才按精确 Work 自动续行。
 
 **所有挂起原因继续弹出原生选择题。** 意外中断后的用户“继续”仍需再答一次，且无法在同一请求中先保存新的执行策略。
 

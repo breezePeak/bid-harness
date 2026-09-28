@@ -218,7 +218,9 @@ async function inspectBidStageValue(
       ? task.stage === 'chapter_writing' && task.status === 'waiting_user'
         ? bidWritingPlanRecoveryEligibility(session, binding.data.goalId)
         : bidRunRecoveryEligibility(session, binding.data.goalId)
-      : { eligible: false, reason: '当前会话没有已绑定的 Bid Goal。', attempts: 0 }
+      : { eligible: false, reason: '当前会话没有已绑定的 Bid Goal。', attempts: 0,
+        sameProblemCount: 0, previousInstructions: [], requiresStrategyChange: false,
+        target: undefined }
     let writingPlanDiagnostic: { readable: boolean; matchesTarget: boolean; error?: string } | undefined
     let artifactDiagnostic: { path: string; readable: boolean; reason?: string } | undefined
     const artifact = task.status === 'suspended'
@@ -256,6 +258,9 @@ async function inspectBidStageValue(
       eligible: decision.eligible && (writingPlanDiagnostic?.matchesTarget ?? true),
       reason: task.status === 'failed' ? task.failure.message : decision.reason,
       attempts: decision.attempts,
+      same_problem_count: decision.sameProblemCount,
+      requires_strategy_change: decision.requiresStrategyChange,
+      previous_instructions: decision.previousInstructions,
       target: decision.target ?? null,
       writing_plan_diagnostic: writingPlanDiagnostic ?? null,
       artifact_diagnostic: artifactDiagnostic ?? null,
@@ -954,7 +959,7 @@ export function installStageInteractionTools(
       if (!goalRound && !hasUser) return decision
       const resumed = agent.session.events.findLast(event => event.type === 'bid.project.resumed')
       const suspended = task.status === 'suspended' ? task.run : undefined
-      const prompt = goalRound && !hasUser ? '你仍是当前主交互 Agent。当前阶段由 Host 持有的 subagent 执行，本轮只处理 Host 报告的失败。先调用 bid_stage_inspect(view="recovery")，根据真实问题提交简短改进办法到 bid_recover_task。不得重置阶段、改正式文件、代替用户确认。受理后只说明正在恢复；没有安全办法时说明阻碍。'
+      const prompt = goalRound && !hasUser ? '你仍是当前主交互 Agent。当前阶段由 Host 持有的 subagent 执行，本轮只处理 Host 报告的失败。先调用 bid_stage_inspect(view="recovery")，对比当前问题、检查点和最近指令；重复问题必须改变步骤、顺序、范围或工具用法，不能提交相同办法。仅修失败单元，不改正式确认或绕过校验。然后调用 bid_recover_task 提交具体改进办法；受理后只说明正在恢复。'
         : suspended !== undefined ? renderSuspendedRunPrompt(
           task.stage,
           suspended.runId,

@@ -78,6 +78,7 @@ export type BidOrchestratorErrorCode =
   | 'BID_AUTOMATIC_STAGE_NOT_ALLOWED'
   | 'BID_PROGRAM_STAGE_NOT_ALLOWED'
   | 'BID_RESUME_NOT_ALLOWED'
+  | 'BID_RECOVERY_DUPLICATE_INSTRUCTION'
   | 'BID_STAGE_RESET_NOT_ALLOWED'
   | 'BID_WRITING_ENTRY_ACTION_NOT_ALLOWED'
 
@@ -464,7 +465,7 @@ export class BidOrchestrator {
         issues: validation.issues,
       }
       const recovery = stage === 'file_intake' || stage === 'docx_export' ? undefined
-        : safeRecoverableBidFailure(work, failure, validation.issues, true).recovery
+        : safeRecoverableBidFailure(work, failure, validation.issues).recovery
       await this.runs.suspend(recovery?.kind === 'repair' ? 'retry_exhausted' : 'executor_error', {
         ...failure, recovery,
       })
@@ -480,7 +481,7 @@ export class BidOrchestrator {
     try {
       commitContext = await this.prepareStageContextTransition(stage)
     } catch (error: unknown) {
-      await this.runs.suspend('executor_error', safeBidRunError(error))
+      await this.runs.suspend('executor_error', safeRecoverableBidFailure(work, error))
       return 'failed'
     }
     if (signalAborted(run.signal)) { await this.runs.suspend('user_stop'); return 'aborted' }

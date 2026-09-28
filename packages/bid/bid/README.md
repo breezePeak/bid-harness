@@ -105,7 +105,7 @@ S2 在同一 live Agent 内一次提交项目事实、原子技术要求、招�
 
 S2 审核页始终从 `scoring-origin.json` 展示完整评分事实，`must_answer` 与“是否纳入后续响应”分别编辑和显示；选择变更立即由 Host 写入确认草稿，刷新或换 Session 后仍可恢复。正式确认只把选中评分项及允许的规范化修改写入 `analysis/scoring.json`，未进行筛选时两份评分集合一致。S3、S4、S5 只读取 `scoring.json`；回退 S2 复用阶段重置清理 `analysis`、`outline`、`chapters` 和 `output`，不会保留依赖旧评分集合的下游产物。
 
-S3 在阶段中途生成只读的 analysis/scoring-response-points.json，并把正式路径和完整 RP 数据交给目录生成、质量复核及局部修复。模型选择 scoring_response_point_ids；Host 按正式清单重建 scoring_response_points 快照、合并所属 scoring_ids 并去重，保留合法独立评分关联。未知编号报错，每个 RP 必须至少由一个合适的可写叶子覆盖，允许多个章节共同响应。格式修复和确定性修复各至多一次，确定性修复落盘时同步保存 `outline/repair-operations.json` 回执，恢复时不得再次消耗同类机会。Blueprint Quality Review 只执行一次完整复核并通过执行期私有工具提交结构化 advisory issues；漏交只允许一次无目录写权限的协议续行。Host 为本轮复核后的目录生成 v4 正式质量报告及完整 checked/reviewed 集合，模型不写质量候选文件。正式清单、目录、修复回执、质量报告和 Draft 是恢复边界；旧 Run scratch 不参与恢复，正式校验只由 Orchestrator 执行。
+S3 在阶段中途生成只读的 analysis/scoring-response-points.json，并把正式路径和完整 RP 数据交给目录生成、质量复核及局部修复。模型选择 scoring_response_point_ids；Host 按正式清单重建 scoring_response_points 快照、合并所属 scoring_ids 并去重，保留合法独立评分关联。未知编号报错，每个 RP 必须至少由一个合适的可写叶子覆盖，允许多个章节共同响应。每个 Run 的格式修复和确定性修复各至多一次；`outline/repair-operations.json` 保存最近一次正式修复回执，新 Run 可基于当前候选和校验问题再做一次局部修复。Blueprint Quality Review 只执行一次完整复核并通过执行期私有工具提交结构化 advisory issues；漏交只允许一次无目录写权限的协议续行。Host 为本轮复核后的目录生成 v4 正式质量报告及完整 checked/reviewed 集合，模型不写质量候选文件。正式清单、目录、修复回执、质量报告和 Draft 是恢复边界；旧 Run scratch 不参与恢复，正式校验只由 Orchestrator 执行。
 
 遗漏 RP 时，Host 提供差集原文、所属评分项及当前目录，模型只提交局部编辑与具体 must_answer；Host 应用后重新规范化和校验。质量候选只记录问题，复核正常完成且目录版本未再变化后，Host 才发布正式报告的已检查清单。相同输入版本的失败重试复用有效 RP 清单和目录候选；输入变化使候选失效。成功停在 S3 用户确认，已有确认版本不被重试覆盖。详见[局部续修与复核条件](../../../.agents/notes/implemented/bug-fix/2026-09-07-bid-outline-response-point-recovery.md)。
 

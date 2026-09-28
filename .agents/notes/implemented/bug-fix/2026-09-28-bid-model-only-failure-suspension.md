@@ -8,6 +8,8 @@ Status: implemented
 
 ## Decision
 
+本记录的非模型错误结算规则由[Bid Host 持续恢复内部失败](2026-09-28-bid-host-recovery-continuation.md)替代；以下保留原决策的边界与取舍。
+
 能力任务保留 `BidStageExecutionError` 的结构化问题，S4 子代理未调用 `finish_mapping_task` 的失败归入模型修复。Host 仅对可修复模型内容保存 `retry_exhausted` 挂起；执行器错误在 Run 停止写入并排空子任务后，提交带诊断的 `failed` 任务状态和中断通知。用户停止、Host 重启与等待输入各自保留原有可恢复的挂起语义。主 Agent 对模型内容仍通过[产物校验接管](2026-09-26-bid-validation-main-agent-recovery.md)取得诊断和受控恢复权；程序故障须由主会话定位并修复，不能以同一模型候选重新执行来掩盖。
 
 本记录收窄[主会话有界接管](../feature/2026-09-23-bid-s2-s5-goal-recovery.md)的挂起范围；该记录仍负责 Goal 身份、提交权限和模型恢复时序。
