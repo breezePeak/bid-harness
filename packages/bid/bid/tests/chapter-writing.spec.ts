@@ -724,8 +724,9 @@ describe('chapter-writing executor', () => {
       instruction: '修改第一章', reference: { scope: 'chapter', section_id: 'SEC-1', content_sha256: 'a'.repeat(64) },
     } })).toEqual(['SEC-1'])
     expect(resolveWritingPreparationSectionIds(outline, { revisionBatch: {
-      tasks: [{ section_id: 'SEC-2' }],
-    } as Parameters<typeof resolveWritingPreparationSectionIds>[1]['revisionBatch'] })).toEqual(['SEC-2'])
+      batchId: 'BATCH-1', tasks: [{ task_id: 'TASK-2', section_id: 'SEC-2', issue_ids: [],
+        depends_on: [], issues: [] }],
+    } })).toEqual(['SEC-2'])
     expect(resolveWritingPreparationSectionIds(outline, { scoped: {
       targetSectionIds: ['SEC-2'], mode: 'write', instruction: '只写第二章',
     } })).toEqual(['SEC-2'])
