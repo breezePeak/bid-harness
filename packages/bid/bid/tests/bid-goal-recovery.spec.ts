@@ -9,6 +9,7 @@ import { BidWorkspace } from '../src/index.ts'
 import { safeRecoverableBidFailure, bidRunRecoveryEligibility } from '../src/bid-recovery.ts'
 import { inspectBidStage } from '../src/stage-interaction.ts'
 import type { BidRunData, BidWorkDescriptor } from '../src/control-plane-contract.ts'
+import { BidStageExecutionError } from '../src/control-plane-contract.ts'
 import { BidRunCoordinator } from '../src/run-coordinator.ts'
 
 const cleanup: Array<() => Promise<unknown>> = []
@@ -33,6 +34,21 @@ it('keeps repairable candidate issues distinct from provider and input faults', 
   }]).recovery?.kind).toBe('blocked')
 })
 
+it('执行器的目录结构与响应点校验失败交给主 Agent，所有输入问题优先阻止恢复', () => {
+  const issues = [
+    { code: 'OUTLINE_SHARED_WRITABLE_NOT_LEAF', artifact: 'outline/outline.json', message: '父节不能直接写作' },
+    { code: 'OUTLINE_SHARED_RESPONSE_POINT_MISSING', artifact: 'outline/outline.json', message: '响应点未覆盖' },
+    { code: 'OUTLINE_GENERATION_REPAIR_FAILED', artifact: 'outline/repair-operations.json', message: '结构章节不能承担响应点' },
+  ]
+  expect(safeRecoverableBidFailure(work, new BidStageExecutionError(issues), issues).recovery)
+    .toMatchObject({ kind: 'repair', unit: 'outline/outline.json' })
+  for (const code of ['OUTLINE_GENERATION_INPUT_CHANGED', 'OUTLINE_SHARED_RESPONSE_POINT_CATALOG_MISMATCH', 'PROVIDER_ERROR']) {
+    const mixed = [...issues, { code, artifact: 'analysis/scoring.json', message: '上游输入或服务不可用' }]
+    expect(safeRecoverableBidFailure(work, new BidStageExecutionError(mixed), mixed).recovery)
+      .toMatchObject({ kind: 'blocked', unit: 'analysis/scoring.json' })
+  }
+})
+
 it.each(['awaiting_input', 'user_stop', 'host_restart'] as const)(
   '能力任务 %s 边界不由 Goal 自动续行', async (cause) => {
     const ctx = new Context()
@@ -47,7 +63,7 @@ it.each(['awaiting_input', 'user_stop', 'host_restart'] as const)(
       reason: '用户停止、Host 重启或等待输入需用户明确继续。' })
   })
 
-it('reads a suspended recovery diagnosis despite a corrupt formal outline and stops unchanged repeats', async () => {
+it('目录损坏与重复校验错误保留主 Agent 的继续修复权限', async () => {
   const root = await mkdtemp(join(tmpdir(), 'dsh-bid-recovery-'))
   cleanup.push(() => rm(root, { recursive: true, force: true }))
   const workspace = new BidWorkspace(root)
@@ -75,11 +91,10 @@ it('reads a suspended recovery diagnosis despite a corrupt formal outline and st
   })
   session.append('bid.task.changed', { state: { stage: 'outline_generation', status: 'suspended',
     run: { ...run('run-two'), cause: 'retry_exhausted', error: failure } } })
-  expect(bidRunRecoveryEligibility(session, 'goal-one')).toMatchObject({ eligible: false, attempts: 1,
-    reason: '同一问题和检查点没有进展。' })
+  expect(bidRunRecoveryEligibility(session, 'goal-one')).toMatchObject({ eligible: true, attempts: 1 })
 })
 
-it('permits a changed candidate once but keeps the two-acceptance budget across Run identities', async () => {
+it.each(['repair', 'retry'] as const)('%s 按故障类别决定是否限制两次自动接管', async (kind) => {
   const ctx = new Context()
   cleanup.push(() => ctx.fiber.dispose())
   await ctx.plugin(SessionStore)
@@ -87,8 +102,8 @@ it('permits a changed candidate once but keeps the two-acceptance budget across 
   const base = safeRecoverableBidFailure(work, new Error('bad candidate'), [{
     code: 'OUTLINE_GENERATION_CANDIDATE_INVALID', artifact: 'outline/outline.json', message: 'missing sections',
   }])
-  const failureA = { ...base, recovery: { ...base.recovery!, candidateSha256: 'a'.repeat(64) } }
-  const failureB = { ...base, recovery: { ...base.recovery!, candidateSha256: 'b'.repeat(64) } }
+  const failureA = { ...base, recovery: { ...base.recovery!, kind, candidateSha256: 'a'.repeat(64) } }
+  const failureB = { ...base, recovery: { ...base.recovery!, kind, candidateSha256: 'b'.repeat(64) } }
   session.append('bid.goal.bound', { goalId: 'goal-one', ownerSessionId: String(session.id), initialS2WorkId: 's2-work' })
   session.append('bid.task.changed', { state: { stage: 'outline_generation', status: 'suspended',
     run: { ...run('run-one'), cause: 'retry_exhausted', error: failureA } } })
@@ -109,8 +124,7 @@ it('permits a changed candidate once but keeps the two-acceptance budget across 
   })
   session.append('bid.task.changed', { state: { stage: 'outline_generation', status: 'suspended',
     run: { ...run('run-three'), cause: 'retry_exhausted', error: { ...failureB, recovery: { ...failureB.recovery, candidateSha256: 'c'.repeat(64) } } } } })
-  expect(bidRunRecoveryEligibility(session, 'goal-one')).toMatchObject({ eligible: false, attempts: 2,
-    reason: '当前 work 的自动接管次数已耗尽。' })
+  expect(bidRunRecoveryEligibility(session, 'goal-one')).toMatchObject({ eligible: kind === 'repair', attempts: 2 })
 })
 
 it('records the digest of the exact failed candidate after a Run settles', async () => {

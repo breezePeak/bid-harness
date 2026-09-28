@@ -10,7 +10,7 @@ S3 把响应点复核、目录修复和质量复核放在共享重试循环中�
 
 S3 按固定步骤执行：响应点分析 Child 产生候选，独立语义复核 Child 检查候选；目录 JSON 格式修复至多一次；字段、引用、结构和覆盖的确定性修复合并为至多一次；Blueprint Quality Review 通过无文件工具的 Child 返回局部 operations 和 advisory issues。合法复核结果应用后结束该步骤；格式或操作错误按独立的 `maxRepairAttempts` 预算重试，耗尽后结束当前 Run。
 
-确定性修复应用成功时，Host 在同一 Commit Scope 中原子写入 `outline/outline.json` 与 `outline/repair-operations.json`。回执是已消耗修复机会的事实记录；恢复发现回执后只校验当前正式目录，仍有问题就失败，不再启动修复轮次。新目录生成或用户请求重新生成会使旧回执和质量报告失效。
+确定性修复应用成功时，Host 在同一 Commit Scope 中原子写入 `outline/outline.json` 与 `outline/repair-operations.json`。回执是已消耗修复机会的事实记录；普通恢复发现回执后只校验当前正式目录，仍有问题就结束当前 Run。主 Agent 已获 Host 接纳的具体修复指令按[持续接管规则](2026-09-26-bid-validation-main-agent-recovery.md)授权当前 work 再执行一次修复。新目录生成或用户请求重新生成会使旧回执和质量报告失效。
 
 正式恢复链使用 `analysis/scoring-response-points.candidate.json`、`analysis/scoring-response-points.json`、`outline/outline.json`、`outline/repair-operations.json`、`outline/quality-report.json` 和 `outline/draft.json`。已有候选时只补做响应点复核，已有正式清单时不再运行响应点 Child。已有目录但没有质量报告时从质量复核继续；质量报告和匹配 Draft 完整有效时不再调用模型，Draft 缺失或内容摘要不匹配时重新复核。旧 Run scratch 不参与恢复，继续运行只复用正式 Artifact；阶段 reset 删除正式 S3 及下游产物后才从头开始。
 

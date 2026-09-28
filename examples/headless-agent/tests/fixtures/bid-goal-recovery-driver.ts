@@ -6,6 +6,7 @@ import { SessionId, type Session } from '@deepseek-ai/dsh-session'
 import { BidHostRuntime, BidWorkspace, BidRunCoordinator, buildBidStageTask, checkpointBidProjectState } from '@deepseek-ai/dsh-bid'
 import { persistBidWorkRequest } from '../../../../packages/bid/bid/src/work-descriptor.ts'
 import { safeRecoverableBidFailure } from '../../../../packages/bid/bid/src/bid-recovery.ts'
+import { BidStageExecutionError } from '../../../../packages/bid/bid/src/control-plane-contract.ts'
 
 interface Operation { runs: BidRunCoordinator }
 interface HostInternals {
@@ -67,17 +68,32 @@ try {
     { stage: 'tender_analysis', inputs, payload })
   const operation = host.beginOperation(agent.session)
   await host.prepareOperation(operation)
-  const failed = await operation.runs.start(work)
+  const initial = await operation.runs.start(work)
+  let failed = initial
+  if (process.env.DSH_BID_RECOVERY_STAGE === 'outline_generation') {
+    await operation.runs.complete(initial, () => {
+      agent.session.append('bid.stage.completed', { stage: 'tender_analysis', status: 'completed', artifacts: [] })
+    })
+    const payload = { stage: 'outline_generation' }
+    const inputs = buildBidStageTask('outline_generation').inputs.map(path => ({ path, sha256: null }))
+    const outlineWork = await persistBidWorkRequest(workspace, 'stage_execution', 'outline_generation', payload,
+      { stage: 'outline_generation', inputs, payload })
+    failed = await operation.runs.start(outlineWork)
+  }
   adapter.runId = failed.runId
-  await operation.runs.suspend('retry_exhausted', safeRecoverableBidFailure(work, new Error('missing submission'), [{
+  const issues = failed.work.stage === 'outline_generation' ? [
+    { code: 'OUTLINE_SHARED_WRITABLE_NOT_LEAF', artifact: 'outline/outline.json', message: '父章节不能直接写作' },
+    { code: 'OUTLINE_SHARED_RESPONSE_POINT_MISSING', artifact: 'outline/outline.json', message: '叶子章节缺失响应点' },
+  ] : [{
     code: 'TENDER_ANALYSIS_SUBMISSION_INCOMPLETE', artifact: 'analysis/project.json', message: '项目字段缺失',
-  }]))
+  }]
+  await operation.runs.suspend('retry_exhausted', safeRecoverableBidFailure(failed.work, new BidStageExecutionError(issues), issues))
   const accepted = Promise.withResolvers<undefined>()
   const off = ctx.on('session/event', (session, event) => {
     if (session === agent.session && event.type === 'bid.goal.recovery.requested') accepted.resolve(undefined)
   }, { global: true })
   const timeout = Promise.withResolvers<never>()
-  const timer = setTimeout(() => timeout.reject(new Error('Goal 未提交恢复工具')), 10_000)
+  const timer = setTimeout(() => { timeout.reject(new Error('Goal 未提交恢复工具')) }, 10_000)
   try {
     await host.finishOperation(agent.session, operation)
     await Promise.race([accepted.promise, timeout.promise])

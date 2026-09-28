@@ -1,6 +1,7 @@
 /** Bounded S2–S5 recovery decisions derived from Host-owned failures. */
 import { createHash } from 'node:crypto'
 import type { BidRunProgress, BidTaskFailure, BidWorkDescriptor, StageValidationIssue } from './control-plane-contract.ts'
+import { BidStageExecutionError } from './control-plane-contract.ts'
 import type { Session } from '@deepseek-ai/dsh-session'
 import { BID_INITIAL_TASK_STATE, reduceBidTaskState } from './runtime-state.ts'
 import type { ModelStageExecutionOptions } from './model-stage-repair.ts'
@@ -11,7 +12,7 @@ type Recovery = NonNullable<BidTaskFailure['recovery']>
 const STAGES = new Set(['tender_analysis', 'outline_generation', 'evidence_mapping', 'chapter_writing'])
 const BLOCKED_CODE = new RegExp(
   'INPUT_(?:INVALID|CHANGED|MISMATCH)|FILE_(?:MISSING|CORRUPT)|PERMISSION|DENIED|UNAUTHORIZED|FORBIDDEN|'
-  + 'CREDENTIAL|QUOTA|PROVIDER|VALIDATOR_FAILED|FATAL|FINGERPRINT|SEMANTIC_BLOCKED', 'iu',
+  + 'CREDENTIAL|QUOTA|PROVIDER|VALIDATOR_FAILED|FATAL|FINGERPRINT|SEMANTIC_BLOCKED|CATALOG_MISMATCH', 'iu',
 )
 const REPAIR_CODE = new RegExp(
   'CANDIDATE_INVALID|SUBMISSION_(?:REQUIRED|INCOMPLETE)|NOT_COMMITTED|VALIDATION_FAILED|SCHEMA_INVALID|'
@@ -33,13 +34,14 @@ export function classifyBidRecovery(
   validationRejected = false,
 ): Recovery | undefined {
   if (!STAGES.has(work.stage) || work.kind === 'file_intake') return undefined
-  const issue = failure.issues?.[0]
+  const blockedIssue = failure.issues?.find(issue => BLOCKED_CODE.test(issue.code))
+  const issue = blockedIssue ?? failure.issues?.[0]
   const code = issue?.code ?? failure.code ?? ''
   const unit = sanitizeBidErrorText(issue?.artifact ?? issue?.path ?? work.workId)
   const reason = sanitizeBidErrorText(issue?.message ?? failure.message)
-  const kind = BLOCKED_CODE.test(code) ? 'blocked'
-    : validationRejected ? 'repair'
-      : RETRY_CODE.test(code) ? 'retry'
+  const kind = blockedIssue !== undefined || BLOCKED_CODE.test(failure.code ?? '') ? 'blocked'
+    : RETRY_CODE.test(code) ? 'retry'
+      : validationRejected ? 'repair'
         : REPAIR_CODE.test(code) ? 'repair' : 'blocked'
   return { kind, unit, reason }
 }
@@ -59,7 +61,8 @@ export function safeRecoverableBidFailure(
   validationRejected = false,
 ): BidTaskFailure {
   const failure = safeBidRunError(error, issues)
-  const recovery = classifyBidRecovery(work, failure, validationRejected)
+  const recovery = classifyBidRecovery(work, failure,
+    validationRejected || error instanceof BidStageExecutionError && (issues?.length ?? 0) > 0)
   return recovery === undefined ? failure : { ...failure, recovery }
 }
 
@@ -113,8 +116,11 @@ export function bidRunRecoveryEligibility(session: Session, goalId: string): {
   if (run.error?.recovery === undefined || run.error.recovery.kind === 'blocked') {
     return { eligible: false, reason: run.error?.recovery?.reason ?? run.error?.message ?? '故障未被认定可自动恢复。', attempts, target }
   }
-  if (attempts >= 2) return { eligible: false, reason: '当前 work 的自动接管次数已耗尽。', attempts, target }
   const fingerprint = bidRecoveryFingerprint(run.work, run.error, run.progress)
+  if (run.error.recovery.kind === 'repair') {
+    return { eligible: true, reason: run.error.recovery.reason, attempts, target, fingerprint }
+  }
+  if (attempts >= 2) return { eligible: false, reason: '当前 work 的自动接管次数已耗尽。', attempts, target }
   const unchanged = session.events.some(event => event.type === 'bid.goal.recovery.requested'
     && event.data.goalId === goalId && event.data.target.kind === 'run'
     && event.data.target.workId === run.work.workId

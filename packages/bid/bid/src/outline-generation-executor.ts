@@ -769,7 +769,8 @@ export async function executeOutlineGeneration(
       relative(workspace.root, path(output)).replaceAll('\\', '/'),
       relative(workspace.root, scratchPath(output)).replaceAll('\\', '/'),
     ), prompt) + '\n当前 DSH file policy 为 workspace-write 或 danger-full-access 时，调用 write 不得传 sandbox_permissions 或 justification；只有 read-only 下首次写入被沙箱拒绝后，才按错误提示做一次严格升级重试。'
-      + (options.recovery !== undefined && (outputs.includes(options.recovery.unit) || options.recovery.unit === options.run.work.workId)
+      + (options.recovery !== undefined && (outputs.includes(options.recovery.unit)
+        || options.recovery.unit === OUTLINE_ARTIFACT || options.recovery.unit === options.run.work.workId)
         ? `\n${renderBidRecoveryContext(options.recovery)}` : '')
     const message = createUserMessage({ content: [{ type: 'text', text: modelPrompt }], source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'instructions' } })
     const protocol = installMainAgentProtocol(agent, {
@@ -881,8 +882,12 @@ export async function executeOutlineGeneration(
       if (candidate.kind === 'format') throw new BidStageExecutionError(candidate.issues)
     }
 
-    let repairUsed = await read(REPAIR_RECEIPT) !== undefined
-    if (repairUsed) await readInput(REPAIR_RECEIPT, value => z.array(z.unknown()).parse(value))
+    const savedRepair = await read(REPAIR_RECEIPT) !== undefined
+    if (savedRepair) await readInput(REPAIR_RECEIPT, value => z.array(z.unknown()).parse(value))
+    const recovery = options.recovery
+    const repairAuthorized = recovery?.workId === options.run.work.workId
+      && [OUTLINE_ARTIFACT, REPAIR_RECEIPT, 'outline/candidate-repair.json', options.run.work.workId].includes(recovery.unit)
+    let repairUsed = savedRepair && !repairAuthorized
     let outline: OutlineArtifact
     if (candidate.kind === 'fields') {
       if (candidate.issues.some(issue => issue.field === null || issue.field === 'sections')) throw new BidStageExecutionError([
