@@ -12,12 +12,12 @@ type Recovery = NonNullable<BidTaskFailure['recovery']>
 const STAGES = new Set(['tender_analysis', 'outline_generation', 'evidence_mapping', 'chapter_writing'])
 const BLOCKED_CODE = new RegExp(
   'INPUT_(?:INVALID|CHANGED|MISMATCH)|FILE_(?:MISSING|CORRUPT)|PERMISSION|DENIED|UNAUTHORIZED|FORBIDDEN|'
-  + 'CREDENTIAL|QUOTA|PROVIDER|VALIDATOR_FAILED|FATAL|FINGERPRINT|SEMANTIC_BLOCKED|CATALOG_MISMATCH', 'iu',
+  + 'CREDENTIAL|QUOTA|PROVIDER|INFRASTRUCTURE|VALIDATOR_FAILED|FATAL|FINGERPRINT|SEMANTIC_BLOCKED|CATALOG_MISMATCH', 'iu',
 )
 const REPAIR_CODE = new RegExp(
   'CANDIDATE_INVALID|SUBMISSION_(?:REQUIRED|INCOMPLETE)|NOT_COMMITTED|VALIDATION_FAILED|SCHEMA_INVALID|'
   + 'CONTENT_INVALID|STRUCTURE_INVALID|SEMANTIC_INVALID|EVIDENCE_MAPPING_(?:PARTIAL|FINAL_REVIEW|FINAL_CHECK|'
-  + 'REVIEW_PENDING|REFINED_SCOPE)|CHAPTER_(?:REVIEWER_RESULT|WRITING_|SUBAGENT_STRUCTURED)', 'iu',
+  + 'REVIEW_PENDING|REFINED_SCOPE|SUBAGENT_STRUCTURED_MISSING)|CHAPTER_(?:REVIEWER_RESULT|WRITING_|SUBAGENT_STRUCTURED)', 'iu',
 )
 const RETRY_CODE = /^(?:ETIMEDOUT|ECONNRESET|EAI_AGAIN|EVIDENCE_MAPPING_SUBAGENT_INFRASTRUCTURE_ERROR)$/u
 
@@ -60,9 +60,10 @@ export function safeRecoverableBidFailure(
   issues?: readonly StageValidationIssue[],
   validationRejected = false,
 ): BidTaskFailure {
-  const failure = safeBidRunError(error, issues)
+  const details = issues ?? (error instanceof BidStageExecutionError ? error.issues : undefined)
+  const failure = safeBidRunError(error, details)
   const recovery = classifyBidRecovery(work, failure,
-    validationRejected || error instanceof BidStageExecutionError && (issues?.length ?? 0) > 0)
+    validationRejected || error instanceof BidStageExecutionError && (details?.length ?? 0) > 0)
   return recovery === undefined ? failure : { ...failure, recovery }
 }
 

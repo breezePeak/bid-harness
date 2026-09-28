@@ -516,21 +516,10 @@ export async function runChapterWritingLoop(ctx: Context, root: string) {
   Object.assign(section, partialResult('https://official.example/standard').section_mappings[0]!.writing_brief)
   const outlineHash = outlineArtifactSha256(outline)
   const evidencePath = join(workspace.projectRoot, 'analysis/evidence-map.json')
-  const unavailableSources = ['missing', 'hash'].map((kind) => {
-    const url = `https://official.example/${kind}`
-    const hash = webEvidenceContentSha256('公开技术资料原文')
-    const id = webEvidenceSourceId(url, hash)
-    return { source_id: id, requested_url: url, final_url: url, content_sha256: hash,
-      snapshot_path: `analysis/web-sources/${id}.md`, status_code: 200, truncated: false, fetched_at: '2026-09-01T00:00:00.000Z' }
-  })
-  const missing = unavailableSources[0]!
   await mkdir(join(workspace.projectRoot, 'analysis/web-sources'), { recursive: true })
   await mkdir(join(workspace.projectRoot, 'chapters'), { recursive: true })
-  await writeFile(join(workspace.projectRoot, unavailableSources[1]!.snapshot_path), '与账本 Hash 不符的正文')
   const evidenceBefore = JSON.stringify({ section_mappings: [{
-    section_id: section.id, local_materials: [], web_materials: [{ source_id: missing.source_id, snapshot_path: missing.snapshot_path,
-      chunk_refs: [`W:${missing.source_id}:C0001`],
-      usage: 'reference', summary: 'S4 已映射的公开审计资料。', supports: '安全审计要求' }],
+    section_id: section.id, local_materials: [], web_materials: [],
     missing_topics: ['缺少实施流程参考资料。'], writing_dimensions: ['身份鉴别与访问控制', '安全审计'],
     answer_plan: [{ targets: [{ kind: 'must_answer', position: 0, text: section.must_answer[0] },
       { kind: 'requirement', id: 'REQ-1' }, { kind: 'response_point', id: 'RP-000001' }],
@@ -545,7 +534,7 @@ export async function runChapterWritingLoop(ctx: Context, root: string) {
       confirmed_outline_sha256: outlineHash, confirmed_draft_revision: 1, confirmed_draft_sha256: outlineHash,
     })),
     writeFile(evidencePath, evidenceBefore),
-    writeFile(join(workspace.projectRoot, 'analysis/web-evidence-sources.json'), JSON.stringify({ stage: 'evidence_mapping', sources: unavailableSources })),
+    writeFile(join(workspace.projectRoot, 'analysis/web-evidence-sources.json'), JSON.stringify({ stage: 'evidence_mapping', sources: [] })),
     writeFile(join(workspace.projectRoot, 'chapters/writing-plan.json'), JSON.stringify({
       schema_version: 3, scope: 'technical_bid', plan_version: 1, confirmed: true,
       confirmed_outline_sha256: outlineHash,
@@ -618,6 +607,33 @@ export async function runChapterWritingLoop(ctx: Context, root: string) {
     toolCall('reject-new-setext-heading', 'submit_chapter', { ...candidate, markdown: `${candidate.markdown}\n\n补充服务方案\n---\n\n不属于确认目录的目录层级。` }),
     toolCall('reject-internal-id', 'submit_chapter', { ...candidate, markdown: `${candidate.markdown}\n\n我方按 REQ-1 组织访问控制实施。` }),
     toolCall('submit-chapter', 'submit_chapter', candidate),
+    toolCall('research-read-local', 'read_source', { source_ref: 'M1:chunk_0001' }),
+    toolCall('research-ready', 'submit_section_research_assessment', researchAssessment(true, false)),
+    toolCall('research-plan', 'update_section_task', {
+      section_id: section.id, basis: { kind: 'tender_requirement', explanation: '核对访问控制任务的实施组织。', requirement_ids: ['REQ-1'] },
+      answer_plan: ['R1', 'R2', 'R3'].map(ref => ({ target_refs: [ref], mode: 'proposal',
+        content: '结合已验证的实施流程资料，拟采用权限授予、执行检查和审计留存方法。',
+        basis: [{ kind: 'section_responsibility' }], boundary: '本地参考流程不证明项目已有系统能力。' })),
+    }),
+    toolCall('research-structure', 'submit_section_structure_assessment', {
+      decision: 'keep', reason: '补搜资料用于本章实施流程，无需改变确认目录。',
+      navigation_analysis: '当前标题覆盖访问控制与安全审计，实施步骤保留在本章正文。',
+      hidden_heading_pressure: false, topic_dispositions: [],
+    }),
+    toolCall('research-lock', 'lock_section_outline', { comparison: '确认目录的章节职责和标题保持一致。' }),
+    toolCall('research-submit', 'submit_section_mapping', {
+      section_id: section.id,
+      local_materials: [{ material_ref: 'M1:chunk_0001', usage: 'reference', summary: '支撑本章实施流程的组织与步骤安排。' }],
+      web_materials: [],
+    }),
+    toolCall('research-finish', 'finish_mapping_task', {}),
+    toolCall('research-quality', 'structured_output', {
+      scope: 'technical_bid', checked_requirement_ids: ['REQ-1'], checked_scoring_ids: ['SCORE-1'],
+      checked_scoring_response_point_ids: ['RP-000001'], issues: [], blocking_issues: [],
+    }),
+    toolCall('research-final-list', 'list_review_items', {}),
+    reviewPendingMappingItems,
+    toolCall('research-final-finish', 'finish_final_check', {}),
   ]
   const reviewScript = [
     toolCall('review-incomplete', 'finish_chapter_review', {}),
@@ -643,7 +659,7 @@ export async function runChapterWritingLoop(ctx: Context, root: string) {
   const metadata = parseChapterMetadata(JSON.parse(await readFile(join(workspace.projectRoot,
     'chapters/meta/0001.json'), 'utf8')))
   if (JSON.stringify(mapped.section_mappings[0]?.local_materials) !== JSON.stringify(metadata.local_materials_used)
-    || mapped.section_mappings[0]?.answer_plan !== undefined) {
+    || (mapped.section_mappings[0]?.answer_plan?.length ?? 0) === 0) {
     throw new Error('S5 实际使用的补搜资料未回流当前 Evidence')
   }
   return { agent, artifacts, workspace, evidenceSynced: true, requests: adapter.requests, parentScript, childScript,

@@ -16,7 +16,7 @@ const fixtureDir = fileURLToPath(new URL('./bid-chapter-writing-snapshots/', imp
 const configPath = fileURLToPath(new URL('../bid-evidence-mapping.cordis.snapshot.yml', import.meta.url))
 const binScript = fileURLToPath(new URL('./fixtures/bid-chapter-writing-driver.ts', import.meta.url))
 
-it('S5 通过真实 Loader 拒绝正文新建目录、隔离坏 Web 来源并回流已使用资料', async () => {
+it('S5 通过真实 Loader 在 Writer 补搜后重研 Evidence 并审核最终计划', async () => {
   const result = await runLoaderSmoke({
     label: 'S5 当前章节本地补搜', tempDirPrefix: 'dsh-s5-local-snapshot-', binScript, configPath, mode: 'src',
     processTimeoutMs: 45_000,
@@ -26,7 +26,7 @@ it('S5 通过真实 Loader 拒绝正文新建目录、隔离坏 Web 来源并回
       const paths = (await readdir(store, { recursive: true })).filter(path => path.endsWith('.jsonl'))
       const logs = await Promise.all(paths.map(async path => readFile(join(store, path), 'utf8')))
       const childLogs = logs.filter(log => (JSON.parse(log.split('\n')[0]!) as SessionHeader).parentSession !== undefined)
-      expect(childLogs).toHaveLength(2)
+      expect(childLogs).toHaveLength(4)
       const writerLog = childLogs.find(log => log.includes('Available Evidence Files：'))
       if (writerLog === undefined) throw new Error('缺少持久化 Writer 日志')
       const [headerLine, ...eventLines] = writerLog.trimEnd().split('\n')
@@ -42,12 +42,12 @@ it('S5 通过真实 Loader 拒绝正文新建目录、隔离坏 Web 来源并回
       const reviewerLog = childLogs.find(log => log.includes('Evidence Pack：'))!
       expect(reviewerLog).toContain('Confirmed Outline Responsibilities：')
       expect(reviewerLog).toContain('清单已覆盖不能抵消放错章节的问题')
+      expect(reviewerLog).toContain('结合已验证的实施流程资料')
+      const researchInitial = childLogs.find(log => log.includes('research-plan'))!
+      const researchFinal = childLogs.find(log => log.includes('research-final-finish'))!
+      expect(researchInitial).toContain('allow_outline_refinement：false')
       expect(writerLog).toContain('Mapped Materials：[]')
       expect(writerLog).toContain('F999')
-      expect(writerLog).toContain('不可用')
-      expect(writerLog).toContain('ENOENT')
-      expect(writerLog).not.toContain('Snapshot Hash')
-      expect(writerLog).toContain('S4 已映射的公开审计资料。')
       expect(writerLog).toContain('未知 W1')
       expect(writerLog).toContain('正文包含系统内部编号 REQ-1')
       expect(writerLog).toContain('S5 Chapter Child 不可读取 tender 或未入库资料。')
@@ -63,7 +63,7 @@ it('S5 通过真实 Loader 拒绝正文新建目录、隔离坏 Web 来源并回
       }])
       expect(metadata.web_materials_used).toEqual([])
       expect(map.section_mappings[0]!.local_materials).toEqual(metadata.local_materials_used)
-      expect(map.section_mappings[0]!.answer_plan).toBeUndefined()
+      expect(map.section_mappings[0]!.answer_plan?.length).toBeGreaterThan(0)
       const manifest = parseChapterWritingManifest(JSON.parse(await readFile(join(projectRoot, 'chapters/manifest.json'), 'utf8')))
       expect(manifest.chapters).toHaveLength(1)
       expect(manifest.chapters[0]!.local_materials_used).toEqual(metadata.local_materials_used)
@@ -95,6 +95,8 @@ it('S5 通过真实 Loader 拒绝正文新建目录、隔离坏 Web 来源并回
         'export.expected.json': exportSnapshot,
         'writer.expected.jsonl': normalizeSessionSnapshot(writerLog, { sessionIds, cwd, cwdAliases: [cwd.replaceAll('\\', '/')] }),
         'reviewer.expected.jsonl': normalizeSessionSnapshot(reviewerLog, { sessionIds, cwd, cwdAliases: [cwd.replaceAll('\\', '/')] }),
+        'research-initial.expected.jsonl': normalizeSessionSnapshot(researchInitial, { sessionIds, cwd, cwdAliases: [cwd.replaceAll('\\', '/')] }),
+        'research-final.expected.jsonl': normalizeSessionSnapshot(researchFinal, { sessionIds, cwd, cwdAliases: [cwd.replaceAll('\\', '/')] }),
         'planning.expected.jsonl': normalizeSessionSnapshot(planningLog, { sessionIds, cwd, cwdAliases: [cwd.replaceAll('\\', '/')] }),
         'artifacts.expected.json': JSON.stringify({ map, metadata, markdown, globalReview, completionReview }, null, 2) + '\n',
       }

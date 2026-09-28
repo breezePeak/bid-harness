@@ -12,7 +12,7 @@ Bid Host 在 S2 Run 的 running 检查点成功后，将一个原生 Goal 绑定
 
 Host 将执行器和最终校验的实际问题分类并保存在 Run failure 中。主 Agent 通过 `bid_stage_inspect(view="recovery")` 读取有界诊断，再用 `bid_recover_task` 提交当前目标的改进指令。Host 在原项目锁内复核 Goal、Run 或写作请求身份、输入指纹、停止状态和预算，持久化一次恢复事件，然后复用原 Run 恢复或已回答写作计划的派发入口。工具在新 Run 的 running 检查点持久化后返回；S2～S5 的真实执行模型只接收与失败单元匹配的指令，正式产物仍经原提交和校验流程。
 
-瞬时操作重试的同一 work 或写作 requestId 至多接受两次自动接管；相同问题与检查点无进展时停止。产物校验失败遵循[持续接管规则](../bug-fix/2026-09-26-bid-validation-main-agent-recovery.md)，不受这两项限制。用户停止、Host 重启、输入身份冲突、提供方与权限故障不取得自动接管权。Goal 的暂停、清除和完成约束主会话的自动续行；S1 文件处理和 S6 独立导出不由这个目标恢复。
+写作 requestId 的瞬时派发至多接受两次自动接管；相同问题与检查点无进展时停止。产物校验失败遵循[持续接管规则](../bug-fix/2026-09-26-bid-validation-main-agent-recovery.md)，不受这两项限制。用户停止、Host 重启、输入身份冲突、提供方与权限故障不取得自动接管权；非模型错误的结算见[模型修复挂起边界](../bug-fix/2026-09-28-bid-model-only-failure-suspension.md)。Goal 的暂停、清除和完成约束主会话的自动续行；S1 文件处理和 S6 独立导出不由这个目标恢复。
 
 ## Alternatives considered
 

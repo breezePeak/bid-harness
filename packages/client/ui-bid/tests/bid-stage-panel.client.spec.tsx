@@ -744,7 +744,7 @@ describe('BidStagePanel', () => {
       await act(async () => { await vi.advanceTimersByTimeAsync(5000) })
       expect(getEvidenceMappingProgress).toHaveBeenCalledTimes(2)
       expect(screen.queryByTestId('bid-stage-plan')).toBeNull()
-      expect(screen.getByText('进度同步暂时失败，当前显示上次成功读取的数据。')).toBeTruthy()
+      expect(screen.queryByText('进度同步暂时失败，当前显示上次成功读取的数据。')).toBeNull()
 
       await act(async () => { await vi.advanceTimersByTimeAsync(5000) })
       expect(getEvidenceMappingProgress).toHaveBeenCalledTimes(3)
@@ -1100,14 +1100,41 @@ describe('BidStagePanel', () => {
     expect(setReviewViewAvailable).toHaveBeenLastCalledWith(false)
   })
 
+  it('能力计划不重复显示章节任务和运行提示', async () => {
+    const main = projection({ runtime: { stage: 'evidence_mapping', status: 'running' } })
+    const plan: BidCapabilityPlanView = {
+      workId: 'current-work', title: '重构评分目录', scope: 'project', status: 'running',
+      workItems: ['核对评分项', '重构目录', '复核覆盖'],
+      steps: [{ id: 'refine', capability: 'outline.refine', status: 'running', detail: null }],
+    }
+    const progress = { ...savedProgress, total: 2, completed: 1, running: 0, not_started: 1,
+      failed: 0, failed_section_ids: [],
+      tasks: [
+        { task_id: 'done', title: '项目服务方案', phase: 'final_check' as const, status: 'completed' as const,
+          section_ids: ['S1'], child_session_id: 'child-done', latest_issue: null },
+        { task_id: 'pending', title: '质量保障措施', phase: 'final_check' as const, status: 'pending' as const,
+          section_ids: ['S6'], child_session_id: null, latest_issue: null },
+      ] }
+    render(<BidStagePanel {...props(main, {
+      getCapabilityTaskPlan: async () => plan, getEvidenceMappingProgress: async () => progress,
+    })} />)
+    expect(await screen.findByTestId('bid-capability-plan')).toBeTruthy()
+    expect(screen.queryByText('章节执行任务（已完成 1/2）')).toBeNull()
+    expect(screen.queryByText('质量保障措施：待启动')).toBeNull()
+    expect(screen.queryByText(/正在处理… · 整个项目/)).toBeNull()
+    expect(screen.getByRole('group', { name: '任务拆分' }).textContent).toContain('核对评分项')
+  })
+
   it('能力任务结束后隐藏计划', async () => {
     const main = projection({ runtime: { stage: 'chapter_writing', status: 'completed' } })
     const plan: BidCapabilityPlanView = {
       workId: 'capability-work', title: '拆分目录', scope: 'project', status: 'running',
+      workItems: ['核对六个评分章', '调整目录结构', '复核响应点覆盖'],
       steps: [{ id: 'update-outline', capability: 'outline.update', status: 'running', detail: null }],
     }
     const view = render(<BidStagePanel {...props(main, { getCapabilityTaskPlan: async () => plan })} />)
     expect(await screen.findByTestId('bid-capability-plan')).toBeTruthy()
+    expect(screen.getByRole('group', { name: '任务拆分' }).textContent).toContain('复核响应点覆盖')
 
     view.rerender(<BidStagePanel {...props(main, { getCapabilityTaskPlan: async () => ({
       ...plan, status: 'completed', steps: [{ ...plan.steps[0]!, status: 'completed' }],
@@ -1122,6 +1149,7 @@ describe('BidStagePanel', () => {
       allowedActions: ['send_message', 'export_docx', 'revise_chapter'] })
     const view = render(<BidStagePanel {...props(complete, { docxExport: exportOperation })}/> )
     expect(screen.getByTestId('bid-docx-export-plan').textContent).toContain('S6 · 导出 Word')
+    expect(screen.queryByText('正在生成 Word')).toBeNull()
     expect(screen.queryByText('正文编写')).toBeNull()
     expect(screen.queryByText('已完成')).toBeNull()
 

@@ -318,7 +318,7 @@ function localIdentity(material: LocalEvidenceMaterial): string {
  * @param context 当前章节职责、计划及适用 S2/S4 记录。
  * @param manifest 项目文件内容身份。
  * @param sources 已持久化 Web 正文身份。
- * @returns 当前 Writer 和 Reviewer 共用的 SHA-256 输入身份。
+ * @returns 指定时刻章节依据的 SHA-256 输入身份；Writer 与 Reviewer 分别记录启动时的值。
  */
 export function chapterEvidenceInputFingerprint(
   context: ChapterContext, manifest: BidManifest, sources: readonly WebEvidenceSource[],
@@ -2319,6 +2319,7 @@ async function runChapterWriting(
   }
   const readableWebPathsByChild = new Map<string, Map<string, readonly { start_line: number; end_line: number }[] | null>>()
   let webWrites: Promise<void> = Promise.resolve()
+  let evidencePreparation: Promise<void> = Promise.resolve()
   const persistWebSnapshots = (
     sectionId: string, childSessionId: string, writerAttempt: number, snapshots: readonly WebEvidenceSnapshot[],
   ): Promise<WebEvidenceSnapshot[]> => {
@@ -2570,12 +2571,13 @@ async function runChapterWriting(
     const batchTask = batchTaskBySection.get(sectionId)
     const inputEpoch = sectionEpochs.get(sectionId) ?? 0
     const inputPlanVersion = writingPlan.plan_version
-    const context = contexts.get(sectionId)
+    const initialContext = contexts.get(sectionId)
     const planned = planSections.get(sectionId)
     const number = outlineNumbers.get(sectionId)
     if (number === undefined) throw new Error(`章节缺少目录编号：${sectionId}`)
     const log = executionLog.sections.find(section => section.section_id === sectionId)
-    if (context === undefined || planned === undefined || log === undefined) throw new Error(`Bid chapter scheduler lost section ${sectionId}`)
+    if (initialContext === undefined || planned === undefined || log === undefined) throw new Error(`Bid chapter scheduler lost section ${sectionId}`)
+    let context: ChapterContext = initialContext
     log.status = 'running'
     log.phase = 'queued'
     log.failure_phase = null
@@ -2599,7 +2601,7 @@ async function runChapterWriting(
           handoff,
         }
       })
-      const inputIdentity: ChapterExecutionAttempt['input'] = {
+      let writerInputIdentity: ChapterExecutionAttempt['input'] = {
         plan_version: inputPlanVersion,
         section_epoch: inputEpoch,
         evidence_sha256: chapterEvidenceInputFingerprint(context, manifest, [...durableWebSources.values()]),
@@ -2613,7 +2615,7 @@ async function runChapterWriting(
           }
         }),
       }
-      const assertCurrentInput = (): void => {
+      const assertCurrentInput = (inputIdentity: ChapterExecutionAttempt['input']): void => {
         const currentDependencies = planned.depends_on.flatMap((dependency) => {
           const prior = completed.get(dependency.section_id)
           return prior === undefined ? [] : [{
@@ -2633,9 +2635,9 @@ async function runChapterWriting(
           throw new Error('BID_CHAPTER_INPUT_STALE')
         }
       }
-      const references = createChapterWriterReferences(context)
-      const chapterWebSourceIds = new Set(context.webMaterials.map(material => material.source_id))
-      const chapterWebSources = () => [...durableWebSources.values()].filter(source => chapterWebSourceIds.has(source.source_id)
+      let references = createChapterWriterReferences(context)
+      const chapterWebSources = () => [...durableWebSources.values()].filter(source =>
+        context.webMaterials.some(material => material.source_id === source.source_id)
         || source.chapter_context?.section_id === context.section.id)
       await appendChapterWebReferences(workspace, references, chapterWebSources())
       const serial = String(context.storageSerial).padStart(4, '0')
@@ -2656,7 +2658,7 @@ async function runChapterWriting(
         persistCandidate = true,
       ): Promise<CompletedChapter> => {
         signal.throwIfAborted()
-        assertCurrentInput()
+        assertCurrentInput(reviewerInputIdentity)
         const reviewPath = context.reviewPath
         const candidateSha256 = chapterCandidateSha256(candidate.markdown)
         if (effectiveRevision !== undefined && revisionOriginal !== undefined) {
@@ -2695,37 +2697,13 @@ async function runChapterWriting(
           }
         }
         logWrites = logWrites.then(async () => {
-          assertCurrentInput()
-          const currentMap = parseEvidenceMapArtifact(await readJson(workspace, 'analysis/evidence-map.json'))
-          const mapping = currentMap.section_mappings.find(item => item.section_id === sectionId)
-          if (mapping === undefined) throw new Error(`EVIDENCE_MAPPING_SECTION_MISSING: ${sectionId}`)
-          const addedLocal = candidate.metadata.local_materials_used.filter(material =>
-            !mapping.local_materials.some(existing => localIdentity(existing) === localIdentity(material)))
-          const addedWeb = candidate.metadata.web_materials_used.filter(material =>
-            !mapping.web_materials.some(existing => webMaterialIdentity(existing) === webMaterialIdentity(material)))
-          const evidenceChanged = addedLocal.length > 0 || addedWeb.length > 0
-          const updatedMap = evidenceChanged ? parseEvidenceMapArtifact({
-            ...currentMap, section_mappings: currentMap.section_mappings.map(item => item.section_id === sectionId
-              ? { ...item, local_materials: [...item.local_materials, ...addedLocal],
-                web_materials: [...item.web_materials, ...addedWeb],
-                // 新材料的证明边界由下次定向研究判断，不能继承旧计划的语义结论。
-                answer_plan: undefined }
-              : item),
-          }) : currentMap
-          const refreshed = evidenceChanged ? pickChapterContext({
-            section: context.section, location: storageLocation(sectionId), project, requirements, scoring,
-            compliance, evidence: updatedMap, responsePointCatalog: responsePointCatalog.points,
-            outline, writingPlan,
-          }) : context
-          inputIdentity.evidence_sha256 = chapterEvidenceInputFingerprint(
-            refreshed, manifest, [...durableWebSources.values()])
+          assertCurrentInput(reviewerInputIdentity)
           const committed = {
             ...log, status: 'completed' as const, phase: null, failure_phase: null,
             final_writer_child_session_id: writerChildSessionId,
             final_reviewer_child_session_id: reviewerChildSessionId,
           }
           await options.run.commits.publish(async (lease) => {
-            if (evidenceChanged) await lease.writeJson(join(workspace.projectRoot, 'analysis/evidence-map.json'), updatedMap)
             if (persistCandidate) {
               await lease.writeText(join(workspace.projectRoot, context.contentPath), afterMarkdown)
               await lease.writeJson(join(workspace.projectRoot, context.metadataPath), candidate.metadata)
@@ -2749,20 +2727,60 @@ async function runChapterWriting(
               ...executionLog, sections: executionLog.sections.map(section => section === log ? committed : section),
             })
           })
-          if (evidenceChanged) {
-            evidence = updatedMap
-            context.relatedMaterials = refreshed.relatedMaterials
-            context.referenceBidMaterials = refreshed.referenceBidMaterials
-            context.webMaterials = refreshed.webMaterials
-            if (refreshed.answerPlan === undefined) delete context.answerPlan
-            else context.answerPlan = refreshed.answerPlan
-          }
-          assertCurrentInput()
+          assertCurrentInput(reviewerInputIdentity)
           Object.assign(log, committed)
         })
         await logWrites
         reportWritingProgress('章节正文已完成，正在推进剩余章节')
         return { candidate, entry: entryFor(context, candidate, reviewPath, candidateSha256) }
+      }
+      let reviewerInputIdentity: ChapterExecutionAttempt['input'] = writerInputIdentity
+      const prepareCandidateEvidence = async (candidate: AcceptedChapterCandidate): Promise<boolean> => {
+        const prepared = evidencePreparation.then(async () => {
+          assertCurrentInput(writerInputIdentity)
+          const currentMap = parseEvidenceMapArtifact(await readJson(workspace, 'analysis/evidence-map.json'))
+          const mapping = currentMap.section_mappings.find(item => item.section_id === sectionId)
+          if (mapping === undefined) throw new Error(`EVIDENCE_MAPPING_SECTION_MISSING: ${sectionId}`)
+          const addedLocal = candidate.metadata.local_materials_used.filter(material =>
+            !mapping.local_materials.some(existing => localIdentity(existing) === localIdentity(material)))
+          const addedWeb = candidate.metadata.web_materials_used.filter(material =>
+            !mapping.web_materials.some(existing => webMaterialIdentity(existing) === webMaterialIdentity(material)))
+          if (addedLocal.length === 0 && addedWeb.length === 0) return false
+          const updatedMap = parseEvidenceMapArtifact({
+            ...currentMap, section_mappings: currentMap.section_mappings.map(item => item.section_id === sectionId
+              ? { ...item, local_materials: [...item.local_materials, ...addedLocal],
+                web_materials: [...item.web_materials, ...addedWeb], answer_plan: undefined }
+              : item),
+          })
+          await options.run.commits.writeJson(join(workspace.projectRoot, 'analysis/evidence-map.json'), updatedMap)
+          await executeSectionResearch(agent, workspace, {
+            outline, sectionIds: [sectionId], mode: 'supplement', allowOutlineRefinement: false,
+            reason: 'Writer 在当前章节写作中实际使用了新的已验证资料，需要重新核对逐项 Answer Plan 和 Evidence 支持边界；不得修改确认目录。',
+          }, {
+            run: options.run, maxRepairAttempts: options.maxRepairAttempts,
+            maxConcurrency: options.maxConcurrency,
+            ...(options.webSearchEnabled === undefined ? {} : { webSearchEnabled: options.webSearchEnabled }),
+          })
+          evidence = parseEvidenceMapArtifact(await readJson(workspace, 'analysis/evidence-map.json'))
+          webSources = parseWebEvidenceSourcesArtifact(await readJson(workspace, 'analysis/web-evidence-sources.json'))
+          for (const source of webSources.sources) durableWebSources.set(source.source_id, source)
+          context = pickChapterContext({ section: context.section, location: storageLocation(sectionId),
+            project, requirements, scoring, compliance, evidence,
+            responsePointCatalog: responsePointCatalog.points, outline, writingPlan })
+          await resolveChapterReadLocations(workspace, manifest, webSources.sources, context)
+          contexts.set(sectionId, context)
+          references = createChapterWriterReferences(context)
+          await appendChapterWebReferences(workspace, references, chapterWebSources())
+          const activeWriterId = activeWriterIds.get(sectionId)
+          if (activeWriterId !== undefined) {
+            const paths = readableWebPathsByChild.get(activeWriterId) ?? mappedWebPaths(context)
+            for (const [path, ranges] of mappedWebPaths(context)) paths.set(path, ranges)
+            readableWebPathsByChild.set(activeWriterId, paths)
+          }
+          return true
+        })
+        evidencePreparation = prepared.then(() => undefined, () => undefined)
+        return prepared
       }
       let rejectedCandidate: unknown
       let latestIssues: StageValidationIssue[] = []
@@ -2777,6 +2795,16 @@ async function runChapterWriting(
       const reviewCandidate = async (
         candidate: AcceptedChapterCandidate,
       ): Promise<{ review?: ChapterReview; reviewerChildSessionId?: string; issues: StageValidationIssue[] }> => {
+        const evidenceChanged = await prepareCandidateEvidence(candidate)
+        reviewerInputIdentity = {
+          ...writerInputIdentity,
+          evidence_sha256: chapterEvidenceInputFingerprint(context, manifest, [...durableWebSources.values()]),
+        }
+        if (evidenceChanged && context.answerPlan?.length && context.answerPlan.every(item => item.mode === 'gap')) {
+          inputBlocked.set(sectionId, context.answerPlan.map(item => item.required_input ?? item.content))
+          throw new BidStageAttentionRequiredError([{ code: 'CHAPTER_WRITING_INPUT_REQUIRED', artifact: sectionId,
+            message: `${sectionId}：${inputBlocked.get(sectionId)?.join('；')}` }])
+        }
         const quotes = new Map(candidate.markdown.split('\n').map(line => line.trim()).filter(Boolean)
           .map((line, index) => [`Q${index + 1}`, line]))
         const evidencePack = await buildChapterReviewEvidence(
@@ -2848,7 +2876,7 @@ async function runChapterWriting(
           try {
             const reviewResult = await reviewer.result
             signal.throwIfAborted()
-            assertCurrentInput()
+            assertCurrentInput(reviewerInputIdentity)
             if (reviewResult.stopReason !== 'completed') {
               reviewIssues.push({ code: 'CHAPTER_REVIEWER_STOP_REASON_INVALID', message: `Chapter Reviewer 未正常完成：${reviewResult.stopReason}。${reviewResult.diagnostic ?? ''}` })
               retryReviewerInfrastructure = reviewResult.stopReason === 'error'
@@ -2872,7 +2900,7 @@ async function runChapterWriting(
             log.attempts.push({
               role: 'reviewer', attempt: reviewAttempt, child_session_id: String(reviewer.id), label: reviewLabel,
               started_at: reviewStartedAt, ended_at: new Date().toISOString(), stop_reason: reviewResult.stopReason,
-              accepted: reviewAccepted, issues: safeAttemptIssues(reviewIssues), input: inputIdentity,
+              accepted: reviewAccepted, issues: safeAttemptIssues(reviewIssues), input: reviewerInputIdentity,
             })
             await persistLog()
             if (reviewAccepted && review !== undefined) {
@@ -2885,7 +2913,7 @@ async function runChapterWriting(
               started_at: reviewStartedAt, ended_at: new Date().toISOString(), stop_reason: 'stale-input',
               accepted: false,
               issues: [{ code: 'BID_CHAPTER_INPUT_STALE', message: 'Reviewer 输入绑定的计划、章节 epoch 或强依赖身份已失效。' }],
-              input: inputIdentity,
+              input: reviewerInputIdentity,
             })
             await persistLog()
             throw error
@@ -2933,6 +2961,10 @@ async function runChapterWriting(
       }
       for (let attempt = firstAttempt, infrastructureRetries = 0; attempt < maxWriterAttempts;) {
         signal.throwIfAborted()
+        writerInputIdentity = {
+          ...writerInputIdentity,
+          evidence_sha256: chapterEvidenceInputFingerprint(context, manifest, [...durableWebSources.values()]),
+        }
         const writerAttempt = log.attempts.filter(item => item.role === 'writer').length + 1
         const semanticLabel = attempt === 0 ? '' : ` · 修复 ${attempt}`
         const retryLabel = infrastructureRetries === 0 ? '' : ` · 运行重试 ${infrastructureRetries}`
@@ -2984,6 +3016,7 @@ async function runChapterWriting(
         let retryInfrastructure = false
         let stopAfterReview = false
         let stopAfterVisualIssue = false
+        let acceptedWriter = false
         const reusableWriterId = originalWriterId ?? reusableWriterIds.get(sectionId) ?? preserved?.writerChildSessionId
         childSetups.set(label, (child) => {
           readableWebPathsByChild.set(String(child.id), mappedWebPaths(context))
@@ -3110,7 +3143,8 @@ async function runChapterWriting(
             }
           }
           const accepted = candidate !== undefined && issues.length === 0
-          if (accepted) assertCurrentInput()
+          if (accepted) assertCurrentInput(writerInputIdentity)
+          acceptedWriter = accepted
           log.attempts.push({
             role: 'writer',
             attempt: writerAttempt,
@@ -3121,18 +3155,18 @@ async function runChapterWriting(
             stop_reason: result.stopReason,
             accepted,
             issues: safeAttemptIssues(issues),
-            input: inputIdentity,
+            input: writerInputIdentity,
           })
           await persistLog()
           if (accepted && candidate !== undefined) {
             signal.throwIfAborted()
             await appendChapterWebReferences(workspace, references, chapterWebSources())
-            rejectedCandidate = projectChapterWriterCandidate(candidate, references)
             await persistLog()
             if (revisionBatch !== undefined && batchTask !== undefined) {
               await updateBatchTask(sectionId, { status: 'reviewing' })
             }
             const reviewed = await reviewCandidate(candidate)
+            rejectedCandidate = projectChapterWriterCandidate(candidate, references)
             if (reviewed.review !== undefined && reviewed.reviewerChildSessionId !== undefined) {
               reviewedFallback = {
                 candidate,
@@ -3150,12 +3184,12 @@ async function runChapterWriting(
           if (error instanceof Error && error.message === 'BID_CHAPTER_INPUT_STALE') {
             const staleIssue = { code: 'BID_CHAPTER_INPUT_STALE', message: 'Writer 输入绑定的计划、章节 epoch 或强依赖身份已失效。' }
             const recorded = log.attempts.findLast(attempt => attempt.role === 'writer'
-              && attempt.child_session_id === String(run.id) && attempt.input === inputIdentity)
+              && attempt.child_session_id === String(run.id) && attempt.input === writerInputIdentity)
             if (recorded === undefined) {
               log.attempts.push({
                 role: 'writer', attempt: writerAttempt, child_session_id: String(run.id), label,
                 started_at: startedAt, ended_at: new Date().toISOString(), stop_reason: 'stale-input',
-                accepted: false, issues: [staleIssue], input: inputIdentity,
+                accepted: false, issues: [staleIssue], input: writerInputIdentity,
               })
             } else {
               recorded.accepted = false
@@ -3165,6 +3199,7 @@ async function runChapterWriting(
             await persistLog()
             throw error
           }
+          if (acceptedWriter) throw error
           const imageUnsupported = error instanceof ChapterWriterImageInputError
           latestStopReason = imageUnsupported ? 'image-input-unsupported' : 'infrastructure-error'
           issues.push(imageUnsupported ? {
@@ -3185,7 +3220,7 @@ async function runChapterWriting(
             stop_reason: latestStopReason,
             accepted: false,
             issues: safeAttemptIssues(issues),
-            input: inputIdentity,
+            input: writerInputIdentity,
           })
           await persistLog()
           latestIssues = issues
@@ -3226,7 +3261,8 @@ async function runChapterWriting(
       }
       throw new Error(`Bid chapter writing failed for ${sectionId}; stopReason=${latestStopReason}; ${latestIssues.map(item => `${item.code}: ${item.message}`).join('; ')}`)
     } catch (error: unknown) {
-      if (signal.aborted || error instanceof Error && error.message === 'BID_CHAPTER_INPUT_STALE') throw error
+      if (signal.aborted || error instanceof BidStageAttentionRequiredError
+        || error instanceof Error && error.message === 'BID_CHAPTER_INPUT_STALE') throw error
       log.status = 'failed'
       log.failure_phase = log.phase
       log.phase = null
@@ -3316,7 +3352,7 @@ async function runChapterWriting(
         await invalidateChangedDependents(settled.sectionId, settled.chapter)
       } else if (settled.error instanceof Error && settled.error.message === 'BID_CHAPTER_INPUT_STALE') {
         pending.add(settled.sectionId)
-      } else failures.set(settled.sectionId, settled.error)
+      } else if (!inputBlocked.has(settled.sectionId)) failures.set(settled.sectionId, settled.error)
     }
     if (failures.size > 0 && revisionBatch === undefined) {
       throw new Error([...failures.entries()].map(([sectionId, error]) => `${sectionId}: ${String(error)}`).join('; '))

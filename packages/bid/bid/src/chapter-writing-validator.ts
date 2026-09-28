@@ -500,11 +500,12 @@ export async function validateChapterWriting(
         handoff_sha256: chapterCandidateSha256(JSON.stringify(chapter.handoff)),
       }]
     })
+    // Writer 记录启动时的 Evidence；补搜可在 Reviewer 前合法更新它，最终审核必须绑定当前 Evidence。
     for (const role of ['writer', 'reviewer'] as const) {
       const childId = role === 'writer' ? sectionLog.final_writer_child_session_id : sectionLog.final_reviewer_child_session_id
       const attempt = sectionLog.attempts.findLast(item => item.role === role && item.child_session_id === childId && item.accepted)
       if (attempt === undefined || attempt.input.plan_version > writingPlan.plan_version
-        || attempt.input.evidence_sha256 !== fingerprint
+        || role === 'reviewer' && attempt.input.evidence_sha256 !== fingerprint
         || attempt.input.section_epoch !== sectionLog.epoch
         || attempt.input.dependencies.length !== expectedDependencies.length
         || attempt.input.dependencies.some((dependency, index) => {

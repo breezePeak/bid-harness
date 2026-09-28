@@ -6,7 +6,8 @@ import type { Session } from '@deepseek-ai/dsh-session'
 import type { AskUserQuestionAnswerItem, AskUserQuestionItem } from '@deepseek-ai/dsh-user-questions/types'
 import { BidWorkspace } from './index.ts'
 import {
-  bidCapabilityResultSchema, bidCapabilityStepSchema, bidCapabilityTaskSchema, validateCapabilityTaskContentFollowup,
+  bidCapabilityResultSchema, bidCapabilityStepSchema, bidCapabilityTaskSchema,
+  validateCapabilityTaskContentFollowup, validateCapabilityTaskWorkItems,
   type BidCapabilityCall, type BidCapabilityExecutionContext, type BidCapabilityResult,
   type BidCapabilityStep, type BidCapabilityTask,
 } from './bid-capability-contract.ts'
@@ -192,6 +193,35 @@ function stepCandidateWorkspace(working: BidWorkspace, parent: BidWorkDescriptor
   return { descriptor, workspace: new BidWorkspace(root, working.config) }
 }
 
+/** 读取当前能力步骤的私有资料映射工作区；其他步骤不复用项目根目录的旧日志。 */
+export async function activeCapabilityMappingWorkspace(
+  canonical: BidWorkspace, work: BidWorkDescriptor,
+): Promise<BidWorkspace | null> {
+  if (work.kind !== 'capability_task') return null
+  const path = checkpointPath(canonical, work.workId)
+  await assertNoLinkedPath(canonical.root, path)
+  let raw: string
+  try { raw = await readFile(path, 'utf8') } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null
+    throw error
+  }
+  const checkpoint = capabilityTaskCheckpointSchema.parse(JSON.parse(raw))
+  if (checkpoint.work_id !== work.workId || checkpoint.request_sha256 !== work.requestSha256) {
+    throw new Error('BID_CAPABILITY_CHECKPOINT_IDENTITY_MISMATCH')
+  }
+  const step = checkpoint.steps.find(record =>
+    (record.status === 'running' || record.status === 'awaiting_input')
+    && (record.step.call.capability === 'outline.refine' || record.step.call.capability === 'evidence.research'))
+  if (step === undefined || (step.status !== 'running' && step.status !== 'awaiting_input')) return null
+  try {
+    const working = new BidWorkspace(bidWorkRoot(canonical, work), canonical.config)
+    return stepCandidateWorkspace(working, work, step.step_id, step.input_sha256).workspace
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null
+    throw error
+  }
+}
+
 async function verifyAwaitingCandidate(working: BidWorkspace, parent: BidWorkDescriptor,
   step: z.infer<typeof awaitingStepSchema>): Promise<BidWorkspace | null> {
   if (step.candidate_files === undefined || step.removed_paths === undefined) return null
@@ -275,6 +305,7 @@ export async function persistCapabilityTaskRequest(
     }
     return existing
   }
+  validateCapabilityTaskWorkItems(task)
   validateCapabilityTaskContentFollowup(task, await hasScopedChapterContent(workspace, task))
   const inputSources = await Promise.all([...new Set(inputPaths)].sort().map(async (path) => {
     const digest = await fileHash(workspace, path)

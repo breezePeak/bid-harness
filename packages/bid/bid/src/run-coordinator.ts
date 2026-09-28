@@ -400,10 +400,10 @@ export class BidRunCoordinator {
   }
 
   /**
-   * Retire, cancel, and drain before publishing a resumable suspension.
-   * @param cause - Stable suspension classification.
+   * Retire, cancel, and drain before publishing a resumable suspension or terminal executor failure.
+   * @param cause - Stable settlement classification; executor_error ends the task as failed.
    * @param error - Sanitized durable failure details when applicable.
-   * @returns Suspended snapshot, or undefined when no Run is active.
+   * @returns Settled snapshot, or undefined when no Run is active.
    */
   suspend(
     cause: BidRunSuspensionCause,
@@ -450,11 +450,18 @@ export class BidRunCoordinator {
       updatedAt: Date.now(),
     }
     this.active = undefined
-    this.session.append('bid.run.suspended', { run: snapshot })
+    if (cause === 'executor_error') {
+      this.session.append('bid.task.changed', {
+        state: { stage: snapshot.work.stage, status: 'failed', run: null,
+          failure: observedError ?? { message: '执行器失败。' } },
+      })
+    } else {
+      this.session.append('bid.run.suspended', { run: snapshot })
+    }
     const superseded = this.session.events.slice(active.eventStart).findLast(event =>
       event.type === 'turn/end' && event.data.reason.kind === 'error')
     const notice: BidRunNotice = {
-      noticeId: `run:${snapshot.runId}:suspended`,
+      noticeId: `run:${snapshot.runId}:${cause === 'executor_error' ? 'failed' : 'suspended'}`,
       supersedesTurn: superseded?.type === 'turn/end' ? superseded.data.turn : null,
       runId: snapshot.runId,
       stage: snapshot.work.stage,

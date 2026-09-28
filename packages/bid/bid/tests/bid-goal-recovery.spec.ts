@@ -34,6 +34,37 @@ it('keeps repairable candidate issues distinct from provider and input faults', 
   }]).recovery?.kind).toBe('blocked')
 })
 
+it('保留能力步骤的 Mapping 模型错误码，允许主 Agent 定向修复', () => {
+  const capabilityWork: BidWorkDescriptor = { ...work, kind: 'capability_task', stage: 'evidence_mapping' }
+  const issues = [{ code: 'EVIDENCE_MAPPING_SUBAGENT_STRUCTURED_MISSING', artifact: 'MAP-REPAIR-S2.1',
+    message: 'Mapping Subagent 未成功调用 finish_mapping_task 完成当前任务。' }]
+  const failure = safeRecoverableBidFailure(capabilityWork, new BidStageExecutionError(issues))
+  expect(failure).toMatchObject({ issues, recovery: { kind: 'repair', unit: 'MAP-REPAIR-S2.1' } })
+  const infrastructure = safeRecoverableBidFailure(capabilityWork, new BidStageExecutionError([{
+    code: 'EVIDENCE_MAPPING_SUBAGENT_INFRASTRUCTURE_ERROR', message: '子代理结果通道失败',
+  }]))
+  expect(infrastructure.recovery?.kind).toBe('blocked')
+})
+
+it('执行器失败不挂起，主 Agent 仍可读取实际错误', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dsh-bid-executor-failure-'))
+  cleanup.push(() => rm(root, { recursive: true, force: true }))
+  const workspace = new BidWorkspace(root)
+  const ctx = new Context()
+  cleanup.push(() => ctx.fiber.dispose())
+  await ctx.plugin(SessionStore)
+  const session = ctx.sessions.create()
+  const coordinator = new BidRunCoordinator(session,
+    { paused: () => false, close: () => {}, waitUntilRunnable: async () => {} },
+    { drain: async () => {} }, () => 0)
+  await coordinator.start(work)
+  await coordinator.suspend('executor_error', safeRecoverableBidFailure(work, new Error('BID_MIDDLEWARE_INVALID')))
+  expect(session.events.some(event => event.type === 'bid.run.suspended')).toBe(false)
+  expect(await inspectBidStage(workspace, session, undefined, 'recovery')).toMatchObject({
+    task: { status: 'failed' }, eligible: false, failure: { message: 'BID_MIDDLEWARE_INVALID' },
+  })
+})
+
 it('执行器的目录结构与响应点校验失败交给主 Agent，所有输入问题优先阻止恢复', () => {
   const issues = [
     { code: 'OUTLINE_SHARED_WRITABLE_NOT_LEAF', artifact: 'outline/outline.json', message: '父节不能直接写作' },

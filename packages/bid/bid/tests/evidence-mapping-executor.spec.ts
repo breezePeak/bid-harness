@@ -2416,7 +2416,7 @@ describe('evidence-mapping Agent executor', () => {
     const dispatcher = createBidCapabilityDispatcher({ modelStageRepairAttempts: 0,
       evidenceMappingMaxConcurrency: 2, chapterWritingMaxConcurrency: 1, webSearchEnabled: false })
     const execution = executeCapabilityTask(workspace, createTestBidRunContext({ work }), dispatcher, fixture.agent, session)
-    await vi.waitFor(() => { expect(fixture.starts).toHaveLength(1) })
+    await vi.waitFor(() => { expect(fixture.starts).toHaveLength(1) }, { timeout: 5_000 })
     fixture.starts[0]!.resolve()
     const outcome = await execution
     expect(outcome.status).toBe('completed')
@@ -2849,6 +2849,27 @@ describe('evidence-mapping Agent executor', () => {
     expect(fixture.subagents.followup).not.toHaveBeenCalled()
   })
 
+  it('旧日志中尚未建立 Child 的 running 任务不计为运行中', async () => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-evidence-progress-')))
+    await mkdir(join(workspace.projectRoot, 'analysis'), { recursive: true })
+    await writeFile(join(workspace.projectRoot, 'analysis/evidence-mapping-log.json'), JSON.stringify({
+      schema_version: 5, max_concurrency: 2, observed_max_concurrency: 0,
+      tasks: [
+        { task_id: 'preparing', phase: 'final_check', title: '准备中的任务',
+          status: 'running', attempts: [], final_child_session_id: null },
+        { task_id: 'active', phase: 'final_check', title: '已建立子会话',
+          status: 'running', attempts: [], final_child_session_id: null, active_child_session_id: 'child-active' },
+      ],
+    }))
+    await expect(readEvidenceMappingProgress(workspace)).resolves.toMatchObject({
+      total: 2, completed: 0, running: 1, not_started: 1,
+      tasks: [
+        { task_id: 'preparing', status: 'pending', child_session_id: null },
+        { task_id: 'active', status: 'running', child_session_id: 'child-active' },
+      ],
+    })
+  })
+
   it('Host 为每个可写叶子生成独立任务，并完整注入当前 Section 与全局目录索引', async () => {
     const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-evidence-executor-')))
     const material = await writeInputs(workspace)
@@ -2857,7 +2878,7 @@ describe('evidence-mapping Agent executor', () => {
 
     await vi.waitFor(() => { expect(fixture.starts).toHaveLength(2) })
     expect(fixture.maxActive()).toBe(2)
-    await expect(readEvidenceMappingProgress(workspace)).resolves.toMatchObject({
+    await vi.waitFor(async () => { await expect(readEvidenceMappingProgress(workspace)).resolves.toMatchObject({
       total: 2,
       initial: 2,
       supplemental: 0,
@@ -2866,9 +2887,9 @@ describe('evidence-mapping Agent executor', () => {
       not_started: 0,
       failed: 0,
       failed_section_ids: [],
-    })
+    }) }, { timeout: 5_000 })
     await expect(readEvidenceMappingProgress(workspace)).resolves.toMatchObject({ tasks: [
-      { task_id: 'MAP-INIT-SEC-1', title: '章节1', status: 'running', section_ids: ['SEC-1'], latest_issue: null },
+      { task_id: 'MAP-INIT-SEC-1', title: '章节1', status: 'running', section_ids: ['SEC-1'], latest_issue: null, child_session_id: expect.any(String) },
       { task_id: 'MAP-INIT-SEC-2', title: '章节2', status: 'running', section_ids: ['SEC-2'], latest_issue: null },
     ] })
     const initialPrompt = promptText(fixture.starts[0]!.request.request)
@@ -3146,15 +3167,15 @@ describe('evidence-mapping Agent executor', () => {
     for (const taskId of completedTaskIds) {
       expect(resumed.starts.some(start => promptText(start.request.request).includes(`Mapping Task：{"task_id":"${taskId}"`))).toBe(false)
     }
-    await expect(readEvidenceMappingProgress(workspace)).resolves.toMatchObject({
+    await vi.waitFor(async () => { await expect(readEvidenceMappingProgress(workspace)).resolves.toMatchObject({
       total: 32, completed: 14, running: 1, not_started: 17, failed: 0,
-    })
+    }) }, { timeout: 5_000 })
     resumed.starts[0]!.resolve()
     await vi.waitFor(() => { expect(resumed.starts).toHaveLength(4) })
     expect(resumed.maxActive()).toBe(3)
-    await expect(readEvidenceMappingProgress(workspace)).resolves.toMatchObject({
+    await vi.waitFor(async () => { await expect(readEvidenceMappingProgress(workspace)).resolves.toMatchObject({
       total: 32, completed: 15, running: 3, not_started: 14, failed: 0,
-    })
+    }) }, { timeout: 5_000 })
     for (const taskId of completedTaskIds) expect(resumed.taskAttempts.has(taskId)).toBe(false)
     expect(resumed.taskAttempts.get('MAP-INIT-SEC-401')).toBe(1)
     resumeController.abort()
@@ -4025,7 +4046,7 @@ describe('S4 Host 准入与最终确认', () => {
       expect(fixture.starts).toHaveLength(3)
 
       fixture.starts[2]!.resolve()
-      await vi.waitFor(() => { expect(fixture.starts).toHaveLength(4) })
+      await vi.waitFor(() => { expect(fixture.starts).toHaveLength(4) }, { timeout: 5_000 })
       fixture.starts[3]!.resolve()
       await execution
 

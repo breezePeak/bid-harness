@@ -6,7 +6,7 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import SessionStore from '@deepseek-ai/dsh-session'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { BidWorkspace } from '../src/index.ts'
-import { askCapabilityTaskInput, capabilityTaskRequestSchema, executeCapabilityTask,
+import { activeCapabilityMappingWorkspace, askCapabilityTaskInput, capabilityTaskRequestSchema, executeCapabilityTask,
   findCapabilityTaskRequest, patchCapabilityTaskSteps, persistCapabilityTaskRequest,
   type CapabilityTaskDispatcher } from '../src/bid-capability-task.ts'
 import { bidCapabilityTaskSchema, type BidCapabilityCall } from '../src/bid-capability-contract.ts'
@@ -66,6 +66,41 @@ function dispatcher(failSecond = false) {
 }
 
 describe('同一 Work 的能力序列', () => {
+  it('新的整本目录深化先保存 Main Agent 的具体工作项，旧请求仍可解析', async () => {
+    const { ctx, workspace, session } = await fixture()
+    try {
+      const message = createUserMessage({ content: [{ type: 'text', text: '重构整本评分目录' }], source: { kind: 'user' } })
+      session.append('user/message', message, { surfaceOp: 'append' })
+      const authorization = { session_id: String(session.id), message_id: String(message.id) }
+      const task = bidCapabilityTaskSchema.parse({ goal: '重构整本评分目录', scope: { kind: 'project' }, steps: [{
+        scope: { source: 'task' }, call: { capability: 'outline.refine', input: { feedback: '六个评分章并列' } },
+      }] })
+      const returnState = { stage: 'evidence_mapping' as const, status: 'ready' as const, run: null }
+      await expect(persistCapabilityTaskRequest(workspace, session, 'evidence_mapping', task,
+        authorization, [], returnState)).rejects.toThrow('BID_CAPABILITY_WORK_ITEMS_REQUIRED')
+      await expect(findCapabilityTaskRequest(workspace, authorization)).resolves.toBeNull()
+      const planned = { ...task, work_items: ['核对六个评分章及响应点', '重构目录并复核覆盖'] }
+      const work = await persistCapabilityTaskRequest(workspace, session, 'evidence_mapping', planned,
+        authorization, [], returnState)
+      const saved = capabilityTaskRequestSchema.parse(await readBidWorkRequest(workspace, work))
+      expect(saved.task.work_items).toEqual(planned.work_items)
+      const checkpointPath = join(workspace.projectRoot, 'runs', work.workId, 'task-checkpoint.json')
+      await mkdir(join(workspace.projectRoot, 'runs', work.workId), { recursive: true })
+      await writeFile(checkpointPath, JSON.stringify({
+        schema_version: 1, work_id: work.workId, request_sha256: work.requestSha256, plan_patches: [],
+        steps: [{ step_id: 'step-test', step: planned.steps[0], status: 'running',
+          authorization, input_sha256: 'a'.repeat(64) }],
+      }))
+      expect(await activeCapabilityMappingWorkspace(workspace, work)).toBeNull()
+      const candidateRoot = join(workspace.projectRoot, 'runs', work.workId, 'work',
+        '.bid-harness', 'runs', 'step-test-aaaaaaaaaaaa', 'work')
+      await mkdir(candidateRoot, { recursive: true })
+      const candidate = await activeCapabilityMappingWorkspace(workspace, work)
+      expect(candidate?.root).toBe(candidateRoot)
+      expect(bidCapabilityTaskSchema.parse(task).work_items).toBeUndefined()
+    } finally { await ctx.fiber.dispose() }
+  })
+
   it('历史不完整计划可读取，但新任务接纳拒绝相同的步骤遗漏', async () => {
     const { ctx, workspace, session, descriptor, authorization } = await fixture()
     try {

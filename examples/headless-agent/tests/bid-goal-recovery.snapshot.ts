@@ -3,7 +3,7 @@ import { fileURLToPath } from 'node:url'
 import { LOADER_SMOKE_TEST_TIMEOUT_MS, runLoaderSmoke } from '@deepseek-ai/dsh-loader-smoke'
 import { expect, it } from 'vitest'
 
-it.each(['tender_analysis', 'outline_generation'])('%s 校验失败后由同一主会话 Goal Round 接管', async (stage) => {
+it.each(['tender_analysis', 'outline_generation', 'evidence_mapping'])('%s 校验失败后由同一主会话 Goal Round 接管', async (stage) => {
   const result = await runLoaderSmoke({
     label: 'Bid Goal 恢复源码装配', tempDirPrefix: 'dsh-bid-goal-recovery-snapshot-',
     binScript: fileURLToPath(new URL('./fixtures/bid-goal-recovery-driver.ts', import.meta.url)),
@@ -14,6 +14,8 @@ it.each(['tender_analysis', 'outline_generation'])('%s 校验失败后由同一�
   expect(JSON.parse(result.stdout)).toEqual({
     boundToInitialS2: true, rounds: 1, goalPrompt: true, recoveryPrompt: true,
     calls: ['bid_stage_inspect', 'bid_recover_task'], acceptedEvents: 1,
-    startedRuns: stage === 'tender_analysis' ? 2 : 3,
+    recoveryUnit: stage === 'evidence_mapping' ? 'MAP-REPAIR-S2.1'
+      : stage === 'outline_generation' ? 'outline/outline.json' : 'analysis/project.json',
+    startedRuns: stage === 'tender_analysis' ? 2 : stage === 'outline_generation' ? 3 : 4,
   })
 }, LOADER_SMOKE_TEST_TIMEOUT_MS)

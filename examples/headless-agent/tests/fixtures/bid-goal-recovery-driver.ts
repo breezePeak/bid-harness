@@ -70,7 +70,8 @@ try {
   await host.prepareOperation(operation)
   const initial = await operation.runs.start(work)
   let failed = initial
-  if (process.env.DSH_BID_RECOVERY_STAGE === 'outline_generation') {
+  if (process.env.DSH_BID_RECOVERY_STAGE === 'outline_generation'
+    || process.env.DSH_BID_RECOVERY_STAGE === 'evidence_mapping') {
     await operation.runs.complete(initial, () => {
       agent.session.append('bid.stage.completed', { stage: 'tender_analysis', status: 'completed', artifacts: [] })
     })
@@ -79,15 +80,28 @@ try {
     const outlineWork = await persistBidWorkRequest(workspace, 'stage_execution', 'outline_generation', payload,
       { stage: 'outline_generation', inputs, payload })
     failed = await operation.runs.start(outlineWork)
+    if (process.env.DSH_BID_RECOVERY_STAGE === 'evidence_mapping') {
+      await operation.runs.complete(failed, () => {
+        agent.session.append('bid.stage.completed', { stage: 'outline_generation', status: 'completed', artifacts: [] })
+      })
+      const payload = { stage: 'evidence_mapping' }
+      const inputs = buildBidStageTask('evidence_mapping').inputs.map(path => ({ path, sha256: null }))
+      const mappingWork = await persistBidWorkRequest(workspace, 'stage_execution', 'evidence_mapping', payload,
+        { stage: 'evidence_mapping', inputs, payload })
+      failed = await operation.runs.start(mappingWork)
+    }
   }
   adapter.runId = failed.runId
-  const issues = failed.work.stage === 'outline_generation' ? [
+  const issues = failed.work.stage === 'evidence_mapping' ? [{
+    code: 'EVIDENCE_MAPPING_SUBAGENT_STRUCTURED_MISSING', artifact: 'MAP-REPAIR-S2.1',
+    message: 'Mapping Subagent 未成功调用 finish_mapping_task 完成当前任务。',
+  }] : failed.work.stage === 'outline_generation' ? [
     { code: 'OUTLINE_SHARED_WRITABLE_NOT_LEAF', artifact: 'outline/outline.json', message: '父章节不能直接写作' },
     { code: 'OUTLINE_SHARED_RESPONSE_POINT_MISSING', artifact: 'outline/outline.json', message: '叶子章节缺失响应点' },
   ] : [{
     code: 'TENDER_ANALYSIS_SUBMISSION_INCOMPLETE', artifact: 'analysis/project.json', message: '项目字段缺失',
   }]
-  await operation.runs.suspend('retry_exhausted', safeRecoverableBidFailure(failed.work, new BidStageExecutionError(issues), issues))
+  await operation.runs.suspend('retry_exhausted', safeRecoverableBidFailure(failed.work, new BidStageExecutionError(issues)))
   const accepted = Promise.withResolvers<undefined>()
   const off = ctx.on('session/event', (session, event) => {
     if (session === agent.session && event.type === 'bid.goal.recovery.requested') accepted.resolve(undefined)
@@ -109,6 +123,7 @@ try {
     recoveryPrompt: adapter.requests[0]?.messages.some(message => message.content.some(block => block.type === 'text' && block.text.includes('bid_stage_inspect(view="recovery")'))),
     calls: toolCalls.filter(name => name === 'bid_stage_inspect' || name === 'bid_recover_task'),
     acceptedEvents: events.filter(event => event.type === 'bid.goal.recovery.requested').length,
+    recoveryUnit: events.find(event => event.type === 'bid.goal.recovery.requested')?.data.unit,
     startedRuns: events.filter(event => event.type === 'bid.run.started').length,
   })}\n`)
 } finally { await ctx?.fiber.dispose() }

@@ -496,6 +496,7 @@ const evidenceMappingExecutionLogSchema = z.object({
       }
     })),
     final_child_session_id: z.string().nullable(),
+    active_child_session_id: z.string().nullable().optional(),
     research_stats: researchStatsSchema.optional(),
     prompt_context_stats: z.object({
       task_id: z.string().min(1),
@@ -2315,7 +2316,9 @@ export async function readEvidenceMappingProgress(workspace: BidWorkspace): Prom
   let notStarted = 0
   let failed = 0
   for (const task of log.tasks) {
-    switch (checkpointCompleted.has(task.task_id) ? 'completed' : task.status) {
+    const status = checkpointCompleted.has(task.task_id) ? 'completed'
+      : task.status === 'running' && task.active_child_session_id == null ? 'pending' : task.status
+    switch (status) {
       case 'completed':
         completed++
         break
@@ -2339,9 +2342,11 @@ export async function readEvidenceMappingProgress(workspace: BidWorkspace): Prom
       task_id: task.task_id,
       title: task.title,
       phase: task.phase,
-      status: checkpointCompleted.has(task.task_id) ? 'completed' as const : task.status,
+      status: checkpointCompleted.has(task.task_id) ? 'completed' as const
+        : task.status === 'running' && task.active_child_session_id == null ? 'pending' as const : task.status,
       section_ids: planByTask.get(task.task_id)?.section_ids ?? [],
-      child_session_id: task.final_child_session_id ?? latestAttempt?.child_session_id ?? null,
+      child_session_id: task.active_child_session_id ?? task.final_child_session_id
+        ?? latestAttempt?.child_session_id ?? null,
       latest_issue: latestAttempt?.issues[0]?.message ?? null,
     }
   })
@@ -3804,6 +3809,7 @@ async function executeEvidenceMappingRun(
       const discarded = new Set<string>()
       let fingerprintOutline = inputs.outline
       for (const item of savedLog.tasks) {
+        item.active_child_session_id = null
         const saved = savedCheckpoints.get(item.task_id)
         const currentTask = plan.tasks.find(task => task.task_id === item.task_id)
         // 完成日志与未完成检查点冲突时，该候选可以恢复复核进度，
@@ -3893,7 +3899,7 @@ async function executeEvidenceMappingRun(
       schema_version: 5,
       max_concurrency: maxConcurrency,
       observed_max_concurrency: 0,
-      tasks: plan.tasks.map(item => ({ task_id: item.task_id, title: item.title, phase: item.phase, status: 'pending', attempts: [], final_child_session_id: null })),
+      tasks: plan.tasks.map(item => ({ task_id: item.task_id, title: item.title, phase: item.phase, status: 'pending', attempts: [], final_child_session_id: null, active_child_session_id: null })),
     }
   }
   if (executionLog === undefined) throw new Error('evidence-mapping-execution-log-missing')
@@ -4191,10 +4197,10 @@ async function executeEvidenceMappingRun(
     const reservedChildId = SessionId(randomUUID())
     activeTasks++
     try {
-      log.status = 'running'
-      executionLog.observed_max_concurrency = Math.max(executionLog.observed_max_concurrency, activeTasks)
+      log.status = 'pending'
+      log.active_child_session_id = null
       await persistLog()
-      reportMappingProgress()
+      reportMappingProgress('正在准备章节研究任务')
       const baselineMappings = new Map<string, PartialSectionMapping>()
       const baselineSectionIds = mappingTask.task_kind === 'branch_summary'
         ? affectedSummarySections(runInputs.outline, mappingTask)
@@ -4441,6 +4447,11 @@ async function executeEvidenceMappingRun(
         if (!submissionRequest.state.everInstalled) throw new Error(`Bid evidence mapping Child ${started.childId} has no structured submission runtime`)
         let child = agent.ctx.agents.get(started.childId)
         if (child === undefined) throw new Error(`Bid evidence mapping Child ${started.childId} was not published`)
+        log.active_child_session_id = String(started.childId)
+        log.status = 'running'
+        executionLog.observed_max_concurrency = Math.max(executionLog.observed_max_concurrency, activeTasks)
+        await persistLog()
+        reportMappingProgress()
         if (webSearchEnabled) {
           const childWeb = child.ctx.get('web')
           const childTools = new Set(child.ctx.get('tools')?.schemas(child).map(schema => schema.name) ?? [])
@@ -4478,6 +4489,7 @@ async function executeEvidenceMappingRun(
                   issues: webFailure.issues.map(({ code, message }) => ({ code, message })), warnings: [],
                 })
                 log.status = 'failed'
+                log.active_child_session_id = null
                 await persistLog()
                 reportMappingProgress('章节资料映射遇到基础设施错误')
                 throw webFailure
@@ -4559,6 +4571,7 @@ async function executeEvidenceMappingRun(
                   for (const mapping of partial.section_mappings) acceptedMappings.set(mapping.section_id, mapping)
                 }
                 log.status = 'completed'
+                log.active_child_session_id = null
                 log.final_child_session_id = String(started.childId)
                 await persistLog()
                 reportMappingProgress('章节资料映射已完成，正在推进剩余任务')
@@ -4586,6 +4599,7 @@ async function executeEvidenceMappingRun(
                   stop_reason: 'infrastructure-error', accepted: false,
                   issues: turnFailure.issues.map(({ code, message }) => ({ code, message })), warnings: [] })
                 log.status = 'failed'
+                log.active_child_session_id = null
                 await persistLog()
                 reportMappingProgress('章节资料映射遇到基础设施错误')
                 throw turnFailure
@@ -4594,6 +4608,7 @@ async function executeEvidenceMappingRun(
               latestIssues = [{ code: 'EVIDENCE_MAPPING_SUBAGENT_INFRASTRUCTURE_ERROR', message: `Mapping Subagent 结果通道发生基础设施错误：${detail}` }]
               log.attempts.push({ child_session_id: String(started.childId), attempt: attemptBase + attempt + 1, stop_reason: 'infrastructure-error', accepted: false, issues: latestIssues, warnings: [] })
               log.status = 'failed'
+              log.active_child_session_id = null
               await persistLog()
               reportMappingProgress('章节资料映射失败，正在保留诊断信息')
               throw new MappingSubagentInfrastructureError(
@@ -4622,11 +4637,13 @@ async function executeEvidenceMappingRun(
           await subagents.drainContinuableChildren(agent, [started.childId])
         }
         log.status = 'failed'
+        log.active_child_session_id = null
         await persistLog()
         reportMappingProgress('章节资料映射未通过校验')
         throw new BidStageExecutionError(latestIssues.map(issue => ({ ...issue, artifact: mappingTask.task_id })))
       } catch (error) {
         log.status = 'failed'
+        log.active_child_session_id = null
         if (error instanceof MappingSubagentInfrastructureError) {
           await persistLog()
           reportMappingProgress('章节资料映射遇到基础设施错误')
@@ -4690,9 +4707,10 @@ async function executeEvidenceMappingRun(
         ))
         const log = executionLog.tasks.find(item => item.task_id === mappingTask.task_id)
         if (log === undefined) throw new Error(`Bid evidence mapping lost task ${mappingTask.task_id}`)
-        log.status = 'running'
+        log.status = 'pending'
+        log.active_child_session_id = null
         await persistLog()
-        reportMappingProgress('正在重试章节资料映射任务')
+        reportMappingProgress('正在等待重试章节资料映射任务')
         releaseMappingAttempt()
         releaseAttempt = false
         await waitForMappingInfrastructureRetry(signal, retry, error.retryAfterMs)
@@ -4737,6 +4755,7 @@ async function executeEvidenceMappingRun(
       status: 'pending' as const,
       attempts: [],
       final_child_session_id: null,
+      active_child_session_id: null,
     })))
     await writeMappingState(options.run.commits, planPath, plan)
     await persistLog()

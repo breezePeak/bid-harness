@@ -89,11 +89,16 @@ import { CHAPTER_REVIEW_SCHEMA_VERSION, chapterCandidateSha256, parseChapterRevi
 import { parseChapterMetadata } from './chapter-writing-artifacts.ts'
 import { readChapterLocation, readChapterLocations } from './chapter-storage.ts'
 import { BID_CAPABILITIES, defaultBidCapabilityForStage } from './bid-capability-registry.ts'
-import { askCapabilityTaskInput, executeCapabilityTask, patchCapabilityTaskSteps, readCapabilityAwaitingInput,
-  persistCapabilityTaskRequest, findCapabilityTaskRequest, capabilityTaskRequestSchema, capabilityTaskCheckpointSchema,
-  type CapabilityTaskDispatcher, type CapabilityTaskRequest } from './bid-capability-task.ts'
+import {
+  activeCapabilityMappingWorkspace, askCapabilityTaskInput, executeCapabilityTask, patchCapabilityTaskSteps,
+  readCapabilityAwaitingInput, persistCapabilityTaskRequest, findCapabilityTaskRequest,
+  capabilityTaskRequestSchema, capabilityTaskCheckpointSchema,
+  type CapabilityTaskDispatcher, type CapabilityTaskRequest,
+} from './bid-capability-task.ts'
 import { readCapabilityPublicationReceipt } from './bid-capability-changes.ts'
-import { bidCapabilityTaskSchema, validateCapabilityTaskContentFollowup, type BidCapabilityTask } from './bid-capability-contract.ts'
+import {
+  bidCapabilityTaskSchema, validateCapabilityTaskContentFollowup, validateCapabilityTaskWorkItems, type BidCapabilityTask,
+} from './bid-capability-contract.ts'
 import { createBidCapabilityDispatcher, type BidCapabilityDispatcher } from './bid-capability-dispatcher.ts'
 import { cancelCapabilityRequestsForReset, enqueueCapabilityRequest, markCapabilityRequestApplied, markCapabilityRequestAppliedWithLease,
   pendingCapabilityWorkIds, readPendingCapabilityRequests } from './bid-capability-queue.ts'
@@ -1862,7 +1867,7 @@ export class BidHostRuntime extends TypertRemoteService {
       (notice, run) => {
         this.injectHostExecutionUpdate(session, {
           stage: run.work.stage,
-          status: 'suspended',
+          status: run.cause === 'executor_error' ? 'failed' : 'suspended',
           cause: run.cause,
           code: run.error?.code,
           message: run.error?.message ?? notice.message,
@@ -5255,6 +5260,7 @@ export class BidHostRuntime extends TypertRemoteService {
    * @returns 接纳、排队或正式发布状态。
    */
   private async runCapabilityTaskFromTool(agent: Agent, task: BidCapabilityTask): Promise<unknown> {
+    validateCapabilityTaskWorkItems(task)
     validateCapabilityTaskContentFollowup(task)
     const session = agent.session
     assertBidMainSession(session)
@@ -5470,9 +5476,11 @@ export class BidHostRuntime extends TypertRemoteService {
       })
       return bidSessionTaskState(operation.session)
     } catch (error: unknown) {
-      if (operation.runs.current === run) await operation.runs.suspend(
-        run.signal.aborted ? 'user_stop' : 'executor_error', safeRecoverableBidFailure(run.work, error),
-      )
+      if (operation.runs.current === run) {
+        const failure = safeRecoverableBidFailure(run.work, error)
+        await operation.runs.suspend(run.signal.aborted ? 'user_stop'
+          : failure.recovery?.kind === 'repair' ? 'retry_exhausted' : 'executor_error', failure)
+      }
       return bidSessionTaskState(operation.session)
     }
   }
@@ -5723,10 +5731,10 @@ export class BidHostRuntime extends TypertRemoteService {
       return bidSessionTaskState(operation.session)
     } catch (error: unknown) {
       if (operation.runs.current === run) {
+        const failure = safeRecoverableBidFailure(run.work, error)
         await operation.runs.suspend(
-          run.signal.aborted ? 'user_stop' : error instanceof BidStageExecutionError ? 'retry_exhausted' : 'executor_error',
-          safeRecoverableBidFailure(run.work, error,
-            error instanceof BidStageExecutionError ? error.issues : undefined),
+          run.signal.aborted ? 'user_stop' : failure.recovery?.kind === 'repair' ? 'retry_exhausted' : 'executor_error',
+          failure,
         )
       }
       if (run.work.kind === 'chapter_revision_batch') {
@@ -7036,6 +7044,7 @@ export class BidHostRuntime extends TypertRemoteService {
         const pending = (await readPendingCapabilityRequests(workspace, workId))[0]
         if (pending === undefined || pending.request.authorization.session_id !== String(session.id)) continue
         return { workId: pending.request.queue_id, title: pending.request.task.goal,
+          workItems: pending.request.task.work_items ?? [],
           scope: pending.request.task.scope.kind === 'project' ? 'project'
             : pending.request.task.scope.kind === 'sections' ? pending.request.task.scope.section_ids.join(', ')
               : pending.request.task.scope.reference.section_id,
@@ -7070,6 +7079,7 @@ export class BidHostRuntime extends TypertRemoteService {
           : 'failed'
       return {
         workId: run.work.workId, title: request.task.goal,
+        workItems: request.task.work_items ?? [],
         scope: request.task.scope.kind === 'project' ? 'project'
           : request.task.scope.kind === 'sections' ? request.task.scope.section_ids.join(', ')
             : request.task.scope.reference.section_id,
@@ -7104,6 +7114,11 @@ export class BidHostRuntime extends TypertRemoteService {
     const { task, observedMatches } = await this.syncEvidenceMappingProjection(session, workspace, observed)
     if (!observedMatches) return null
     if (task.stage !== 'evidence_mapping' || task.status === 'ready') return null
+    if ((task.status === 'running' || task.status === 'suspended')
+      && task.run.work.kind === 'capability_task') {
+      const candidate = await activeCapabilityMappingWorkspace(workspace, task.run.work)
+      return candidate === null ? null : readEvidenceMappingProgress(candidate)
+    }
     return readEvidenceMappingProgress(workspace)
   }
 

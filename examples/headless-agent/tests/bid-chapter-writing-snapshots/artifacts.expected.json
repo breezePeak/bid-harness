@@ -11,20 +11,63 @@
             "summary": "支撑本章实施流程的组织与步骤安排。"
           }
         ],
-        "web_materials": [
-          {
-            "source_id": "WEB-2f34a2c0c4f78b65",
-            "snapshot_path": "analysis/web-sources/WEB-2f34a2c0c4f78b65.md",
-            "chunk_refs": [
-              "W:WEB-2f34a2c0c4f78b65:C0001"
-            ],
-            "usage": "reference",
-            "summary": "S4 已映射的公开审计资料。",
-            "supports": "安全审计要求"
-          }
-        ],
+        "web_materials": [],
         "missing_topics": [
           "缺少实施流程参考资料。"
+        ],
+        "answer_plan": [
+          {
+            "targets": [
+              {
+                "kind": "must_answer",
+                "position": 0,
+                "text": "说明访问控制与安全审计措施。"
+              }
+            ],
+            "mode": "proposal",
+            "content": "结合已验证的实施流程资料，拟采用权限授予、执行检查和审计留存方法。",
+            "basis": [
+              {
+                "kind": "section_responsibility",
+                "section_id": "SEC-SECURITY"
+              }
+            ],
+            "boundary": "本地参考流程不证明项目已有系统能力。"
+          },
+          {
+            "targets": [
+              {
+                "kind": "requirement",
+                "id": "REQ-1"
+              }
+            ],
+            "mode": "proposal",
+            "content": "结合已验证的实施流程资料，拟采用权限授予、执行检查和审计留存方法。",
+            "basis": [
+              {
+                "kind": "section_responsibility",
+                "section_id": "SEC-SECURITY"
+              }
+            ],
+            "boundary": "本地参考流程不证明项目已有系统能力。"
+          },
+          {
+            "targets": [
+              {
+                "kind": "response_point",
+                "id": "RP-000001"
+              }
+            ],
+            "mode": "proposal",
+            "content": "结合已验证的实施流程资料，拟采用权限授予、执行检查和审计留存方法。",
+            "basis": [
+              {
+                "kind": "section_responsibility",
+                "section_id": "SEC-SECURITY"
+              }
+            ],
+            "boundary": "本地参考流程不证明项目已有系统能力。"
+          }
         ],
         "section_id": "SEC-SECURITY",
         "writing_dimensions": [

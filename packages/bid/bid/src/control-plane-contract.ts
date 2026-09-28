@@ -321,6 +321,8 @@ export interface BidCapabilityPlanView {
   readonly workId: string
   readonly title: string
   readonly scope: string
+  /** Main Agent 在提交整本目录深化前列出的具体工作项。 */
+  readonly workItems?: readonly string[]
   readonly status: 'queued' | 'running' | 'awaiting_input' | 'suspended' | 'completed' | 'failed'
   readonly steps: readonly {
     readonly id: string
