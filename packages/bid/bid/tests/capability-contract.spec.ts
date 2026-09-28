@@ -47,6 +47,22 @@ describe('公共能力契约', () => {
     expect(() => validate({ ...task, allow_pending_content: true })).not.toThrow()
   })
 
+  it('已有正文的研究深化需要迁移与复核收尾，无正文时可单步研究', () => {
+    for (const call of [
+      { capability: 'outline.refine', input: { feedback: '按技术对象细化目录' } },
+      { capability: 'evidence.research', input: { mode: 'supplement', reason: '研究技术对象',
+        allow_outline_refinement: true } },
+    ]) {
+      const task = bidCapabilityTaskSchema.parse({ goal: '研究并细化目录',
+        scope: { kind: 'sections', section_ids: ['A'] }, steps: [{ scope: { source: 'task' }, call }] })
+      expect(() => { validateCapabilityTaskContentFollowup(task, false) }).not.toThrow()
+      expect(() => { validateCapabilityTaskContentFollowup(task, true) })
+        .toThrow('BID_CAPABILITY_CONTENT_FOLLOWUP_REQUIRED')
+      expect(() => { validateCapabilityTaskContentFollowup({ ...task, allow_pending_content: true }, true) })
+        .not.toThrow()
+    }
+  })
+
   it('能力目录闭合，业务输入拒绝任意对象和模型指定路径', () => {
     expect(Object.keys(BID_CAPABILITIES)).toHaveLength(13)
     expect(bidCapabilityInputSchema.parse({ capability: 'outline.refine', input: { feedback: '细化 A' } }).capability)

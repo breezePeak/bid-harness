@@ -6,6 +6,7 @@ import { SessionId, type Session } from '@deepseek-ai/dsh-session'
 import { BidHostRuntime, BidWorkspace, BidRunCoordinator, buildBidStageTask, checkpointBidProjectState } from '@deepseek-ai/dsh-bid'
 import { persistBidWorkRequest } from '../../../../packages/bid/bid/src/work-descriptor.ts'
 import { safeRecoverableBidFailure } from '../../../../packages/bid/bid/src/bid-recovery.ts'
+import { BidStageExecutionError } from '../../../../packages/bid/bid/src/control-plane-contract.ts'
 
 interface Operation { runs: BidRunCoordinator }
 interface HostInternals {
@@ -67,17 +68,46 @@ try {
     { stage: 'tender_analysis', inputs, payload })
   const operation = host.beginOperation(agent.session)
   await host.prepareOperation(operation)
-  const failed = await operation.runs.start(work)
+  const initial = await operation.runs.start(work)
+  let failed = initial
+  if (process.env.DSH_BID_RECOVERY_STAGE === 'outline_generation'
+    || process.env.DSH_BID_RECOVERY_STAGE === 'evidence_mapping') {
+    await operation.runs.complete(initial, () => {
+      agent.session.append('bid.stage.completed', { stage: 'tender_analysis', status: 'completed', artifacts: [] })
+    })
+    const payload = { stage: 'outline_generation' }
+    const inputs = buildBidStageTask('outline_generation').inputs.map(path => ({ path, sha256: null }))
+    const outlineWork = await persistBidWorkRequest(workspace, 'stage_execution', 'outline_generation', payload,
+      { stage: 'outline_generation', inputs, payload })
+    failed = await operation.runs.start(outlineWork)
+    if (process.env.DSH_BID_RECOVERY_STAGE === 'evidence_mapping') {
+      await operation.runs.complete(failed, () => {
+        agent.session.append('bid.stage.completed', { stage: 'outline_generation', status: 'completed', artifacts: [] })
+      })
+      const payload = { stage: 'evidence_mapping' }
+      const inputs = buildBidStageTask('evidence_mapping').inputs.map(path => ({ path, sha256: null }))
+      const mappingWork = await persistBidWorkRequest(workspace, 'stage_execution', 'evidence_mapping', payload,
+        { stage: 'evidence_mapping', inputs, payload })
+      failed = await operation.runs.start(mappingWork)
+    }
+  }
   adapter.runId = failed.runId
-  await operation.runs.suspend('retry_exhausted', safeRecoverableBidFailure(work, new Error('missing submission'), [{
+  const issues = failed.work.stage === 'evidence_mapping' ? [{
+    code: 'EVIDENCE_MAPPING_SUBAGENT_STRUCTURED_MISSING', artifact: 'MAP-REPAIR-S2.1',
+    message: 'Mapping Subagent 未成功调用 finish_mapping_task 完成当前任务。',
+  }] : failed.work.stage === 'outline_generation' ? [
+    { code: 'OUTLINE_SHARED_WRITABLE_NOT_LEAF', artifact: 'outline/outline.json', message: '父章节不能直接写作' },
+    { code: 'OUTLINE_SHARED_RESPONSE_POINT_MISSING', artifact: 'outline/outline.json', message: '叶子章节缺失响应点' },
+  ] : [{
     code: 'TENDER_ANALYSIS_SUBMISSION_INCOMPLETE', artifact: 'analysis/project.json', message: '项目字段缺失',
-  }]))
+  }]
+  await operation.runs.suspend('retry_exhausted', safeRecoverableBidFailure(failed.work, new BidStageExecutionError(issues)))
   const accepted = Promise.withResolvers<undefined>()
   const off = ctx.on('session/event', (session, event) => {
     if (session === agent.session && event.type === 'bid.goal.recovery.requested') accepted.resolve(undefined)
   }, { global: true })
   const timeout = Promise.withResolvers<never>()
-  const timer = setTimeout(() => timeout.reject(new Error('Goal 未提交恢复工具')), 10_000)
+  const timer = setTimeout(() => { timeout.reject(new Error('Goal 未提交恢复工具')) }, 10_000)
   try {
     await host.finishOperation(agent.session, operation)
     await Promise.race([accepted.promise, timeout.promise])
@@ -91,8 +121,10 @@ try {
     rounds: ctx.goals.get(agent)?.roundsStarted,
     goalPrompt: adapter.requests[0]?.messages.some(message => message.content.some(block => block.type === 'text' && block.text.includes('<goal_round>'))),
     recoveryPrompt: adapter.requests[0]?.messages.some(message => message.content.some(block => block.type === 'text' && block.text.includes('bid_stage_inspect(view="recovery")'))),
+    strategyPrompt: adapter.requests[0]?.messages.some(message => message.content.some(block => block.type === 'text' && block.text.includes('重复问题必须改变'))),
     calls: toolCalls.filter(name => name === 'bid_stage_inspect' || name === 'bid_recover_task'),
     acceptedEvents: events.filter(event => event.type === 'bid.goal.recovery.requested').length,
+    recoveryUnit: events.find(event => event.type === 'bid.goal.recovery.requested')?.data.unit,
     startedRuns: events.filter(event => event.type === 'bid.run.started').length,
   })}\n`)
 } finally { await ctx?.fiber.dispose() }

@@ -25,7 +25,8 @@ import {
   getBidClientProjection, parseEvidenceMapArtifact,
   outlineArtifactSha256, parseChapterReviewArtifact,
   parseGlobalComplianceReviewArtifact, validateGlobalComplianceReview,
-  parseTenderComplianceArtifact, parseTenderScoringArtifact, readBidProjectState,
+  parseScoringResponsePointCatalog, parseTenderComplianceArtifact, parseTenderProjectArtifact,
+  parseTenderRequirementsArtifact, parseTenderScoringArtifact, parseWritingPlan, readBidProjectState,
   reduceBidTaskState, TECHNICAL_DEVIATION_SECTION_ID, validateTenderAnalysis,
   type BidRunData, type BidStage, type BidStageExecutorPort, type BidStageValidatorPort, type BidTaskState, type BidTaskStatus,
 } from '@deepseek-ai/dsh-bid'
@@ -35,7 +36,8 @@ import { isBidMainSession } from '../src/stage-interaction.ts'
 import { parseChapterExecutionLog } from '../src/chapter-writing-plan-artifacts.ts'
 import { chapterContentSha256 } from '../src/chapter-revision.ts'
 import { readBidChapterCommandJournal } from '../src/chapter-command-journal.ts'
-import type { ChapterWritingControl } from '../src/chapter-writing-executor.ts'
+import { chapterEvidenceInputFingerprint, pickChapterContext, type ChapterWritingControl } from '../src/chapter-writing-executor.ts'
+import { chapterLocation } from '../src/chapter-storage.ts'
 import type { BidRunContext } from '../src/run-coordinator.ts'
 import { writeRevisionQueue, type RevisionQueueArtifact } from '../src/chapter-revision-queue.ts'
 import { writeRevisionBatch, type RevisionBatchArtifact } from '../src/chapter-revision-batch.ts'
@@ -497,7 +499,7 @@ describe('Workspace 项目与独立 Session', () => {
     expect(third.adapter.requests.filter(request => request.sessionId !== again.session.id)).toHaveLength(0)
   })
 
-  it('Run 登记后执行前中断，重建 Host 与 Session 后仅执行原能力 Work', async () => {
+  it('Run 登记后内部错误保留挂起 Work，未绑定 Goal 的新 Session 不自动恢复', async () => {
     const first = await fixture({ withPersistence: true })
     await seedProjectArtifacts(first.workspace)
     await checkpointBidProjectState(first.workspace, { stage: 'chapter_writing', status: 'completed' })
@@ -519,30 +521,14 @@ describe('Workspace 项目与独立 Session', () => {
     await first.ctx.fiber.dispose()
 
     const second = await fixture({ root: first.workspace.root, withPersistence: true })
-    const execute = vi.fn<CapabilityTaskDispatcher['execute']>(async (_call, context) => {
-      await context.run.commits.writeJson(join(context.working.projectRoot, 'chapters/local-review.json'), { ok: true })
-      return { result: { target_section_ids: [], changed_artifacts: ['chapters/local-review.json'],
-        change_summary: '审核完成', warnings: [], missing_topics: [], needs_input: false } }
-    })
-    const unregister = second.ctx.bid.registerCapabilityTaskDispatcher({
-      allowedWrites: async () => new Set(['chapters/local-review.json']), execute, validate: async () => {},
-    })
-    try {
-      const restored = await second.fresh('capability-admission-restart')
-      const suspended = await readBidProjectState(second.workspace)
-      expect(suspended).toMatchObject({ status: 'suspended' })
-      if (suspended?.status !== 'suspended') throw new Error('未保存待恢复 Run')
-      const result = await second.ctx.bid.resumeCurrentRun(restored.session, suspended.run.runId, suspended.revision)
-      expect(result).toMatchObject({ status: 'completed' })
-      expect(execute).toHaveBeenCalledOnce()
-      expect(await readFile(join(second.workspace.projectRoot, 'chapters/local-review.json'), 'utf8'))
-        .toContain('"ok": true')
-      expect(restored.session.events.filter(event => event.type === 'bid.run.notice'
-        && event.data.workId === suspended.run.work.workId && event.data.kind === 'completed')).toHaveLength(1)
-    } finally { unregister() }
+    const restored = await second.fresh('capability-admission-restart')
+    expect(await readBidProjectState(second.workspace)).toMatchObject({ status: 'suspended' })
+    expect(restored.session.events.filter(event => event.type === 'bid.run.started')).toHaveLength(1)
+    await expect(readFile(join(second.workspace.projectRoot, 'chapters/local-review.json')))
+      .rejects.toMatchObject({ code: 'ENOENT' })
   })
 
-  it('首个能力步骤已合并后重建 Host 与 Session，只重试未完成步骤', async () => {
+  it('首个能力步骤后内部错误保留挂起 Run，未绑定 Goal 不自动重试', async () => {
     const first = await fixture({ withPersistence: true })
     await seedProjectArtifacts(first.workspace)
     await checkpointBidProjectState(first.workspace, { stage: 'chapter_writing', status: 'completed' })
@@ -583,21 +569,10 @@ describe('Workspace 项目与独立 Session', () => {
     await first.ctx.fiber.dispose()
 
     const second = await fixture({ root: first.workspace.root, withPersistence: true })
-    const unregister = second.ctx.bid.registerCapabilityTaskDispatcher(dispatcher)
-    try {
-      const restored = await second.fresh('capability-step-restart')
-      const suspended = await readBidProjectState(second.workspace)
-      if (suspended?.status !== 'suspended') throw new Error('未恢复待续行 Work')
-      expect(await second.ctx.bid.resumeCurrentRun(restored.session, suspended.run.runId, suspended.revision))
-        .toMatchObject({ status: 'completed' })
-      expect(calls).toEqual(['chapter.review', 'document.review', 'document.review'])
-      expect(await readFile(join(second.workspace.projectRoot, 'chapters/local-review.json'), 'utf8'))
-        .toContain('chapter.review')
-      expect(await readFile(join(second.workspace.projectRoot, 'chapters/document-review.json'), 'utf8'))
-        .toContain('document.review')
-      expect(restored.session.events.filter(event => event.type === 'bid.run.notice'
-        && event.data.workId === suspended.run.work.workId && event.data.kind === 'completed')).toHaveLength(1)
-    } finally { unregister() }
+    const restored = await second.fresh('capability-step-restart')
+    expect(await readBidProjectState(second.workspace)).toMatchObject({ status: 'suspended' })
+    expect(restored.session.events.filter(event => event.type === 'bid.run.started')).toHaveLength(1)
+    expect(calls).toEqual(['chapter.review', 'document.review'])
   })
 
   it('上传入口把 S1 Work 交给与恢复入口相同的默认编排器', async () => {
@@ -1146,13 +1121,17 @@ describe('Workspace 项目与独立 Session', () => {
       const execution = ctx.agents.list().find(candidate => candidate.session.header.parentSession === b.id)
       if (execution === undefined) throw new Error('S3 execution lane 未创建')
       s3Contexts.push(JSON.stringify(execution.session.deriveMessages()))
-      if (s3Contexts.length === 1) throw new Error('模拟 S3 模型失败')
+      if (s3Contexts.length === 1) throw new BidStageExecutionError([{
+        code: 'OUTLINE_GENERATION_SUBMISSION_INCOMPLETE', message: '模拟 S3 模型失败',
+      }])
       return []
     })
     const confirmation = await ctx.bid.confirmTenderAnalysis(b.session, [{ type: 'update_project', fields: { project_name: '项目 B' } }])
     expect(confirmation).toMatchObject({
       ok: true,
-      value: { stage: 'outline_generation', status: 'suspended', run: { error: { message: '模拟 S3 模型失败' } } },
+      value: { stage: 'outline_generation', status: 'suspended', run: {
+        error: { issues: [{ code: 'OUTLINE_GENERATION_SUBMISSION_INCOMPLETE', message: '模拟 S3 模型失败' }] },
+      } },
     })
     expect(JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/project.json'), 'utf8'))).toMatchObject({ project_name: '项目 B' })
     const unchangedOrigin = parseTenderScoringArtifact(JSON.parse(await readFile(scoringOriginPath, 'utf8')))
@@ -3370,17 +3349,28 @@ describe('Workspace 项目与独立 Session', () => {
       meta: { cwd: workspace.root, agentPreset: 'bid', origin: 'subagent', parentSession: originalParent.id },
     })
 
+    const evidenceContext = pickChapterContext({
+      section: outline.sections[0]!, location: chapterLocation('SEC-1', 1), outline,
+      project: parseTenderProjectArtifact(JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/project.json'), 'utf8'))),
+      requirements: parseTenderRequirementsArtifact(JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/requirements.json'), 'utf8'))),
+      scoring: parseTenderScoringArtifact(JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/scoring.json'), 'utf8'))),
+      compliance: parseTenderComplianceArtifact(JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/compliance.json'), 'utf8'))),
+      evidence: parseEvidenceMapArtifact(JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/evidence-map.json'), 'utf8'))),
+      responsePointCatalog: parseScoringResponsePointCatalog(JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/scoring-response-points.json'), 'utf8'))).points,
+      writingPlan: parseWritingPlan(JSON.parse(await readFile(join(workspace.projectRoot, 'chapters/writing-plan.json'), 'utf8'))),
+    })
+    const evidenceSha = chapterEvidenceInputFingerprint(evidenceContext, await workspace.readManifest(), [])
     const attempt = {
       role: 'writer', attempt: 1, child_session_id: 'writer-sec-1', label: 'Writer',
       started_at: '2024-01-01T00:00:00Z', ended_at: '2024-01-01T00:01:00Z',
       stop_reason: 'completed', accepted: true, issues: [],
-      input: { plan_version: 1, section_epoch: 0, dependencies: [] },
+      input: { plan_version: 1, section_epoch: 0, evidence_sha256: evidenceSha, dependencies: [] },
     }
     const reviewAttempt = {
       role: 'reviewer', attempt: 1, child_session_id: 'reviewer-a', label: 'Reviewer',
       started_at: '2024-01-01T00:01:00Z', ended_at: '2024-01-01T00:02:00Z',
       stop_reason: 'completed', accepted: true, issues: [],
-      input: { plan_version: 1, section_epoch: 0, dependencies: [] },
+      input: { plan_version: 1, section_epoch: 0, evidence_sha256: evidenceSha, dependencies: [] },
     }
     await writeFile(join(workspace.projectRoot, 'chapters/execution-log.json'), JSON.stringify({
       schema_version: 4, scope: 'technical_bid', confirmed_outline_sha256: outlineSha,

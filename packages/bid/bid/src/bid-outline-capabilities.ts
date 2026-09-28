@@ -3,15 +3,11 @@ import { readFile } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 import { z } from 'zod'
 import type { BidWorkspace } from './index.ts'
-import { bidCapabilityInputSchema, type BidCapabilityCall,
+import { type BidCapabilityCall,
   type BidCapabilityExecutionContext, type BidCapabilityResult } from './bid-capability-contract.ts'
 import { capabilityOutlineAllowedWrites, executeCapabilityChapterReorganize,
-  executeCapabilityOutlineUpdate, OUTLINE_CAPABILITY_INDEX_PATHS,
-  previewCapabilityOutline, outlineReassignmentSchema } from './outline-capability-update.ts'
+  executeCapabilityOutlineUpdate, outlineReassignmentSchema } from './outline-capability-update.ts'
 import { readCapabilityOutlineBaseline } from './outline-draft-store.ts'
-import { generateScopedOutlineBusinessBindings, generateScopedOutlineOperations } from './outline-generation-executor.ts'
-import { parseTenderComplianceArtifact, parseTenderRequirementsArtifact, parseTenderScoringArtifact } from './tender-analysis-artifacts.ts'
-import { parseScoringResponsePointCatalog } from './scoring-response-point-artifacts.ts'
 import { zodJsonSchema } from './zod-json-schema.ts'
 import { readChapterLocation } from './chapter-storage.ts'
 import { chapterBlockAssignmentSchema, indexChapterContentBlocks } from './chapter-content-reuse.ts'
@@ -27,7 +23,7 @@ import { buildWritableSectionWorklist, validateSectionEvidenceCoverage } from '.
 import { parseEvidenceMapArtifact } from './evidence-mapping-artifacts.ts'
 import { assertNoLinkedPath, within } from './workspace-path.ts'
 
-type OutlineCall = Extract<BidCapabilityCall, { capability: 'outline.update' | 'outline.refine' | 'chapter.reorganize' }>
+type OutlineCall = Extract<BidCapabilityCall, { capability: 'outline.update' | 'chapter.reorganize' }>
 
 async function optionalJson(workspace: BidWorkspace, path: string): Promise<unknown> {
   const absolute = within(workspace.projectRoot, path)
@@ -50,7 +46,6 @@ export function allowedOutlineCapabilityWrites(
   call: OutlineCall, workspace: BidWorkspace, stepId: string,
   sectionIds: ReadonlySet<string> | null,
 ): Promise<ReadonlySet<string>> {
-  if (call.capability === 'outline.refine') return Promise.resolve(new Set(OUTLINE_CAPABILITY_INDEX_PATHS))
   return capabilityOutlineAllowedWrites(call, workspace, stepId, sectionIds)
 }
 
@@ -96,48 +91,6 @@ async function generateChapterAssignments(
   } finally { await run.dispose() }
 }
 
-async function refinedOutlineInput(
-  call: Extract<OutlineCall, { capability: 'outline.refine' }>, context: BidCapabilityExecutionContext,
-): Promise<Extract<BidCapabilityCall, { capability: 'outline.update' }>['input']> {
-  const workspace = context.working
-  const baseline = await readCapabilityOutlineBaseline(workspace)
-  const sectionIds = context.sectionIds === null
-    ? baseline.outline.sections.filter(section => section.parent_id === null).map(section => section.id)
-    : [...context.sectionIds]
-  const operations = await generateScopedOutlineOperations(
-    context.agent, baseline, sectionIds, call.input.feedback, context.run.signal,
-  )
-  const candidate = await previewCapabilityOutline(workspace, operations, context.stepId)
-  let businessBindings: Extract<BidCapabilityCall, { capability: 'outline.update' }>['input']['business_bindings'] = []
-  if (operations.some(operation => ['split_section', 'add_section', 'merge_sections'].includes(operation.type))) {
-    const [requirements, scoring, compliance, catalog] = await Promise.all([
-      optionalJson(workspace, 'analysis/requirements.json'), optionalJson(workspace, 'analysis/scoring.json'),
-      optionalJson(workspace, 'analysis/compliance.json'), optionalJson(workspace, 'analysis/scoring-response-points.json'),
-    ])
-    const facts = {
-      requirements: parseTenderRequirementsArtifact(requirements).requirements.map(item => ({
-        id: item.id, text: item.normalized_requirement,
-      })),
-      scoring: parseTenderScoringArtifact(scoring).scoring_items.map(item => ({ id: item.id, text: item.criterion })),
-      compliance: parseTenderComplianceArtifact(compliance).compliance_items.map(item => ({
-        id: item.id, text: item.normalized_rule,
-      })),
-      response_points: parseScoringResponsePointCatalog(catalog).points.map(item => ({
-        id: item.id, scoring_id: item.scoring_id, text: item.text,
-      })),
-    }
-    businessBindings = await generateScopedOutlineBusinessBindings(
-      context.agent, candidate, sectionIds, facts, call.input.feedback, context.run.signal,
-    )
-  }
-  const parsed = bidCapabilityInputSchema.parse({ capability: 'outline.update', input: {
-    operations, business_bindings: businessBindings, content_assignments: [],
-    allow_content_deletion: false, defer_content_migration: true,
-  } })
-  if (parsed.capability !== 'outline.update') throw new Error('BID_OUTLINE_REFINEMENT_CALL_INVALID')
-  return parsed.input
-}
-
 /**
  * 在独立步骤候选中应用目录或原文迁移，并返回可由 Host 核验的实际结果。
  * @param call 已解析的能力参数。
@@ -149,10 +102,8 @@ export async function executeOutlineCapability(
 ): Promise<{ readonly result: BidCapabilityResult }> {
   const outcome = call.capability === 'outline.update'
     ? await executeCapabilityOutlineUpdate(context, call.input)
-    : call.capability === 'outline.refine'
-      ? await executeCapabilityOutlineUpdate(context, await refinedOutlineInput(call, context))
-      : await executeCapabilityChapterReorganize(context, { ...call.input,
-        assignments: call.input.assignments ?? await generateChapterAssignments(call, context) })
+    : await executeCapabilityChapterReorganize(context, { ...call.input,
+      assignments: call.input.assignments ?? await generateChapterAssignments(call, context) })
   return { result: {
     target_section_ids: [...outcome.targetSectionIds], changed_artifacts: [...outcome.changedPaths],
     change_summary: call.capability === 'chapter.reorganize' ? '已按原文块迁移章节草稿' : '已协调目录与受影响章节产物',

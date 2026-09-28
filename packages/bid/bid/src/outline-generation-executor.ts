@@ -574,7 +574,9 @@ export async function executeOutlineGeneration(
       signal: options.run.signal,
       label: request.label,
       prompt: [{ type: 'text', text: [request.prompt,
-        options.recovery?.unit === request.artifact || options.recovery?.unit === options.run.work.workId
+        options.recovery?.workId === options.run.work.workId
+          && (options.recovery.unit === request.artifact || options.recovery.unit === options.run.work.workId
+            || request.artifact === OUTLINE_ARTIFACT && options.recovery.unit.startsWith('outline/'))
           ? renderBidRecoveryContext(options.recovery) : '',
         failedCandidate,
       ].filter(Boolean).join('\n') }],
@@ -769,7 +771,9 @@ export async function executeOutlineGeneration(
       relative(workspace.root, path(output)).replaceAll('\\', '/'),
       relative(workspace.root, scratchPath(output)).replaceAll('\\', '/'),
     ), prompt) + '\n当前 DSH file policy 为 workspace-write 或 danger-full-access 时，调用 write 不得传 sandbox_permissions 或 justification；只有 read-only 下首次写入被沙箱拒绝后，才按错误提示做一次严格升级重试。'
-      + (options.recovery !== undefined && (outputs.includes(options.recovery.unit) || options.recovery.unit === options.run.work.workId)
+      + (options.recovery?.workId === options.run.work.workId
+        && (options.recovery.unit === options.run.work.workId || outputs.includes(options.recovery.unit)
+          || options.recovery.unit.startsWith('outline/') && outputs.some(output => output.startsWith('outline/')))
         ? `\n${renderBidRecoveryContext(options.recovery)}` : '')
     const message = createUserMessage({ content: [{ type: 'text', text: modelPrompt }], source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'instructions' } })
     const protocol = installMainAgentProtocol(agent, {
@@ -881,18 +885,15 @@ export async function executeOutlineGeneration(
       if (candidate.kind === 'format') throw new BidStageExecutionError(candidate.issues)
     }
 
-    let repairUsed = await read(REPAIR_RECEIPT) !== undefined
-    if (repairUsed) await readInput(REPAIR_RECEIPT, value => z.array(z.unknown()).parse(value))
+    const savedRepair = await read(REPAIR_RECEIPT) !== undefined
+    if (savedRepair) await readInput(REPAIR_RECEIPT, value => z.array(z.unknown()).parse(value))
+    let repairUsed = false
     let outline: OutlineArtifact
     if (candidate.kind === 'fields') {
       if (candidate.issues.some(issue => issue.field === null || issue.field === 'sections')) throw new BidStageExecutionError([
         ...candidate.issues, { code: 'OUTLINE_CANDIDATE_UNRECOVERABLE', artifact: OUTLINE_ARTIFACT,
           message: '候选缺少可恢复的目录或章节对象；字段修复不能重生成整章或整本目录，已保留原始候选。' },
       ])
-      if (repairUsed) throw new BidStageExecutionError([...candidate.issues, {
-        code: 'OUTLINE_GENERATION_REPAIR_EXHAUSTED', artifact: REPAIR_RECEIPT,
-        message: '当前目录候选已经使用过一次确定性修复，不能再次启动修复。',
-      }])
       options.run.reportProgress({ phase: 'repairing', summary: '正在修正目录确定性问题', completed: 0, total: 1,
         details: candidate.issues.slice(0, 5).map(issue => `${issue.code}：${issue.message}`) })
       const output = 'outline/candidate-repair.json'

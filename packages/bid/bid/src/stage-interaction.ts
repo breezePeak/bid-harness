@@ -218,7 +218,9 @@ async function inspectBidStageValue(
       ? task.stage === 'chapter_writing' && task.status === 'waiting_user'
         ? bidWritingPlanRecoveryEligibility(session, binding.data.goalId)
         : bidRunRecoveryEligibility(session, binding.data.goalId)
-      : { eligible: false, reason: '当前会话没有已绑定的 Bid Goal。', attempts: 0 }
+      : { eligible: false, reason: '当前会话没有已绑定的 Bid Goal。', attempts: 0,
+        sameProblemCount: 0, previousInstructions: [], requiresStrategyChange: false,
+        target: undefined }
     let writingPlanDiagnostic: { readable: boolean; matchesTarget: boolean; error?: string } | undefined
     let artifactDiagnostic: { path: string; readable: boolean; reason?: string } | undefined
     const artifact = task.status === 'suspended'
@@ -254,14 +256,18 @@ async function inspectBidStageValue(
     return {
       task,
       eligible: decision.eligible && (writingPlanDiagnostic?.matchesTarget ?? true),
-      reason: decision.reason,
+      reason: task.status === 'failed' ? task.failure.message : decision.reason,
       attempts: decision.attempts,
+      same_problem_count: decision.sameProblemCount,
+      requires_strategy_change: decision.requiresStrategyChange,
+      previous_instructions: decision.previousInstructions,
       target: decision.target ?? null,
       writing_plan_diagnostic: writingPlanDiagnostic ?? null,
       artifact_diagnostic: artifactDiagnostic ?? null,
       run_id: task.status === 'suspended' ? task.run.runId : null,
       cause: task.status === 'suspended' ? task.run.cause : null,
-      failure: task.status === 'suspended' ? task.run.error ?? null : null,
+      failure: task.status === 'suspended' ? task.run.error ?? null
+        : task.status === 'failed' ? task.failure : null,
       unit: task.status === 'suspended' ? task.run.error?.recovery?.unit ?? null : null,
     }
   }
@@ -585,7 +591,7 @@ function renderIdleStageInteractionPrompt(
     '若用户询问为什么没开始或现在能不能继续，应解释当前 Host 状态和正式入口。',
     status === 'ready'
       ? '阶段已经准备好；Host 将自动驱动，不把普通聊天当作启动命令。'
-      : '当前阶段失败且没有可运行任务。先解释失败原因。',
+      : '当前阶段失败且没有可运行任务。读取 Host 失败诊断，说明程序或输入故障；由主会话处理根因，不得将相同模型候选当作恢复执行。',
   ].join('\n')
 }
 
@@ -625,12 +631,14 @@ function renderCurrentRunProgress(run: BidRunData | null): string | undefined {
 }
 
 const CAPABILITY_TASK_GUIDANCE = [
-  '项目阶段只表示默认整本路线的进度。明确修改时可先用 bid_project_inspect 读取当前事实，再用 bid_run_task 提交目标、根范围和有序能力步骤；普通讨论与解释只读。',
-  'tender.update 更正规范化理解或评分选择；outline.update/refine 调整目录，chapter.reorganize 分配旧正文；evidence.research 更新资料；writing.plan 更新写作要求；chapter.write/revise/review 处理正文。按用户真实目标选择最少步骤。',
+  '项目阶段只表示默认整本路线的进度。明确修改时可先用 bid_project_inspect 读取当前事实，再用 bid_run_task 提交目标、根范围和有序能力步骤；普通讨论与解释只读。整本目录深化先核对目标，把核对、结构修改和覆盖复核拆成 2–8 个具体 work_items 随任务提交，界面会展示这些工作项；能力步骤仍按真实依赖选择，不为凑步骤重复研究。',
+  'tender.update 更正规范化理解或评分选择；只改标题或移动明确节点用 outline.update；“深化这个章节”用 outline.refine，它在调整目录前完成所需研究；evidence.research 可独立补研，allow_outline_refinement=false 保持目录，true 可按研究发现深化；chapter.reorganize 分配旧正文；writing.plan 更新写作要求；chapter.write/revise/review 处理正文。按用户真实目标选择最少步骤。',
   '拆分或合并已有正文的章节时，先 inspect 目录、正文和写作要求，再用 bid_run_task 提交完整有序执行计划：目录调整、原文迁移、结果复核。用户明确只改目录时才可留下待迁移正文；不要把目录步骤完成说成整项任务完成。',
   '用户要求执行修改或确认先前的修改建议，即授权完成该修改所必需的目录、资料、正文和复核步骤；在同一回合提交完整任务，不只回复建议、保存计划或再次询问是否开始。计划因缺少后续步骤被拒绝时，补齐步骤并重新提交，不请求重复授权。用户只讨论或明确暂缓时不执行。',
   'outline.update.defer_content_migration=true 只把原文迁移延后到同一任务的 chapter.reorganize，之后必须安排 chapter.write 或 chapter.review；仅用户明确只改目录或暂缓正文时才设置 task.allow_pending_content=true。不得自行把正文留给用户下一次催促。',
   'outline.update 新增或拆分章节的 ID 由工具生成；未提供 business_bindings 时，工具按新章节职责分配真实业务引用。不要猜新 ID。拆分后 chapter.reorganize 使用 task 范围并提供原 source_section_ids，后续复核可使用 previous_targets；保留原文不等于重新写作。',
+  '目录研究已经完成且资料映射可用时，不要再追加重复的 evidence.research。深化后需继续处理旧正文时，在同一授权任务安排原文迁移及写作或审核。只修改选中的一句仍用段落级 chapter.revise，不扩成目录研究或整章重写。',
+  '资料结果区分已核验的招标、本地或 Web 依据，本次拟采用且保留条件的方案设计，以及待补的企业事实或承诺。研究有 gap 时说明“已完成研究并标明缺口”；正文候选未完整通过时说明“候选已保留，仍需补充或修复”。不要把资料条数、计划或 metadata 当成正文已经通过的证明。',
   '任务根范围用 project、实际 section_ids 或带原文哈希的 paragraphs；步骤可继承根范围，也可引用前一步真实 target_section_ids。不要从“全部”“流程”等字词机械扩大范围。',
   '初次整本确认仍由原生确认入口完成；局部任务只凭本次真实用户消息授权。工具返回的接受、执行和发布状态以 Host 结果为准。',
 ].join('\n')
@@ -951,7 +959,7 @@ export function installStageInteractionTools(
       if (!goalRound && !hasUser) return decision
       const resumed = agent.session.events.findLast(event => event.type === 'bid.project.resumed')
       const suspended = task.status === 'suspended' ? task.run : undefined
-      const prompt = goalRound && !hasUser ? '你仍是当前主交互 Agent。当前阶段由 Host 持有的 subagent 执行，本轮只处理 Host 报告的失败。先调用 bid_stage_inspect(view="recovery")，根据真实问题提交简短改进办法到 bid_recover_task。不得重置阶段、改正式文件、代替用户确认。受理后只说明正在恢复；没有安全办法时说明阻碍。'
+      const prompt = goalRound && !hasUser ? '你仍是当前主交互 Agent。当前阶段由 Host 持有的 subagent 执行，本轮只处理 Host 报告的失败。先调用 bid_stage_inspect(view="recovery")，对比当前问题、检查点和最近指令；重复问题必须改变步骤、顺序、范围或工具用法，不能提交相同办法。仅修失败单元，不改正式确认或绕过校验。然后调用 bid_recover_task 提交具体改进办法；受理后只说明正在恢复。'
         : suspended !== undefined ? renderSuspendedRunPrompt(
           task.stage,
           suspended.runId,

@@ -26,6 +26,7 @@ import { bidCapabilityResultSchema, type BidCapabilityId, type BidCapabilityResu
 /** 静态前提只描述实际需要的项目对象，不推导隐藏的能力调用。 */
 export const BID_CAPABILITIES: Readonly<Record<BidCapabilityId, {
   readonly requires: readonly string[]
+  readonly optionalInputs?: readonly string[]
   readonly result: 'artifacts' | 'review' | 'export'
 }>> = {
   'tender.analyze': { requires: ['manifest.json'], result: 'artifacts' },
@@ -35,16 +36,23 @@ export const BID_CAPABILITIES: Readonly<Record<BidCapabilityId, {
     'analysis/scoring.json', 'analysis/compliance.json'], result: 'artifacts' },
   'outline.update': { requires: ['outline/outline.json', 'analysis/requirements.json', 'analysis/scoring.json',
     'analysis/compliance.json', 'analysis/scoring-response-points.json'], result: 'artifacts' },
-  'outline.refine': { requires: ['outline/outline.json', 'analysis/requirements.json', 'analysis/scoring.json',
-    'analysis/compliance.json', 'analysis/scoring-response-points.json'], result: 'artifacts' },
+  'outline.refine': { requires: ['manifest.json', 'outline/outline.json', 'analysis/project.json',
+    'analysis/requirements.json', 'analysis/scoring.json', 'analysis/compliance.json',
+    'analysis/scoring-response-points.json'], optionalInputs: ['outline/confirmed-outline.json',
+    'outline/draft.json', 'analysis/evidence-map.json', 'analysis/web-evidence-sources.json'], result: 'artifacts' },
   'chapter.reorganize': { requires: ['outline/confirmed-outline.json', 'chapters/execution-log.json'], result: 'artifacts' },
-  'evidence.research': { requires: ['outline/confirmed-outline.json', 'outline/outline.json',
-    'analysis/evidence-map.json', 'analysis/web-evidence-sources.json', 'analysis/requirements.json',
-    'analysis/scoring.json', 'analysis/compliance.json', 'analysis/scoring-response-points.json'], result: 'artifacts' },
+  'evidence.research': { requires: ['manifest.json', 'outline/outline.json', 'analysis/project.json',
+    'analysis/requirements.json', 'analysis/scoring.json', 'analysis/compliance.json',
+    'analysis/scoring-response-points.json'], optionalInputs: ['outline/confirmed-outline.json',
+    'outline/draft.json', 'analysis/evidence-map.json', 'analysis/web-evidence-sources.json'], result: 'artifacts' },
   'writing.plan': { requires: ['outline/confirmed-outline.json'], result: 'artifacts' },
-  'chapter.write': { requires: ['outline/confirmed-outline.json', 'chapters/writing-plan.json'], result: 'artifacts' },
-  'chapter.revise': { requires: ['outline/confirmed-outline.json', 'chapters/writing-plan.json'], result: 'artifacts' },
-  'chapter.review': { requires: ['chapters/execution-log.json'], result: 'review' },
+  'chapter.write': { requires: ['manifest.json', 'outline/confirmed-outline.json', 'chapters/writing-plan.json',
+    'analysis/project.json', 'analysis/requirements.json', 'analysis/scoring.json', 'analysis/compliance.json',
+    'analysis/scoring-response-points.json', 'analysis/evidence-map.json', 'analysis/web-evidence-sources.json'], result: 'artifacts' },
+  'chapter.revise': { requires: ['manifest.json', 'outline/confirmed-outline.json', 'chapters/writing-plan.json',
+    'analysis/project.json', 'analysis/requirements.json', 'analysis/scoring.json', 'analysis/compliance.json',
+    'analysis/scoring-response-points.json', 'analysis/evidence-map.json', 'analysis/web-evidence-sources.json'], result: 'artifacts' },
+  'chapter.review': { requires: ['chapters/execution-log.json', 'analysis/evidence-map.json'], result: 'review' },
   'document.review': { requires: ['chapters/execution-log.json'], result: 'review' },
   'docx.export': { requires: ['outline/confirmed-outline.json'], result: 'export' },
 }

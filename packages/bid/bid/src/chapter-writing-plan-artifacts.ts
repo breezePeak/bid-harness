@@ -43,6 +43,8 @@ const executionAttemptSchema = z.object({
   input: z.object({
     plan_version: z.number().int().positive(),
     section_epoch: z.number().int().nonnegative(),
+    /** 章节实际依据身份；缺失的历史尝试不能恢复旧审核。 */
+    evidence_sha256: sha256Schema.optional(),
     dependencies: z.array(z.object({
       section_id: z.string().min(1),
       candidate_sha256: sha256Schema,

@@ -1128,17 +1128,18 @@ export function BidStagePanel({
   ) : null
   const capabilityRunPlan = capabilityPlan?.status === 'running' ? (
     <div>
+      {(capabilityPlan.workItems?.length ?? 0) > 0 && (
+        <div className={css.capabilityWorkItems} role="group" aria-label="任务拆分">
+          <strong>任务拆分</strong>
+          <ol>{capabilityPlan.workItems?.map(item => <li key={item}>{item}</li>)}</ol>
+        </div>
+      )}
       <PlanListPanel
         items={buildCapabilityTaskPlan(capabilityPlan, t)}
         running
         labels={{ ...planLabels, title: capabilityPlan.title }}
         testId="bid-capability-plan"
       />
-      <p role="status" className={css.agentStatus}>
-        {t('status.running')} · {capabilityPlan.scope === 'project'
-          ? t('capability.scope.project') : capabilityPlan.scope}
-        {capabilityPlan.steps.flatMap(step => step.detail === null ? [] : [step.detail]).join('；')}
-      </p>
     </div>
   ) : null
   const exportPlan = docxExport?.status === 'running' ? (
@@ -1149,19 +1150,12 @@ export function BidStagePanel({
         labels={{ ...planLabels, title: 'S6 · 导出 Word' }}
         testId="bid-docx-export-plan"
       />
-      <p role="status" className={css.agentStatus}>{docxExport.message}</p>
     </div>
-  ) : null
-  const mappingSyncNotice = mappingProgressObservable && mappingReadState === 'stale' ? (
-    <p className={css.agentStatus} role="status">
-      {t(mappingProgress === null ? 'mapping.sync_failed_empty' : 'mapping.sync_failed_cached')}
-    </p>
   ) : null
   if (projection.task.status === 'running') return <>
     {runPlan}
     {capabilityRunPlan}
     {exportPlan}
-    {mappingSyncNotice}
     {floatingRevision}
   </>
   const queuedFiles: readonly (SelectedFile | SelectedTemplate)[] = selectedTemplate === null
@@ -1208,8 +1202,6 @@ export function BidStagePanel({
               : t(statusKey(projection.task.status))}
           </span>
         </div>}
-
-        {mappingSyncNotice}
 
         {projection.task.status === 'suspended' && mainAgentRunning && (
           <p className={css.agentStatus} role="status">{t('agent.recovery_checking')}</p>

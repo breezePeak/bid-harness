@@ -6,7 +6,7 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import SessionStore from '@deepseek-ai/dsh-session'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { BidWorkspace } from '../src/index.ts'
-import { askCapabilityTaskInput, capabilityTaskRequestSchema, executeCapabilityTask,
+import { activeCapabilityMappingWorkspace, askCapabilityTaskInput, capabilityTaskRequestSchema, executeCapabilityTask,
   findCapabilityTaskRequest, patchCapabilityTaskSteps, persistCapabilityTaskRequest,
   type CapabilityTaskDispatcher } from '../src/bid-capability-task.ts'
 import { bidCapabilityTaskSchema, type BidCapabilityCall } from '../src/bid-capability-contract.ts'
@@ -24,6 +24,8 @@ async function fixture() {
   roots.push(root)
   const workspace = new BidWorkspace(root)
   await mkdir(join(workspace.projectRoot, 'chapters'), { recursive: true })
+  await mkdir(join(workspace.projectRoot, 'analysis'), { recursive: true })
+  await writeFile(join(workspace.projectRoot, 'analysis/evidence-map.json'), '{"section_mappings":[]}\n')
   await writeFile(join(workspace.projectRoot, 'chapters/execution-log.json'), '{}\n')
   const ctx = new Context()
   await ctx.plugin(SessionStore)
@@ -64,6 +66,41 @@ function dispatcher(failSecond = false) {
 }
 
 describe('同一 Work 的能力序列', () => {
+  it('新的整本目录深化先保存 Main Agent 的具体工作项，旧请求仍可解析', async () => {
+    const { ctx, workspace, session } = await fixture()
+    try {
+      const message = createUserMessage({ content: [{ type: 'text', text: '重构整本评分目录' }], source: { kind: 'user' } })
+      session.append('user/message', message, { surfaceOp: 'append' })
+      const authorization = { session_id: String(session.id), message_id: String(message.id) }
+      const task = bidCapabilityTaskSchema.parse({ goal: '重构整本评分目录', scope: { kind: 'project' }, steps: [{
+        scope: { source: 'task' }, call: { capability: 'outline.refine', input: { feedback: '六个评分章并列' } },
+      }] })
+      const returnState = { stage: 'evidence_mapping' as const, status: 'ready' as const, run: null }
+      await expect(persistCapabilityTaskRequest(workspace, session, 'evidence_mapping', task,
+        authorization, [], returnState)).rejects.toThrow('BID_CAPABILITY_WORK_ITEMS_REQUIRED')
+      await expect(findCapabilityTaskRequest(workspace, authorization)).resolves.toBeNull()
+      const planned = { ...task, work_items: ['核对六个评分章及响应点', '重构目录并复核覆盖'] }
+      const work = await persistCapabilityTaskRequest(workspace, session, 'evidence_mapping', planned,
+        authorization, [], returnState)
+      const saved = capabilityTaskRequestSchema.parse(await readBidWorkRequest(workspace, work))
+      expect(saved.task.work_items).toEqual(planned.work_items)
+      const checkpointPath = join(workspace.projectRoot, 'runs', work.workId, 'task-checkpoint.json')
+      await mkdir(join(workspace.projectRoot, 'runs', work.workId), { recursive: true })
+      await writeFile(checkpointPath, JSON.stringify({
+        schema_version: 1, work_id: work.workId, request_sha256: work.requestSha256, plan_patches: [],
+        steps: [{ step_id: 'step-test', step: planned.steps[0], status: 'running',
+          authorization, input_sha256: 'a'.repeat(64) }],
+      }))
+      expect(await activeCapabilityMappingWorkspace(workspace, work)).toBeNull()
+      const candidateRoot = join(workspace.projectRoot, 'runs', work.workId, 'work',
+        '.bid-harness', 'runs', 'step-test-aaaaaaaaaaaa', 'work')
+      await mkdir(candidateRoot, { recursive: true })
+      const candidate = await activeCapabilityMappingWorkspace(workspace, work)
+      expect(candidate?.root).toBe(candidateRoot)
+      expect(bidCapabilityTaskSchema.parse(task).work_items).toBeUndefined()
+    } finally { await ctx.fiber.dispose() }
+  })
+
   it('历史不完整计划可读取，但新任务接纳拒绝相同的步骤遗漏', async () => {
     const { ctx, workspace, session, descriptor, authorization } = await fixture()
     try {
@@ -248,15 +285,25 @@ describe('同一 Work 的能力序列', () => {
   it('需要用户输入时保留问题身份并等待，不重复调用执行器', async () => {
     const { ctx, workspace, session, descriptor, run, agent } = await fixture()
     try {
-      const execute = vi.fn<CapabilityTaskDispatcher['execute']>(async (call, context) => ({
-        result: { target_section_ids: [], changed_artifacts: [], change_summary: context.inputAnswer === undefined
-          ? '需要补充依据' : '依据已补充',
-        warnings: [], missing_topics: context.inputAnswer === undefined && call.capability === 'chapter.review'
-          ? ['缺少验收文件'] : [],
-        needs_input: context.inputAnswer === undefined && call.capability === 'chapter.review' },
-      }))
+      const execute = vi.fn<CapabilityTaskDispatcher['execute']>(async (call, context) => {
+        const waiting = context.inputAnswer === undefined && call.capability === 'chapter.review'
+        const path = 'chapters/local-review.json'
+        if (call.capability === 'chapter.review') {
+          if (!waiting) {
+            expect(context.resumeCandidate).toBe(true)
+            expect(JSON.parse(await readFile(join(context.working.projectRoot, path), 'utf8')))
+              .toEqual({ candidate: '保留的审核依据' })
+          }
+          await context.run.commits.writeJson(join(context.working.projectRoot, path),
+            waiting ? { candidate: '保留的审核依据' } : { candidate: '已补充验收文件' })
+        }
+        return { result: { target_section_ids: [], changed_artifacts: call.capability === 'chapter.review' ? [path] : [],
+          change_summary: waiting ? '需要补充依据' : '依据已补充',
+          warnings: [], missing_topics: waiting ? ['缺少验收文件'] : [], needs_input: waiting } }
+      })
       const adapter: CapabilityTaskDispatcher = {
-        allowedWrites: async () => new Set(), execute, validate: async () => {},
+        allowedWrites: async call => new Set(call.capability === 'chapter.review'
+          ? ['chapters/local-review.json'] : []), execute, validate: async () => {},
       }
       const first = await executeCapabilityTask(workspace, run, adapter, agent, session)
       expect(first).toMatchObject({ status: 'awaiting_input', result: { missing_topics: ['缺少验收文件'] } })
@@ -273,6 +320,50 @@ describe('同一 Work 的能力序列', () => {
       await expect(executeCapabilityTask(workspace, resumed, adapter, agent, session))
         .resolves.toMatchObject({ status: 'completed' })
       expect(execute).toHaveBeenCalledTimes(3)
+    } finally { await ctx.fiber.dispose() }
+  })
+
+  it('等待输入恢复将已生成文件和删除差异一起发布，重复缺口获得新问题身份', async () => {
+    const { ctx, workspace, session, descriptor, run, agent } = await fixture()
+    try {
+      await writeFile(join(workspace.projectRoot, 'chapters/deleted.json'), '旧文件\n')
+      let calls = 0
+      const adapter: CapabilityTaskDispatcher = {
+        allowedWrites: async call => new Set(call.capability === 'chapter.review'
+          ? ['chapters/kept.json', 'chapters/deleted.json'] : []),
+        execute: async (call, context) => {
+          if (call.capability !== 'chapter.review') return { result: { target_section_ids: [],
+            changed_artifacts: [], change_summary: '完成后续步骤', warnings: [], missing_topics: [], needs_input: false } }
+          calls++
+          if (calls === 1) {
+            await context.run.commits.writeJson(join(context.working.projectRoot, 'chapters/kept.json'), { writer: '原有成果' })
+            await context.run.commits.remove(join(context.working.projectRoot, 'chapters/deleted.json'))
+          } else {
+            expect(context.resumeCandidate).toBe(true)
+            expect(await readFile(join(context.working.projectRoot, 'chapters/kept.json'), 'utf8')).toContain('原有成果')
+          }
+          return { result: { target_section_ids: [], changed_artifacts: calls === 1 ? ['chapters/kept.json'] : [],
+            change_summary: '保留成果', warnings: [], missing_topics: calls < 3 ? ['仍缺企业资料'] : [],
+            needs_input: calls < 3 }, removedPaths: calls === 1 ? ['chapters/deleted.json'] : [] }
+        }, validate: async () => {},
+      }
+      const first = await executeCapabilityTask(workspace, run, adapter, agent, session)
+      if (first.status !== 'awaiting_input') throw new Error('缺少待答问题')
+      expect(await askCapabilityTaskInput(session, descriptor.workId, first,
+        async question => ({ id: question.id, selected: [], custom: '无关的补充。' }), async () => {})).toBe(true)
+      const second = await executeCapabilityTask(workspace, createTestBidRunContext({ work: descriptor }), adapter, agent, session)
+      if (second.status !== 'awaiting_input') throw new Error('缺口必须保留')
+      expect(second.questionId).not.toBe(first.questionId)
+      expect(await askCapabilityTaskInput(session, descriptor.workId, second,
+        async question => ({ id: question.id, selected: [], custom: '已提供真实资料。' }), async () => {})).toBe(true)
+      const final = await executeCapabilityTask(workspace, createTestBidRunContext({ work: descriptor }), adapter, agent, session)
+      expect(final.status).toBe('completed')
+      if (final.status !== 'completed') return
+      expect(final.receipt.files.map(file => file.path)).toContain('chapters/kept.json')
+      expect(final.receipt.removed_paths).toContain('chapters/deleted.json')
+      expect(await readFile(join(workspace.projectRoot, 'chapters/kept.json'), 'utf8')).toContain('原有成果')
+      await expect(readFile(join(workspace.projectRoot, 'chapters/deleted.json'))).rejects.toMatchObject({ code: 'ENOENT' })
+      expect(calls).toBe(3)
     } finally { await ctx.fiber.dispose() }
   })
 })

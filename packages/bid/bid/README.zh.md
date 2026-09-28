@@ -21,7 +21,7 @@ PDF 提取使用文本位置保留物理行，并输出 `<!-- page: N -->` 注�
 
 入库会拒绝空文件、不安全文件、不支持格式、超大文件和超数量批次。解析失败会保留原文件，并在 `manifest.json` 中记录稳定的提取错误。复用提取输出目录时，系统通过 `dsh-atomic-write` 原子替换三个完整语料文件。`exportDocx()` 只接受项目目录内 Markdown，并写入项目输出目录。
 
-S4 的映射计划和检查点通过当前 Agent 的文件系统服务提交；任一任务成功后立即将结果和 `completed=true` 写入关键状态队列，恢复调度和进度统计均以该完成标记覆盖执行日志中的瞬时状态。执行日志保留真正失败、运行中与未开始任务的区别并使用独立的尽力写入队列和原子替换；恢复只调度失败与未开始任务，首个失败任务通过恢复屏障后立即按配置并发继续。短暂的 Windows 文件占用会有限重试，重试耗尽只记录 Host 告警且不阻断后续检查点。
+S4 的映射计划和检查点通过当前 Agent 的文件系统服务提交；任一任务成功后立即将结果和 `completed=true` 写入关键状态队列，恢复调度和进度统计均以该完成标记覆盖执行日志中的瞬时状态。执行日志仅在子会话建立后标记任务运行中；准备子会话和等待重试期间保持待启动状态，旧日志中没有活动子会话身份的运行标记也按待启动投影。执行日志保留真正失败、运行中与未开始任务的区别并使用独立的尽力写入队列和原子替换；恢复只调度失败与未开始任务，首个失败任务通过恢复屏障后立即按配置并发继续。短暂的 Windows 文件占用会有限重试，重试耗尽只记录 Host 告警且不阻断后续检查点。
 
 ## 控制面类型
 
@@ -33,19 +33,23 @@ S4 的映射计划和检查点通过当前 Agent 的文件系统服务提交；�
 
 `stopRun` 同时取消发起停止的会话回复和项目后台 Run，保留待处理的用户消息；后台执行收敛并保存挂起状态后返回。主会话空闲时也可停止后台 Run。
 
-S2 Run 首次通过 running 检查点后，Host 把一个原生 Goal 绑定到同一主会话；S1 和独立 S6 不取得该目标。后台阶段正常运行或等待用户正式确认时，Goal Round 暂缓且不消耗轮数。S2～S5 有可修复的挂起任务时，主 Agent 读取 `bid_stage_inspect(view="recovery")` 的当前失败与目标身份，再调用 `bid_recover_task` 提交有界改进要求；Host 在项目锁内验证并记录请求，原执行子代理按原提交和校验流程继续。同一 work 或写作请求最多自动接管两次，问题与检查点无进展、用户停止或输入和基础设施故障转入既有人工处理。Goal 完成只跟随 S5 正式完成，不触发 Word 导出。
+S2 Run 首次通过 running 检查点后，Host 把一个原生 Goal 绑定到同一主会话；S1 和独立 S6 不取得该目标。后台阶段正常运行或等待用户正式确认时，Goal Round 暂缓且不消耗轮数。S2～S5 的内部执行或校验失败在本地修复耗尽后交回主 Agent；主 Agent 读取 `bid_stage_inspect(view="recovery")` 的失败单元、连续相同问题次数和最近指令，再调用 `bid_recover_task` 提交不同的具体办法，Host 拒绝相同问题的重复指令，原执行子代理按原提交和校验流程继续。重复问题和接管次数用于要求换策略，不终止修复；自动续行仍受原生 Goal 总轮数约束。Host 重启后重新确认自己绑定的 active Goal，并按原 Run ID、项目 revision 和检查点自动续行；用户停止与等待真实输入保持人工边界，输入身份变化和确定的模型基础设施故障停止自动修复。Goal 完成只跟随 S5 正式完成，不触发 Word 导出。
 
 `project-state.json` 是项目进度的持久化来源，schema version 4 扁平保存 `stage`、`status`、`run`、单调递增 revision 和 `updated_at`，不保存聊天消息、工具调用、提示词或摘要。读取器会把结构合法的 v3 状态归一为 v4，后续写入只使用 v4。Bid Session 启动时从 `session.header.cwd` 定位项目；缺少状态文件时初始化 S1 等待上传，否则通过 `bid.project.resumed` 恢复当前 Session 的 Projection。Workspace 的“+”继续调用 `sessions.create()`：新 Session 不读取其他 Session 的聊天或模型上下文，也不建立父会话关系。
 
-`BidOrchestrator` 绑定执行操作所用的 DSH Session，并通过 `reduceBidTaskState()` 归约当前 Session 已同步的状态。Run 只记录一次执行尝试的身份、epoch、基线 revision、工作描述和进度，停止原因属于外层 `suspended` 状态。Host 为每次自动执行传入强制 `BidRunContext`；调度准入、Child 收敛、取消信号和正式写入栅栏都归该 Run 所有。读取到没有活动 operation 的未完成 `running` 时，Host 在项目锁内将其改为 `suspended(host_restart)`，不自动执行；能力 Work 已有可验证的正式提交凭据时只补完成结算。恢复必须同时匹配挂起 Run ID 和项目 revision，并由执行器按持久检查点核对已完成工作。
+`BidOrchestrator` 绑定执行操作所用的 DSH Session，并通过 `reduceBidTaskState()` 归约当前 Session 已同步的状态。Run 只记录一次执行尝试的身份、epoch、基线 revision、工作描述和进度，停止原因属于外层 `suspended` 状态。Host 为每次自动执行传入强制 `BidRunContext`；调度准入、Child 收敛、取消信号和正式写入栅栏都归该 Run 所有。读取到没有活动 operation 的未完成 `running` 时，Host 在项目锁内先将其改为 `suspended(host_restart)`，释放启动操作后对绑定的 S2～S5 目标自动恢复原 Work；能力 Work 已有可验证的正式提交凭据时只补完成结算。恢复必须同时匹配挂起 Run ID 和项目 revision，并由执行器按持久检查点核对已完成工作。
 
 `capability_task` 用一个 Work 和一个 Run 顺序执行已注册适配器的能力步骤。Host 将真实用户消息、初始计划、输入摘要和任务前状态保存为不可变请求；`runs/<workId>/task-checkpoint.json` 保存已开始步骤、结果与后续授权的计划补丁。每步只在独立候选目录执行，Host 核对目标 ID 与精确文件清单后合并到 Work 候选；最终业务文件与 `requests/<workId>/result.json` 凭据同批发布。恢复先核对凭据和正式文件，已提交的 Work 只补 Run 结算及公开会话通知。`awaiting_input` 保留原 Work，并以持久化原生问题取得补充文本；用户停止使 Run 提交权限退休并等待 Child 收敛。适配器由 `BidHostRuntime.registerCapabilityTaskDispatcher()` 注册，`runCapabilityTask()` 仅接受当前公开主 Agent 与真实用户消息授权。
 
+等待输入的步骤将旧候选复制到新输入身份的候选项目，Host 在业务校验前对全部授权路径比较候选与 Work 的新增、改动和删除，并把差异并入同批发布凭据。每轮仍需输入时按本轮输入摘要发出新的原生问题，已保存的回答不会冒充下一轮回答。
+
 主 Agent 在所有 Bid 阶段都可用 `bid_project_inspect` 读取项目，用 `bid_run_task` 提交有序能力步骤。段落范围只接纳引用同一选区的单步 `chapter.revise`，后续计划补丁也不能扩大为整章或结构写入。挂起的能力 Work 可由后续真实用户消息调用 `bid_plan_task` 替换尚未开始的后缀；Host 保留已完成步骤和原任务范围，保存计划后仍等待明确恢复。旧目录、资料、写作计划及章节修订工具在原生确认或 S5 热插入边界保留既有处理，其余阶段按相同能力适配器执行；目录旧参数仍要匹配当前确认目录的 CAS 身份。运行中跨能力请求先保存到当前 Work 命令日志，收敛后由独立 Work 顺序执行。
 
-目录能力以当前确认目录为已写项目的基线，首次确认前读取当前 Draft。`outline.update` 同时应用结构操作与经过真实招标 ID 校验的业务归属；拆分子章不会机械继承父章的全部要求。`outline.refine` 先由独立子会话提出结构操作，再基于 Host 分配的新章节 ID 分配业务引用。`chapter.reorganize` 把旧正文按完整 Markdown 块交由子会话分配，Host 核对源正文 SHA、块身份、目标范围、完整覆盖及显式共享或删减。迁移成果写入 `chapters/reuse-seeds.json` 并保持待写、待审；退役章节的计划、资料和旧 Manifest 归属保存在 `outline/reassignment.json`，未分配的旧正文由 `chapters/pending-reorganization.json` 指明。目录、Draft、授权来源为 `user_task` 的 confirmation、Evidence、Writing Plan、执行索引及 Manifest 在同一步候选中校验，再由能力 Work 发布实际改变的精确文件。
+目录能力以当前确认目录为已写项目的基线，首次确认前读取当前 Draft。`outline.update` 同时应用结构操作与经过真实招标 ID 校验的业务归属；拆分子章不会机械继承父章的全部要求。`outline.refine` 使用 S4 的章节研究、结构判断和终审，依据实际资料决定是否深化目录；新叶节由 Host 分配 ID 并独立形成任务级依据。`chapter.reorganize` 把旧正文按完整 Markdown 块交由子会话分配，Host 核对源正文 SHA、块身份、目标范围、完整覆盖及显式共享或删减。迁移成果写入 `chapters/reuse-seeds.json` 并保持待写、待审；退役章节的计划、资料和旧 Manifest 归属保存在 `outline/reassignment.json`，未分配的旧正文由 `chapters/pending-reorganization.json` 指明。目录、Draft、授权来源为 `user_task` 的 confirmation、Evidence、Writing Plan、执行索引及 Manifest 在同一步候选中校验，再由能力 Work 发布实际改变的精确文件。
 
-`evidence.research` 的局部能力复用 S4 remap：`supplement` 保留并去重旧材料，`replace` 只替换目标章节；范围外映射和既有 Web 来源顺序保持原样。拆分后的退役章节资料只作为待判断候选，当前正文草稿只辅助检索意图，二者都不自动成为 Evidence。研究不开放目录结构工具；需要深化时先执行独立目录步骤。研究更新章节写作说明后同步当前确认目录及相关写作索引，新增 Web 快照从严格来源账本取得精确文件许可；阶段映射计划与检查点留在步骤候选内，不随能力结果发布。
+`evidence.research` 与默认 S4 使用同一章节研究执行器：`supplement` 保留并去重旧材料，`replace` 只替换目标章节；范围外映射和既有 Web 来源顺序保持原样。首次调用可从空 Evidence Map 和 Web Ledger 建立资料。`allow_outline_refinement=false` 保持确认目录的结构、职责与必答项；明确授权为 `true` 时，研究后的结构判断可在授权子树内深化目录。拆分后的退役章节资料只作为待判断候选，当前正文草稿只辅助检索意图，二者都不自动成为 Evidence。每个当前可写叶节的 `answer_plan` 逐项记录具体回应、依据边界或真实缺口；历史映射仍可读取，写作前会定向补齐缺失计划。写作和审核保留缺口及修复结论，全节缺少可成文内容时等待真实输入。新增 Web 快照从严格来源账本取得精确文件许可；阶段映射计划和检查点留在步骤候选内，等待输入时由原 Work 校验并复用。
+
+选中非叶章节并允许深化时，首轮研究以该父节点为结构编辑根，覆盖完整子树；新增叶节随后单独研究。固定目录研究的 Initial Mapping 和 Final Check 均拒绝改变 Blueprint 职责或业务覆盖，结构问题直接报告。Final Check 之前持久化当前 Evidence 与目录候选，恢复只复用匹配研究请求、章节范围、目录和语料身份的检查点。用户补充的文字仅作为新研究的待核验输入；当前范围的 gap 必须重新评估，不能自动改为有依据。
 
 全新项目的文件接入必须等待专用上传操作，因为其 Executor 需要已准入的文件批次。S2 的 Stage Policy 声明 `requiresUserConfirmationAfterValidation`；初次校验通过后记录 `bid.user_confirmation.required`，不记录完成事件。`confirmValidatedStage()` 在正式 Artifact 再次通过 Validator 后才记录用户确认和阶段完成。
 
@@ -55,13 +59,15 @@ Host 插件注册该 Projection，并全局拒绝已解析 Preset 为 `bid` 的 
 
 `bid` Agent Preset 为 Bid Session 注册 `/bid-reset-s2` 至 `/bid-reset-s5` 四个无参数重置命令。重置可以选择当前阶段或更早阶段；Host 原子占用项目，无论内存中是否仍保留运行记录，都会取消并等待主 Agent、Subagent 和并发 Worker 静止，再删除所选阶段及其后续阶段拥有的 Artifact。旧操作已经开始结算时，重置等待其完成；否则重置与操作收尾共用一次 Run retirement，排空 child 后才释放父 Execution Agent。S2、S3、S4 提交 `ready` 并结束重置请求后，由持有同一项目操作的后台续行进入正常执行；续行结算前不释放 Execution Agent 或项目锁。S5 回到 `waiting_user` 且不创建 Execution Agent；内部 S1 重置同样回到 `waiting_user`。短暂文件事务先自然结算；未来阶段、第二个并发重置和带参数命令会被拒绝。用户发起的取消不会记录 `bid.stage.failed`，命令结果也不进入模型历史。
 
-浏览器将一次 S1 所选原文件按顺序组成同源二进制请求，并只在小型请求头中声明名称、角色、类型和大小。Host 由该请求解析实时 Session，以工作区的规范绝对路径作为项目锁键，准入完整批次，通过 `BidWorkspace` 入库并校验生成的 `manifest.json`、原文件、语料、分块索引和分块文件，随后调用 `drive()`。同一 Workspace 的不同 Session 不能并发修改项目；不同 Workspace 可以并行。请求体不能还原全部已声明文件时，S1 会记录 Workflow 失败且不能推进。`modelStageRepairAttempts` 配置 S2–S5 的内容校验修复轮数；执行器错误或修复耗尽挂起当前 Run，Workflow 的业务进度不回退。S2、S4 和 S5 分别从逐条分析、任务与章节检查点恢复未完成或失效工作。
+浏览器将一次 S1 所选原文件按顺序组成同源二进制请求，并只在小型请求头中声明名称、角色、类型和大小。Host 由该请求解析实时 Session，以工作区的规范绝对路径作为项目锁键，准入完整批次，通过 `BidWorkspace` 入库并校验生成的 `manifest.json`、原文件、语料、分块索引和分块文件，随后调用 `drive()`。同一 Workspace 的不同 Session 不能并发修改项目；不同 Workspace 可以并行。请求体不能还原全部已声明文件时，S1 会记录 Workflow 失败且不能推进。`modelStageRepairAttempts` 配置 S2–S5 的内容校验修复轮数；内部错误保留挂起 Run 和恢复诊断，确定的输入、权限及模型基础设施阻断结算为 `failed`。S2、S4 和 S5 分别从逐条分析、任务与章节检查点恢复未完成或失效工作。
 
 DOCX 模板通过独立同源二进制请求上传，请求头只携带 Session、文件名、长度和配置 revision。`docxTemplateMaxBytes` 默认 300 MiB，浏览器按 `DocxFormatView.templateMaxBytes` 预检，Host 按相同值和声明长度限制请求体；模板解析需要 ZIP 随机访问，因此 Host 只在准入后把原始二进制体缓冲一次，不生成 base64 字符串。Host 解析 docDefaults、Theme、样式继承、段落与 Run 直接格式、页面和编号，再让当前会话模型仅依据模板正文与候选解释格式说明和角色；模型选择候选后只合并该候选，模板说明中的常用中文字号在页面显示原名称和对应磅值。模型解释失败时保留确定性提取结果，并提示用户重新上传以重试解释。模板上传、冲突确认、独立格式建议和导出使用项目级 Word 操作锁，不占用 S1—S5 阶段 operation；同项目各会话均可配置或导出 Word，阶段启动与 Word 操作可并行；会删除章节和输出的阶段重置与 Word 写入互斥。`word-export/config.json` 分别保存 `extracted`、`modelInterpreted`、`conflicts`、`resolved` 和 `userConfirmed`，预览与导出只读取 `resolved`。
 
-S1 资料上传、S2 招标分析、S3 初步目录生成、S4 目录生成/资料映射和 S5 正文编写组成线性流程；S6 是 S5 完成后在审核工作台内随时可用的按需导出动作。S2 只提取 Project、Requirements、Scoring 和 Compliance；评分原文在 S2 保持完整。S3 独立复核按语义拆解的评分响应点，由 Host 分配稳定 `RP-*` ID，再适配可选人工框架、保存精确框架标题引用并生成初始目录；同一响应点可覆盖多个可写 Section。S4 按 Section 规划和研究，直接形成 `section_mappings`，完成一次基于证据的目录深化，并只对新增或语义变化的可写 Section 补充映射。S5 在章节正文生成后立即持久化并启动独立 Reviewer；明确问题回到同一 Writer 会话，按 `modelStageRepairAttempts` 自动修复（默认 3 次，含初稿共最多 4 轮），最终仍有问题时保留 `needs_attention`，不阻断 Word 导出。
+S1 资料上传、S2 招标分析、S3 初步目录生成、S4 目录生成/资料映射和 S5 正文编写组成线性流程；S6 是 S5 完成后在审核工作台内随时可用的按需导出动作。S2 只提取 Project、Requirements、Scoring 和 Compliance；评分原文在 S2 保持完整。S3 独立复核按语义拆解的评分响应点，由 Host 分配稳定 `RP-*` ID，再适配可选人工框架、保存精确框架标题引用并生成初始目录；同一响应点可覆盖多个可写 Section。S4 按 Section 规划和研究，直接形成 `section_mappings`，完成一次基于证据的目录深化，并只对新增或语义变化的可写 Section 补充映射。S5 在 Writer 候选通过 Host 校验后，先回流实际使用的新资料并定向重研 Answer Plan，再以最终章节依据启动独立 Reviewer；审核后提交正文；明确问题回到同一 Writer 会话，按 `modelStageRepairAttempts` 自动修复（默认 3 次，含初稿共最多 4 轮），最终仍有问题时保留 `needs_attention`，不阻断 Word 导出。
 
 S5 将 `execution-plan.json` 和 schema v4 `execution-log.json` 绑定当前 Writing Plan 版本，并以日志作为章节级检查点。日志在排队、编写、审核和修复期间记录当前 phase，失败时保留失败 phase；Host 据此生成审核工作台的章节状态。Host 读取 schema v3 日志时会确定性迁移为 v4，已完成章节保持完成，待执行和中断运行章节仅重新排队，失败章节按可确认的最后失败角色保留失败语义。每次 Writer 和 Reviewer 尝试都绑定计划版本、section epoch，以及全部强依赖章节的正文和 handoff 身份；正文、审核、文件写入与完成日志提交前都会重新核对 Run fence。计划、章节或上游交接变化会使迟到结果记为 `stale-input` 和 `accepted=false`，不能覆盖正文或成为最终审核。模型流断开或结果通道错误使用独立运行重试预算，不占内容修订次数；单章最终失败不会取消无关章节。Run 恢复严格校验关系计划、日志、正文、metadata、Reviewer 报告、内容哈希和 Child 身份，保留仍绑定当前契约的 completed 章节，只重新排队失效、failed、running 和 pending 章节。恢复不会删除章节文件；显式阶段重置才执行清理。
+
+章节尝试还绑定当前章节的 Evidence、Answer Plan、已映射本地及 Web Chunk 和适用招标记录；依据变化保留有效正文重新运行 Reviewer，不连带重写无强依赖的章节。Writer 实际使用且验证通过的新资料由 Host 在 Reviewer 启动前合并到当前章节 Evidence，旧 Answer Plan 失效并经单节固定目录研究重新生成；模型判断资料支持边界，真实缺口继续等待输入。`chapter.revise` 和 revisionBatch 的写前研究分别只覆盖被修订章节和批内实际章节；默认整书写作才扫描全部可写叶节。
 
 Writer 使用私有 `submit_chapter` 提交完整候选，工具参数错误在当前回合纠正；每轮语义修复保留 Writer 身份并启动独立 Reviewer，引用和报告按当前候选重新生成。正文标题在审查前按确认目录统一编号；页面读取同一正文，Word 保留相同编号并调整文档标题层级。
 
@@ -73,7 +79,7 @@ S2 的 `project.json` 记录项目背景、建设目标、实施约束和项目�
 
 `bid/getDetails` 只读已发布详情：已存在的 `outline/confirmed-outline.json` 与章节位置决定最终目录和正文入口是否可见；没有最终目录时仍按首次确认边界显示初始或候选目录。阶段标签不会隐藏已有正式正文，也不改变确认接口的编辑准入。
 
-Bid Main Agent 可在任意阶段通过 `bid_run_task` 提交真实用户消息授权的能力计划。运行中的跨能力请求先写入不可变请求，再登记到原 Work 的 `commands.json`；原 Work 结束后按顺序启动独立能力 Work，挂起时保留待办并让原 Run 先恢复。`getCapabilityTaskPlan` 从请求和步骤检查点返回实际进度，未登记的孤立文件不构成接纳。`tender.analyze`、`outline.generate` 和 `document.review` 只接受项目范围；整书审核重新核对已完成正文并更新全局合规与整书验收记录，不启动 Writer 或改写正文。`docx.export` 只能作为任务最后一步，在前序能力正式结算后使用独立 Word 导出；导出提示包含正文快照摘要。局部任务成功不推进或倒退默认整本路线，首次 S2–S5 确认仍由原生阶段入口执行。
+新的整本目录深化任务须由 Main Agent 随请求提交 2–8 个具体工作项，界面展示该拆分，旧请求仍可恢复。运行中的资料映射进度读取当前能力步骤候选工作区的日志；不会把项目根目录的旧 S4 日志显示成当前任务。Bid Main Agent 可在任意阶段通过 `bid_run_task` 提交真实用户消息授权的能力计划。运行中的跨能力请求先写入不可变请求，再登记到原 Work 的 `commands.json`；原 Work 结束后按顺序启动独立能力 Work，挂起时保留待办并让原 Run 先恢复。`getCapabilityTaskPlan` 从请求和步骤检查点返回实际进度，未登记的孤立文件不构成接纳。`tender.analyze`、`outline.generate` 和 `document.review` 只接受项目范围；整书审核重新核对已完成正文并更新全局合规与整书验收记录，不启动 Writer 或改写正文。`docx.export` 只能作为任务最后一步，在前序能力正式结算后使用独立 Word 导出；导出提示包含正文快照摘要。局部任务成功不推进或倒退默认整本路线，首次 S2–S5 确认仍由原生阶段入口执行。
 
 S3 的评分响应点拆解与语义复核都上报 `analyzing`，对应计划第一步；`reviewing` 只用于目录确定性校验通过后的目录质量复核。首次执行和候选恢复遵守相同的进度含义，评分响应点复核失败时不标记目录生成或校验已完成。
 
@@ -96,7 +102,7 @@ S5 的首次整体要求由 Host 使用 Interaction Session 的原生 `ask_user_
 
 S5 只把 `outline/confirmed-outline.json` 作为章节结构来源。Main Agent 根据当前 Task Contract 生成绑定 Writing Plan 版本的章节关系计划；共用背景、资料或业务流程先后不构成写作强依赖，只有必须消费前章具体决策、成果结构或最终索引时才使用 `depends_on`。Writing Plan 更新后，Main Agent 重新判断受影响范围的 `depends_on`、`related_sections`、章节规划说明和全书一致性说明，Host 校验 DAG 并按实际强依赖传播失效。Host 按每个 Section 的 `framework_refs` 注入精确框架正文分块；框架正文是可保留、适配或改写的写作输入，不是当前项目事实 Evidence。每份有效候选正文和 Metadata 在 Reviewer 启动前即可读取；Reviewer 没有工作区或网络工具。正文以我方拟采用的方案、措施、职责、成果和承诺直接作答；主要复述采购要求、解释资格条件或采用需求分析口吻时，Reviewer 通过 `bidder_response_voice` 要求原 Writer 修订。企业事实缺少本地依据时只保留在 `unresolved_topics`，不在客户正文生成要求解读、无依据承诺或占位内容，也不得由框架或 Web 资料替代。明确作为拟议方案的实施方法、分工、台账字段与质控措施，只要不违背采购要求，不因原文未逐项列出而自动判为无依据。目录、总述及正文不得显示内部 Requirement、Scoring、Compliance、Response Point、Section 或 Acceptance Criterion ID；招标原文自身使用的同名条款编号不受影响。
 
-最终 Validator 不依赖 Final Main Agent 复述章节判断，而是独立校验当前计划版本的全部 required section 结果来自最新 Chapter Reviewer、required document 结果来自最终整书验收、确定性结果等于 Host 当前事实，并复核每次最终 Writer/Reviewer 输入身份。通过后才发布 S5 完成状态。
+最终 Validator 不依赖 Final Main Agent 复述章节判断，而是独立校验当前计划版本的全部 required section 结果来自最新 Chapter Reviewer、required document 结果来自最终整书验收、确定性结果等于 Host 当前事实，并复核 Writer 启动时的计划、章节与依赖身份以及最终 Reviewer 对当前 Evidence 的输入身份。通过后才发布 S5 完成状态。
 
 S5 完成后项目保持 `chapter_writing/completed`，审核项标签和逐章状态常驻。审核工作台中的“导出 Word”调用 Host `exportDocx`，程序核对章节 manifest 的确认目录哈希、完整章节集合及正文路径，再按确认目录顺序保留结构标题并组合正文；组合结果仍含项目内部 ID 时拒绝导出。每次成功导出在 `outputDirectory` 写入一对带时间标识的 Markdown 和 DOCX 文件。导出成功或失败都不改变 S5 状态，可重复执行。已经保存为 `docx_export/completed` 的旧项目同样保留审核工作台和导出动作。
 

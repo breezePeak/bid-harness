@@ -5,6 +5,7 @@ import type { GoalView } from '@deepseek-ai/dsh-goal'
 import type {} from '@deepseek-ai/dsh-goal-round-driver'
 import type { Session } from '@deepseek-ai/dsh-session'
 import type { BidRunContext } from './run-coordinator.ts'
+import type { BidTaskState } from './control-plane-contract.ts'
 import { bidRunRecoveryEligibility, bidWritingPlanRecoveryEligibility } from './bid-recovery.ts'
 import { isBidMainSession } from './stage-interaction.ts'
 
@@ -122,6 +123,24 @@ export class BidGoalBridge {
       && goal?.id === bound.data.goalId && goal.phase === 'active' && goal.activation === 'armed'
       && (bidRunRecoveryEligibility(session, goal.id).eligible
         || bidWritingPlanRecoveryEligibility(session, goal.id).eligible)
+  }
+
+  /**
+   * Restore only this Host's active Goal after native session-start disarms it.
+   * @param session - Bound Bid main Session.
+   * @param task - Authoritative project state loaded under the project lock.
+   */
+  rearmBoundActiveGoal(session: Session, task: BidTaskState): void {
+    if (!isBidMainSession(session)
+      || !['tender_analysis', 'outline_generation', 'evidence_mapping', 'chapter_writing'].includes(task.stage)
+      || task.status !== 'suspended'
+      || ['user_stop', 'awaiting_input'].includes(task.run.cause)) return
+    this.change(session, ({ agent, view }) => {
+      if (bidGoalBinding(session)?.data.ownerSessionId !== String(session.id)
+        || view.phase !== 'active' || view.activation !== 'disarmed'
+        || view.roundsStarted >= view.maxGoalRounds) return
+      this.ctx.goals.resume(agent, { id: view.id, revision: view.revision })
+    })
   }
 
   /**

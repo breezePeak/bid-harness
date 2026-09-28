@@ -4,9 +4,9 @@ English | [中文](README.zh.md)
 
 Bid Session 浏览器 UI。插件向 Conversation 声明的 `conversation.input.dock` 列表注册 `BidStagePanel`，只在 Host 解析的 Session preset 为 `bid` 且存在 `bid.runtime` 投影时渲染。运行中的阶段把当前 `run.progress.phase` 映射为 S1–S6 有序计划并使用共享 `PlanListPanel`；独立 Word 导出的 S6 计划只在导出运行时显示。S5 完成后隐藏阶段状态行，审核与修订控件仍可用；挂起、失败和等待状态保留阶段状态行及适用控件。客户端不折叠 Bid 事件、不推进阶段、不推导权限，也不保存本地阶段或状态。
 
-S4 进度读取暂不可用时保留同一工作已读到的统计；首次读取由计划表头显示同步状态，正常同步不追加独立提示行。读取失败仍显示错误说明，后续轮询继续重试。
+S4 进度读取暂不可用时保留同一工作已读到的统计；首次读取由计划表头显示同步状态，后续轮询继续重试。阶段面板不另行显示进度同步提示。
 
-能力任务计划从 Host 的 `getCapabilityTaskPlan` 读取当前 Work 检查点，运行时按实际能力顺序显示，不按兼容阶段标签推断局部步骤；阶段计划仍用于默认生成路线。正文与目录入口依据正式产物显示，拆章后按 `section_id` 重新定位正文。独立 Word 导出运行时显示专用计划；完成或失败事件在发起导出的会话聊天时间线生成可重放的结果，成功时显示文件绝对路径，失败时显示原因。既有事件缺少绝对路径时，显示相对项目数据目录的路径并提供导出页入口。
+整本目录深化运行时展示主 Agent 随请求提交的具体工作项。能力任务计划从 Host 的 `getCapabilityTaskPlan` 读取当前 Work 检查点，运行时按实际能力顺序显示，不按兼容阶段标签推断局部步骤；阶段计划仍用于默认生成路线。运行计划不附加章节任务摘要或单独的运行状态文字。正文与目录入口依据正式产物显示，拆章后按 `section_id` 重新定位正文。独立 Word 导出运行时显示专用计划；完成或失败事件在发起导出的会话聊天时间线生成可重放的结果，成功时显示文件绝对路径，失败时显示原因。既有事件缺少绝对路径时，显示相对项目数据目录的路径并提供导出页入口。
 
 `projection.allowedActions` controls upload, retry, outline-confirmation, and Word-export controls, while the Host-projected file limits configure the picker and its rule text. File selection keeps browser `File` objects locally until the user explicitly uploads the batch. These actions use dedicated Bid Host entry points and never call `session.prompt()`.
 

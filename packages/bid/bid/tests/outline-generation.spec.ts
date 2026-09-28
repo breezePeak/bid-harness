@@ -56,7 +56,7 @@ const source = { file_id: 'tender', chunk: 'corpus/tender/chunks/0001.md', line_
 function subagentPrompt(request: Record<string, unknown>): string {
   const prompt = request.prompt
   if (!Array.isArray(prompt)) throw new Error('subagent request has no prompt')
-  const first = prompt[0]
+  const first: unknown = prompt[0]
   if (typeof first !== 'object' || first === null || !('text' in first) || typeof first.text !== 'string') {
     throw new Error('subagent prompt has no text')
   }
@@ -1310,7 +1310,7 @@ describe('S3 确定性规范化与局部续修', () => {
     if (!validation.ok) expect(validation.issues.map(issue => issue.code)).toEqual(expect.arrayContaining(['OUTLINE_SHARED_CONTAINER_RESPONSE_POINT_INVALID', 'OUTLINE_SHARED_RESPONSE_POINT_MISSING']))
   })
 
-  it('确定性修复正式应用后恢复不再获得第二次修复', async () => {
+  it('新的 Run 可基于已保存候选再做一次局部修复', async () => {
     const workspace = await fixture()
     const catalog = await catalogWithMissing(workspace)
     await publishOutline(workspace, reviewedOutline)
@@ -1321,12 +1321,39 @@ describe('S3 确定性规范化与局部续修', () => {
     expect(JSON.parse(await readFile(join(workspace.projectRoot, 'outline/outline.json'), 'utf8'))).toEqual(withTechnicalDeviation(reviewedOutline))
     expect(JSON.parse(await readFile(join(workspace.projectRoot, 'outline/repair-operations.json'), 'utf8'))).toEqual([])
     await expect(readFile(join(workspace.projectRoot, 'outline/quality-report.json'))).rejects.toMatchObject({ code: 'ENOENT' })
-    const retry = modelAgent(workspace, async () => { throw new Error('恢复后不应再调用模型') })
-    await expect(executeOutlineGeneration(retry.agent, workspace, buildBidStageTask('outline_generation'), {
+    const retry = modelAgent(workspace, async (prompt, submitReview) => {
+      if (prompt.includes('局部响应点修复')) {
+        await writeFile(join(workspace.projectRoot, 'outline/repair-operations.json'), JSON.stringify(repairSchedule))
+      } else await submitReview()
+    })
+    await executeOutlineGeneration(retry.agent, workspace, buildBidStageTask('outline_generation'), {
       run: createTestBidRunContext({ resumeOf: { runId: 'prior-run', cause: 'host_restart' } }),
-    })).rejects.toThrow('已经使用过一次确定性修复')
-    expect(retry.followup).not.toHaveBeenCalled()
+    })
+    expect(retry.followup).toHaveBeenCalledTimes(1)
     expect(JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/scoring-response-points.json'), 'utf8'))).toEqual(catalog)
+  })
+
+  it('主 Agent 接管已修复过的目录时传入具体指令，并保留正式响应点重新校验', async () => {
+    const workspace = await fixture()
+    const catalog = await catalogWithMissing(workspace)
+    await publishOutline(workspace, reviewedOutline)
+    await writeFile(join(workspace.projectRoot, 'outline/repair-operations.json'), '[]')
+    const instruction = '把遗漏响应点补到实施进度叶子，并写明里程碑与进度保障。'
+    const { agent, followup } = modelAgent(workspace, async (prompt, submitReview) => {
+      if (prompt.includes('局部响应点修复')) {
+        expect(prompt).toContain(instruction)
+        expect(prompt).toContain('原问题：OUTLINE_SHARED_RESPONSE_POINT_MISSING')
+        await writeFile(join(workspace.projectRoot, 'outline/repair-operations.json'), JSON.stringify(repairSchedule))
+      } else await submitReview()
+    })
+    const run = createTestBidRunContext({ resumeOf: { runId: 'failed-repair', cause: 'retry_exhausted' } })
+    await executeOutlineGeneration(agent, workspace, buildBidStageTask('outline_generation'), { run, recovery: {
+      workId: run.work.workId, unit: 'outline/outline.json', instruction,
+      issues: [{ code: 'OUTLINE_SHARED_RESPONSE_POINT_MISSING', artifact: 'outline/outline.json', message: '遗漏 RP-000011' }],
+    } })
+    expect(followup).toHaveBeenCalledTimes(1)
+    expect(JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/scoring-response-points.json'), 'utf8'))).toEqual(catalog)
+    await expect(validateOutlineGeneration(workspace, 'outline_generation', artifacts)).resolves.toEqual({ ok: true })
   })
 
   it.each(['error', 'aborted'] as const)('复核 %s 即使输出报告也不能伪造完成', async (reason) => {

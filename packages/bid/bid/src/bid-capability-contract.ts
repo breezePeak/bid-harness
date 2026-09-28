@@ -80,6 +80,7 @@ export const bidCapabilityStepSchema = z.object({
 export const bidCapabilityTaskSchema = z.object({
   goal: instruction,
   scope: bidCapabilityScopeSchema,
+  work_items: z.array(z.string().trim().min(1).max(200)).min(2).max(8).optional(),
   allow_pending_content: z.boolean().optional().describe('仅用户明确要求只改目录或暂缓正文时设为 true；执行中的临时迁移延后不属于此授权。'),
   steps: z.array(bidCapabilityStepSchema).min(1),
 }).strict().refine((task) => {
@@ -93,6 +94,14 @@ export const bidCapabilityTaskSchema = z.object({
     && actual.content_sha256 === expected.content_sha256 && actual.start === expected.start
     && actual.end === expected.end && actual.text === expected.text
 }, 'BID_CAPABILITY_PARAGRAPH_PLAN_INVALID')
+
+/** 新的整本目录深化任务须由 Main Agent 提交可见的具体工作项。 */
+export function validateCapabilityTaskWorkItems(task: BidCapabilityTask): void {
+  if (task.scope.kind === 'project' && task.steps.some(step => step.call.capability === 'outline.refine')
+    && task.work_items === undefined) {
+    throw new Error('BID_CAPABILITY_WORK_ITEMS_REQUIRED: 整本目录深化请先拆成 2–8 个具体工作项。')
+  }
+}
 
 /** Host 核对过产物后形成的步骤结果。 */
 export const bidCapabilityResultSchema = z.object({
@@ -113,6 +122,8 @@ export interface BidCapabilityExecutionContext {
   readonly sourceSession?: WritingMessageSession
   readonly run: BidRunContext
   readonly sectionIds: ReadonlySet<string> | null
+  /** 用户选中的最小子树根；与可写叶节分开传入结构研究。 */
+  readonly sectionScopeRoots?: readonly string[]
   /** 结构操作产出并经 Host 核对属于任务根范围的新后代。 */
   readonly authorizedNewDescendants?: ReadonlySet<string>
   readonly stepDirectory: string
@@ -124,6 +135,8 @@ export interface BidCapabilityExecutionContext {
   readonly authorization: { readonly session_id: string; readonly message_id: string }
   readonly inputSha256: string
   readonly inputAnswer?: AskUserQuestionAnswerItem
+  /** 相同步骤及输入摘要的候选已存在，可继续其业务检查点。 */
+  readonly resumeCandidate?: boolean
 }
 
 /** 已注册适配器接受的能力标识。 */
@@ -142,12 +155,16 @@ export type BidCapabilityTask = z.infer<typeof bidCapabilityTaskSchema>
 /**
  * 接纳新任务或修改后续计划时拒绝缺少正文迁移及复核的计划；读取历史请求不调用。
  * @param task 已解析的任务。
+ * @param hasExistingContent 授权范围内已有正文；研究深化可能需要迁移时由 Host 判定。
  * @throws 未明确暂缓正文且目录步骤缺少后续迁移和复核时拒绝。
  */
-export function validateCapabilityTaskContentFollowup(task: BidCapabilityTask): void {
+export function validateCapabilityTaskContentFollowup(task: BidCapabilityTask, hasExistingContent = false): void {
   if (task.allow_pending_content === true) return
   for (const [index, step] of task.steps.entries()) {
-    if (step.call.capability !== 'outline.update' || !step.call.input.defer_content_migration) continue
+    const needsFollowup = step.call.capability === 'outline.update' && step.call.input.defer_content_migration
+      || hasExistingContent && (step.call.capability === 'outline.refine'
+        || step.call.capability === 'evidence.research' && step.call.input.allow_outline_refinement)
+    if (!needsFollowup) continue
     const following = task.steps.slice(index + 1)
     const migration = following.findIndex(item => item.call.capability === 'chapter.reorganize')
     if (migration >= 0 && following.slice(migration + 1).some(item =>

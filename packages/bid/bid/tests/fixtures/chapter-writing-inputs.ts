@@ -16,9 +16,17 @@ export async function writeInputs(workspace: BidWorkspace): Promise<ReturnType<t
   await writeFile(join(workspace.projectRoot, 'analysis/scoring.json'), `${JSON.stringify(scoring)}\n`)
   await writeFile(join(workspace.projectRoot, 'analysis/scoring-response-points.json'), `${JSON.stringify(createScoringResponsePointCatalog(scoring, { schema_version: 1, points: [1, 2, 3].map(index => ({ scoring_id: `SCORE-${index}`, order: 1, text: `回答评分${index}` })) }))}\n`)
   await writeFile(join(workspace.projectRoot, 'analysis/compliance.json'), `${JSON.stringify({ schema_version: 1, compliance_items: [] })}\n`)
-  await writeFile(join(workspace.projectRoot, 'analysis/evidence-map.json'), `${JSON.stringify({ section_mappings: [1, 2, 3].map(index => ({ section_id: `SEC-${index}`, local_materials: [], web_materials: [], missing_topics: [], writing_dimensions: ['技术方案'] })) })}\n`)
-  await writeFile(join(workspace.projectRoot, 'analysis/web-evidence-sources.json'), `${JSON.stringify({ stage: 'evidence_mapping', sources: [] })}\n`)
   const outline = outlineFixture()
+  await writeFile(join(workspace.projectRoot, 'analysis/evidence-map.json'), `${JSON.stringify({ section_mappings: [1, 2, 3].map(index => ({ section_id: `SEC-${index}`, local_materials: [], web_materials: [], missing_topics: [], writing_dimensions: ['技术方案'], answer_plan: [{
+    targets: [
+      { kind: 'must_answer', position: 0, text: `回答${index}` },
+      { kind: 'requirement', id: `REQ-${index}` },
+      { kind: 'response_point', id: `RP-${String(index).padStart(6, '0')}` },
+    ], mode: 'proposal', content: `本次拟采用章节${index}的实施方案。`,
+    basis: [{ kind: 'section_responsibility', section_id: `SEC-${index}` }],
+    boundary: '方案设计不证明现有企业能力或具体参数。',
+  }] })) })}\n`)
+  await writeFile(join(workspace.projectRoot, 'analysis/web-evidence-sources.json'), `${JSON.stringify({ stage: 'evidence_mapping', sources: [] })}\n`)
   await writeFile(join(workspace.projectRoot, 'outline/confirmed-outline.json'), `${JSON.stringify(outline)}\n`)
   const outlineSha256 = outlineArtifactSha256(outline)
   await writeFile(join(workspace.projectRoot, 'outline/confirmation.json'), `${JSON.stringify({ schema_version: 2, scope: 'technical_bid', decision: 'confirmed', source_outline_sha256: outlineSha256, confirmed_outline_sha256: outlineSha256, confirmed_draft_revision: 1, confirmed_draft_sha256: outlineSha256 })}\n`)

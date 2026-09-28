@@ -15,6 +15,7 @@ import type { WebEvidenceSource } from './web-evidence-source-artifacts.ts'
 import { semanticAcceptanceSubmissionSchema, type HostAcceptanceResult } from './acceptance-criteria.ts'
 import { parseWebEvidenceChunkIndex, webEvidenceChunkIndexMatches, webEvidenceChunkIndexPath } from './web-evidence-chunks.ts'
 import { assertNoLinkedPath } from './workspace-path.ts'
+import { buildSectionAnswerChecklist } from './section-answer-plan.ts'
 
 /** 仅在当前 Reviewer Child 注册的工具。 */
 export const CHAPTER_REVIEW_TOOLS = ['review_coverage_items', 'review_acceptance_criteria', 'review_global_constraints', 'review_claims', 'set_review_summary', 'finish_chapter_review', 'review_revision_issues'] as const
@@ -54,13 +55,7 @@ export interface ChapterReviewEvidence {
 export function buildChapterReviewChecklist(
   context: Pick<ChapterContext, 'section' | 'requirements' | 'responsePoints' | 'compliance'>,
 ): ChapterReviewItem[] {
-  const items: Omit<ChapterReviewItem, 'item_ref'>[] = [
-    ...context.section.must_answer.map(text => ({ kind: 'must_answer' as const, id: null, text })),
-    ...context.requirements.map(value => ({ kind: 'requirement' as const, id: value.id, text: value.normalized_requirement })),
-    ...context.responsePoints.map(value => ({ kind: 'response_point' as const, id: value.id, text: value.text })),
-    ...context.compliance.map(value => ({ kind: 'compliance' as const, id: value.id, text: value.normalized_rule })),
-  ]
-  return items.map((item, index) => ({ item_ref: `R${index + 1}`, ...item }))
+  return buildSectionAnswerChecklist(context).map(({ target: _target, ...item }) => item)
 }
 
 /**
@@ -161,6 +156,7 @@ const qualityParameters = Object.fromEntries(Object.keys(chapterReviewSchema.sha
  * @param hostAcceptanceResults 当前章节确定性条件的 Host 测量。
  * @param revisionIssues 当前任务的用户审批意见清单（如为批量修订）。
  * @param paragraphRevision 当前任务是否仅授权段落选区。
+ * @param changedQuoteTexts 本次选区新增或改写的原文行；仅这些声明可新增选区修复义务。
  * @returns 仅在权威 finish 结果成功后可读的报告。
  */
 export function attachChapterReview(
@@ -169,6 +165,7 @@ export function attachChapterReview(
   hostAcceptanceResults: readonly HostAcceptanceResult[] = [],
   revisionIssues: readonly ChapterRevisionReviewIssue[] = [],
   paragraphRevision = false,
+  changedQuoteTexts: ReadonlySet<string> = new Set(),
 ): ChapterProtocol<ChapterReview> {
   const runtime = createChapterProtocol<ChapterReview>(agent, 'finish_chapter_review', maxContinuations)
   const checklist = buildChapterReviewChecklist(context)
@@ -411,9 +408,12 @@ export function attachChapterReview(
             && context.sectionWritingPlan.acceptance_criteria.find(item => item.id === result.criterion_id)?.priority === 'required')
             .map(item => `动态验收未通过：${context.sectionWritingPlan.acceptance_criteria.find(value => value.id === item.criterion_id)?.description}；${item.message}`),
         ]
-        const blocking = completedSummary.external_input_only ? [] : paragraphRevision
+        const blocking = paragraphRevision
           ? [...new Set(unsatisfiedRevisionIssues
-            .map(item => `审批意见未满足：${item.issue_id} unsatisfied: ${item.reason}`))]
+            .map(item => `审批意见未满足：${item.issue_id} unsatisfied: ${item.reason}`)
+            .concat(claimChecks.filter(item => item.status === 'unsupported'
+              && changedQuoteTexts.has(item.claim_quote)).map(item =>
+              `本次修改的声明无依据：${item.claim_quote}；${item.issue}`)))]
           : [...new Set([
             ...completedSummary.blocking_issues,
             ...wholeChapterBlocking,
@@ -453,7 +453,7 @@ export function attachChapterReview(
         })
         const review = parseChapterReview({
           schema_version: CHAPTER_REVIEW_SCHEMA_VERSION, section_id: context.section.id,
-          verdict: completedSummary.external_input_only ? 'attention' : blocking.length > 0 ? 'repair'
+          verdict: blocking.length > 0 ? 'repair'
             : completedSummary.assignment_conflicts.length > 0 || completedSummary.external_input_gaps.length > 0 || hasRevisionNeedsInput ? 'attention' : 'pass',
           must_answer_coverage: entries.filter(entry => entry.item.kind === 'must_answer').map(entry => entry.value),
           requirement_coverage: entries.filter(entry => entry.item.kind === 'requirement').map(entry => ({ ...entry.value, requirement_id: entry.item.id })),

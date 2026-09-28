@@ -78,6 +78,7 @@ export type BidOrchestratorErrorCode =
   | 'BID_AUTOMATIC_STAGE_NOT_ALLOWED'
   | 'BID_PROGRAM_STAGE_NOT_ALLOWED'
   | 'BID_RESUME_NOT_ALLOWED'
+  | 'BID_RECOVERY_DUPLICATE_INSTRUCTION'
   | 'BID_STAGE_RESET_NOT_ALLOWED'
   | 'BID_WRITING_ENTRY_ACTION_NOT_ALLOWED'
 
@@ -445,8 +446,9 @@ export class BidOrchestrator {
         return 'waiting_user'
       }
       if (error instanceof BidStageExecutionError) {
-        await this.runs.suspend('retry_exhausted', stage === 'file_intake'
-          ? safeBidRunError(error, error.issues) : safeRecoverableBidFailure(work, error, error.issues))
+        const failure = stage === 'file_intake'
+          ? safeBidRunError(error, error.issues) : safeRecoverableBidFailure(work, error, error.issues)
+        await this.runs.suspend(failure.recovery?.kind === 'repair' ? 'retry_exhausted' : 'executor_error', failure)
         return 'failed'
       }
       await this.runs.suspend('executor_error', stage === 'file_intake'
@@ -462,10 +464,10 @@ export class BidOrchestrator {
         message: stage === 'tender_analysis' ? '招标分析结果未通过校验。' : '当前阶段结果未通过校验。',
         issues: validation.issues,
       }
-      await this.runs.suspend('retry_exhausted', {
-        ...failure,
-        recovery: stage === 'file_intake' || stage === 'docx_export' ? undefined
-          : safeRecoverableBidFailure(work, failure, validation.issues, true).recovery,
+      const recovery = stage === 'file_intake' || stage === 'docx_export' ? undefined
+        : safeRecoverableBidFailure(work, failure, validation.issues).recovery
+      await this.runs.suspend(recovery?.kind === 'repair' ? 'retry_exhausted' : 'executor_error', {
+        ...failure, recovery,
       })
       return 'failed'
     }
@@ -479,7 +481,7 @@ export class BidOrchestrator {
     try {
       commitContext = await this.prepareStageContextTransition(stage)
     } catch (error: unknown) {
-      await this.runs.suspend('executor_error', safeBidRunError(error))
+      await this.runs.suspend('executor_error', safeRecoverableBidFailure(work, error))
       return 'failed'
     }
     if (signalAborted(run.signal)) { await this.runs.suspend('user_stop'); return 'aborted' }

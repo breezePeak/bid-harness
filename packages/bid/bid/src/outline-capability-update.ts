@@ -11,7 +11,7 @@ import { validateOutlineDraftForConfirmation } from './outline-confirmation-vali
 import { generateScopedOutlineBusinessBindings } from './outline-generation-executor.ts'
 import { parseTenderComplianceArtifact, parseTenderRequirementsArtifact, parseTenderScoringArtifact } from './tender-analysis-artifacts.ts'
 import { parseScoringResponsePointCatalog } from './scoring-response-point-artifacts.ts'
-import { parseEvidenceMapArtifact, sectionEvidenceMappingSchema } from './evidence-mapping-artifacts.ts'
+import { parseEvidenceMapArtifact, sectionEvidenceMappingSchema, type EvidenceMapArtifact } from './evidence-mapping-artifacts.ts'
 import { changedWritableSectionIds, reconcileSectionEvidence, buildWritableSectionWorklist } from './section-evidence-context.ts'
 import { nextCriterionId, parseWritingPlan, writingPlanSchema, type WritingPlan } from './writing-requirements.ts'
 import { parseChapterExecutionPlan, parseOrMigrateChapterExecutionLog } from './chapter-writing-plan-artifacts.ts'
@@ -188,10 +188,10 @@ export async function executeCapabilityOutlineUpdate(
  * @returns 精确协调文件及仍待完成的正文任务。
  */
 export async function adoptCapabilityResearchedOutline(
-  context: BidCapabilityExecutionContext, outline: OutlineArtifact, researchedIds: ReadonlySet<string>,
+  context: BidCapabilityExecutionContext, old: OutlineArtifact, outline: OutlineArtifact,
+  researchedIds: ReadonlySet<string>, previousEvidence: EvidenceMapArtifact,
 ): ReturnType<typeof executeCapabilityOutlineUpdate> {
   const workspace = context.working
-  const old = (await readCapabilityOutlineBaseline(workspace)).outline
   const facts = await Promise.all([
     requiredJson(workspace, 'analysis/requirements.json'), requiredJson(workspace, 'analysis/scoring.json'),
     requiredJson(workspace, 'analysis/compliance.json'), requiredJson(workspace, 'analysis/scoring-response-points.json'),
@@ -202,25 +202,34 @@ export async function adoptCapabilityResearchedOutline(
   if (!validation.ok) throw new Error(`BID_OUTLINE_CAPABILITY_INVALID: ${validation.issues.map(issue => issue.code).join(',')}`)
   const before = new Map(old.sections.map(section => [section.id, section]))
   const changed = outline.sections.filter(section => JSON.stringify(before.get(section.id)) !== JSON.stringify(section))
+  const withinScope = (id: string): boolean => {
+    if (context.sectionIds === null) return true
+    const byId = new Map(outline.sections.map(section => [section.id, section.parent_id]))
+    for (let current: string | null = id; current !== null; current = byId.get(current) ?? null) {
+      if (context.sectionIds.has(current)) return true
+    }
+    return false
+  }
   if (JSON.stringify({ ...old, sections: [] }) !== JSON.stringify({ ...outline, sections: [] })
-    || outline.sections.length !== old.sections.length
     || changed.some((section) => {
       const previous = before.get(section.id)
-      return previous === undefined || previous.parent_id !== section.parent_id || previous.order !== section.order
-        || previous.title !== section.title || previous.writable !== section.writable
-        || context.sectionIds !== null && !context.sectionIds.has(section.id)
-    }) || [...researchedIds].some(id => !outline.sections.some(section => section.id === id && section.writable))) {
+      return !withinScope(section.id) || previous !== undefined && previous.parent_id !== section.parent_id
+        && (section.parent_id === null || !withinScope(section.parent_id))
+    })
+    || old.sections.some(section => !outline.sections.some(item => item.id === section.id)
+      && context.sectionIds !== null && !context.sectionIds.has(section.id))
+    || [...researchedIds].some(id => !outline.sections.some(section => section.id === id && section.writable))) {
     throw new Error('BID_EVIDENCE_RESEARCH_OUTLINE_SCOPE_INVALID')
   }
   return coordinateCapabilityOutline(context, old, outline, {
     operations: [], business_bindings: [], content_assignments: [], allow_content_deletion: false,
-    defer_content_migration: false,
-  }, researchedIds)
+    defer_content_migration: true,
+  }, researchedIds, previousEvidence)
 }
 
 async function coordinateCapabilityOutline(
   context: BidCapabilityExecutionContext, old: OutlineArtifact, outline: OutlineArtifact,
-  input: OutlineUpdate, researchedIds: ReadonlySet<string>,
+  input: OutlineUpdate, researchedIds: ReadonlySet<string>, previousEvidence?: EvidenceMapArtifact,
 ): ReturnType<typeof executeCapabilityOutlineUpdate> {
   const workspace = context.working
   const base = await readCapabilityOutlineBaseline(workspace)
@@ -370,7 +379,7 @@ async function coordinateCapabilityOutline(
   const priorReassignment = priorReassignmentRaw === undefined ? []
     : outlineReassignmentSchema.parse(priorReassignmentRaw).retired_sections
   const oldWriting = writingRaw === undefined ? undefined : parseWritingPlan(writingRaw)
-  const oldEvidence = evidenceRaw === undefined ? undefined : parseEvidenceMapArtifact(evidenceRaw)
+  const oldEvidence = previousEvidence ?? (evidenceRaw === undefined ? undefined : parseEvidenceMapArtifact(evidenceRaw))
   const retired = oldLeaves.filter(section => !newLeafIds.has(section.id)).map(section => ({
     source_section_id: section.id,
     target_section_ids: [...new Set([
@@ -391,16 +400,17 @@ async function coordinateCapabilityOutline(
   const priorSeedsRaw = await optionalJson(workspace, 'chapters/reuse-seeds.json')
   const priorSeeds = priorSeedsRaw === undefined ? [] : chapterReuseSeedsSchema.parse(priorSeedsRaw).seeds
     .filter(seed => newLeafIds.has(seed.section_id) && !staleReview.has(seed.section_id))
+  const hasConfirmedOutline = await optionalJson(workspace, 'outline/confirmed-outline.json') !== undefined
   await context.run.commits.publish(async (lease) => {
     const write = async (path: string, value: unknown): Promise<void> => {
       if (JSON.stringify(await optionalJson(workspace, path)) === JSON.stringify(value)) return
       await lease.writeJson(within(workspace.projectRoot, path), value)
       changed.add(path)
     }
-    if (outlineChanged) {
+    if (outlineChanged || !hasConfirmedOutline && researchedIds.size > 0) {
       await write('outline/outline.json', outline)
       await write('outline/draft.json', draft)
-      if (await optionalJson(workspace, 'outline/confirmed-outline.json') !== undefined) {
+      if (hasConfirmedOutline || researchedIds.size > 0) {
         await write('outline/confirmed-outline.json', outline)
         await write('outline/confirmation.json', {
           schema_version: 2, scope: 'technical_bid', decision: 'confirmed',

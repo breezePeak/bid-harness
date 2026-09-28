@@ -15,6 +15,6 @@ it('默认整本路线的顺序与首次确认点由同一表述决定', () => {
   expect(defaultBidUserGate('tender_analysis')).toBe('after_validation')
   expect(defaultBidUserGate('outline_generation')).toBe('after_validation')
   expect(defaultBidUserGate('evidence_mapping')).toBe('after_validation')
-  expect(defaultBidUserGate('chapter_writing')).toBe('before_execution')
+  expect(defaultBidUserGate('chapter_writing')).toBe('none')
   expect(defaultBidNextStage('docx_export')).toBeNull()
 })
