@@ -35,8 +35,8 @@ async function fixture() {
   session.append('turn/start', { turn: 1 })
   session.append('user/message', message, { surfaceOp: 'append' })
   const task = { goal: '审核章节和整书', scope: { kind: 'project' as const }, steps: [
-    { scope: { source: 'task' as const }, call: { capability: 'chapter.review' as const, input: { reason: '审核章节' } } },
-    { scope: { source: 'task' as const }, call: { capability: 'document.review' as const, input: { reason: '审核整书' } } },
+    { description: '审核章节', scope: { source: 'task' as const }, call: { capability: 'chapter.review' as const, input: { reason: '审核章节' } } },
+    { description: '审核整书', scope: { source: 'task' as const }, call: { capability: 'document.review' as const, input: { reason: '审核整书' } } },
   ] }
   const authorization = { session_id: String(session.id), message_id: String(message.id) }
   const descriptor = await persistCapabilityTaskRequest(workspace, session, 'chapter_writing', task, authorization,
@@ -78,9 +78,9 @@ describe('同一 Work 的能力序列', () => {
         name === 'agents' ? { get: () => main } : undefined } } as Parameters<typeof executeCapabilityTask>[3]
       const request = capabilityTaskRequestSchema.parse(await readBidWorkRequest(workspace, descriptor))
       const working = new BidWorkspace((await prepareBidWorkingTree(workspace, descriptor)).root, workspace.config)
-      const replacement = [{ scope: { source: 'task' as const }, call: {
+      const replacement = [{ description: '按章节复核未完成目标', scope: { source: 'task' as const }, call: {
         capability: 'chapter.review' as const, input: { reason: '按章节复核未完成目标' },
-      } }, { scope: { source: 'task' as const }, call: {
+      } }, { description: '核对整项任务结果', scope: { source: 'task' as const }, call: {
         capability: 'document.review' as const, input: { reason: '核对整项任务结果' },
       } }]
       const patch = (from = 1) => patchCapabilityTaskSteps(run, workspace, working, request, session,
@@ -103,11 +103,13 @@ describe('同一 Work 的能力序列', () => {
           { index: 1, status: 'running', call: { capability: 'document.review' } },
         ] } })
       await expect(patchCapabilityTaskSteps(run, workspace, working, request, session, authorization, 1, replacement,
-        { ...main, ctx: { get: () => undefined } } as typeof main)).rejects.toThrow('BID_CAPABILITY_PLAN_PATCH_UNAUTHORIZED')
+        { ...main, ctx })).rejects.toThrow('BID_CAPABILITY_PLAN_PATCH_UNAUTHORIZED')
       await expect(patch(0)).rejects.toThrow('BID_CAPABILITY_PLAN_PATCH_STARTED_STEP')
       const patched = await patch()
       expect(patched.steps.map(step => step.status)).toEqual(['completed', 'pending', 'pending'])
       expect(patched.steps[0]).toMatchObject({ result: { change_summary: '完成审核' } })
+      expect(patched.steps[0]?.step.description).toBe(request.task.steps[0]?.description)
+      expect(patched.steps.slice(1).map(step => step.step.description)).toEqual(replacement.map(step => step.description))
       expect((await patch()).plan_patches).toHaveLength(1)
       adapter.execute.mockImplementationOnce(async () => ({ result: { target_section_ids: [], changed_artifacts: [],
         change_summary: '既有章节审核结果满足要求', warnings: [], missing_topics: [], needs_input: false } }))
@@ -119,30 +121,32 @@ describe('同一 Work 的能力序列', () => {
     } finally { await ctx.fiber.dispose() }
   })
 
-  it('新的整本目录深化先保存 Main Agent 的具体工作项，旧请求仍可解析', async () => {
+  it('步骤说明随请求保存，缺失或空白说明不能接纳为能力任务', async () => {
     const { ctx, workspace, session } = await fixture()
     try {
       const message = createUserMessage({ content: [{ type: 'text', text: '重构整本评分目录' }], source: { kind: 'user' } })
       session.append('turn/start', { turn: 1 })
       session.append('user/message', message, { surfaceOp: 'append' })
       const authorization = { session_id: String(session.id), message_id: String(message.id) }
-      const task = bidCapabilityTaskSchema.parse({ goal: '重构整本评分目录', scope: { kind: 'project' }, steps: [{
+      const task = bidCapabilityTaskSchema.parse({ goal: '重构整本评分目录', scope: { kind: 'project' }, steps: [{ description: '六个评分章并列',
         scope: { source: 'task' }, call: { capability: 'outline.refine', input: { feedback: '六个评分章并列' } },
       }] })
       const returnState = { stage: 'evidence_mapping' as const, status: 'ready' as const, run: null }
-      await expect(persistCapabilityTaskRequest(workspace, session, 'evidence_mapping', task,
-        authorization, [], returnState)).rejects.toThrow('BID_CAPABILITY_WORK_ITEMS_REQUIRED')
+      for (const description of [undefined, '', '   ']) {
+        await expect(persistCapabilityTaskRequest(workspace, session, 'evidence_mapping', {
+          ...task, steps: [{ ...task.steps[0]!, description }],
+        } as typeof task, authorization, [], returnState)).rejects.toThrow()
+      }
       await expect(findCapabilityTaskRequest(workspace, authorization)).resolves.toBeNull()
-      const planned = { ...task, work_items: ['核对六个评分章及响应点', '重构目录并复核覆盖'] }
-      const work = await persistCapabilityTaskRequest(workspace, session, 'evidence_mapping', planned,
+      const work = await persistCapabilityTaskRequest(workspace, session, 'evidence_mapping', task,
         authorization, [], returnState)
       const saved = capabilityTaskRequestSchema.parse(await readBidWorkRequest(workspace, work))
-      expect(saved.task.work_items).toEqual(planned.work_items)
+      expect(saved.task.steps[0]?.description).toBe('六个评分章并列')
       const checkpointPath = join(workspace.projectRoot, 'runs', work.workId, 'task-checkpoint.json')
       await mkdir(join(workspace.projectRoot, 'runs', work.workId), { recursive: true })
       await writeFile(checkpointPath, JSON.stringify({
         schema_version: 1, work_id: work.workId, request_sha256: work.requestSha256, plan_patches: [],
-        steps: [{ step_id: 'step-test', step: planned.steps[0], status: 'running',
+        steps: [{ step_id: 'step-test', step: task.steps[0], status: 'running',
           authorization, input_sha256: 'a'.repeat(64) }],
       }))
       expect(await activeCapabilityMappingWorkspace(workspace, work)).toBeNull()
@@ -151,7 +155,6 @@ describe('同一 Work 的能力序列', () => {
       await mkdir(candidateRoot, { recursive: true })
       const candidate = await activeCapabilityMappingWorkspace(workspace, work)
       expect(candidate?.root).toBe(candidateRoot)
-      expect(bidCapabilityTaskSchema.parse(task).work_items).toBeUndefined()
     } finally { await ctx.fiber.dispose() }
   })
 
@@ -159,7 +162,7 @@ describe('同一 Work 的能力序列', () => {
     const { ctx, workspace, session, descriptor, authorization } = await fixture()
     try {
       const previous = capabilityTaskRequestSchema.parse(await readBidWorkRequest(workspace, descriptor))
-      const task = bidCapabilityTaskSchema.parse({ goal: '拆分背景与目标', scope: { kind: 'project' }, steps: [{
+      const task = bidCapabilityTaskSchema.parse({ goal: '拆分背景与目标', scope: { kind: 'project' }, steps: [{ description: '执行已授权的测试步骤',
         scope: { source: 'task' }, call: { capability: 'outline.update', input: {
           operations: [{ type: 'split_section', section_id: 'A', children: [
             { title: '背景', purpose: '背景', must_answer: ['背景'] },
@@ -198,7 +201,7 @@ describe('同一 Work 的能力序列', () => {
       const original = createUserMessage({ content: [{ type: 'text', text: '缩短选中段落' }], source: { kind: 'user' } })
       session.append('turn/start', { turn: 1 })
       session.append('user/message', original, { surfaceOp: 'append' })
-      const task = { goal: '缩短选中段落', scope: { kind: 'paragraphs' as const, reference }, steps: [{
+      const task = { goal: '缩短选中段落', scope: { kind: 'paragraphs' as const, reference }, steps: [{ description: '缩短选中段落',
         scope: { source: 'task' as const }, call: { capability: 'chapter.revise' as const,
           input: { instruction: '缩短选中段落', reference } },
       }] }
@@ -219,7 +222,7 @@ describe('同一 Work 的能力序列', () => {
       const working = new BidWorkspace((await prepareBidWorkingTree(workspace, work)).root, workspace.config)
       await expect(patchCapabilityTaskSteps(run, workspace, working, request, session,
         { session_id: String(session.id), message_id: String(next.id) }, 0,
-        [{ scope: { source: 'task' }, call: { capability: 'chapter.write', input: { instruction: '重写整章' } } }]))
+        [{ description: '重写整章', scope: { source: 'task' }, call: { capability: 'chapter.write', input: { instruction: '重写整章' } } }]))
         .rejects.toThrow('BID_CAPABILITY_PARAGRAPH_PLAN_INVALID')
       const checkpointPath = join(workspace.projectRoot, `runs/${work.workId}/task-checkpoint.json`)
       const checkpoint = JSON.parse(await readFile(checkpointPath, 'utf8')) as {
@@ -228,7 +231,7 @@ describe('同一 Work 的能力序列', () => {
       }
       expect(checkpoint.steps.map(step => step.step.call.capability)).toEqual(['chapter.revise'])
       expect(await readFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), 'utf8')).toBe(markdown)
-      const replacement = { scope: { source: 'task' }, call: { capability: 'chapter.write',
+      const replacement = { description: '重写整章', scope: { source: 'task' }, call: { capability: 'chapter.write',
         input: { instruction: '重写整章' } } }
       const nextAuthorization = { session_id: String(session.id), message_id: String(next.id) }
       checkpoint.steps[0] = { ...checkpoint.steps[0]!, step: replacement, authorization: nextAuthorization }
@@ -261,7 +264,7 @@ describe('同一 Work 的能力序列', () => {
       const authorization = { session_id: String(session.id), message_id: String(message.id) }
       const request = capabilityTaskRequestSchema.parse(await readBidWorkRequest(workspace, descriptor))
       const working = new BidWorkspace((await prepareBidWorkingTree(workspace, descriptor)).root, workspace.config)
-      const replacement = [{ scope: { source: 'task' as const },
+      const replacement = [{ description: '只核对当前完整目录', scope: { source: 'task' as const },
         call: { capability: 'document.review' as const, input: { reason: '只核对当前完整目录' } } }]
       await expect(patchCapabilityTaskSteps(run, workspace, working, request, session, authorization, 0, replacement))
         .rejects.toThrow('BID_CAPABILITY_PLAN_PATCH_STARTED_STEP')
@@ -341,7 +344,7 @@ describe('同一 Work 的能力序列', () => {
       const request = capabilityTaskRequestSchema.parse(await readBidWorkRequest(workspace, descriptor))
       const working = new BidWorkspace((await prepareBidWorkingTree(workspace, descriptor)).root, workspace.config)
       await expect(patchCapabilityTaskSteps(run, workspace, working, request, session, authorization, 0,
-        [{ scope: { source: 'task' }, call: { capability: 'document.review', input: { reason: '替换审核' } } }]))
+        [{ description: '替换审核', scope: { source: 'task' }, call: { capability: 'document.review', input: { reason: '替换审核' } } }]))
         .rejects.toThrow('步骤已有提交凭据')
       const resumed = createTestBidRunContext({ work: descriptor })
       await expect(executeCapabilityTask(workspace, resumed, adapter, agent, session))

@@ -9,6 +9,8 @@ export type PlanListItemStatus = 'completed' | 'in_progress' | 'pending'
 export interface PlanListItem {
   readonly key: string
   readonly content: string
+  /** 步骤的具体结果或阻断原因；存在时正文与详情均允许换行。 */
+  readonly detail?: string
   readonly status: PlanListItemStatus
 }
 
@@ -154,7 +156,10 @@ export function PlanListPanel({ items, running, labels, testId, summary }: PlanL
                 data-active={item.status === 'in_progress' ? running : undefined}
               >
                 <span className={css.glyph} aria-hidden><StatusGlyph status={item.status} running={running} /></span>
-                <span className={css.content}>{item.content}</span>
+                <span className={css.content} data-detailed={item.detail !== undefined}>
+                  <span>{item.content}</span>
+                  {item.detail !== undefined && <span className={css.detail}>{item.detail}</span>}
+                </span>
               </li>
             ))}
           </ul>

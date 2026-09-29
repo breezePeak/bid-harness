@@ -228,7 +228,7 @@ it('原生 Goal Round 通过 bid_run_task 发布能力结果，授权只保存�
     const goal = ctx.goals.get(agent)!
     if (request > 2) return [{ type: 'finish', reason: { kind: 'stop' } }]
     const name = request === 1 ? 'bid_run_task' : 'update_goal'
-    const args = request === 1 ? { task: { goal: '更正招标理解', scope: { kind: 'project' }, steps: [{
+    const args = request === 1 ? { task: { goal: '更正招标理解', scope: { kind: 'project' }, steps: [{ description: '执行已授权的测试步骤',
       scope: { source: 'task' }, call: { capability: 'tender.update', input: { operations: [{
         type: 'update_requirement', requirement_id: 'REQ-1', fields: { normalized_requirement: '明确实施边界' },
       }] } },
@@ -267,8 +267,8 @@ it('后续合法 Goal 轮次可修改未执行步骤，旧轮次与伪造来源�
         firstAuthorization = authorization
         work = await persistCapabilityTaskRequest(workspace, agent.session, 'chapter_writing', {
           goal: '审核章节和全书', scope: { kind: 'project' }, steps: [
-            { scope: { source: 'task' }, call: { capability: 'chapter.review', input: { reason: '审核章节' } } },
-            { scope: { source: 'task' }, call: { capability: 'document.review', input: { reason: '审核全书' } } },
+            { description: '审核章节', scope: { source: 'task' }, call: { capability: 'chapter.review', input: { reason: '审核章节' } } },
+            { description: '审核全书', scope: { source: 'task' }, call: { capability: 'document.review', input: { reason: '审核全书' } } },
           ],
         }, authorization, ['chapters/execution-log.json'], { stage: 'chapter_writing', status: 'completed', run: null }, agent)
         saved = capabilityTaskRequestSchema.parse(await readBidWorkRequest(workspace, work))
@@ -286,7 +286,7 @@ it('后续合法 Goal 轮次可修改未执行步骤，旧轮次与伪造来源�
       } else {
         const paths = await prepareBidWorkingTree(workspace, work)
         const working = new BidWorkspace(paths.root)
-        const steps = [{ scope: { source: 'task' as const }, call: { capability: 'document.review' as const, input: { reason: '只审核一致性' } } }]
+        const steps = [{ description: '只审核一致性', scope: { source: 'task' as const }, call: { capability: 'document.review' as const, input: { reason: '只审核一致性' } } }]
         const patched = await patchCapabilityTaskSteps(createTestBidRunContext({ work }), workspace, working,
           saved, agent.session, authorization, 1, steps, agent)
         expect(patched.steps[1]?.authorization).toEqual(authorization)

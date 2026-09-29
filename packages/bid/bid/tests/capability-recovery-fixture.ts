@@ -29,8 +29,8 @@ export async function capabilityRecoveryFixture() {
   session.append('turn/start', { turn: 1 })
   session.append('user/message', message, { surfaceOp: 'append' })
   const task = { goal: '审核两个范围', scope: { kind: 'project' as const }, steps: [
-    { scope: { source: 'task' as const }, call: { capability: 'chapter.review' as const, input: { reason: '审核章节' } } },
-    { scope: { source: 'task' as const }, call: { capability: 'document.review' as const, input: { reason: '审核全书' } } },
+    { description: '审核章节', scope: { source: 'task' as const }, call: { capability: 'chapter.review' as const, input: { reason: '审核章节' } } },
+    { description: '审核全书', scope: { source: 'task' as const }, call: { capability: 'document.review' as const, input: { reason: '审核全书' } } },
   ] }
   const authorization = { session_id: String(session.id), message_id: String(message.id) }
   const work = await persistCapabilityTaskRequest(workspace, session, 'chapter_writing', task, authorization,

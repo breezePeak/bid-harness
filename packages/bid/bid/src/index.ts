@@ -97,7 +97,7 @@ import {
 } from './bid-capability-task.ts'
 import { readCapabilityPublicationReceipt } from './bid-capability-changes.ts'
 import {
-  bidCapabilityTaskSchema, validateCapabilityTaskContentFollowup, validateCapabilityTaskWorkItems, type BidCapabilityTask,
+  bidCapabilityTaskSchema, validateCapabilityTaskContentFollowup, type BidCapabilityTask,
 } from './bid-capability-contract.ts'
 import { createBidCapabilityDispatcher, type BidCapabilityDispatcher } from './bid-capability-dispatcher.ts'
 import { cancelCapabilityRequestsForReset, enqueueCapabilityRequest, markCapabilityRequestApplied, markCapabilityRequestAppliedWithLease,
@@ -1686,6 +1686,7 @@ export class BidHostRuntime extends TypertRemoteService {
   private readonly queuedDrainRequested = new Set<BidProjectKey>()
   private readonly pendingRunDecisionControllers = new Map<string, AbortController>()
   private readonly recoveryNotices = new WeakMap<Session, string>()
+  private readonly executionQuestionNotices = new WeakSet<ActiveBidOperation>()
   private readonly recoveryAcceptances = new Map<string, Promise<{ accepted: true; run_id: string }>>()
   private readonly recoveryTasks = new Set<Promise<unknown>>()
   private readonly pendingWritingQuestions = new Map<BidProjectKey, ActiveWritingQuestion>()
@@ -3010,6 +3011,27 @@ export class BidHostRuntime extends TypertRemoteService {
     }, { global: true })
     ctx.inject(['tools'], (toolCtx) => {
       toolCtx.effect(() => toolCtx.tools.guard((execution) => {
+        if (execution.name === 'ask_user_question' && execution.agent !== undefined) {
+          const operation = [...this.inFlight.values()].find(active => active.executionHandle?.agent === execution.agent)
+          if (operation !== undefined) {
+            if (!this.executionQuestionNotices.has(operation)) {
+              this.executionQuestionNotices.add(operation)
+              const message = createUserMessage({
+                content: [{ type: 'text', text: [
+                  'Bid 后台执行 Agent 尝试直接等待用户回答，调用已被拒绝。请由你判断是否需要向用户说明或提问；后台任务仍按原执行链收敛。',
+                  `stage: ${operation.executionStage ?? 'unknown'}`,
+                  `execution_session_id: ${String(execution.agent.session.id)}`,
+                  `question: ${sanitizeBidErrorText(JSON.stringify(execution.arguments), 1600)}`,
+                ].join('\n') }],
+                source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'notice', summary: 'Bid 后台提问交由主 Agent 处理' },
+              })
+              const main = this.ctx.agents.get(operation.session.id)
+              if (main?.session === operation.session) main.steer(message)
+              else operation.session.append('user/message', message, { surfaceOp: 'append' })
+            }
+            return 'BID_EXECUTION_QUESTION_REQUIRES_MAIN_AGENT'
+          }
+        }
         const session = execution.agent?.session
         if (session === undefined || !isBidMainSession(session)) return
         if ((execution.name === 'web_search' || execution.name === 'web_fetch') && !this.config.webSearchEnabled) {
@@ -3316,16 +3338,16 @@ export class BidHostRuntime extends TypertRemoteService {
           return { ok: false, error: { code: 'BID_OUTLINE_DRAFT_CONFLICT', current: baseline } }
         }
         const task = request.action === 'bid_outline_apply_operations' ? {
-          goal: '按用户要求调整目录', scope: { kind: 'project' }, steps: [{ scope: { source: 'task' },
+          goal: '按用户要求调整目录', scope: { kind: 'project' }, steps: [{ description: '应用当前确认的目录编辑操作并同步受影响的章节引用', scope: { source: 'task' },
             call: { capability: 'outline.update', input: { operations: request.operations,
               business_bindings: request.business_bindings ?? [] } } }],
         } : request.action === 'bid_outline_regenerate_scope' ? {
           goal: '按用户要求深化选中目录', scope: { kind: 'sections', section_ids: request.section_ids },
-          steps: [{ scope: { source: 'task' }, call: { capability: 'outline.refine',
+          steps: [{ description: request.feedback, scope: { source: 'task' }, call: { capability: 'outline.refine',
             input: { feedback: request.feedback } } }],
         } : {
           goal: '按用户要求更新选中资料', scope: { kind: 'sections', section_ids: request.section_ids },
-          steps: [{ scope: { source: 'task' }, call: { capability: 'evidence.research',
+          steps: [{ description: request.reason ?? '重新核对选中章节的资料依据和缺口', scope: { source: 'task' }, call: { capability: 'evidence.research',
             input: { mode: request.mode, reason: request.reason ?? '重新核对该范围的资料',
               allow_outline_refinement: false } } }],
         }
@@ -3337,7 +3359,8 @@ export class BidHostRuntime extends TypertRemoteService {
       if (state.stage !== 'chapter_writing') {
         const { action: _action, ...input } = request
         return this.runCapabilityTaskFromTool(agent, bidCapabilityTaskSchema.parse({
-          goal: '按用户要求更新写作计划', scope: { kind: 'project' }, steps: [{ scope: { source: 'task' },
+          goal: '按用户要求更新写作计划', scope: { kind: 'project' }, steps: [{
+            description: input.update_kind === 'patch' ? input.summary : '按已确认要求建立章节写作安排和验收条件', scope: { source: 'task' },
             call: { capability: 'writing.plan', input } }],
         }))
       }
@@ -3350,7 +3373,7 @@ export class BidHostRuntime extends TypertRemoteService {
           scope: request.reference.scope === 'paragraphs'
             ? { kind: 'paragraphs', reference: request.reference }
             : { kind: 'sections', section_ids: [request.reference.section_id] },
-          steps: [{ scope: { source: 'task' }, call: { capability: 'chapter.revise',
+          steps: [{ description: request.instruction, scope: { source: 'task' }, call: { capability: 'chapter.revise',
             input: { instruction: request.instruction, reference: request.reference } } }],
         }))
       }
@@ -5288,7 +5311,6 @@ export class BidHostRuntime extends TypertRemoteService {
    * @returns 接纳、排队或正式发布状态。
    */
   private async runCapabilityTaskFromTool(agent: Agent, task: BidCapabilityTask): Promise<unknown> {
-    validateCapabilityTaskWorkItems(task)
     validateCapabilityTaskContentFollowup(task)
     const session = agent.session
     assertBidMainSession(session)
@@ -7081,17 +7103,16 @@ export class BidHostRuntime extends TypertRemoteService {
         const pending = (await readPendingCapabilityRequests(workspace, workId))[0]
         if (pending === undefined || pending.request.authorization.session_id !== String(session.id)) continue
         return { workId: pending.request.queue_id, title: pending.request.task.goal,
-          workItems: pending.request.task.work_items ?? [],
           scope: pending.request.task.scope.kind === 'project' ? 'project'
             : pending.request.task.scope.kind === 'sections' ? pending.request.task.scope.section_ids.join(', ')
               : pending.request.task.scope.reference.section_id,
           status: 'queued', steps: pending.request.task.steps.map((step, index) => ({
-            id: `${pending.request.queue_id}:${index}`, capability: step.call.capability,
+            id: `${pending.request.queue_id}:${index}`, capability: step.call.capability, description: step.description,
             status: 'pending', detail: null,
           })) }
       }
     }
-    const lastStarted = session.events.findLast(event => event.type === 'bid.run.started')
+    const lastStarted = session.events.findLast(event => event.type === 'bid.run.started' && event.data.run.work.kind === 'capability_task')
     const run = current?.work.kind === 'capability_task' ? current
       : lastStarted?.type === 'bid.run.started' && lastStarted.data.run.work.kind === 'capability_task'
         ? lastStarted.data.run : null
@@ -7114,21 +7135,26 @@ export class BidHostRuntime extends TypertRemoteService {
             ? task.run.cause === 'awaiting_input' ? 'awaiting_input' : 'suspended'
             : 'running'
           : 'failed'
+      const steps = checkpoint?.steps ?? request.task.steps.map((step, index) => ({
+        step_id: `${run.work.workId}:${index}`, step, status: 'pending' as const,
+      }))
+      const firstUnfinished = steps.findIndex(step => step.status !== 'completed')
       return {
         workId: run.work.workId, title: request.task.goal,
-        workItems: request.task.work_items ?? [],
         scope: request.task.scope.kind === 'project' ? 'project'
           : request.task.scope.kind === 'sections' ? request.task.scope.section_ids.join(', ')
             : request.task.scope.reference.section_id,
         status,
-        steps: (checkpoint?.steps ?? request.task.steps.map((step, index) => ({
-          step_id: `${run.work.workId}:${index}`, step, status: 'pending' as const,
-        }))).map((record, index) => ({
-          id: record.step_id, capability: record.step.call.capability,
-          status: status === 'failed' && index === checkpoint?.steps.findIndex(step => step.status === 'running')
-            ? 'failed' as const : record.status,
-          detail: 'result' in record ? [...record.result.missing_topics,
-            ...record.result.warnings].join('；') || null : null,
+        steps: steps.map((record, index) => ({
+          id: record.step_id, capability: record.step.call.capability, description: record.step.description,
+          status: index === firstUnfinished && (status === 'failed' || status === 'awaiting_input')
+            ? status : status === 'suspended' && record.status === 'running' ? 'suspended' as const : record.status,
+          detail: [
+            ...'result' in record ? [record.result.change_summary, ...record.result.missing_topics, ...record.result.warnings] : [],
+            ...task.status === 'suspended' && current?.work.workId === run.work.workId
+              && index === firstUnfinished
+              ? [task.run.error?.message ?? '当前任务已暂停，等待继续执行。'] : [],
+          ].join('；') || null,
         })),
       }
     }

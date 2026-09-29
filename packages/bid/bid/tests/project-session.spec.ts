@@ -321,7 +321,7 @@ describe('Workspace 项目与独立 Session', () => {
     const unregister = ctx.bid.registerCapabilityTaskDispatcher(dispatcher)
     try {
       const result = await ctx.bid.runCapabilityTask(agent, {
-        goal: '审核当前章节', scope: { kind: 'project' }, steps: [{ scope: { source: 'task' },
+        goal: '审核当前章节', scope: { kind: 'project' }, steps: [{ description: '审核当前章节', scope: { source: 'task' },
           call: { capability: 'chapter.review', input: { reason: '审核当前章节' } } }],
       }, { session_id: String(agent.session.id), message_id: String(message.id) }, ['chapters/execution-log.json'])
       expect(result).toMatchObject({ stage: 'chapter_writing', status: 'completed', run: null })
@@ -367,7 +367,7 @@ describe('Workspace 项目与独立 Session', () => {
     })
     try {
       await expect(ctx.bid.runCapabilityTask(agent, {
-        goal: '审核当前章节并补齐问题', scope: { kind: 'project' }, steps: [{ scope: { source: 'task' },
+        goal: '审核当前章节并补齐问题', scope: { kind: 'project' }, steps: [{ description: '审核当前章节', scope: { source: 'task' },
           call: { capability: 'chapter.review', input: { reason: '审核当前章节' } } }],
       }, { session_id: String(agent.session.id), message_id: String(message.id) }, ['chapters/execution-log.json']))
         .resolves.toMatchObject({ status: 'suspended', run: { cause: 'awaiting_input' } })
@@ -413,7 +413,7 @@ describe('Workspace 项目与独立 Session', () => {
     })
     try {
       const running = ctx.bid.runCapabilityTask(agent, { goal: '重新审核章节', scope: { kind: 'project' },
-        steps: [{ scope: { source: 'task' }, call: { capability: 'chapter.review', input: { reason: '重新审核章节' } } }],
+        steps: [{ description: '重新审核章节', scope: { source: 'task' }, call: { capability: 'chapter.review', input: { reason: '重新审核章节' } } }],
       }, { session_id: String(agent.session.id), message_id: String(message.id) }, ['chapters/execution-log.json'])
       await started.promise
       expect((await readBidProjectState(workspace))?.status).toBe('running')
@@ -450,7 +450,7 @@ describe('Workspace 项目与独立 Session', () => {
     agent.session.append('turn/start', { turn: 1 })
     agent.session.append('user/message', message, { surfaceOp: 'append' })
     const work = await persistCapabilityTaskRequest(workspace, agent.session, 'chapter_writing', {
-      goal: '审核已有正文', scope: { kind: 'project' }, steps: [{ scope: { source: 'task' },
+      goal: '审核已有正文', scope: { kind: 'project' }, steps: [{ description: '审核已有正文', scope: { source: 'task' },
         call: { capability: 'chapter.review', input: { reason: '审核已有正文' } } }],
     }, { session_id: String(agent.session.id), message_id: String(message.id) }, ['chapters/execution-log.json'],
     { stage: 'chapter_writing', status: 'completed', run: null })
@@ -488,7 +488,7 @@ describe('Workspace 项目与独立 Session', () => {
     agent.session.append('user/message', message, { surfaceOp: 'append' })
     await first.ctx.sessions.flush(agent.session)
     const work = await persistCapabilityTaskRequest(first.workspace, agent.session, 'chapter_writing', {
-      goal: '审核已保存正文', scope: { kind: 'project' }, steps: [{ scope: { source: 'task' },
+      goal: '审核已保存正文', scope: { kind: 'project' }, steps: [{ description: '审核已保存正文', scope: { source: 'task' },
         call: { capability: 'chapter.review', input: { reason: '审核已保存正文' } } }],
     }, { session_id: String(agent.session.id), message_id: String(message.id) }, ['chapters/execution-log.json'],
     { stage: 'chapter_writing', status: 'completed', run: null })
@@ -534,7 +534,7 @@ describe('Workspace 项目与独立 Session', () => {
     agent.session.append('turn/start', { turn: 1 })
     agent.session.append('user/message', message, { surfaceOp: 'append' })
     await first.ctx.sessions.flush(agent.session)
-    const task = { goal: '审核已保存正文', scope: { kind: 'project' as const }, steps: [{
+    const task = { goal: '审核已保存正文', scope: { kind: 'project' as const }, steps: [{ description: '审核已保存正文',
       scope: { source: 'task' as const }, call: { capability: 'chapter.review' as const,
         input: { reason: '审核已保存正文' } },
     }] }
@@ -586,8 +586,8 @@ describe('Workspace 项目与独立 Session', () => {
     first.ctx.bid.registerCapabilityTaskDispatcher(dispatcher)
     const result = await first.ctx.bid.runCapabilityTask(agent, { goal: '先审章节再审全书',
       scope: { kind: 'project' }, steps: [
-        { scope: { source: 'task' }, call: { capability: 'chapter.review', input: { reason: '审核章节' } } },
-        { scope: { source: 'task' }, call: { capability: 'document.review', input: { reason: '审核全书' } } },
+        { description: '审核章节', scope: { source: 'task' }, call: { capability: 'chapter.review', input: { reason: '审核章节' } } },
+        { description: '审核全书', scope: { source: 'task' }, call: { capability: 'document.review', input: { reason: '审核全书' } } },
       ] }, { session_id: String(agent.session.id), message_id: String(message.id) },
     ['chapters/execution-log.json'])
     expect(result).toMatchObject({ status: 'suspended' })
@@ -770,7 +770,7 @@ describe('Workspace 项目与独立 Session', () => {
   })
 
   it('主 Agent 工具以真实用户消息执行跨阶段能力任务并返回发布文件', async () => {
-    const { ctx, workspace, fresh } = await fixture()
+    const { ctx, workspace, fresh } = await fixture({ withPersistence: true })
     await seedCapabilityProject(workspace, 'complete')
     await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'completed' })
     const agent = await fresh('capability-main-tool')
@@ -779,7 +779,7 @@ describe('Workspace 项目与独立 Session', () => {
     agent.session.append('turn/start', { turn: 1 })
     agent.session.append('user/message', message, { surfaceOp: 'append' })
     const result = await ctx.tools.execute({ agent, name: 'bid_run_task', arguments: { task: {
-      goal: '更正第一条招标要求的理解', scope: { kind: 'project' }, steps: [{
+      goal: '更正第一条招标要求的理解', scope: { kind: 'project' }, steps: [{ description: '更正第一条要求，明确实施边界',
         scope: { source: 'task' }, call: { capability: 'tender.update', input: { operations: [{
           type: 'update_requirement', requirement_id: 'REQ-1',
           fields: { normalized_requirement: '明确实施边界' },
@@ -789,6 +789,43 @@ describe('Workspace 项目与独立 Session', () => {
     expect(result.isError, JSON.stringify(result)).toBe(false)
     expect(result.value).toMatchObject({ accepted: true, state: { stage: 'chapter_writing', status: 'completed' },
       changed_artifacts: expect.arrayContaining(['analysis/requirements.json']) })
+    const plan = await ctx.bid.getCapabilityTaskPlan(agent.session)
+    expect(plan).toMatchObject({ status: 'completed', steps: [
+      { description: '更正第一条要求，明确实施边界', status: 'completed', detail: expect.any(String) },
+    ] })
+    const stageWork = await persistStageExecutionWork(workspace, 'chapter_writing')
+    const stageRun: BidRunData = { runId: 'later-stage-run', epoch: 2, baseProjectRevision: 1,
+      work: stageWork, startedAt: Date.now(), updatedAt: Date.now() }
+    agent.session.append('bid.run.started', { run: stageRun })
+    agent.session.append('bid.run.completed', { run: stageRun })
+    expect(await ctx.bid.getCapabilityTaskPlan(agent.session)).toEqual(plan)
+    await ctx.sessions.flush(agent.session)
+    await ctx.fiber.dispose()
+    const restarted = await fixture({ root: workspace.root, withPersistence: true })
+    const restored = await restarted.fresh('capability-main-tool')
+    expect(await restarted.ctx.bid.getCapabilityTaskPlan(restored.session)).toEqual(plan)
+  })
+
+  it('检查点尚未创建时，能力计划仍显示等待输入原因', async () => {
+    const { ctx, workspace, fresh } = await fixture()
+    await seedProjectArtifacts(workspace)
+    await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'completed' })
+    const agent = await fresh('capability-plan-awaiting')
+    const message = createUserMessage({ content: [{ type: 'text', text: '核对本章资料依据' }], source: { kind: 'user' } })
+    agent.session.append('turn/start', { turn: 1 })
+    agent.session.append('user/message', message, { surfaceOp: 'append' })
+    const work = await persistCapabilityTaskRequest(workspace, agent.session, 'chapter_writing', {
+      goal: '核对本章资料依据', scope: { kind: 'project' }, steps: [{ description: '核对本章资料依据并列出缺口',
+        scope: { source: 'task' }, call: { capability: 'chapter.review', input: { reason: '核对资料' } } }],
+    }, { session_id: String(agent.session.id), message_id: String(message.id) }, ['chapters/execution-log.json'],
+    { stage: 'chapter_writing', status: 'completed', run: null })
+    const run: BidRunData = { runId: 'awaiting-first-step', epoch: 1, baseProjectRevision: 1,
+      work, startedAt: Date.now(), updatedAt: Date.now() }
+    agent.session.append('bid.run.started', { run })
+    agent.session.append('bid.run.suspended', { run: { ...run, cause: 'awaiting_input', error: { message: '请提供验收资料' } } })
+    expect(await ctx.bid.getCapabilityTaskPlan(agent.session)).toMatchObject({ status: 'awaiting_input', steps: [
+      { description: '核对本章资料依据并列出缺口', status: 'awaiting_input', detail: '请提供验收资料' },
+    ] })
   })
 
   it('后续真实用户消息通过 bid_plan_task 只调整挂起 Work 未开始的后缀', async () => {
@@ -801,8 +838,8 @@ describe('Workspace 项目与独立 Session', () => {
     agent.session.append('user/message', first, { surfaceOp: 'append' })
     const work = await persistCapabilityTaskRequest(workspace, agent.session, 'chapter_writing', {
       goal: '审核章节和整书', scope: { kind: 'project' }, steps: [
-        { scope: { source: 'task' }, call: { capability: 'chapter.review', input: { reason: '审核章节' } } },
-        { scope: { source: 'task' }, call: { capability: 'document.review', input: { reason: '审核整书' } } },
+        { description: '审核章节', scope: { source: 'task' }, call: { capability: 'chapter.review', input: { reason: '审核章节' } } },
+        { description: '审核整书', scope: { source: 'task' }, call: { capability: 'document.review', input: { reason: '审核整书' } } },
       ],
     }, { session_id: String(agent.session.id), message_id: String(first.id) }, ['chapters/execution-log.json'],
     { stage: 'chapter_writing', status: 'completed', run: null })
@@ -825,7 +862,7 @@ describe('Workspace 项目与独立 Session', () => {
     agent.session.append('turn/start', { turn: 1 })
     agent.session.append('user/message', correction, { surfaceOp: 'append' })
     const patched = await ctx.tools.execute({ agent, name: 'bid_plan_task', arguments: {
-      work_id: work.workId, from_index: 1, steps: [{ scope: { source: 'task' },
+      work_id: work.workId, from_index: 1, steps: [{ description: '只检查一致性', scope: { source: 'task' },
         call: { capability: 'document.review', input: { reason: '只检查一致性' } } }],
     }, callId: CallId('patch-capability-plan'), signal: new AbortController().signal })
     expect(patched).toMatchObject({ isError: false, value: { accepted: true, steps: 2 } })
@@ -835,6 +872,11 @@ describe('Workspace 项目与独立 Session', () => {
     expect(checkpoint.steps[1]?.step.call.input.reason).toBe('只检查一致性')
     expect(executed).toHaveBeenCalledOnce()
     expect(await readBidProjectState(workspace)).toMatchObject({ status: 'suspended' })
+    const visible = await ctx.bid.getCapabilityTaskPlan(agent.session)
+    expect(visible).toMatchObject({ status: 'suspended', steps: [
+      { status: 'completed', description: '审核章节', detail: '本章已审核' },
+      { status: 'pending', description: '只检查一致性', detail: '等待后续计划' },
+    ] })
   })
 
   it('旧目录工具在 S5 完成后使用能力 Work，并保留 CAS 冲突保护', async () => {
@@ -889,7 +931,7 @@ describe('Workspace 项目与独立 Session', () => {
     agent.session.append('turn/start', { turn: 1 })
     agent.session.append('user/message', message, { surfaceOp: 'append' })
     const queued = await ctx.tools.execute({ agent, name: 'bid_run_task', arguments: { task: {
-      goal: '更正第一条招标要求', scope: { kind: 'project' }, steps: [{ scope: { source: 'task' },
+      goal: '更正第一条招标要求', scope: { kind: 'project' }, steps: [{ description: '修订第一条招标要求的实施边界', scope: { source: 'task' },
         call: { capability: 'tender.update', input: { operations: [{ type: 'update_requirement',
           requirement_id: 'REQ-1', fields: { normalized_requirement: '明确实施边界' } }] } } }],
     } }, callId: CallId('queued-capability-main'), signal: new AbortController().signal })
@@ -898,7 +940,7 @@ describe('Workspace 项目与独立 Session', () => {
     expect(await readPendingCapabilityRequests(workspace, running.run.work.workId)).toHaveLength(1)
     expect(await ctx.bid.getCapabilityTaskPlan(agent.session)).toMatchObject({
       status: 'queued', title: '更正第一条招标要求',
-      steps: [{ capability: 'tender.update', status: 'pending' }],
+      steps: [{ capability: 'tender.update', description: '修订第一条招标要求的实施边界', status: 'pending' }],
     })
     gate.resolve([])
     const settled = await retry
@@ -913,7 +955,7 @@ describe('Workspace 项目与独立 Session', () => {
     expect(await readPendingCapabilityRequests(workspace, running.run.work.workId)).toEqual([])
     await vi.waitFor(() => { expect(host.inFlight.size).toBe(0) }, { timeout: 10_000 })
     expect(await ctx.bid.getCapabilityTaskPlan(agent.session)).toMatchObject({
-      status: 'completed', steps: [{ capability: 'tender.update', status: 'completed' }],
+      status: 'completed', steps: [{ capability: 'tender.update', description: '修订第一条招标要求的实施边界', status: 'completed' }],
     })
   }, 20_000)
 
@@ -1536,7 +1578,7 @@ describe('Workspace 项目与独立 Session', () => {
     agent.session.append('user/message', createUserMessage({ content: [{ type: 'text', text: '导出 Word' }],
       source: { kind: 'user' } }), { surfaceOp: 'append' })
     const execute = () => ctx.tools.execute({ agent, name: 'bid_run_task', arguments: { task: {
-      goal: '导出当前 Word', scope: { kind: 'project' }, steps: [{ scope: { source: 'task' },
+      goal: '导出当前 Word', scope: { kind: 'project' }, steps: [{ description: '执行已授权的测试步骤', scope: { source: 'task' },
         call: { capability: 'docx.export', input: { template_id: null } } }],
     } }, callId: CallId('capability-docx-export'), signal: new AbortController().signal })
     const first = await execute()
@@ -1562,11 +1604,11 @@ describe('Workspace 项目与独立 Session', () => {
       source: { kind: 'user' } }), { surfaceOp: 'append' })
     const result = await ctx.tools.execute({ agent, name: 'bid_run_task', arguments: { task: {
       goal: '更正要求并导出', scope: { kind: 'project' }, steps: [
-        { scope: { source: 'task' }, call: { capability: 'tender.update', input: {
+        { description: '执行已授权的测试步骤', scope: { source: 'task' }, call: { capability: 'tender.update', input: {
           operations: [{ type: 'update_requirement', requirement_id: 'REQ-1',
             fields: { normalized_requirement: '交付范围包含测试' } }],
         } } },
-        { scope: { source: 'task' }, call: { capability: 'docx.export', input: { template_id: null } } },
+        { description: '执行已授权的测试步骤', scope: { source: 'task' }, call: { capability: 'docx.export', input: { template_id: null } } },
       ],
     } }, callId: CallId('capability-update-export'), signal: new AbortController().signal })
     expect(result.isError, JSON.stringify(result)).toBe(false)

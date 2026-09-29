@@ -394,6 +394,7 @@ export function BidStagePanel({
   const [capabilitySnapshot, setCapabilitySnapshot] = useState<{
     sessionId: typeof sessionId
     plan: BidCapabilityPlanView | null
+    stale: boolean
   } | null>(null)
   const capabilityPlan = capabilitySnapshot?.sessionId === sessionId ? capabilitySnapshot.plan : null
   const [bodyAvailable, setBodyAvailable] = useState(false)
@@ -405,9 +406,11 @@ export function BidStagePanel({
     const refresh = async (): Promise<void> => {
       try {
         const plan = await getCapabilityTaskPlan()
-        if (active) setCapabilitySnapshot({ sessionId, plan })
+        if (active) setCapabilitySnapshot({ sessionId, plan, stale: false })
       } catch {
-        // 短暂读取失败时保留上次 Host 摘要，下次轮询重试。
+        // 短暂读取失败时保留同一会话摘要并标明未同步，下次轮询重试。
+        if (active) setCapabilitySnapshot(previous => previous?.sessionId === sessionId
+          ? { ...previous, stale: true } : { sessionId, plan: null, stale: true })
       } finally {
         if (active) timer = window.setTimeout(() => { void refresh() }, 2000)
       }
@@ -1126,22 +1129,21 @@ export function BidStagePanel({
       } : undefined}
     />
   ) : null
-  const capabilityRunPlan = capabilityPlan?.status === 'running' ? (
-    <div>
-      {(capabilityPlan.workItems?.length ?? 0) > 0 && (
-        <div className={css.capabilityWorkItems} role="group" aria-label="任务拆分">
-          <strong>任务拆分</strong>
-          <ol>{capabilityPlan.workItems?.map(item => <li key={item}>{item}</li>)}</ol>
-        </div>
-      )}
-      <PlanListPanel
-        items={buildCapabilityTaskPlan(capabilityPlan, t)}
-        running
-        labels={{ ...planLabels, title: capabilityPlan.title }}
-        testId="bid-capability-plan"
-      />
-    </div>
-  ) : null
+  const capabilityRunPlan = capabilityPlan !== null ? (
+    <PlanListPanel
+      key={capabilityPlan.workId}
+      items={buildCapabilityTaskPlan(capabilityPlan, t)}
+      running={capabilityPlan.status === 'running' && !capabilitySnapshot?.stale}
+      labels={{ ...planLabels, title: capabilityPlan.title }}
+      summary={{ label: t(`capability.status.${capabilityPlan.status}`), items: [{
+        key: 'state', text: capabilitySnapshot?.stale ? t('capability.status.stale') : t(`capability.status.${capabilityPlan.status}`),
+        status: capabilitySnapshot?.stale || capabilityPlan.status === 'failed' ? 'failed'
+          : capabilityPlan.status === 'completed' ? 'completed' : capabilityPlan.status === 'running' ? 'running' : 'neutral',
+      }] }}
+      testId="bid-capability-plan"
+    />
+  ) : capabilitySnapshot?.sessionId === sessionId && capabilitySnapshot.stale
+    ? <p role="status">{t('capability.unavailable')}</p> : null
   const exportPlan = docxExport?.status === 'running' ? (
     <div>
       <PlanListPanel

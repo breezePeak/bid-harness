@@ -46,7 +46,7 @@ export async function runCapabilityReplanLoop(ctx: Context, root: string) {
   let runId = ''
   parentScript.push(
     call('bid_run_task', { task: { goal: '把章节3提升到顶层，并改名为独立实施方案；保留正文',
-      scope: { kind: 'project' }, steps: [{ scope: { source: 'task' }, call: { capability: 'outline.generate', input: {} } }],
+      scope: { kind: 'project' }, steps: [{ description: '生成包含独立实施方案的新目录', scope: { source: 'task' }, call: { capability: 'outline.generate', input: {} } }],
     } }),
     call('bid_stage_inspect', { view: 'recovery' }),
     (options) => {
@@ -66,10 +66,10 @@ export async function runCapabilityReplanLoop(ctx: Context, root: string) {
           const failed = task.steps.find(step => step.status === 'running')
           if (failed === undefined || !runId) throw new Error('未返回实际失败步骤')
           return call('bid_plan_task', { work_id: task.work_id, from_index: failed.index, steps: [
-            { scope: { source: 'task' }, call: { capability: 'outline.update', input: { operations: [
+            { description: '将章节3提升到顶层并保留现有正文', scope: { source: 'task' }, call: { capability: 'outline.update', input: { operations: [
               { type: 'move_section', section_id: 'SEC-3', parent_id: null, order: 3 },
             ] } } },
-            { scope: { source: 'previous_targets' }, call: { capability: 'outline.update', input: { operations: [
+            { description: '将提升后的章节改名为独立实施方案', scope: { source: 'previous_targets' }, call: { capability: 'outline.update', input: { operations: [
               { type: 'update_section', section_id: 'SEC-3', title: '独立实施方案' },
             ] } } },
           ] })
@@ -88,7 +88,11 @@ export async function runCapabilityReplanLoop(ctx: Context, root: string) {
     const section = outline.sections.find(item => item.id === 'SEC-3')!
     const events = agent.session.events.slice(before)
     await ctx.sessions.flush(agent.session)
+    const plan = await ctx.bid.getCapabilityTaskPlan(agent.session)
     return { section: { title: section.title, parent_id: section.parent_id, level: section.level },
+      plan: plan === null ? null : { status: plan.status, steps: plan.steps.map(step => ({
+        description: step.description, status: step.status, hasResult: Boolean(step.detail),
+      })) },
       bodyPreserved: await readFile(join(workspace.projectRoot, 'chapters/sections/0003.md'), 'utf8') === originalBody,
       userMessages: events.filter(event => event.type === 'user/message' && event.data.source.kind === 'user').length,
       calls: events.filter(event => event.type === 'tool/call').map(event => event.data.name),
@@ -223,7 +227,7 @@ export async function runStageInteractionLoop(ctx: Context, root: string, checkR
     && agent.session.events.filter(event => event.type === 'bid.run.started').length === runsBeforePlanOnly
   await send('把第一条要求的理解改为明确实施边界', [
     call('bid_run_task', { task: { goal: '更正第一条要求的理解', scope: { kind: 'project' },
-      steps: [{ scope: { source: 'task' }, call: { capability: 'tender.update', input: {
+      steps: [{ description: '执行已授权的测试步骤', scope: { source: 'task' }, call: { capability: 'tender.update', input: {
         operations: [{ type: 'update_requirement', requirement_id: 'REQ-1',
           fields: { normalized_requirement: '明确实施边界' } }],
       } } }],
@@ -261,7 +265,7 @@ export async function runStageInteractionLoop(ctx: Context, root: string, checkR
       compliance_ids: target.compliance_ids }]))
   })
   const splitTask = { goal: '拆分实施准备目录',
-    scope: { kind: 'sections', section_ids: [target.id] }, steps: [{ scope: { source: 'task' },
+    scope: { kind: 'sections', section_ids: [target.id] }, steps: [{ description: '执行已授权的测试步骤', scope: { source: 'task' },
       call: { capability: 'outline.update', input: {
         operations: [{ type: 'split_section', section_id: target.id,
           children: ['人员准备', '资源核查'].map(title => ({ title, purpose: title, must_answer: [`${title}的安排`] })) }],

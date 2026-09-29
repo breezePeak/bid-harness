@@ -2427,7 +2427,7 @@ describe('evidence-mapping Agent executor', () => {
     session.append('turn/start', { turn: 1 })
     session.append('user/message', message, { surfaceOp: 'append' })
     const task = { goal: '离线研究当前目录', scope: { kind: 'sections' as const, section_ids: ['SEC-1'] },
-      steps: [{ scope: { source: 'task' as const }, call: { capability: 'evidence.research' as const,
+      steps: [{ description: '离线研究当前章节', scope: { source: 'task' as const }, call: { capability: 'evidence.research' as const,
         input: { mode: 'supplement' as const, reason: '离线研究当前章节', allow_outline_refinement: false } } }] }
     const work = await persistCapabilityTaskRequest(workspace, session, 'evidence_mapping', task,
       { session_id: String(session.id), message_id: String(message.id) },

@@ -18,6 +18,10 @@ it('主 Agent 在原授权内换用目录编辑能力并接续后续步骤', asy
   expect(JSON.parse(result.stdout)).toEqual({
     section: { title: '独立实施方案', parent_id: null, level: 1 }, bodyPreserved: true,
     userMessages: 1, completed: 1,
+    plan: { status: 'completed', steps: [
+      { description: '将章节3提升到顶层并保留现有正文', status: 'completed', hasResult: true },
+      { description: '将提升后的章节改名为独立实施方案', status: 'completed', hasResult: true },
+    ] },
     calls: ['bid_run_task', 'bid_stage_inspect', 'bid_project_inspect', 'bid_plan_task', 'bid_recover_task'],
   })
 }, LOADER_SMOKE_TEST_TIMEOUT_MS)

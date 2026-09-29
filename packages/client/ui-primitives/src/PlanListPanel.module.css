@@ -159,6 +159,17 @@
   font-variant-numeric: tabular-nums;
 }
 
+.content[data-detailed='true'] {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.detail {
+  display: block;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 12px;
+}
+
 .summaryItem {
   color: var(--dsw-alias-label-tertiary);
   white-space: nowrap;

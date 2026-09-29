@@ -6,7 +6,9 @@ Bid Session 浏览器 UI。插件向 Conversation 声明的 `conversation.input.
 
 S4 进度读取暂不可用时保留同一工作已读到的统计；首次读取由计划表头显示同步状态，后续轮询继续重试。阶段面板不另行显示进度同步提示。
 
-整本目录深化运行时展示主 Agent 随请求提交的具体工作项。能力任务计划从 Host 的 `getCapabilityTaskPlan` 读取当前 Work 检查点，运行时按实际能力顺序显示，不按兼容阶段标签推断局部步骤；阶段计划仍用于默认生成路线。运行计划不附加章节任务摘要或单独的运行状态文字。正文与目录入口依据正式产物显示，拆章后按 `section_id` 重新定位正文。独立 Word 导出运行时显示专用计划；完成或失败事件在发起导出的会话聊天时间线生成可重放的结果，成功时显示文件绝对路径，失败时显示原因。既有事件缺少绝对路径时，显示相对项目数据目录的路径并提供导出页入口。
+能力任务计划从 Host 的 `getCapabilityTaskPlan` 读取实际步骤：主 Agent 的具体说明为主行，能力、状态及结果或阻断原因为详情，长文本自动换行。重规划同步替换未完成后缀；排队、挂起、等待输入、失败和完成后仍保留计划。读取失败时保留同会话上次结果并标明未同步、停止运行动画；首次读取失败显示不可用，切换会话不会显示原会话计划。阶段计划仍用于默认生成路线，不按阶段标签推断局部步骤，也不另存工作项清单。
+
+正文与目录入口依据正式产物显示，拆章后按 `section_id` 重新定位正文。独立 Word 导出运行时显示专用计划；完成或失败事件在发起导出的会话聊天时间线生成可重放的结果，成功时显示文件绝对路径，失败时显示原因。既有事件缺少绝对路径时，显示相对项目数据目录的路径并提供导出页入口。
 
 `projection.allowedActions` controls upload, retry, outline-confirmation, and Word-export controls, while the Host-projected file limits configure the picker and its rule text. File selection keeps browser `File` objects locally until the user explicitly uploads the batch. These actions use dedicated Bid Host entry points and never call `session.prompt()`.
 

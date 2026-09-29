@@ -35,10 +35,10 @@ it('同一能力 Work 先更正招标理解再改目录，正式正文仅按实�
   session.append('turn/start', { turn: 1 })
   session.append('user/message', message, { surfaceOp: 'append' })
   const task = bidCapabilityTaskSchema.parse({ goal: '更正第三章理解并修改目录标题', scope: { kind: 'project' }, steps: [
-    { scope: { source: 'task' as const }, call: { capability: 'tender.update' as const,
+    { description: '执行已授权的测试步骤', scope: { source: 'task' as const }, call: { capability: 'tender.update' as const,
       input: { operations: [{ type: 'update_requirement' as const, requirement_id: 'REQ-3',
         fields: { normalized_requirement: '第三章应说明实施检查' } }] } } },
-    { scope: { source: 'task' as const }, call: { capability: 'outline.update' as const,
+    { description: '执行已授权的测试步骤', scope: { source: 'task' as const }, call: { capability: 'outline.update' as const,
       input: { operations: [{ type: 'update_section' as const, section_id: 'SEC-3', title: '实施检查' }] } } },
   ] })
   const authorization = { session_id: String(session.id), message_id: String(message.id) }
@@ -85,7 +85,7 @@ it('移动已有章节后保持身份和正文文件，导出按新目录顺序�
   session.append('turn/start', { turn: 1 })
   session.append('user/message', message, { surfaceOp: 'append' })
   const task = bidCapabilityTaskSchema.parse({ goal: '将第三章移到第一章前面，不改正文',
-    scope: { kind: 'project' }, steps: [{ scope: { source: 'task' },
+    scope: { kind: 'project' }, steps: [{ description: '执行已授权的测试步骤', scope: { source: 'task' },
       call: { capability: 'outline.update', input: { operations: [{ type: 'move_section',
         section_id: 'SEC-3', parent_id: 'GROUP-A', order: 1 }] } } }] })
   const work = await persistCapabilityTaskRequest(workspace, session, 'chapter_writing', task,
@@ -134,7 +134,7 @@ it('同一完成项目连续更正要求、移动合并章节和局部约束后�
     const message = createUserMessage({ content: [{ type: 'text', text: goal }], source: { kind: 'user' } })
     session.append('turn/start', { turn: 1 })
     session.append('user/message', message, { surfaceOp: 'append' })
-    const task = bidCapabilityTaskSchema.parse({ goal, scope: { kind: 'project' }, steps: [{
+    const task = bidCapabilityTaskSchema.parse({ goal, scope: { kind: 'project' }, steps: [{ description: '执行已授权的测试步骤',
       scope: { source: 'task' }, call: { capability, input },
     }] })
     const work = await persistCapabilityTaskRequest(workspace, session, 'chapter_writing', task,
@@ -169,7 +169,7 @@ it('同一完成项目连续更正要求、移动合并章节和局部约束后�
   const planEvent = session.append('user/message', planMessage, { surfaceOp: 'append' })
   const ref = { session_id: String(session.id), message_id: String(planMessage.id), seq: planEvent.seq }
   const planTask = bidCapabilityTaskSchema.parse({ goal: '仅第三章增加实施检查步骤',
-    scope: { kind: 'sections', section_ids: ['SEC-3'] }, steps: [{ scope: { source: 'task' },
+    scope: { kind: 'sections', section_ids: ['SEC-3'] }, steps: [{ description: '执行已授权的测试步骤', scope: { source: 'task' },
       call: { capability: 'writing.plan', input: { update_kind: 'patch',
         base_plan_version: priorPlan.plan_version, user_message_refs: [ref],
         summary: '第三章增加实施检查步骤', affected_section_ids: ['SEC-3'], sections: [{

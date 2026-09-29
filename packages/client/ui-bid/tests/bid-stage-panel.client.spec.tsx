@@ -152,7 +152,7 @@ function props(
     return selector === undefined ? value : selector(value)
   }
   const useSessions = (selector: (state: { byId: Record<string, { agentPreset: string; running: boolean }> }) => unknown) =>
-    selector({ byId: { session_bid: { agentPreset: 'bid', running: false } } })
+    selector({ byId: { [patch.sessionId ?? 'session_bid']: { agentPreset: 'bid', running: false } } })
   return {
     sessionId: 'session_bid',
     useProjection,
@@ -162,6 +162,7 @@ function props(
     setComposerBlock: vi.fn(),
     setReviewViewAvailable: vi.fn(),
     getDetails: vi.fn(async () => ({ tender: null, outline: null, body: false, outlinePresentation: null })),
+    getCapabilityTaskPlan: vi.fn(async () => null),
     getDocxLibrary: vi.fn(async () => ({ version: 1, revision: 0, estimateTemplateId: null,
       templateMaxBytes: 300 * 1024 * 1024, templates: [] })),
     uploadDocxTemplate: vi.fn(async () => { throw new Error('unexpected template upload') }),
@@ -1104,8 +1105,7 @@ describe('BidStagePanel', () => {
     const main = projection({ runtime: { stage: 'evidence_mapping', status: 'running' } })
     const plan: BidCapabilityPlanView = {
       workId: 'current-work', title: '重构评分目录', scope: 'project', status: 'running',
-      workItems: ['核对评分项', '重构目录', '复核覆盖'],
-      steps: [{ id: 'refine', capability: 'outline.refine', status: 'running', detail: null }],
+      steps: [{ id: 'refine', capability: 'outline.refine', description: '研究各章节资料并复核评分点覆盖', status: 'running', detail: null }],
     }
     const progress = { ...savedProgress, total: 2, completed: 1, running: 0, not_started: 1,
       failed: 0, failed_section_ids: [],
@@ -1122,24 +1122,72 @@ describe('BidStagePanel', () => {
     expect(screen.queryByText('章节执行任务（已完成 1/2）')).toBeNull()
     expect(screen.queryByText('质量保障措施：待启动')).toBeNull()
     expect(screen.queryByText(/正在处理… · 整个项目/)).toBeNull()
-    expect(screen.getByRole('group', { name: '任务拆分' }).textContent).toContain('核对评分项')
+    expect(screen.getByTestId('bid-capability-plan').textContent).toContain('研究各章节资料并复核评分点覆盖')
   })
 
-  it('能力任务结束后隐藏计划', async () => {
+  it('重规划更新具体步骤并保留完成后的说明和结果', async () => {
     const main = projection({ runtime: { stage: 'chapter_writing', status: 'completed' } })
     const plan: BidCapabilityPlanView = {
       workId: 'capability-work', title: '拆分目录', scope: 'project', status: 'running',
-      workItems: ['核对六个评分章', '调整目录结构', '复核响应点覆盖'],
-      steps: [{ id: 'update-outline', capability: 'outline.update', status: 'running', detail: null }],
+      steps: [{ id: 'update-outline', capability: 'outline.refine', description: '研究现有子树的章节安排', status: 'running', detail: null }],
     }
     const view = render(<BidStagePanel {...props(main, { getCapabilityTaskPlan: async () => plan })} />)
     expect(await screen.findByTestId('bid-capability-plan')).toBeTruthy()
-    expect(screen.getByRole('group', { name: '任务拆分' }).textContent).toContain('复核响应点覆盖')
+    expect(screen.getByTestId('bid-capability-plan').textContent).toContain('研究现有子树的章节安排')
+
+    const replacement = { ...plan.steps[0]!, capability: 'outline.update', description: '将评分章节移至顶层并保留正文' }
+    view.rerender(<BidStagePanel {...props(main, { getCapabilityTaskPlan: async () => ({
+      ...plan, steps: [replacement],
+    }) })} />)
+    await waitFor(() => { expect(screen.getByTestId('bid-capability-plan').textContent).toContain(replacement.description) })
+    expect(screen.queryByText('研究现有子树的章节安排')).toBeNull()
 
     view.rerender(<BidStagePanel {...props(main, { getCapabilityTaskPlan: async () => ({
-      ...plan, status: 'completed', steps: [{ ...plan.steps[0]!, status: 'completed' }],
+      ...plan, status: 'completed', steps: [{ ...replacement, status: 'completed', detail: '已移动评分章节，正文及引用均保留。' }],
     }) })} />)
-    await waitFor(() => { expect(screen.queryByTestId('bid-capability-plan')).toBeNull() })
+    await waitFor(() => { expect(screen.getByTestId('bid-capability-plan').textContent).toContain('已移动评分章节，正文及引用均保留。') })
+    expect(screen.getByTestId('bid-capability-plan').textContent).toContain(replacement.description)
+    expect(screen.getByTestId('bid-capability-plan').querySelector('[data-active="true"]')).toBeNull()
+  })
+
+  it.each(['queued', 'suspended', 'awaiting_input', 'failed'] as const)('%s 保留具体计划与原因，不显示运行动画', async (status) => {
+    const plan: BidCapabilityPlanView = {
+      workId: 'retained-plan', title: '重构目录并核验正文', scope: 'project', status,
+      steps: [
+        { id: 'done', capability: 'outline.update', description: '将评分章节提升为平级目录', status: 'completed', detail: '目录层级已更新' },
+        { id: 'next', capability: 'chapter.review', description: '核对迁移后的正文及引用完整性',
+          status: status === 'queued' ? 'pending' : status, detail: '等待核验资料' },
+      ],
+    }
+    render(<BidStagePanel {...props(projection({ runtime: { stage: 'evidence_mapping', status: 'completed' } }), {
+      getCapabilityTaskPlan: async () => plan,
+    })} />)
+    const panel = await screen.findByTestId('bid-capability-plan')
+    expect(panel.textContent).toContain('将评分章节提升为平级目录')
+    expect(panel.textContent).toContain('核对迁移后的正文及引用完整性')
+    expect(panel.textContent).toContain('等待核验资料')
+    expect(panel.querySelector('[data-active="true"]')).toBeNull()
+  })
+
+  it('计划读取失败标记旧状态，切换会话不显示前一会话计划', async () => {
+    const main = projection({ runtime: { stage: 'evidence_mapping', status: 'completed' } })
+    const plan: BidCapabilityPlanView = { workId: 'source-plan', title: '评分目录修复', scope: 'project', status: 'running',
+      steps: [{ id: 'fix', capability: 'outline.update', description: '将评分章节移至顶层', status: 'running', detail: null }] }
+    const view = render(<BidStagePanel {...props(main, { getCapabilityTaskPlan: async () => plan })} />)
+    await screen.findByTestId('bid-capability-plan')
+    const unreadable = async (): Promise<BidCapabilityPlanView | null> => { throw new Error('连接中断') }
+    view.rerender(<BidStagePanel {...props(main, { getCapabilityTaskPlan: unreadable })} />)
+    await screen.findByText('更新暂不可用，显示上次状态')
+    expect(screen.getByTestId('bid-capability-plan').textContent).toContain('将评分章节移至顶层')
+    expect(screen.getByTestId('bid-capability-plan').querySelector('[data-active="true"]')).toBeNull()
+    view.rerender(<BidStagePanel {...props(main, { sessionId: 'session_other' as BidStagePanelProps['sessionId'],
+      getCapabilityTaskPlan: unreadable })} />)
+    expect(screen.queryByTestId('bid-capability-plan')).toBeNull()
+    await screen.findByText('任务计划暂时无法读取，请查看任务轨迹。')
+    view.rerender(<BidStagePanel {...props(main, { getCapabilityTaskPlan: async () => ({ ...plan, status: 'completed',
+      steps: [{ ...plan.steps[0]!, status: 'completed', detail: '层级已核验' }] }) })} />)
+    await screen.findByText(/层级已核验/)
+    expect(screen.queryByText('任务计划暂时无法读取，请查看任务轨迹。')).toBeNull()
   })
 
   it('S5 完成后只显示独立 S6 任务，S5 修改时保留两个真实计划', async () => {

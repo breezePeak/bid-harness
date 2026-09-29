@@ -106,9 +106,11 @@ export function buildCapabilityTaskPlan(plan: BidCapabilityPlanView, t: Translat
     const label = t(key)
     return {
       key: step.id,
-      content: label === key ? t('capability.unknown') : label,
+      content: step.description,
+      detail: [label === key ? t('capability.unknown') : label, t(`capability.status.${step.status}`), step.detail]
+        .filter(Boolean).join(' · '),
       status: step.status === 'completed' ? 'completed'
-        : step.status === 'running' || step.status === 'awaiting_input' || step.status === 'failed'
+        : step.status === 'running' || step.status === 'awaiting_input' || step.status === 'failed' || step.status === 'suspended'
           ? 'in_progress' : 'pending',
     }
   })

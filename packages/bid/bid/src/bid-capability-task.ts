@@ -11,7 +11,7 @@ import type { AskUserQuestionAnswerItem, AskUserQuestionItem } from '@deepseek-a
 import { BidWorkspace } from './index.ts'
 import {
   bidCapabilityResultSchema, bidCapabilityStepSchema, bidCapabilityTaskSchema,
-  validateCapabilityTaskContentFollowup, validateCapabilityTaskWorkItems,
+  validateCapabilityTaskContentFollowup,
   type BidCapabilityCall, type BidCapabilityExecutionContext, type BidCapabilityResult,
   type BidCapabilityStep, type BidCapabilityTask,
 } from './bid-capability-contract.ts'
@@ -325,7 +325,6 @@ export async function persistCapabilityTaskRequest(
     }
     return existing
   }
-  validateCapabilityTaskWorkItems(task)
   validateCapabilityTaskContentFollowup(task, await hasScopedChapterContent(workspace, task))
   const inputSources = await Promise.all([...new Set(inputPaths)].sort().map(async (path) => {
     const digest = await fileHash(workspace, path)

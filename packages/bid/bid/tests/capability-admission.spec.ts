@@ -28,7 +28,7 @@ it.each(['outline_generation', 'evidence_mapping', 'chapter_writing', 'docx_expo
       session.append('turn/start', { turn: 1 })
       session.append('user/message', message, { surfaceOp: 'append' })
       const task = { goal: '把第一条要求改为明确实施边界', scope: { kind: 'project' as const },
-        steps: [{ scope: { source: 'task' as const }, call: { capability: 'tender.update' as const,
+        steps: [{ description: '执行已授权的测试步骤', scope: { source: 'task' as const }, call: { capability: 'tender.update' as const,
           input: { operations: [{ type: 'update_requirement' as const, requirement_id: 'REQ-1',
             fields: { normalized_requirement: '明确实施边界' } }] } } }] }
       const descriptor = await persistCapabilityTaskRequest(workspace, session, stage, task,

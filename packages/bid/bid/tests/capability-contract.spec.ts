@@ -20,15 +20,15 @@ const outline = { sections: [
 
 describe('公共能力契约', () => {
   it('暂缓正文迁移要求同一任务继续迁移并复核，只有明确暂缓可省略', () => {
-    const outlineStep = { scope: { source: 'task' }, call: { capability: 'outline.update', input: {
+    const outlineStep = { description: '执行已授权的测试步骤', scope: { source: 'task' }, call: { capability: 'outline.update', input: {
       operations: [{ type: 'split_section', section_id: 'A', children: [
         { title: '背景', purpose: '背景', must_answer: ['背景'] },
         { title: '目标', purpose: '目标', must_answer: ['目标'] },
       ] }], defer_content_migration: true,
     } } }
-    const reorganize = { scope: { source: 'task' }, call: { capability: 'chapter.reorganize',
+    const reorganize = { description: '分配原文', scope: { source: 'task' }, call: { capability: 'chapter.reorganize',
       input: { instruction: '分配原文', source_section_ids: ['A'] } } }
-    const review = { scope: { source: 'previous_targets' }, call: { capability: 'chapter.review',
+    const review = { description: '复核拆分结果', scope: { source: 'previous_targets' }, call: { capability: 'chapter.review',
       input: { reason: '复核拆分结果' } } }
     const task = { goal: '拆分为背景与目标并完成正文', scope: { kind: 'sections', section_ids: ['A'] },
       steps: [outlineStep] }
@@ -54,7 +54,7 @@ describe('公共能力契约', () => {
         allow_outline_refinement: true } },
     ]) {
       const task = bidCapabilityTaskSchema.parse({ goal: '研究并细化目录',
-        scope: { kind: 'sections', section_ids: ['A'] }, steps: [{ scope: { source: 'task' }, call }] })
+        scope: { kind: 'sections', section_ids: ['A'] }, steps: [{ description: '执行已授权的测试步骤', scope: { source: 'task' }, call }] })
       expect(() => { validateCapabilityTaskContentFollowup(task, false) }).not.toThrow()
       expect(() => { validateCapabilityTaskContentFollowup(task, true) })
         .toThrow('BID_CAPABILITY_CONTENT_FOLLOWUP_REQUIRED')
@@ -70,7 +70,7 @@ describe('公共能力契约', () => {
     expect(() => bidCapabilityInputSchema.parse({ capability: 'outline.refine', input: { feedback: '细化 A', path: '../x' } })).toThrow()
     expect(() => bidCapabilityInputSchema.parse({ capability: 'unknown', input: {} })).toThrow()
     expect(() => bidCapabilityTaskSchema.parse({ goal: '细化 A', scope: { kind: 'sections', section_ids: ['A'] },
-      steps: [{ scope: { source: 'task' }, call: { capability: 'outline.refine', input: { feedback: '细化 A' } },
+      steps: [{ description: '细化 A', scope: { source: 'task' }, call: { capability: 'outline.refine', input: { feedback: '细化 A' } },
         step_id: 'model-owned' }] })).toThrow()
   })
 
@@ -86,11 +86,11 @@ describe('公共能力契约', () => {
     const reference = { scope: 'paragraphs' as const, section_id: 'A',
       content_sha256: 'a'.repeat(64), start: 0, end: 2, text: '正文' }
     const scope = { kind: 'paragraphs' as const, reference }
-    const revise = { scope: { source: 'task' as const }, call: { capability: 'chapter.revise' as const,
+    const revise = { description: '缩短这句', scope: { source: 'task' as const }, call: { capability: 'chapter.revise' as const,
       input: { instruction: '缩短这句', reference } } }
     expect(() => bidCapabilityTaskSchema.parse({ goal: '缩短这句', scope, steps: [revise] })).not.toThrow()
     expect(() => bidCapabilityTaskSchema.parse({ goal: '缩短这句', scope, steps: [
-      { scope: { source: 'task' }, call: { capability: 'chapter.write', input: { instruction: '重写整章' } } },
+      { description: '重写整章', scope: { source: 'task' }, call: { capability: 'chapter.write', input: { instruction: '重写整章' } } },
     ] })).toThrow()
     expect(() => bidCapabilityTaskSchema.parse({ goal: '缩短这句', scope, steps: [
       { ...revise, call: { ...revise.call, input: { ...revise.call.input,

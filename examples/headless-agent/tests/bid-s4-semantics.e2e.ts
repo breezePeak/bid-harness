@@ -172,8 +172,11 @@ describe.skipIf(!process.env.DEEPSEEK_API_KEY && !process.env.DSH_BID_EVAL_PROVI
       await seedCapabilityProject(workspace, 'complete')
       await checkpointBidProjectState(workspace, { stage: 'evidence_mapping', status: 'completed', run: null })
       await ctx.plugin(BidHostRuntime)
-      const agent = ctx.agentLoop.create(SessionId('capability-routing'),
-        { provider, model: process.env.DSH_BID_EVAL_MODEL ?? 'deepseek-v4-flash' }, { cwd: root, agentPreset: 'bid' })
+      const { agent } = await ctx.agentLoop.createAgent(ctx, {
+        sessionId: SessionId('capability-routing'),
+        agentOptions: { provider, model: process.env.DSH_BID_EVAL_MODEL ?? 'deepseek-v4-flash' },
+        meta: { cwd: root, agentPreset: 'bid' },
+      })
       const bodyPaths = ['0001', '0002', '0003', '0004', '0005'].map(id =>
         join(workspace.projectRoot, `chapters/sections/${id}.md`))
       const bodies = await Promise.all(bodyPaths.map(path => readFile(path, 'utf8')))

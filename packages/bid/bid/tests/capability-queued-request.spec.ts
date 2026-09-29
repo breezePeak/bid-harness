@@ -13,7 +13,7 @@ it('请求先落盘再登记；孤立文件不执行且 applied 不重复读取'
   const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-capability-queue-')))
   const run = createTestBidRunContext()
   const authorization = { session_id: 'user-session', message_id: 'message-1' }
-  const task = { goal: '更正一条要求', scope: { kind: 'project' as const }, steps: [{
+  const task = { goal: '更正一条要求', scope: { kind: 'project' as const }, steps: [{ description: '执行已授权的测试步骤',
     scope: { source: 'task' as const }, call: { capability: 'tender.update' as const,
       input: { operations: [{ type: 'update_requirement' as const, requirement_id: 'REQ-1',
         fields: { normalized_requirement: '明确实施边界' } }] } },
@@ -39,7 +39,7 @@ it('请求先落盘再登记；孤立文件不执行且 applied 不重复读取'
 it('重置删除必需输入时取消已登记请求，其他请求保留', async () => {
   const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-capability-reset-')))
   const run = createTestBidRunContext()
-  const task = { goal: '更正招标要求', scope: { kind: 'project' as const }, steps: [{
+  const task = { goal: '更正招标要求', scope: { kind: 'project' as const }, steps: [{ description: '执行已授权的测试步骤',
     scope: { source: 'task' as const }, call: { capability: 'tender.update' as const,
       input: { operations: [{ type: 'update_requirement' as const, requirement_id: 'REQ-1',
         fields: { normalized_requirement: '明确实施边界' } }] } },
@@ -47,7 +47,7 @@ it('重置删除必需输入时取消已登记请求，其他请求保留', asyn
   await enqueueCapabilityRequest(workspace, run, task,
     { session_id: 'user-session', message_id: 'message-1' })
   await enqueueCapabilityRequest(workspace, run, { goal: '分析招标文件', scope: { kind: 'project' },
-    steps: [{ scope: { source: 'task' }, call: { capability: 'tender.analyze', input: {} } }],
+    steps: [{ description: '执行已授权的测试步骤', scope: { source: 'task' }, call: { capability: 'tender.analyze', input: {} } }],
   }, { session_id: 'user-session', message_id: 'message-2' })
   await run.commits.publish(async (lease) => {
     expect(await cancelCapabilityRequestsForReset(workspace,

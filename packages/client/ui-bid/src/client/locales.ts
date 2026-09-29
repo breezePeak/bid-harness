@@ -37,6 +37,15 @@ export const zh = {
   'capability.docx.export': '导出 Word',
   'capability.queued': '已排队，等待当前工作收敛',
   'capability.awaiting_input': '等待补充输入',
+  'capability.status.queued': '已排队',
+  'capability.status.pending': '待执行',
+  'capability.status.running': '执行中',
+  'capability.status.awaiting_input': '等待补充输入',
+  'capability.status.completed': '已完成',
+  'capability.status.failed': '执行失败',
+  'capability.status.suspended': '已挂起',
+  'capability.status.stale': '更新暂不可用，显示上次状态',
+  'capability.unavailable': '任务计划暂时无法读取，请查看任务轨迹。',
   'plan.progress.completed': '{count} 已完成',
   'plan.progress.active': '{count} 正在进行',
   'plan.progress.unfinished': '{count} 未收尾',
@@ -188,6 +197,7 @@ export type BidKey = keyof typeof zh
 
 /** English dictionary checked against the Chinese key set. */
 export const en = {
+  ...zh,
   title: 'Technical bid',
   'confirmation.mode.label': 'Confirmation mode',
   'confirmation.mode.manual': 'Manual',

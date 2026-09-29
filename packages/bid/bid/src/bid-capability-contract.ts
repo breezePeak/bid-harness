@@ -75,6 +75,8 @@ export const bidCapabilityInputSchema = z.discriminatedUnion('capability', [
 
 /** 模型选择的单一步骤；身份和文件路径由 Host 填充。 */
 export const bidCapabilityStepSchema = z.object({
+  description: instruction
+    .describe('向用户说明本步骤要处理的具体对象、动作和预期结果。不要只填写能力名称；由实际任务决定，不使用固定模板步骤。'),
   scope: bidCapabilityStepScopeSchema,
   call: bidCapabilityInputSchema,
 }).strict()
@@ -83,7 +85,6 @@ export const bidCapabilityStepSchema = z.object({
 export const bidCapabilityTaskSchema = z.object({
   goal: instruction,
   scope: bidCapabilityScopeSchema,
-  work_items: z.array(z.string().trim().min(1).max(200)).min(2).max(8).optional(),
   allow_pending_content: z.boolean().optional().describe('仅用户明确要求只改目录或暂缓正文时设为 true；执行中的临时迁移延后不属于此授权。'),
   steps: z.array(bidCapabilityStepSchema).min(1),
 }).strict().refine((task) => {
@@ -97,17 +98,6 @@ export const bidCapabilityTaskSchema = z.object({
     && actual.content_sha256 === expected.content_sha256 && actual.start === expected.start
     && actual.end === expected.end && actual.text === expected.text
 }, 'BID_CAPABILITY_PARAGRAPH_PLAN_INVALID')
-
-/**
- * 新的整本目录深化任务须由 Main Agent 提交可见的具体工作项。
- * @param task 待校验的能力任务。
- */
-export function validateCapabilityTaskWorkItems(task: BidCapabilityTask): void {
-  if (task.scope.kind === 'project' && task.steps.some(step => step.call.capability === 'outline.refine')
-    && task.work_items === undefined) {
-    throw new Error('BID_CAPABILITY_WORK_ITEMS_REQUIRED: 整本目录深化请先拆成 2–8 个具体工作项。')
-  }
-}
 
 /** Host 核对过产物后形成的步骤结果。 */
 export const bidCapabilityResultSchema = z.object({

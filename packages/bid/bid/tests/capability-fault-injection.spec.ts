@@ -49,7 +49,7 @@ it('目录候选校验后中断时旧版本仍可导出，同一 Work 重试才�
   const message = createUserMessage({ content: [{ type: 'text', text: '把第一节改名为设计核验' }], source: { kind: 'user' } })
   session.append('turn/start', { turn: 1 })
   session.append('user/message', message, { surfaceOp: 'append' })
-  const task = bidCapabilityTaskSchema.parse({ goal: '把第一节改名为设计核验', scope: { kind: 'project' }, steps: [{
+  const task = bidCapabilityTaskSchema.parse({ goal: '把第一节改名为设计核验', scope: { kind: 'project' }, steps: [{ description: '执行已授权的测试步骤',
     scope: { source: 'task' }, call: { capability: 'outline.update', input: {
       operations: [{ type: 'update_section', section_id: 'SEC-1', title: '设计核验' }],
     } },

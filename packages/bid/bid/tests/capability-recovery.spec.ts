@@ -118,7 +118,7 @@ it('资料任务登记后来源分块丢失时预检给出具体来源错误', a
   session.append('user/message', message, { surfaceOp: 'append' })
   const work = await persistCapabilityTaskRequest(workspace, session, 'chapter_writing', {
     goal: '仅补第三章资料', scope: { kind: 'sections', section_ids: ['SEC-3'] },
-    steps: [{ scope: { source: 'task' }, call: { capability: 'evidence.research',
+    steps: [{ description: '补充第三章资料', scope: { source: 'task' }, call: { capability: 'evidence.research',
       input: { mode: 'supplement', reason: '补充第三章资料', allow_outline_refinement: false } } }],
   }, { session_id: String(session.id), message_id: String(message.id) },
   BID_CAPABILITIES['evidence.research'].requires, { stage: 'chapter_writing', status: 'completed', run: null })
@@ -209,7 +209,7 @@ it('段落引用在接纳后变化时，恢复拒绝旧选区且不启动 Writer
   session.append('user/message', message, { surfaceOp: 'append' })
   const work = await persistCapabilityTaskRequest(workspace, session, 'chapter_writing', {
     goal: '缩短选中段落', scope: { kind: 'paragraphs', reference },
-    steps: [{ scope: { source: 'task' }, call: { capability: 'chapter.revise',
+    steps: [{ description: '缩短选中段落', scope: { source: 'task' }, call: { capability: 'chapter.revise',
       input: { instruction: '缩短选中段落', reference } } }],
   }, { session_id: String(session.id), message_id: String(message.id) },
   BID_CAPABILITIES['chapter.revise'].requires, { stage: 'chapter_writing', status: 'completed', run: null })
@@ -238,7 +238,7 @@ it('接纳后目标章节被移除时，旧任务拒绝改写相邻章节', asyn
   session.append('user/message', message, { surfaceOp: 'append' })
   const work = await persistCapabilityTaskRequest(workspace, session, 'chapter_writing', {
     goal: '修改第一章标题', scope: { kind: 'sections', section_ids: ['SEC-1'] },
-    steps: [{ scope: { source: 'task' }, call: { capability: 'outline.update', input: {
+    steps: [{ description: '执行已授权的测试步骤', scope: { source: 'task' }, call: { capability: 'outline.update', input: {
       operations: [{ type: 'update_section', section_id: 'SEC-1', title: '新标题' }],
       business_bindings: [], content_assignments: [], allow_content_deletion: false,
       defer_content_migration: false,

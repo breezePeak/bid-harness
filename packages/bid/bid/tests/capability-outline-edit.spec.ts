@@ -339,14 +339,14 @@ describe('目录能力候选', () => {
       const deferred = interrupt === 'missing_followup' || interrupt === 'user_deferred'
       const task = bidCapabilityTaskSchema.parse({ goal: '拆分并迁移第一章', allow_pending_content: interrupt === 'user_deferred',
         scope: { kind: 'sections' as const, section_ids: ['SEC-1'] }, steps: [
-          { scope: { source: 'task' as const }, call: { capability: 'outline.update' as const,
+          { description: '执行已授权的测试步骤', scope: { source: 'task' as const }, call: { capability: 'outline.update' as const,
             input: { operations: [{ type: 'split_section' as const, section_id: 'SEC-1', children: [
               { title: '准备', purpose: '准备', must_answer: ['准备'] },
               { title: '实施', purpose: '实施', must_answer: ['实施'] },
             ] }], defer_content_migration: true } } },
-          ...deferred ? [] : [{ scope: { source: 'task' as const }, call: { capability: 'chapter.reorganize' as const,
+          ...deferred ? [] : [{ description: '保留并分配旧章所有正文块', scope: { source: 'task' as const }, call: { capability: 'chapter.reorganize' as const,
             input: { instruction: '保留并分配旧章所有正文块', source_section_ids: ['SEC-1'], allow_content_deletion: false } } }],
-          ...deferred ? [] : [{ scope: { source: 'task' as const },
+          ...deferred ? [] : [{ description: '审核原文迁移结果', scope: { source: 'task' as const },
             call: { capability: 'chapter.review' as const, input: { reason: '审核原文迁移结果' } } }],
         ] })
       const authorization = { session_id: String(session.id), message_id: String(message.id) }
