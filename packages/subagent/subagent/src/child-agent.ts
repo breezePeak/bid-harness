@@ -137,7 +137,9 @@ export const SUBAGENT_DELEGATION_CONTEXT
   = 'You are a delegated subagent: your permission scope was fixed when you were started and cannot be '
     + 'widened from inside this session — operations that require approval are rejected automatically. '
     + 'When the task needs access beyond that scope, do not retry the denied operation; state the '
-    + 'limitation in your reply so the delegating agent can handle it.'
+    + 'limitation in your reply so the delegating agent can handle it. '
+    + 'Do not ask the human directly. If human input, confirmation, or a user-owned decision is required, '
+    + 'report the unresolved question or decision to the delegating agent instead of waiting for the user yourself.'
 
 /**
  * Compose one child inside its creation window: join its parent's preset,

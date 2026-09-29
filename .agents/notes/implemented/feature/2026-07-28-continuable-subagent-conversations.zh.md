@@ -34,13 +34,13 @@ persisted Session
 
 ### 物化与公开操作
 
-具名 subagent 提供方只参与准备初始创建规格，此时 `spawn` 与 `fork` 有所区别。其可选的 `prepareContinuable(request): Promise<ContinuableCreateSpec>` 方法就是可继续创建能力。返回的规格只包含与 Agent 实例分离且由提供方决定的创建输入，例如可选的 parent 历史种子；它不包含 Agent、`AgentHandle`、提示词投递、结果、dispose 或恢复操作。管理器会预留 child 身份，解析持久化描述符和通用 Agent 配置，通过私有 activation-owner 作用域调用 `ctx.agents.create()`，将返回的 `AgentHandle` 安装到激活中，建立适用的可继续 parent 所有权，然后调用 `Agent.followup(initialPrompt)`。inbox 接受消息后会产生一个 `MessageId`；`ctx.subagents.startContinuable()` 在此边界返回 `{ childId, messageId }`，不等待轮次开始，也不等待消息写入会话日志。
+具名 subagent 提供方只参与准备初始创建规格，此时 `spawn` 与 `fork` 有所区别。其可选的 `prepareContinuable(request): Promise<ContinuableCreateSpec>` 方法就是可继续创建能力。返回的规格只包含与 Agent 实例分离且由提供方决定的创建输入，例如可选的 parent 历史种子；它不包含 Agent、`AgentHandle`、提示词投递、结果、dispose 或恢复操作。管理器会预留 child 身份，解析持久化描述符和通用 Agent 配置，通过私有 activation-owner 作用域派生带有确切在线直接 parent 的调用 Context，再调用 `ctx.agents.create()`。该作用域持有生命周期，`AgentRegistry` 同时记录直接 parent 作为 runtime owner。管理器将返回的 `AgentHandle` 安装到激活中，建立适用的可继续 parent 所有权，然后调用 `Agent.followup(initialPrompt)`。inbox 接受消息后会产生一个 `MessageId`；`ctx.subagents.startContinuable()` 在此边界返回 `{ childId, messageId }`，不等待轮次开始，也不等待消息写入会话日志。
 
 inbox 接受消息前发生任何失败，操作都会在不返回任何 id 的情况下被拒绝。Agent 创建流程负责 handle 移交前的回滚；移交后，管理器会保留一个对并发投递和 drain 可见的关闭事务，dispose 已创建的 handle、移除激活并回滚 parent `ownedChildren` 中的任何成员关系，再拒绝操作。在驻留 start 事件发布前失败不会发布终止事件，start 发布后失败则通过正常 dispose 闭合生命周期配对。
 
 `backgroundMode: 'one-shot' | 'continuable'` 仍是部署策略。配置为 continuable 时要求存在 `prepareContinuable`；该方法是否存在会取代 `SubagentProvider.resume?()` 成为能力检查，而具备该能力的提供方仍可运行 one-shot 工作。
 
-冷恢复不会通过 subagent 提供方分发。继续执行管理器会归并通用的进程内描述符，通过同一个 activation-owner 作用域调用 `ctx.agents.resume()`，安装返回的 `AgentHandle`，并提交等待中的 `next-turn`。`SubagentProvider.resume?()` 和 `SubagentProviderResumeRequest` 均不存在。初始提供方注销后，描述符仍保留其名称；该名称不赋予恢复能力，也不要求后续驻留时该提供方存在。远程提供方需要单独设计。
+冷恢复不会通过 subagent 提供方分发。继续执行管理器会归并通用的进程内描述符，通过同一个 activation-owner 作用域派生带有当前直接 parent 的调用 Context，再调用 `ctx.agents.resume()`、安装返回的 `AgentHandle`，并提交等待中的 `next-turn`。`SubagentProvider.resume?()` 和 `SubagentProviderResumeRequest` 均不存在。初始提供方注销后，描述符仍保留其名称；该名称不赋予恢复能力，也不要求后续驻留时该提供方存在。远程提供方需要单独设计。
 
 `SubagentProvider.start()` 和 `SubagentRun` 只保留在不变的 one-shot 路径上。可继续激活直接持有自身的 `AgentHandle`，绝不创建、包装或保留 `SubagentRun`；因此，`SubagentRun.steer?()` 不存在。
 
@@ -54,7 +54,7 @@ inbox 接受消息前发生任何失败，操作都会在不返回任何 id 的�
 
 空闲的历史会话没有 `AgentHandle`。第一条通过鉴权的 `next-turn` 投递会根据持久化会话恢复激活，并将消息提交到其 inbox。冷恢复使用经过身份认证的确切在线 parent Agent 执行鉴权；当该 parent 有激活时，还使用它建立所有权，但绝不使用 parent 执行重建。
 
-激活会直接持有已发布的 `AgentHandle` 直至结算，而管理器的私有 activation-owner 作用域则是其 Cordis 结构化所有者。可继续 subagent 路径不创建任何中间的带结果执行包装层，包括 `SubagentRun`；一次性委派保持不变，且不属于该生命周期。远程提供方不在此处的范围内，引入时需要单独的激活所有权约定。激活 dispose 后，历史会话不消耗运行时内存。
+激活会直接持有已发布的 `AgentHandle` 直至结算，而管理器的私有 activation-owner 作用域则是其 Cordis 结构化所有者。`AgentRegistry` 的 runtime owner 是确切的在线直接 parent，决定 `roots()` 与仅顶层 Agent 可用的用户提问权限；它不改变持久化 `parentSession`，也不把 handle 的释放交给 parent 轮次。可继续 subagent 路径不创建任何中间的带结果执行包装层，包括 `SubagentRun`；一次性委派保持不变，且不属于该生命周期。远程提供方不在此处的范围内，引入时需要单独的激活所有权约定。激活 dispose 后，历史会话不消耗运行时内存。
 
 ### 激活生命周期
 
@@ -156,6 +156,8 @@ activation-owner 作用域之所以存在，是因为普通 Cordis owner effect 
 **等待期间 dispose Agent。** child 仍属于上一个进程内所有权图时重建 parent，需要持久化所有权与拆卸协议。只为尚未完成的所有权图保留 `AgentHandle`，可以在不让已结算历史驻留的前提下，保留 child-first 拆卸。
 
 **让提供方通过 Agent handle 创建、恢复 child 或投递消息。** 初始提供方只持有 `prepareContinuable()` 及其分离式创建规格这一项差异：child 是全新启动，还是带有 parent 前缀。管理器必须通过私有 activation-owner 作用域自行调用 `ctx.agents.create()`，使该作用域成为每个 handle 的结构化所有者。持久化的进程内会话已经包含初始前缀及通用重建描述符，消息投递则属于 Agent inbox。让提供方持有任何后续 handle、`SubagentRun` 或消息所有权，会让提供方保留所有权，却没有已发布行为需要它。
+
+**通过 `parent.ctx` 创建或恢复 child。** 这会把 handle 的 Cordis 生命周期转交给 parent 作用域；parent 一次轮次结束时的作用域拆卸可能抢先于管理器的 child-first drain。派生管理器作用域的调用 Context 只提供 runtime parent 身份，保留管理器对 handle 生命周期的控制。
 
 **将报告投递纳入基础生命周期。** 可重复的 child 到 parent 报告与该生命周期兼容，但静默投递还是 next-step 投递、确认、持久性和重试行为都是独立的产品决策。后续的 report 包保持可选，并消费一个显式的 child 设置钩子，因此可继续驻留不会默认授予返回通道。
 
