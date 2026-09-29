@@ -44,4 +44,4 @@ S5 的明确修改继续通过现有 Writing Plan 与 durable command journal �
 
 运行中的聊天不再占用执行 Agent，公开回复失败也不会终止阶段；所有 Artifact 写入仍经过同一个 operation、Run coordinator 和 commit scope。每个活动 operation 额外持有一个内部 Session，其日志按现有 Session 存储恢复，并在运行收敛后释放 live Agent。内部 Execution Session 使用 `subagent` origin 作为现有路由隔离标记，目录中以「Bid 阶段执行」的一次性子代理身份呈现；监控和调试仍通过 Run 快照身份区分它与真正执行章节工作的后代 Child。
 
-Execution 的用户提问会快速返回工具拒绝，并在主会话留下有界通知；这不会自动回答问题，也不会替代阶段校验或 Run 失败恢复。
+Execution 的用户提问会快速返回工具拒绝，将有界问题写入原 Run 的失败记录并取消执行；结算和项目锁释放后，主 Agent 收到失败通知，按原任务身份检查恢复。Host 不自动回答问题，也不代替主 Agent 选择恢复动作。

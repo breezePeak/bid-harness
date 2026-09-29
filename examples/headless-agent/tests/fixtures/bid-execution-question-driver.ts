@@ -4,9 +4,9 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { CallId, LlmAdapter, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import { SessionId, type Session } from '@deepseek-ai/dsh-session'
-import { BidHostRuntime, BidWorkspace, checkpointBidProjectState } from '@deepseek-ai/dsh-bid'
+import { BidHostRuntime, BidWorkspace, checkpointBidProjectState, type BidRunCoordinator } from '@deepseek-ai/dsh-bid'
 
-interface Operation { readonly session: Session }
+interface Operation { readonly session: Session; readonly runs: BidRunCoordinator }
 interface HostInternals {
   beginOperation(session: Session): Operation
   prepareOperation(operation: Operation): Promise<unknown>
@@ -48,6 +48,9 @@ try {
   const operation = host.beginOperation(main.session)
   await host.prepareOperation(operation)
   const execution = await host.executionAgent(operation, 'evidence_mapping')
+  await operation.runs.start({ kind: 'stage_execution', workId: 'execution-question-work',
+    stage: 'evidence_mapping', requestRef: 'requests/execution-question-work.json',
+    requestSha256: '0'.repeat(64), inputFingerprint: '0'.repeat(64) })
   let providerCalls = 0
   ctx.userQuestions.registerProvider({
     async ask() { providerCalls += 1; return { answers: [] } },
@@ -57,18 +60,22 @@ try {
     arguments: { questions: [{ id: 'directory_restructure', question: '是否现在启动目录编辑任务？' }] },
     callId: CallId('execution-question'), signal: new AbortController().signal,
   })
+  await host.finishOperation(main.session, operation)
   await main.whenIdle()
   const notices = main.session.events.filter(event => event.type === 'user/message'
     && event.data.source.kind === 'plugin' && event.data.source.form === 'notice'
-    && event.data.source.summary === 'Bid 后台提问交由主 Agent 处理')
+    && event.data.source.summary === 'Bid 执行失败，交由主 Agent 处理')
+  const suspended = main.session.events.findLast(event => event.type === 'bid.run.suspended')
   process.stdout.write(`${JSON.stringify({
     denied: result.isError && JSON.stringify(result).includes('BID_EXECUTION_QUESTION_REQUIRES_MAIN_AGENT'),
     providerCalls,
     notices: notices.length,
+    runSuspended: suspended?.type === 'bid.run.suspended' && suspended.data.run.cause === 'executor_error',
+    questionSaved: suspended?.type === 'bid.run.suspended' && suspended.data.run.error?.issues?.some(issue =>
+      issue.code === 'BID_EXECUTION_QUESTION_REQUIRES_MAIN_AGENT' && issue.message.includes('是否现在启动目录编辑任务？')),
     mainSawQuestion: adapter.requests.some(request => request.messages.some(message =>
       message.content.some(block => block.type === 'text' && block.text.includes('是否现在启动目录编辑任务？')))),
     mainReplied: main.session.deriveMessages().some(message => message.role === 'assistant'
       && message.content.some(block => block.type === 'text' && block.text.includes('我会先判断'))),
   })}\n`)
-  await host.finishOperation(main.session, operation)
 } finally { await ctx?.fiber.dispose() }

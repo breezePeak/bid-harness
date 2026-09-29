@@ -283,6 +283,9 @@ export class BidRunCoordinator {
   /** Current live Run, if any. */
   get current(): BidRunContext | undefined { return this.active?.context }
 
+  /** Whether an external owner has begun settling the current Run. */
+  get suspending(): boolean { return this.suspension !== undefined }
+
   /**
    * Durably record a running Run before exposing its context to an Executor.
    * @param work - Durable descriptor selecting the exact resume adapter and request.

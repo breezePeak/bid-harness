@@ -431,6 +431,10 @@ export class BidOrchestrator {
     try {
       artifacts = await run.activities.track(() => this.executor.execute(buildBidStageTask(stage), run))
     } catch (error: unknown) {
+      if (this.runs.suspending) {
+        const settled = await this.runs.suspend('executor_error')
+        return settled?.cause === 'user_stop' ? 'aborted' : 'failed'
+      }
       if (signalAborted(run.signal)) {
         await this.runs.suspend('user_stop')
         return 'aborted'

@@ -2416,26 +2416,31 @@ describe('Workspace 项目与独立 Session', () => {
     const retry = resumeRun(ctx, agent.session)
     try {
       await vi.waitFor(() => { expect(runtime(agent.session)).toMatchObject({ stage: 'evidence_mapping', status: 'running' }) })
+      const initialMainRequests = adapter.requests.filter(request => String(request.sessionId) === String(agent.id)).length
       const operation = host.inFlight.values().next().value as { executionHandle?: { agent: Agent } }
       const execution = operation.executionHandle?.agent
       if (execution === undefined) throw new Error('测试未找到 Execution Agent')
-      adapter.script.push(answer('我会判断是否需要用户确认。'))
       const request = { questions: [{ id: 'directory_restructure', question: '是否现在启动目录编辑任务？' }] }
       const result = await ctx.tools.execute({ agent: execution, name: 'ask_user_question', arguments: request,
         callId: CallId('execution-question'), signal: new AbortController().signal })
       expect(result).toMatchObject({ isError: true })
       expect(JSON.stringify(result)).toContain('BID_EXECUTION_QUESTION_REQUIRES_MAIN_AGENT')
       expect(ask).not.toHaveBeenCalled()
-      await vi.waitFor(() => {
-        expect(agent.session.events.filter(event => event.type === 'user/message'
-          && event.data.source.kind === 'plugin' && event.data.source.form === 'notice'
-          && event.data.source.summary === 'Bid 后台提问交由主 Agent 处理')).toHaveLength(1)
-      })
+      expect(adapter.requests.filter(request => String(request.sessionId) === String(agent.id))).toHaveLength(initialMainRequests)
+      expect(runtime(agent.session)).toMatchObject({ stage: 'evidence_mapping', status: 'running' })
+      adapter.script.push(answer('原任务已挂起，我会检查并决定如何恢复。'))
+      stageGate.resolve([])
+      const settled = await retry
+      expect(settled, JSON.stringify(settled)).toMatchObject({ ok: true, value: { stage: 'evidence_mapping', status: 'suspended' } })
+      expect(runtime(agent.session)).toMatchObject({ stage: 'evidence_mapping', status: 'suspended',
+        run: { cause: 'executor_error', error: { issues: [{ code: 'BID_EXECUTION_QUESTION_REQUIRES_MAIN_AGENT' }] } } })
       await agent.whenIdle()
       expect(adapter.requests.filter(request => String(request.sessionId) === String(agent.id)).at(-1)?.messages)
         .toEqual(expect.arrayContaining([expect.objectContaining({ content: expect.arrayContaining([
           expect.objectContaining({ type: 'text', text: expect.stringContaining('是否现在启动目录编辑任务？') }),
         ]) })]))
+      expect(agent.session.deriveMessages().at(-1)?.content)
+        .toContainEqual({ type: 'text', text: '原任务已挂起，我会检查并决定如何恢复。' })
     } finally {
       stageGate.resolve([])
       await retry

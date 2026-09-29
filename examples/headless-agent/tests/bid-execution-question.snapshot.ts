@@ -11,6 +11,7 @@ it('源码装配的 Bid Execution 提问唤醒主 Agent', async () => {
     mode: 'src', tsconfigPath: fileURLToPath(new URL('../../../tsconfig.json', import.meta.url)),
   })
   expect(JSON.parse(result.stdout)).toEqual({
-    denied: true, providerCalls: 0, notices: 1, mainSawQuestion: true, mainReplied: true,
+    denied: true, providerCalls: 0, notices: 1, runSuspended: true, questionSaved: true,
+    mainSawQuestion: true, mainReplied: true,
   })
 }, LOADER_SMOKE_TEST_TIMEOUT_MS)

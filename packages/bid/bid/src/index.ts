@@ -1687,7 +1687,6 @@ export class BidHostRuntime extends TypertRemoteService {
   private readonly queuedDrainRequested = new Set<BidProjectKey>()
   private readonly pendingRunDecisionControllers = new Map<string, AbortController>()
   private readonly recoveryNotices = new WeakMap<Session, string>()
-  private readonly executionQuestionNotices = new WeakSet<ActiveBidOperation>()
   private readonly recoveryAcceptances = new Map<string, Promise<{ accepted: true; run_id: string }>>()
   private readonly recoveryTasks = new Set<Promise<unknown>>()
   private readonly pendingWritingQuestions = new Map<BidProjectKey, ActiveWritingQuestion>()
@@ -3015,20 +3014,17 @@ export class BidHostRuntime extends TypertRemoteService {
         if (execution.name === 'ask_user_question' && execution.agent !== undefined) {
           const operation = [...this.inFlight.values()].find(active => active.executionHandle?.agent === execution.agent)
           if (operation !== undefined) {
-            if (!this.executionQuestionNotices.has(operation)) {
-              this.executionQuestionNotices.add(operation)
-              const message = createUserMessage({
-                content: [{ type: 'text', text: [
-                  'Bid 后台执行 Agent 尝试直接等待用户回答，调用已被拒绝。请由你判断是否需要向用户说明或提问；后台任务仍按原执行链收敛。',
-                  `stage: ${operation.executionStage ?? 'unknown'}`,
-                  `execution_session_id: ${String(execution.agent.session.id)}`,
-                  `question: ${sanitizeBidErrorText(JSON.stringify(execution.arguments), 1600)}`,
-                ].join('\n') }],
-                source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'notice', summary: 'Bid 后台提问交由主 Agent 处理' },
+            const run = operation.runs.current
+            if (run !== undefined && operation.suspension === undefined) {
+              const question = sanitizeBidErrorText(JSON.stringify(execution.arguments), 1600)
+              const failure = safeRecoverableBidFailure(run.work, new BidStageExecutionError([{
+                code: 'BID_EXECUTION_QUESTION_REQUIRES_MAIN_AGENT',
+                message: `后台执行 Agent 尝试等待用户回答：${question}`,
+              }]))
+              operation.suspension = operation.runs.suspend('executor_error', failure)
+              void operation.suspension.catch((error: unknown) => {
+                this.ctx.logger.warn(`Bid 后台提问结算失败：${String(error)}`)
               })
-              const main = this.ctx.agents.get(operation.session.id)
-              if (main?.session === operation.session) main.steer(message)
-              else operation.session.append('user/message', message, { surfaceOp: 'append' })
             }
             return 'BID_EXECUTION_QUESTION_REQUIRES_MAIN_AGENT'
           }
