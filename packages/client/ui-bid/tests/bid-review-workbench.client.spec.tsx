@@ -8,7 +8,7 @@ import type {
   DocxTemplateId,
 } from '@deepseek-ai/dsh-bid/control-plane'
 import { BidReviewWorkbench, type BidReviewWorkbenchProps } from '../src/client/BidReviewWorkbench.tsx'
-import { createBidRevisionStore } from '../src/client/revision-reference.ts'
+import { createBidRevisionStore, type BidRevisionReference } from '../src/client/revision-reference.ts'
 
 afterEach(cleanup)
 
@@ -57,7 +57,7 @@ describe('BidReviewWorkbench', () => {
         before_markdown: '# 实施方案\n\nAAA\n\nCCC\n', after_markdown: '# 实施方案\n\nAAA\n\nBBB\n\nCCC\n',
         before_sha256: 'a'.repeat(64), after_sha256: 'b'.repeat(64),
       }),
-      onCompareRevision: listener => { compare = listener; return () => {} },
+      onCompareRevision: (listener) => { compare = listener; return () => {} },
     })} />)
     await screen.findByText('章节正文')
     act(() => { compare?.({ issueId: 'ISSUE-1', sectionId: 'SEC-1' }) })
@@ -80,7 +80,7 @@ describe('BidReviewWorkbench', () => {
     })
     render(<BidReviewWorkbench {...props({
       getRevisionComparison: issueId => issueId === 'A' ? first.promise : second.promise,
-      onCompareRevision: listener => { compare = listener; return () => {} },
+      onCompareRevision: (listener) => { compare = listener; return () => {} },
     })} />)
     await screen.findByText('章节正文')
     act(() => {
@@ -98,7 +98,7 @@ describe('BidReviewWorkbench', () => {
     let compare: ((target: { issueId: string; sectionId: string }) => void) | undefined
     render(<BidReviewWorkbench {...props({
       getRevisionComparison: async () => { throw Object.assign(new Error('not available'), { code: 'BID_REVISION_COMPARISON_NOT_AVAILABLE' }) },
-      onCompareRevision: listener => { compare = listener; return () => {} },
+      onCompareRevision: (listener) => { compare = listener; return () => {} },
     })} />)
     await screen.findByText('章节正文')
     act(() => { compare?.({ issueId: 'OLD', sectionId: 'SEC-1' }) })
@@ -826,7 +826,7 @@ describe('BidReviewWorkbench', () => {
   })
 
   it('右键菜单支持"添加到对话框"，设置 reference 并关闭菜单', async () => {
-    const setReference = vi.fn()
+    const setReference = vi.fn<(reference: BidRevisionReference | null) => void>()
     const markdown = '# 1.1 实施方案\n\n首段内容。\n'
     render(<BidReviewWorkbench {...props({
       getChapter: async () => ({ ...chapter, markdown }),
@@ -842,8 +842,10 @@ describe('BidReviewWorkbench', () => {
     const addItem = await screen.findByRole('menuitem', { name: '添加到对话框' })
     fireEvent.click(addItem)
     expect(setReference).toHaveBeenCalledTimes(1)
-    const ref = setReference.mock.calls[0]![0]
+    const ref = setReference.mock.calls[0]?.[0]
+    if (ref === undefined || ref === null) throw new Error('Missing paragraph reference')
     expect(ref.reference.scope).toBe('paragraphs')
+    if (ref.reference.scope !== 'paragraphs') throw new Error('Expected paragraph reference')
     expect(ref.reference.text).toBe('首段内容。')
     expect(screen.queryByRole('menu', { name: '选中段落操作' })).toBeNull()
   })

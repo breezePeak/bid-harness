@@ -190,7 +190,7 @@ export function apply(ctx: Context): void {
           publishDescription(undefined)
         }
       }, 'connection: browser recovery and stream loop')
-      return { stop }
+      return { stop: () => { void stop() } }
     },
   }
   ctx.provide('connection', handle)

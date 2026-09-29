@@ -89,7 +89,7 @@ export function BidRevisionFloatingPanel({
     let timer: number | undefined
     const poll = (): void => {
       void refreshRevisionQueue().then(() => {
-        const queueRunning = latestRevisionQueueRef.current?.issues?.some(
+        const queueRunning = latestRevisionQueueRef.current?.issues.some(
           issue => issue.status === 'scheduled' || issue.status === 'running',
         ) ?? false
         if (!disposed && (isRunning || queueRunning)) {
@@ -514,9 +514,9 @@ function resolveRevisionQueueProgress(queue: BidRevisionQueueView | null): {
   readonly label: string
   readonly title: string
 } | null {
-  const active = queue?.issues?.find(issue => issue.status === 'scheduled' || issue.status === 'running')
+  const active = queue?.issues.find(issue => issue.status === 'scheduled' || issue.status === 'running')
   if (active?.batch_id === null || active?.batch_id === undefined) return null
-  const issues = queue?.issues?.filter(issue => issue.batch_id === active.batch_id) ?? []
+  const issues = queue?.issues.filter(issue => issue.batch_id === active.batch_id) ?? []
   const processed = issues.filter(
     issue => issue.status === 'completed' || issue.status === 'needs_input' || issue.status === 'conflict' || issue.status === 'failed',
   ).length

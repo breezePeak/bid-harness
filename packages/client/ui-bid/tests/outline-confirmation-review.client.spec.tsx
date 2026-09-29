@@ -434,7 +434,9 @@ describe('S4 稳定章节对应与业务差异', () => {
 
     // 右侧新增章节正常显示并带有标题
     expect(screen.getByLabelText('SEC-NEW-999 标题')).toBeTruthy()
-    expect((screen.getByLabelText('SEC-NEW-999 标题') as HTMLInputElement).value).toBe('新增服务保障')
+    const titleInput = screen.getByLabelText('SEC-NEW-999 标题')
+    if (!(titleInput instanceof HTMLInputElement)) throw new Error('Expected title input')
+    expect(titleInput.value).toBe('新增服务保障')
 
     // “编写要求更新” 徽章位于 .rowMain 内部，紧随章节标题
     const writingBadge = screen.getAllByText('✎ 编写要求更新')[0]!

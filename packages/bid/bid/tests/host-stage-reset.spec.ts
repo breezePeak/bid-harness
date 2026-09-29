@@ -141,6 +141,7 @@ describe('Bid Host stage reset', () => {
     await vi.waitFor(() => { expect(executionCancel).toHaveBeenCalledWith({ kind: 'hook', reason: 'bid-stage-reset' }) })
     expect(operation.controller.signal.aborted).toBe(true)
     expect(cancel).not.toHaveBeenCalled()
+    // oxlint-disable-next-line typescript/unbound-method -- Vitest only compares the spy identity.
     expect(agent.whenIdle).not.toHaveBeenCalled()
     expect(drive).not.toHaveBeenCalled()
     await expect(BidHostRuntime.prototype.resetStage.call(

@@ -111,7 +111,10 @@ export function buildWebEvidenceChunkIndex(source: WebEvidenceSource, content: s
     cursor = end
   }
   if (blocks.length === 0) blocks.push({ start: 0, end: content.length, heading_path: [] })
-  else if (cursor < content.length) blocks[blocks.length - 1]!.end = content.length
+  else if (cursor < content.length) {
+    const last = blocks.at(-1)
+    if (last !== undefined) last.end = content.length
+  }
 
   const boundedBlocks = blocks.flatMap((block) => {
     if (block.end - block.start <= WEB_EVIDENCE_CHUNK_MAX_CHARS) return [block]
@@ -135,7 +138,7 @@ export function buildWebEvidenceChunkIndex(source: WebEvidenceSource, content: s
   let group: typeof blocks = []
   for (const block of boundedBlocks) {
     const size = group.reduce((total, item) => total + item.end - item.start, 0)
-    if (group.length > 0 && (block.heading_path.join('\0') !== group[0]!.heading_path.join('\0')
+    if (group.length > 0 && (block.heading_path.join('\0') !== group[0]?.heading_path.join('\0')
       || size + block.end - block.start > WEB_EVIDENCE_CHUNK_TARGET_CHARS)) {
       groups.push(group)
       group = []
@@ -145,14 +148,17 @@ export function buildWebEvidenceChunkIndex(source: WebEvidenceSource, content: s
   if (group.length > 0) groups.push(group)
 
   const chunks = groups.map<WebEvidenceChunk>((items, position) => {
-    const start = items[0]!.start
-    const end = items.at(-1)!.end
+    const first = items[0]
+    const last = items.at(-1)
+    if (first === undefined || last === undefined) throw new Error('WEB_EVIDENCE_CHUNK_EMPTY_GROUP')
+    const start = first.start
+    const end = last.end
     const body = content.slice(start, end)
     const chunkId = `C${String(position + 1).padStart(4, '0')}`
     return {
       chunk_id: chunkId,
       chunk_ref: `W:${source.source_id}:${chunkId}`,
-      heading_path: items[0]!.heading_path,
+      heading_path: first.heading_path,
       start_line: lineAt(content, start),
       end_line: lineAt(content, Math.max(start, end - 1)),
       start_offset: start,

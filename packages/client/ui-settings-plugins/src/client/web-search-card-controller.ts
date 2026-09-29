@@ -135,8 +135,8 @@ export class WebSearchCardController {
     }
     return {
       hooks: { webSearchCard: this.store },
-      edit: (field, text) => action(field, (actions, name) => { actions.edit(name, text) }),
-      resetField: field => action(field, (actions, name) => { actions.resetField(name) }),
+      edit: (field, text) => { action(field, (actions, name) => { actions.edit(name, text) }) },
+      resetField: (field) => { action(field, (actions, name) => { actions.resetField(name) }) },
       save: () => { web.save(); model.save(); tavily.save() },
       discard: () => { web.discard(); model.discard(); tavily.discard() },
     }

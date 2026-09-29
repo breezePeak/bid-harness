@@ -167,11 +167,14 @@ export class ConnectionController {
       }
 
       await failed
+      // oxlint-disable-next-line typescript/no-unnecessary-condition -- abort can occur while failed settles
       if (lifetime.aborted) return
       const idle = new AbortController()
       this.current = idle
       this.emitState('reconnecting')
+      // oxlint-disable-next-line typescript/no-unnecessary-condition -- the state sink can stop this controller
       if (lifetime.aborted) return
+      // oxlint-disable-next-line typescript/no-unnecessary-condition -- the state sink can request an immediate retry
       if (this.retryImmediately) continue
       this.attempt += 1
       console.warn(`[web-runtime] connection lost, retry #${this.attempt}`)

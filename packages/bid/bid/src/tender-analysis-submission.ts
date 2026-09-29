@@ -450,8 +450,10 @@ export async function attachTenderAnalysisSubmissionRuntime(
           const text = await readFile(chunk.absolutePath, 'utf8')
           if (signal !== undefined && !signal.test(text)) continue
           relatedChunks.push({ file_ref: locator.file_ref, chunk: chunkId, text })
+          // oxlint-disable-next-line typescript/no-unnecessary-condition -- push() 会改变数组长度。
           if (relatedChunks.length >= 3) break
         }
+        // oxlint-disable-next-line typescript/no-unnecessary-condition -- 内层循环会追加片段。
         if (relatedChunks.length >= 3) break
       }
     }

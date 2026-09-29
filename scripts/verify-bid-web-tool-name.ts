@@ -10,13 +10,13 @@ const sourceExtensions = new Set(['.cjs', '.d.ts', '.js', '.json', '.map', '.mjs
 
 function filesIn(directory: string): string[] {
   if (!existsSync(directory)) return []
-  return readdirSync(directory, { withFileTypes: true }).flatMap(entry => {
+  return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
     const path = join(directory, entry.name)
     return entry.isDirectory() ? filesIn(path) : sourceExtensions.has(path.slice(path.lastIndexOf('.'))) ? [path] : []
   })
 }
 
-const matches = scanRoots.flatMap(path => filesIn(join(root, path))).flatMap(path => {
+const matches = scanRoots.flatMap(path => filesIn(join(root, path))).flatMap((path) => {
   const text = readFileSync(path, 'utf8')
   return text.includes(removedName) ? [path] : []
 })

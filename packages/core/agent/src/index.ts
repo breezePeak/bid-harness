@@ -440,6 +440,7 @@ export class AgentRegistry extends Service {
     const { target } = this.requireFactory()
     if (target.disposeAgent === undefined) return false
     const receiver = getTraceable(this.ctx, target)
+    // oxlint-disable-next-line typescript/unbound-method -- Reflect.apply supplies the caller-traced receiver
     return await Reflect.apply(target.disposeAgent, receiver, [id])
   }
 

@@ -137,7 +137,7 @@ export const docsPages: DocsPage[] = [
 /** 按分组与声明顺序返回侧栏页面。 */
 export function orderedPages(locale: DocsLocale, collection: DocsSidebar): DocsPage[] {
   return docsPages
-    .filter(page => page.locale === locale && page.sidebar === collection)
+    .filter(page => page.sidebar === collection)
     .sort((left, right) => sectionSpec(locale, left.section).index - sectionSpec(locale, right.section).index || left.order - right.order)
 }
 

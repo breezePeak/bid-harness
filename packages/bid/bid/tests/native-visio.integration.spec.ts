@@ -74,7 +74,16 @@ try {
   }
 }
 
-async function inspectWord(path: string): Promise<{ inlineShapes: number; visioObjects: number; progIds: string[]; text: string; maxWidth: number; availableWidth: number }> {
+type WordInspection = {
+  inlineShapes: number
+  visioObjects: number
+  progIds: string[]
+  text: string
+  maxWidth: number
+  availableWidth: number
+}
+
+async function inspectWord(path: string): Promise<WordInspection> {
   const output = await runPowerShell(`$word = $null
 $document = $null
 try {
@@ -100,7 +109,7 @@ try {
   if ($null -ne $document) { $document.Close() }
   if ($null -ne $word) { $word.Quit() }
 }`)
-  return JSON.parse(output.trim()) as { inlineShapes: number; visioObjects: number; progIds: string[]; text: string; maxWidth: number; availableWidth: number }
+  return JSON.parse(output.trim()) as WordInspection
 }
 
 async function activateEditAndMove(path: string): Promise<{ moved: boolean; text: string }> {

@@ -31,11 +31,11 @@ describe('chapter revision comparison', () => {
 
   it('accepts an idempotent retry and rejects a different snapshot for the same task', () => {
     const value = artifact()
-    expect(() => assertRevisionComparisonEquivalent(value, { ...value, created_at: 2 })).not.toThrow()
-    expect(() => assertRevisionComparisonEquivalent(value, createRevisionComparisonArtifact({
+    expect(() => { assertRevisionComparisonEquivalent(value, { ...value, created_at: 2 }) }).not.toThrow()
+    expect(() => { assertRevisionComparisonEquivalent(value, createRevisionComparisonArtifact({
       batchId: 'BATCH-1', taskId: 'TASK-1', sectionId: 'SEC-1', issueIds: ['ISSUE-1', 'ISSUE-2'],
       beforeMarkdown: value.before_markdown, afterMarkdown: 'different', createdAt: 2,
-    }))).toThrow('BID_REVISION_COMPARISON_CONFLICT')
+    })) }).toThrow('BID_REVISION_COMPARISON_CONFLICT')
   })
 
   it('reads one exact batch task and treats a missing legacy snapshot as absent', async () => {

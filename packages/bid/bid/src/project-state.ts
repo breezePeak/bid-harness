@@ -19,14 +19,16 @@ const projectMetadataSchema = z.object({
   schema_version: recordOnlySchemaVersion(4),
   revision: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
   updated_at: z.number().int().nonnegative(),
-}).passthrough()
+}).loose()
 
 const legacyProjectStateSchema = z.object({
   schema_version: recordOnlySchemaVersion(3),
+  // oxlint-disable typescript/no-deprecated -- 读取 v3 记录仍需使用原始结构。
   workflow: legacyBidControlStateSchema.shape.workflow,
   run: legacyBidControlStateSchema.shape.run,
   last_run: legacyBidControlStateSchema.shape.lastRun,
   runtime: legacyBidRuntimeSchema.optional(),
+  // oxlint-enable typescript/no-deprecated
   revision: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
   updated_at: z.number().int().nonnegative(),
 }).strict()

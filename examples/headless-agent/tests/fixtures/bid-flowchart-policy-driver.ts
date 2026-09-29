@@ -69,9 +69,9 @@ try {
       startedAt: 0, updatedAt: 0, cause: 'executor_error', error: { message: '等待恢复' },
     },
   })
-  const resumed = Promise.withResolvers<void>()
+  const resumed = Promise.withResolvers<undefined>()
   const off = ctx.on('session/event', (session, event) => {
-    if (session.id === 's5-policy-session' && event.type === 'bid.project.resumed') resumed.resolve()
+    if (session.id === 's5-policy-session' && event.type === 'bid.project.resumed') resumed.resolve(undefined)
   }, { global: true })
   const handle = await ctx.agentLoop.createAgent(ctx, {
     sessionId: SessionId('s5-policy-session'),
@@ -91,10 +91,10 @@ try {
   const saved = await readBidProjectState(workspace)
   if (saved === undefined) throw new Error('恢复前项目状态缺失')
   adapter.resumeRevision = saved.revision
-  const resumeSettled = Promise.withResolvers<void>()
+  const resumeSettled = Promise.withResolvers<undefined>()
   const offResume = ctx.on('session/event', (session, event) => {
     if (session === agent.session && event.type === 'tool/result'
-      && event.data.message.source.callId === 'snapshot-s5-resume') resumeSettled.resolve()
+      && event.data.message.source.callId === 'snapshot-s5-resume') resumeSettled.resolve(undefined)
   }, { global: true })
   agent.followup(createUserMessage({
     content: [{ type: 'text', text: '继续' }], source: { kind: 'user' },

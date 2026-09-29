@@ -551,19 +551,19 @@ describe('assertChapterRevisionBatchScope', () => {
 
   it('chapter-scope 允许整章修改', () => {
     const candidate = '# 标题\n\n段落一改。\n\n段落二改。\n\n段落三改。\n'
-    expect(() => assertChapterRevisionBatchScope([{ scope: 'chapter' }], original, candidate)).not.toThrow()
+    expect(() => { assertChapterRevisionBatchScope([{ scope: 'chapter' }], original, candidate) }).not.toThrow()
   })
 
   it('paragraph-only 严格限制在授权段落内', () => {
     const candidate = '# 标题\n\n段落一改。\n\n段落二。\n\n段落三。\n'
     const scopes: BatchRevisionScope[] = [{ scope: 'paragraphs', start: 7, end: 14 }]
-    expect(() => assertChapterRevisionBatchScope(scopes, original, candidate)).not.toThrow()
+    expect(() => { assertChapterRevisionBatchScope(scopes, original, candidate) }).not.toThrow()
   })
 
   it('修改未授权段落会被拒绝', () => {
     const candidate = '# 标题\n\n段落一。\n\n段落二改。\n\n段落三。\n'
     const scopes: BatchRevisionScope[] = [{ scope: 'paragraphs', start: 7, end: 14 }]
-    expect(() => assertChapterRevisionBatchScope(scopes, original, candidate)).toThrow()
+    expect(() => { assertChapterRevisionBatchScope(scopes, original, candidate) }).toThrow()
   })
 
   it('拒绝在首个未授权片段前新增内容', () => {
@@ -594,7 +594,7 @@ describe('assertChapterRevisionBatchScope', () => {
       { scope: 'paragraphs', start: start1, end: end1 },
       { scope: 'paragraphs', start: start2, end: end2 },
     ]
-    expect(() => assertChapterRevisionBatchScope(scopes, original, candidate)).not.toThrow()
+    expect(() => { assertChapterRevisionBatchScope(scopes, original, candidate) }).not.toThrow()
   })
 
   it('多个不连续范围中修改未授权段落被拒绝', () => {
@@ -607,7 +607,7 @@ describe('assertChapterRevisionBatchScope', () => {
       { scope: 'paragraphs', start: start1, end: end1 },
       { scope: 'paragraphs', start: start2, end: end2 },
     ]
-    expect(() => assertChapterRevisionBatchScope(scopes, original, candidate)).toThrow()
+    expect(() => { assertChapterRevisionBatchScope(scopes, original, candidate) }).toThrow()
   })
 
   it('混合 chapter 和 paragraph scope 时 chapter 优先', () => {
@@ -616,7 +616,7 @@ describe('assertChapterRevisionBatchScope', () => {
       { scope: 'paragraphs', start: 7, end: 14 },
       { scope: 'chapter' },
     ]
-    expect(() => assertChapterRevisionBatchScope(scopes, original, candidate)).not.toThrow()
+    expect(() => { assertChapterRevisionBatchScope(scopes, original, candidate) }).not.toThrow()
   })
 })
 

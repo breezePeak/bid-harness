@@ -1073,6 +1073,7 @@ class HostChapterWritingControl implements ChapterWritingControl {
     for (let index = this.records.length - 1; index >= 0; index -= 1) {
       const command = this.records[index]?.command as ChapterWritingCommand | undefined
       if (command?.kind === 'flowchart_visual_review_policy'
+        // oxlint-disable-next-line typescript/no-unnecessary-condition -- 日志记录来自持久化文件。
         && (command.policy === 'required' || command.policy === 'skip')) return command.policy
     }
     return 'required'
@@ -1211,7 +1212,7 @@ async function readWritingRequest(workspace: BidWorkspace): Promise<WritingReque
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
     throw error
   }
-  const parsed = JSON.parse(raw)
+  const parsed: unknown = JSON.parse(raw)
   if (parsed !== null && typeof parsed === 'object' && 'prompt_event' in parsed) {
     return undefined
   }
@@ -2446,7 +2447,7 @@ export class BidHostRuntime extends TypertRemoteService {
       return
     }
     try {
-      if (accepted && request !== undefined) await this.scheduleWritingPlanProcessing(pending.agent, request)
+      if (accepted) await this.scheduleWritingPlanProcessing(pending.agent, request)
     } catch (error: unknown) {
       this.ctx.logger.warn(`Bid S5 计划处理启动失败：${String(error)}`)
     }
@@ -2670,7 +2671,7 @@ export class BidHostRuntime extends TypertRemoteService {
       try {
         await this.withWritingEntryOperation(agent.session, async (operation, workspace) => {
           const current = await readWritingRequest(workspace)
-          if (current?.request_id !== request.request_id || current?.attempt_id !== request.attempt_id) return
+          if (current?.request_id !== request.request_id || current.attempt_id !== request.attempt_id) return
           const failed: WritingRequest = {
             ...current,
             processing: { message_id: String(dispatch.id), state: 'failed', turn: null },
@@ -2730,7 +2731,7 @@ export class BidHostRuntime extends TypertRemoteService {
       if (turnEnded) {
         await this.withWritingEntryOperation(agent.session, async (operation, ws) => {
           const current = await readWritingRequest(ws)
-          if (current?.request_id !== request.request_id || current?.attempt_id !== request.attempt_id) return
+          if (current?.request_id !== request.request_id || current.attempt_id !== request.attempt_id) return
           const failed: WritingRequest = {
             ...current,
             processing: { ...processing, state: 'failed' },
@@ -2742,7 +2743,7 @@ export class BidHostRuntime extends TypertRemoteService {
       }
       const newRequest = await this.withWritingEntryOperation(agent.session, async (operation, ws) => {
         const current = await readWritingRequest(ws)
-        if (current?.request_id !== request.request_id || current?.attempt_id !== request.attempt_id) return null
+        if (current?.request_id !== request.request_id || current.attempt_id !== request.attempt_id) return null
         const nextAttempt = randomUUID()
         const updated: WritingRequest = {
           ...current,
@@ -2757,6 +2758,7 @@ export class BidHostRuntime extends TypertRemoteService {
       if (newRequest !== null) await this.scheduleWritingPlanProcessing(agent, newRequest)
       return
     }
+    // oxlint-disable-next-line typescript/no-unnecessary-condition -- 恢复时从磁盘读取处理状态。
     if (processing.state === 'running') {
       if (existing !== undefined && existing.messageId === processing.message_id && existing.turn !== null) {
         const turnEnded = existing.agent.session.events.some(
@@ -2766,7 +2768,7 @@ export class BidHostRuntime extends TypertRemoteService {
       }
       await this.withWritingEntryOperation(agent.session, async (operation, ws) => {
         const current = await readWritingRequest(ws)
-        if (current?.request_id !== request.request_id || current?.attempt_id !== request.attempt_id) return
+        if (current?.request_id !== request.request_id || current.attempt_id !== request.attempt_id) return
         const failed: WritingRequest = {
           ...current,
           processing: { ...processing, state: 'failed' },
@@ -2794,7 +2796,7 @@ export class BidHostRuntime extends TypertRemoteService {
     try {
       await this.withWritingEntryOperation(entry.agent.session, async (operation, workspace) => {
         const current = await readWritingRequest(workspace)
-        if (current?.request_id !== entry.requestId || current?.attempt_id !== entry.attemptId
+        if (current?.request_id !== entry.requestId || current.attempt_id !== entry.attemptId
           || current.owner_session_id !== entry.ownerSessionId) {
           if (this.processingWritingPlans.get(entry.key) === entry) this.processingWritingPlans.delete(entry.key)
           return
@@ -2997,7 +2999,7 @@ export class BidHostRuntime extends TypertRemoteService {
             stale = true
           } else {
             const current = await readWritingRequest(workspace)
-            if (current?.request_id !== entry.requestId || current?.attempt_id !== entry.attemptId
+            if (current?.request_id !== entry.requestId || current.attempt_id !== entry.attemptId
               || current.continuation === 'paused') stale = true
           }
         } catch {
@@ -3045,7 +3047,7 @@ export class BidHostRuntime extends TypertRemoteService {
           entry.turn = turn
           void this.withWritingEntryOperation(agent.session, async (operation, workspace) => {
             const current = await readWritingRequest(workspace)
-            if (current?.request_id !== entry.requestId || current?.attempt_id !== entry.attemptId) return
+            if (current?.request_id !== entry.requestId || current.attempt_id !== entry.attemptId) return
             if (current.processing?.message_id !== entry.messageId || current.state !== 'answered') return
             const updated: WritingRequest = {
               ...current,
@@ -3120,7 +3122,7 @@ export class BidHostRuntime extends TypertRemoteService {
           if (!stopExists) {
             void this.withWritingEntryOperation(agent.session, async (operation, workspace) => {
               const current = await readWritingRequest(workspace)
-              if (current?.request_id !== entry.requestId || current?.attempt_id !== entry.attemptId) return
+              if (current?.request_id !== entry.requestId || current.attempt_id !== entry.attemptId) return
               const { sha256 } = await confirmedOutline(workspace)
               const plan = await readCurrentWritingPlan(workspace, sha256)
               if (plan !== undefined) return
@@ -4521,11 +4523,7 @@ export class BidHostRuntime extends TypertRemoteService {
   ): Promise<WritingEntryEffect> {
     if (currentPlan !== undefined) return { kind: 'none' }
     if (stop !== undefined || currentRequest?.continuation === 'paused') return { kind: 'none' }
-    if (currentRequest !== undefined) {
-      if (currentRequest.owner_session_id !== String(session.id)) return { kind: 'none' }
-      if (currentRequest.state === 'answered' || currentRequest.state === 'dismissed'
-        || currentRequest.state === 'consumed' || currentRequest.state === 'awaiting_answer') return { kind: 'none' }
-    }
+    if (currentRequest !== undefined) return { kind: 'none' }
     const request = writingRequestSchema.parse({
       schema_version: WRITING_REQUEST_SCHEMA_VERSION,
       request_id: randomUUID(),
@@ -4641,7 +4639,7 @@ export class BidHostRuntime extends TypertRemoteService {
       }
       return { kind: 'none' }
     }
-    if (intent.mode === 'retry_answer') {
+    {
       const unsaved = this.unsavedWritingAnswers.get(key)
       if (unsaved === undefined) {
         throw new BidOrchestratorError('BID_WRITING_ENTRY_ACTION_NOT_ALLOWED', '没有待重试的未保存答案。')
@@ -4757,7 +4755,7 @@ export class BidHostRuntime extends TypertRemoteService {
       phase = 'paused'
     } else if (isFailed) {
       phase = 'failed'
-    } else if (hasPlan && task.run === null) {
+    } else if (hasPlan) {
       phase = 'ready'
     } else if (request?.state === 'awaiting_answer') {
       phase = 'awaiting_answer'
@@ -4999,7 +4997,7 @@ export class BidHostRuntime extends TypertRemoteService {
             processing: undefined,
             processing_message_id: undefined,
           }
-        } else if (writingRequest.state === 'dismissed') {
+        } else {
           updatedRequest = writingRequest
         }
       }
@@ -8275,7 +8273,7 @@ export class BidWorkspace {
         if (embeddedCount !== flowcharts.length) throw new Error(`DOCX_VISIO_OBJECT_COUNT_MISMATCH: 预期 ${String(flowcharts.length)} 个 Visio 对象，实际检测到 ${String(embeddedCount)} 个。`)
         bytes = await readFile(temporaryDocx)
       }
-      if (canFinalize && finalizer !== undefined) {
+      if (canFinalize) {
         const temporaryRoot = await mkdtemp(resolve(this.root, '.dsh-word-finalize-'))
         try {
           const temporaryDocx = resolve(temporaryRoot, 'final.docx')

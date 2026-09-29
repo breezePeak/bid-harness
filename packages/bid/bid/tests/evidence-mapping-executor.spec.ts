@@ -1,3 +1,4 @@
+/* oxlint-disable typescript/no-unsafe-assignment -- Vitest asymmetric matchers return any. */
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -353,7 +354,7 @@ function mappingFixture(
       if (outcome.name === 'web_fetch') {
         const url = String((outcome.arguments as { url?: unknown }).url)
         const queued = queuedFetchResults.get(url) ?? []
-        queued.push(outcome.result as ToolExecutionResult)
+        queued.push(outcome.result)
         queuedFetchResults.set(url, queued)
         const definitions = submissionTools.get(String(child.id))
         const fetchTool = definitions?.get('web_fetch')
@@ -1175,7 +1176,7 @@ describe('evidence-mapping Agent executor', () => {
     })
     const execution = executeEvidenceMapping(initial.agent, workspace, buildBidStageTask('evidence_mapping'))
     await vi.waitFor(() => { expect(initial.starts).toHaveLength(2) })
-    initial.starts.forEach((start) =>{  start.resolve() })
+    initial.starts.forEach((start) => { start.resolve() })
     await execution
     const published = parseOutlineArtifact(JSON.parse(await readFile(join(workspace.projectRoot, 'outline/outline.json'), 'utf8')))
     const previous = parseEvidenceMapArtifact(JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/evidence-map.json'), 'utf8')))
@@ -4474,6 +4475,7 @@ describe('S4 Host 准入与最终确认', () => {
             return { agent: {
               ...fixture.agent,
               id: sessionId,
+              // oxlint-disable-next-line typescript/no-misused-spread -- This test uses a detached session snapshot.
               session: { ...fixture.agent.session, id: sessionId, header: { ...fixture.agent.session.header, parentSession: 'session', origin: 'subagent' } },
             },
             dispose: async () => {} }
