@@ -33,6 +33,15 @@ it('keeps repairable candidate issues distinct from provider and input faults', 
   }]).recovery?.kind).toBe('blocked')
 })
 
+it.each(['EVIDENCE_MAPPING_OUTLINE_SCOPE_STALE', 'EVIDENCE_MAPPING_DEPENDENCY_STALE',
+  'OUTLINE_GENERATION_INPUT_CHANGED', 'PREVIOUS_TARGET_INVALID', 'EACCES', 'INVARIANT_VIOLATION'])
+('候选可修也不能掩盖后续 %s，最终校验拒绝不授予恢复权限', (code) => {
+  expect(safeRecoverableBidFailure(work, new Error('failed'), [
+    { code: 'OUTLINE_GENERATION_CANDIDATE_INVALID', message: 'missing sections' },
+    { code, message: '当前输入无法安全继续', artifact: 'outline/outline.json' },
+  ], true).recovery).toMatchObject({ kind: 'blocked', reason: '当前输入无法安全继续' })
+})
+
 it('reads a suspended recovery diagnosis despite a corrupt formal outline and stops unchanged repeats', async () => {
   const root = await mkdtemp(join(tmpdir(), 'dsh-bid-recovery-'))
   cleanup.push(() => rm(root, { recursive: true, force: true }))
@@ -63,6 +72,13 @@ it('reads a suspended recovery diagnosis despite a corrupt formal outline and st
     run: { ...run('run-two'), cause: 'retry_exhausted', error: failure } } })
   expect(bidRunRecoveryEligibility(session, 'goal-one')).toMatchObject({ eligible: false, attempts: 1,
     reason: '同一问题和检查点没有进展。' })
+  // 指令措辞不是执行进展，换 Run 或换说法均不能重获准入。
+  session.append('bid.goal.recovery.requested', {
+    goalId: 'goal-one', ownerSessionId: String(session.id),
+    target: { kind: 'run', workId: 's3-work', runId: 'run-two' },
+    unit: 'outline/outline.json', instruction: '重新梳理章节再修正结构', progressFingerprint: first.fingerprint!,
+  })
+  expect(bidRunRecoveryEligibility(session, 'goal-one').eligible).toBe(false)
 })
 
 it('permits a changed candidate once but keeps the two-acceptance budget across Run identities', async () => {

@@ -43,6 +43,8 @@ S6 只对流程图、表格和图片执行最终页面视觉审核；标题、�
 
 ### 执行与恢复所有权
 
+自动恢复检查全部错误项；目录范围或依赖失效、目标无效、权限与数据损坏错误优先阻断，不因同时出现候选校验问题而重试。相同 Work 的问题与检查点无进展时，更换恢复指令不能重新获得准入。
+
 每个 Host 入口明确归入 Long Run、Project Mutation、Pure Read 或 Independent DOCX Operation。Long Run 在启动前持久化请求和输入身份，以 Work Descriptor 区分完整阶段、文件接入、资料重映射、目录重生成、目录确认及章节修订；恢复按原 work kind 分派，并复用 `runs/<workId>/work/` 候选与匹配输入指纹的检查点，不按 stage 猜测。每个 Run 的持久化快照记录 Interaction Session 与 Execution Session 身份；Host 在 Execution Session 中运行执行器及其 Child、Writer 和 Reviewer，Interaction Session 始终可处理项目聊天。Run 启动后，执行器、Child、Worker、Parser 和 Renderer 统一使用 `run.signal` 并登记 Activity；只有调度、Agent、Child、Activity 与 Commit 全部收敛后才持久化 suspended 或 completed。
 
 Long Run 的正式文件只能由 Commit Scope 发布，短确定性修改由带 expected project revision 的 Project Mutation 提交，读取入口不创建或刷新文件。两种写入所有者共用 crash-safe PublicationBatch；项目读取先对 commit intent 前滚或清理未提交批次。项目 revision 只随 Run 控制转换或 Project Mutation 增长，同一 Run 的进度与 command journal 不把 revision 当 checkpoint 计数器。S5 steering 在响应 accepted 前写入 durable command journal；挂起主 S5 Run 保留自身身份，恢复时才应用已保存修订。独立 Word 操作不改变 Workflow revision，但 DOCX、Markdown 快照和 `lastExport` 使用同一 PublicationBatch。
@@ -94,6 +96,8 @@ S3 在阶段中途生成只读的 analysis/scoring-response-points.json，并把
 遗漏 RP 时，Host 提供差集原文、所属评分项及当前目录，模型只提交局部编辑与具体 must_answer；Host 应用后重新规范化和校验。质量候选只记录问题，复核正常完成且目录版本未再变化后，Host 才发布正式报告的已检查清单。相同输入版本的失败重试复用有效 RP 清单和目录候选；输入变化使候选失效。成功停在 S3 用户确认，已有确认版本不被重试覆盖。详见[局部续修与复核条件](../../../.agents/notes/implemented/bug-fix/2026-09-07-bid-outline-response-point-recovery.md)。
 
 S4 与 S5 共用 `buildWritableSectionWorklist`。Host 为 S3 每个可写叶子创建一个 Initial Mapping Task，在并发上限内按代执行。Initial 与 Repair Child 先研究并通过结构化充分性判断，Host 才允许目录操作和章节任务固化；找到资料不会隐式占用材料提交状态。每个 Child 只展开当前 Section 职责、对应 S3 基线、局部差异和候选引用，并用 `global_outline_index` 获取全书轻量职责索引；无关兄弟的完整 Brief、Evidence 和全部 checkpoint 操作不重复注入。Child 只能修改 `outline_edit_scope_id` 指定的 Section 自身及其后代；拆分后的原节点不再提交叶子 Mapping，新叶在下一代各自成为一个任务，其他已完成 Section 不重跑。父任务读过的本地资料和 Web Source 身份作为 `research_candidates` 传给新叶，Host 不据此自动写入 Evidence。结构语义变化只使受影响章节及祖先的旧任务、材料和复核结论失效，纯 order/level 变化不触发失效。正式 Evidence Map 以 `chunk_refs` 保存精确 Web 证据范围；结构字段和输入身份必须严格校验，旧 S4 数据不用于恢复。
+
+同代 S4 任务及检查点按实际子树检测重叠；相同、祖先或后代范围按计划顺序合并，后续任务使用最新目录，独立分支仍并行。输入有效的已完成研究继续复用，合并时仍拒绝过期子树。
 
 S4 启动 Child 前复检 reference/reference_bid Corpus，损坏文件以 `EVIDENCE_MAPPING_CORPUS_INVALID` 报告身份与原因。程序根据标准化 Markdown 的实际标题位置、层级及现有分块行号定位正文，同名标题按出现位置区分，直接正文与包含子节的完整范围分别提供引用。`structure.json` 展示完整目录；无法确定对应的节点标记“定位未确定”，不推断缺失。跨标题分块显示全部实际覆盖范围。原始框架标题仅作结构输入，不进入事实 Evidence。
 

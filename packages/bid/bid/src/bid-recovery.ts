@@ -11,7 +11,8 @@ type Recovery = NonNullable<BidTaskFailure['recovery']>
 const STAGES = new Set(['tender_analysis', 'outline_generation', 'evidence_mapping', 'chapter_writing'])
 const BLOCKED_CODE = new RegExp(
   'INPUT_(?:INVALID|CHANGED|MISMATCH)|FILE_(?:MISSING|CORRUPT)|PERMISSION|DENIED|UNAUTHORIZED|FORBIDDEN|'
-  + 'CREDENTIAL|QUOTA|PROVIDER|VALIDATOR_FAILED|FATAL|FINGERPRINT|SEMANTIC_BLOCKED', 'iu',
+  + 'CREDENTIAL|QUOTA|PROVIDER|VALIDATOR_FAILED|FATAL|FINGERPRINT|SEMANTIC_BLOCKED|'
+  + 'SCOPE_STALE|DEPENDENCY_STALE|PREVIOUS_TARGET_INVALID|EACCES|EPERM|INVARIANT|CORRUPTION', 'iu',
 )
 const REPAIR_CODE = new RegExp(
   'CANDIDATE_INVALID|SUBMISSION_(?:REQUIRED|INCOMPLETE)|NOT_COMMITTED|VALIDATION_FAILED|SCHEMA_INVALID|'
@@ -33,11 +34,12 @@ export function classifyBidRecovery(
   validationRejected = false,
 ): Recovery | undefined {
   if (!STAGES.has(work.stage) || work.kind === 'file_intake') return undefined
-  const issue = failure.issues?.[0]
+  const blockedIssue = failure.issues?.find(issue => BLOCKED_CODE.test(issue.code))
+  const issue = blockedIssue ?? failure.issues?.[0]
   const code = issue?.code ?? failure.code ?? ''
   const unit = sanitizeBidErrorText(issue?.artifact ?? issue?.path ?? work.workId)
   const reason = sanitizeBidErrorText(issue?.message ?? failure.message)
-  const kind = BLOCKED_CODE.test(code) ? 'blocked'
+  const kind = blockedIssue !== undefined || BLOCKED_CODE.test(failure.code ?? '') || BLOCKED_CODE.test(code) ? 'blocked'
     : validationRejected ? 'repair'
       : RETRY_CODE.test(code) ? 'retry'
         : REPAIR_CODE.test(code) ? 'repair' : 'blocked'

@@ -2891,6 +2891,76 @@ describe('evidence-mapping Agent executor', () => {
     expect(await resumedRejection).toBeInstanceOf(Error)
   })
 
+  it.each([['ROOT', 'SEC-1'], ['SEC-1', 'ROOT'], ['SEC-1', 'SEC-1']])
+  ('同代重叠范围 %s → %s 顺序合并，独立分支并行且已完成研究不重跑', async (firstRoot, nextRoot) => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-overlapping-research-')))
+    const material = await writeInputs(workspace)
+    const outlinePath = join(workspace.projectRoot, 'outline/initial-confirmed-outline.json')
+    const outline = parseOutlineArtifact(JSON.parse(await readFile(outlinePath, 'utf8')))
+    const leaf = outline.sections[0]!
+    const root = { ...structuredClone(leaf), id: 'ROOT', writable: false, title: '总体方案',
+      must_answer: [], requirement_ids: [], scoring_ids: [], scoring_response_point_ids: [], scoring_response_points: [],
+      summary: '统筹实施方法与质量验证。' }
+    outline.sections = [root, { ...leaf, parent_id: 'ROOT', level: 2 }, outline.sections[1]!]
+    await writeFile(outlinePath, JSON.stringify(outline))
+    const initial = mappingFixture(workspace, material)
+    const initialExecution = executeEvidenceMapping(initial.agent, workspace, buildBidStageTask('evidence_mapping'))
+    await vi.waitFor(() => { expect(initial.starts).toHaveLength(2) })
+    initial.starts.forEach((start) => { start.resolve() })
+    await initialExecution
+
+    // 持久化待执行的同代修复任务，模拟研究完成后进入修复时的恢复边界。
+    const repairs: EvidenceMappingTask[] = [firstRoot, nextRoot, 'SEC-2'].map((id, index) => ({
+      task_id: `MAP-REPAIR-OVERLAP-${index}`, task_kind: 'outline_repair', generation: 1, phase: 'initial',
+      section_ids: id === 'ROOT' ? [] : [id], outline_edit_scope_id: id,
+      title: `复核 ${id}`, heading_path: [id],
+    }))
+    const planPath = join(workspace.projectRoot, 'analysis/evidence-mapping-plan.json')
+    const plan = JSON.parse(await readFile(planPath, 'utf8')) as EvidenceMappingPlan
+    plan.tasks = [...plan.tasks.filter(task => task.phase === 'initial'), ...repairs]
+    const logPath = join(workspace.projectRoot, 'analysis/evidence-mapping-log.json')
+    const log = parseEvidenceMappingExecutionLog(JSON.parse(await readFile(logPath, 'utf8')))
+    log.tasks = [...log.tasks.filter(task => task.phase === 'initial'), ...repairs.map(task => ({
+      task_id: task.task_id, title: task.title, phase: task.phase, status: 'pending' as const,
+      attempts: [], final_child_session_id: null,
+    }))]
+    const checkpointPath = join(workspace.projectRoot, 'analysis/evidence-mapping-checkpoint.json')
+    const checkpoint = JSON.parse(await readFile(checkpointPath, 'utf8')) as { tasks: Array<{ task_id: string }> }
+    checkpoint.tasks = checkpoint.tasks.filter(task => plan.tasks.some(item => item.task_id === task.task_id))
+    await Promise.all([
+      writeFile(planPath, JSON.stringify(plan)), writeFile(logPath, JSON.stringify(log)),
+      writeFile(checkpointPath, JSON.stringify(checkpoint)),
+    ])
+
+    const resumed = mappingFixture(workspace, material, false, {
+      'MAP-REPAIR-OVERLAP-0': [{ type: 'update_section', section_id: firstRoot, title: '最新实施方案' }],
+    })
+    const controller = new AbortController()
+    const execution = executeEvidenceMapping(resumed.agent, workspace, buildBidStageTask('evidence_mapping'), {
+      maxRepairAttempts: 0, maxConcurrency: 3, resume: true, signal: controller.signal,
+    })
+    const settled = execution.catch((error: unknown) => error)
+    try {
+      await vi.waitFor(() => { expect(resumed.starts).toHaveLength(2) })
+      expect(resumed.starts.map(start => mappingTaskId(start.request.request)))
+        .toEqual(['MAP-REPAIR-OVERLAP-0', 'MAP-REPAIR-OVERLAP-2'])
+      expect(resumed.maxActive()).toBe(2)
+      resumed.starts.forEach((start) => { start.resolve() })
+      await vi.waitFor(() => { expect(resumed.starts).toHaveLength(3) })
+      const next = resumed.starts[2]!
+      expect(mappingTaskId(next.request.request)).toBe('MAP-REPAIR-OVERLAP-1')
+      expect(promptText(next.request.request)).toContain('最新实施方案')
+      next.resolve()
+      await expect(settled).resolves.not.toBeInstanceOf(Error)
+      expect([...resumed.taskAttempts.entries()].filter(([id]) => !id.startsWith('MAP-FINAL-') && !id.startsWith('MAP-BRANCH-')))
+        .toEqual(repairs.filter((_, index) => index !== 1)
+          .concat(repairs[1]!).map(task => [task.task_id, 1]))
+    } finally {
+      controller.abort()
+      await settled
+    }
+  })
+
   it('拆分后新叶研究失败，恢复复用既有动态任务而不重复创建 REFINE 任务', async () => {
     const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-split-resume-')))
     const material = await writeInputs(workspace)

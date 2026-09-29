@@ -1,6 +1,7 @@
 /** 源码 Loader 下的同会话 Goal Round 与 Bid 恢复工具回放。 */
 import { boot } from '@deepseek-ai/dsh-app-boot'
 import type { Context } from '@deepseek-ai/cordis'
+import type { Agent } from '@deepseek-ai/dsh-agent'
 import { CallId, LlmAdapter, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import { SessionId, type Session } from '@deepseek-ai/dsh-session'
 import { BidHostRuntime, BidWorkspace, BidRunCoordinator, buildBidStageTask, checkpointBidProjectState } from '@deepseek-ai/dsh-bid'
@@ -12,6 +13,7 @@ interface HostInternals {
   beginOperation(session: Session): Operation
   prepareOperation(operation: Operation): Promise<unknown>
   finishOperation(session: Session, operation: Operation): Promise<void>
+  executeStageInteraction(agent: Agent, input: unknown, signal: AbortSignal): Promise<unknown>
 }
 
 function tool(name: string, args: object): StreamChunk[] {
@@ -47,6 +49,7 @@ class GoalRecoveryAdapter extends LlmAdapter {
 
 const configPath = process.argv[2]
 if (configPath === undefined) throw new Error('缺少 Bid Goal 回放配置')
+const stale = process.argv[3] === 'stale'
 let ctx: Context | undefined
 try {
   ctx = await boot('bid-goal-recovery-snapshot', configPath)
@@ -71,28 +74,47 @@ try {
   adapter.runId = failed.runId
   await operation.runs.suspend('retry_exhausted', safeRecoverableBidFailure(work, new Error('missing submission'), [{
     code: 'TENDER_ANALYSIS_SUBMISSION_INCOMPLETE', artifact: 'analysis/project.json', message: '项目字段缺失',
-  }]))
-  const accepted = Promise.withResolvers<undefined>()
-  const off = ctx.on('session/event', (session, event) => {
-    if (session === agent.session && event.type === 'bid.goal.recovery.requested') accepted.resolve(undefined)
-  }, { global: true })
-  const timeout = Promise.withResolvers<never>()
-  const timer = setTimeout(() => timeout.reject(new Error('Goal 未提交恢复工具')), 10_000)
-  try {
+  }, ...(stale ? [{ code: 'EVIDENCE_MAPPING_OUTLINE_SCOPE_STALE', message: '目录范围已过期。' }] : [])]))
+  if (stale) {
     await host.finishOperation(agent.session, operation)
-    await Promise.race([accepted.promise, timeout.promise])
-    await agent.whenIdle()
-  } finally { clearTimeout(timer); off() }
-  const bound = agent.session.events.find(event => event.type === 'bid.goal.bound')
-  const events = agent.session.events
-  const toolCalls = events.filter(event => event.type === 'tool/call').map(event => event.data.name)
-  process.stdout.write(`${JSON.stringify({
-    boundToInitialS2: bound?.type === 'bid.goal.bound' && bound.data.initialS2WorkId === work.workId,
-    rounds: ctx.goals.get(agent)?.roundsStarted,
-    goalPrompt: adapter.requests[0]?.messages.some(message => message.content.some(block => block.type === 'text' && block.text.includes('<goal_round>'))),
-    recoveryPrompt: adapter.requests[0]?.messages.some(message => message.content.some(block => block.type === 'text' && block.text.includes('bid_stage_inspect(view="recovery")'))),
-    calls: toolCalls.filter(name => name === 'bid_stage_inspect' || name === 'bid_recover_task'),
-    acceptedEvents: events.filter(event => event.type === 'bid.goal.recovery.requested').length,
-    startedRuns: events.filter(event => event.type === 'bid.run.started').length,
-  })}\n`)
+    const rejected: boolean[] = []
+    for (const instruction of ['重试当前任务', '换一种方法修复', '再次检查后继续']) {
+      let denial: unknown
+      try {
+        await host.executeStageInteraction(agent, {
+          action: 'bid_recover_task', target: 'run', run_id: failed.runId, instruction,
+        }, new AbortController().signal)
+      } catch (error) { denial = error }
+      rejected.push(denial instanceof Error && denial.message.includes('目录范围已过期'))
+    }
+    process.stdout.write(`${JSON.stringify({ rejected,
+      toolAvailable: ctx.tools.schemas(agent).some(tool => tool.name === 'bid_recover_task'),
+      acceptedEvents: agent.session.events.filter(event => event.type === 'bid.goal.recovery.requested').length,
+      startedRuns: agent.session.events.filter(event => event.type === 'bid.run.started').length,
+    })}\n`)
+  } else {
+    const accepted = Promise.withResolvers<undefined>()
+    const off = ctx.on('session/event', (session, event) => {
+      if (session === agent.session && event.type === 'bid.goal.recovery.requested') accepted.resolve(undefined)
+    }, { global: true })
+    const timeout = Promise.withResolvers<never>()
+    const timer = setTimeout(() => { timeout.reject(new Error('Goal 未提交恢复工具')) }, 10_000)
+    try {
+      await host.finishOperation(agent.session, operation)
+      await Promise.race([accepted.promise, timeout.promise])
+      await agent.whenIdle()
+    } finally { clearTimeout(timer); off() }
+    const bound = agent.session.events.find(event => event.type === 'bid.goal.bound')
+    const events = agent.session.events
+    const toolCalls = events.filter(event => event.type === 'tool/call').map(event => event.data.name)
+    process.stdout.write(`${JSON.stringify({
+      boundToInitialS2: bound?.type === 'bid.goal.bound' && bound.data.initialS2WorkId === work.workId,
+      rounds: ctx.goals.get(agent)?.roundsStarted,
+      goalPrompt: adapter.requests[0]?.messages.some(message => message.content.some(block => block.type === 'text' && block.text.includes('<goal_round>'))),
+      recoveryPrompt: adapter.requests[0]?.messages.some(message => message.content.some(block => block.type === 'text' && block.text.includes('bid_stage_inspect(view="recovery")'))),
+      calls: toolCalls.filter(name => name === 'bid_stage_inspect' || name === 'bid_recover_task'),
+      acceptedEvents: events.filter(event => event.type === 'bid.goal.recovery.requested').length,
+      startedRuns: events.filter(event => event.type === 'bid.run.started').length,
+    })}\n`)
+  }
 } finally { await ctx?.fiber.dispose() }

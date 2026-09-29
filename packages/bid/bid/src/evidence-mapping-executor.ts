@@ -4597,7 +4597,15 @@ async function executeEvidenceMappingRun(
     while (replayTaskIds.size > 0 || scheduledTaskIds.size > 0) {
       const remaining = tasks.filter(task => replayTaskIds.has(task.task_id) || scheduledTaskIds.has(task.task_id))
       const generation = Math.min(...remaining.map(task => task.generation))
-      const wave = remaining.filter(task => task.generation === generation)
+      // 同代重叠子树按计划顺序读取合并后的目录，检查点回放也遵守该顺序。
+      const precedingScope = new Set<string>()
+      const wave = remaining.filter((task) => {
+        if (task.generation !== generation) return false
+        const scope = taskEditableSectionIds(outline, task)
+        const overlaps = [...scope].some(id => precedingScope.has(id))
+        for (const id of scope) precedingScope.add(id)
+        return !overlaps
+      })
       const replayed = wave.filter(task => replayTaskIds.delete(task.task_id))
       const runnable = wave.filter(task => scheduledTaskIds.has(task.task_id))
       const barrier = runnable.find(task => task.task_id === resumeBarrierTaskId)
