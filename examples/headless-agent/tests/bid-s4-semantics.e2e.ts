@@ -13,6 +13,8 @@ import * as PiAi from '@deepseek-ai/dsh-llm-pi-ai'
 import FileSettingsProvider from '@deepseek-ai/dsh-settings-file'
 import LocalCredentialProvider from '@deepseek-ai/dsh-credentials-local'
 import SessionStore, { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
+import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
+import UserQuestionService from '@deepseek-ai/dsh-user-questions'
 import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import SubagentRuntime from '@deepseek-ai/dsh-subagent'
 import * as spawn from '@deepseek-ai/dsh-subagent-spawn-in-process'
@@ -20,7 +22,7 @@ import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime, { validateJsonSchemaValue, type JsonSchemaNode } from '@deepseek-ai/dsh-tools'
 import { describe, expect, it, vi } from 'vitest'
 import {
-  BidWorkspace, buildBidStageTask, createScoringResponsePointCatalog, executeEvidenceMapping,
+  BidHostRuntime, BidWorkspace, checkpointBidProjectState, buildBidStageTask, createScoringResponsePointCatalog, executeEvidenceMapping,
   parseOutlineArtifact, parseEvidenceMapArtifact, buildEvidenceMappingPlan,
   parseTenderProjectArtifact, parseTenderRequirementsArtifact, parseTenderScoringArtifact,
   parseTenderComplianceArtifact, parseScoringResponsePointCatalog,
@@ -28,6 +30,7 @@ import {
 } from '@deepseek-ai/dsh-bid'
 import { registerIntegrationTools } from '../../../packages/bid/bid/tests/fixtures/evidence-mapping-loop.ts'
 import { reviewRefinedOutline } from '../../../packages/bid/bid/src/evidence-mapping-executor.ts'
+import { seedCapabilityProject } from '../../../packages/bid/bid/tests/capability-fixture.ts'
 
 const cases = [{
   id: 'survey', name: '国土线索核查服务', structure: 'unscored',
@@ -149,6 +152,53 @@ async function configureRuntime(ctx: Context, root: string): Promise<void> {
 }
 
 describe.skipIf(!process.env.DEEPSEEK_API_KEY && !process.env.DSH_BID_EVAL_PROVIDER)('真实模型 S4 材料映射与目录语义验收', () => {
+  it.each([{
+    name: '指定章节提升与后续改名',
+    prompt: '请直接把章节3移到顶层，排在现有顶层章节之后，再将它改名为独立实施方案。保留所有章节正文，不需要补资料。',
+    sectionIds: ['SEC-3'], title: '独立实施方案',
+  }, {
+    name: '按实际评分项重组平级目录',
+    prompt: '当前目录还是套在设计和交付下面。请按采购文件的全部评分项重组为平级顶层目录，取消这两个外层分组，保留现有章节正文和评分归属。不需要补资料，请直接完成。',
+    sectionIds: ['SEC-1', 'SEC-2', 'SEC-3', 'SEC-4', 'SEC-5'], title: undefined,
+  }])('Main Agent $name 并保留正文', { timeout: 180_000, retry: 0 }, async (scenario) => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-capability-routing-'))
+    vi.stubEnv('DSH_HOME', root)
+    const ctx = new Context()
+    try {
+      await configureRuntime(ctx, root)
+      await ctx.plugin(SessionProjectionRegistry)
+      await ctx.plugin(UserQuestionService)
+      const workspace = new BidWorkspace(root)
+      await seedCapabilityProject(workspace, 'complete')
+      await checkpointBidProjectState(workspace, { stage: 'evidence_mapping', status: 'completed', run: null })
+      await ctx.plugin(BidHostRuntime)
+      const agent = ctx.agentLoop.create(SessionId('capability-routing'),
+        { provider, model: process.env.DSH_BID_EVAL_MODEL ?? 'deepseek-v4-flash' }, { cwd: root, agentPreset: 'bid' })
+      const bodyPaths = ['0001', '0002', '0003', '0004', '0005'].map(id =>
+        join(workspace.projectRoot, `chapters/sections/${id}.md`))
+      const bodies = await Promise.all(bodyPaths.map(path => readFile(path, 'utf8')))
+      agent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text',
+        text: scenario.prompt }] }))
+      await vi.waitFor(async () => {
+        const outline = parseOutlineArtifact(JSON.parse(await readFile(join(workspace.projectRoot, 'outline/confirmed-outline.json'), 'utf8')))
+        for (const id of scenario.sectionIds) {
+          expect(outline.sections.find(section => section.id === id)).toMatchObject({ parent_id: null, level: 1,
+            ...(scenario.title === undefined ? {} : { title: scenario.title }), scoring_ids: [`SCORE-${id.slice(4)}`] })
+        }
+        if (scenario.title === undefined) expect(outline.sections.some(section =>
+          section.id === 'GROUP-A' || section.id === 'GROUP-B')).toBe(false)
+      }, { timeout: 150_000, interval: 500 })
+      await agent.whenIdle()
+      expect(await Promise.all(bodyPaths.map(path => readFile(path, 'utf8')))).toEqual(bodies)
+      expect(agent.session.events.filter(event => event.type === 'user/message' && event.data.source.kind === 'user')).toHaveLength(1)
+      await ctx.sessions.flush(agent.session)
+      console.info('Main Agent 能力选择验收记录：' + root)
+    } finally {
+      await ctx.fiber.dispose()
+      vi.unstubAllEnvs()
+    }
+  })
+
   it.each(cases)('$name 的章节、材料和目录承载符合任务', { timeout: 1_200_000, retry: 0 }, async (scenario) => {
     const resumeRoot = process.env.DSH_BID_EVAL_RESUME_ROOT
     const root = resumeRoot ?? await mkdtemp(join(tmpdir(), `dsh-s4-semantics-${scenario.id}-`))
@@ -300,7 +350,12 @@ describe.skipIf(!process.env.DEEPSEEK_API_KEY && !process.env.DSH_BID_EVAL_PROVI
         await writeFile(join(root, 'independent-review-report.json'), JSON.stringify(review, null, 2))
         if (scenario.id === 'boundary') {
           expect(review.blockingIssues).toContainEqual(expect.objectContaining({ code: 'OUTLINE_STRUCTURE_REVIEW', section_id: 'IMPLEMENTATION' }))
-        } else expect(review.blockingIssues).toEqual([])
+        } else {
+          expect(review.blockingIssues).toEqual([])
+          const unmet = await reviewRefinedOutline(agent, workspace, inputs, results, 0,
+            reviewRun.signal, reviewRun.commits, '将背景与实施方案从当前父章中移出，形成两个平级的顶层章节。')
+          expect(unmet.blockingIssues.length).toBeGreaterThan(0)
+        }
         console.info('S4 独立复核验收记录：' + root)
       } finally {
         await ctx.fiber.dispose()

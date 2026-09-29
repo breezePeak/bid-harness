@@ -632,7 +632,9 @@ function renderCurrentRunProgress(run: BidRunData | null): string | undefined {
 
 const CAPABILITY_TASK_GUIDANCE = [
   '项目阶段只表示默认整本路线的进度。明确修改时可先用 bid_project_inspect 读取当前事实，再用 bid_run_task 提交目标、根范围和有序能力步骤；普通讨论与解释只读。整本目录深化先核对目标，把核对、结构修改和覆盖复核拆成 2–8 个具体 work_items 随任务提交，界面会展示这些工作项；能力步骤仍按真实依赖选择，不为凑步骤重复研究。',
-  'tender.update 更正规范化理解或评分选择；只改标题或移动明确节点用 outline.update；“深化这个章节”用 outline.refine，它在调整目录前完成所需研究；evidence.research 可独立补研，allow_outline_refinement=false 保持目录，true 可按研究发现深化；chapter.reorganize 分配旧正文；writing.plan 更新写作要求；chapter.write/revise/review 处理正文。按用户真实目标选择最少步骤。',
+  '根据用户目标、当前成果和能力的实际修改范围选择步骤，不按当前阶段或用户用词固定选路。tender.update 更正招标理解；outline.generate 首次生成目录；outline.update 编辑已有目录的层级、职责及跨分支结构；outline.refine 研究并深化各章节子树，不能调整顶层或跨分支移动；evidence.research 补充或替换资料映射；chapter.reorganize 分配旧正文；writing.plan 更新写作要求；chapter.write/revise/review 处理正文。',
+  '规划前确认每项修改都由有权执行的能力承担，再按产物依赖安排后续步骤。已有资料或正文可复用时不重复生成。能力任务完成后读取实际结果，逐项核对用户目标；工具成功、资料覆盖或工作项完成不等于用户要求全部实现。',
+  '子任务报告超出范围或无法完成时，主 Agent 负责调整能力计划，不要求子任务越权，也不把未完成目标当作建议略过。可恢复的失败任务先用 bid_project_inspect(object=task) 读取原目标、范围和实际步骤，再用 bid_plan_task 替换未提交结果的失败步骤及后续步骤，并用 bid_recover_task 继续；保持原目标和授权范围，保留已完成步骤。能力选择错误不需要用户重复授权；用户停止、等待输入或不可恢复故障仍须遵守对应限制。',
   '拆分或合并已有正文的章节时，先 inspect 目录、正文和写作要求，再用 bid_run_task 提交完整有序执行计划：目录调整、原文迁移、结果复核。用户明确只改目录时才可留下待迁移正文；不要把目录步骤完成说成整项任务完成。',
   '用户要求执行修改或确认先前的修改建议，即授权完成该修改所必需的目录、资料、正文和复核步骤；在同一回合提交完整任务，不只回复建议、保存计划或再次询问是否开始。计划因缺少后续步骤被拒绝时，补齐步骤并重新提交，不请求重复授权。用户只讨论或明确暂缓时不执行。',
   'outline.update.defer_content_migration=true 只把原文迁移延后到同一任务的 chapter.reorganize，之后必须安排 chapter.write 或 chapter.review；仅用户明确只改目录或暂缓正文时才设置 task.allow_pending_content=true。不得自行把正文留给用户下一次催促。',
@@ -856,7 +858,7 @@ export function installStageInteractionTools(
                 : name === 'bid_stage_inspect' ? '读取当前阶段的有界权威快照；传正文引用时校验原文身份并返回受控正文。'
                   : name === 'bid_project_inspect' ? '按真实项目对象与章节 ID 分页读取已保存资料；不依赖当前阶段，也不修改项目。'
                     : name === 'bid_run_task' ? '用当前用户消息或原生 Goal 轮次授权有序业务能力任务；Host 核对项目输入、范围和候选文件，再发布实际结果。提问与讨论不得调用。'
-                      : name === 'bid_plan_task' ? '用后续用户消息或原生 Goal 轮次替换当前能力 Work 尚未开始的步骤后缀；已完成、运行中和等待输入的步骤不可改。'
+                      : name === 'bid_plan_task' ? '调整挂起能力任务的未完成步骤后缀；可恢复失败可沿用原授权重新规划。已完成、仍在执行和等待用户输入的步骤不可改；保存后调用恢复能力继续。'
                         : name === 'bid_set_flowchart_visual_review' ? '设置当前 S5 work 的流程图视觉检查策略。skip 表示后续不再启动新的流程图视觉确认；required 表示恢复正常视觉确认。设置会写入当前 work 的命令日志并在挂起恢复后继续生效。'
                           : name === 'bid_pause_stage' ? '仅在用户明确要求暂停时阻止后续阶段任务启动；已经运行的任务继续收敛。'
                             : name === 'bid_resume_stage' ? '仅在用户明确要求继续时释放当前阶段的新任务调度门。'
@@ -953,7 +955,7 @@ export function installStageInteractionTools(
       const resumed = agent.session.events.findLast(event => event.type === 'bid.project.resumed')
       const suspended = task.status === 'suspended' ? task.run : undefined
       const prompt = failureMessage
-        ? '你是当前 Bid Main Agent。Host 已保存真实失败状态。先调用 bid_stage_inspect(view="recovery") 分析 failure、issues、checkpoint 和已完成成果。eligible=true 时针对失败范围提出具体新方案并调用 bid_recover_task；eligible=false 时向用户解释真实阻断及需要的动作，不机械重试。'
+        ? '你是当前 Bid Main Agent。Host 已保存真实失败状态。先调用 bid_stage_inspect(view="recovery") 分析 failure、issues、checkpoint 和已完成成果。eligible=true 时判断是执行失败还是能力计划无法完成目标；需要换能力时先用 bid_plan_task 调整未完成步骤，再调用 bid_recover_task；eligible=false 时向用户解释真实阻断及需要的动作，不机械重试。'
         : suspended !== undefined ? renderSuspendedRunPrompt(
           task.stage,
           suspended.runId,

@@ -8,6 +8,7 @@ import UserQuestionService from '@deepseek-ai/dsh-user-questions'
 import { BidHostRuntime, BidOrchestratorError, checkpointBidProjectState, getOrCreateOutlineDraft, parseEvidenceMapArtifact, BID_INITIAL_TASK_STATE, reduceBidTaskState } from '@deepseek-ai/dsh-bid'
 import { runEvidenceMappingLoop } from './evidence-mapping-loop.ts'
 import { outlineRegenerationChanges } from '../../src/outline-regeneration-artifacts.ts'
+import { seedCapabilityProject } from '../capability-fixture.ts'
 
 function call(name: string, args: object): StreamChunk[] {
   return [{ type: 'block-start', index: 0, blockType: 'tool-call' }, { type: 'block-end', index: 0, block: { type: 'tool-call', id: CallId(name), name, arguments: JSON.stringify(args) } }, { type: 'finish', reason: { kind: 'tool-calls' } }]
@@ -26,6 +27,73 @@ function visibleTarget(options: GenerateOptions, pattern: RegExp): string {
     }
   }
   throw new Error('模型上下文缺少候选文件路径')
+}
+
+/** @param ctx 源码 Loader 装配。 @param root 临时项目。 @returns 原授权恢复后的真实目录和步骤结果。 */
+export async function runCapabilityReplanLoop(ctx: Context, root: string) {
+  const { agent, workspace, parentScript } = await runEvidenceMappingLoop(ctx, root, false, true)
+  await seedCapabilityProject(workspace, 'complete')
+  const state = { stage: 'evidence_mapping' as const, status: 'completed' as const, run: null }
+  agent.session.append('bid.task.changed', { state })
+  await checkpointBidProjectState(workspace, state)
+  if (ctx.get('bid') === undefined) await ctx.plugin(BidHostRuntime)
+  const before = agent.session.events.length
+  const originalBody = await readFile(join(workspace.projectRoot, 'chapters/sections/0003.md'), 'utf8')
+  const done = Promise.withResolvers<undefined>()
+  const release = ctx.on('session/event', (session, event) => {
+    if (session === agent.session && event.type === 'bid.run.notice' && event.data.kind === 'completed') done.resolve(undefined)
+  }, { global: true })
+  let runId = ''
+  parentScript.push(
+    call('bid_run_task', { task: { goal: '把章节3提升到顶层，并改名为独立实施方案；保留正文',
+      scope: { kind: 'project' }, steps: [{ scope: { source: 'task' }, call: { capability: 'outline.generate', input: {} } }],
+    } }),
+    call('bid_stage_inspect', { view: 'recovery' }),
+    (options) => {
+      if (!JSON.stringify(options.tools).includes('project 范围可跨分支重组及调整顶层章节')) throw new Error('缺少能力范围说明')
+      return call('bid_project_inspect', { query: { object: 'task' } })
+    },
+    (options) => {
+      for (const message of [...options.messages].reverse()) for (const block of message.content) {
+        if (block.type !== 'tool-result') continue
+        for (const content of block.content) {
+          if (content.type !== 'text') continue
+          const value = JSON.parse(content.text) as { data?: { run?: { runId: string }
+            capability_task?: { work_id: string; steps: Array<{ index: number; status: string }> } } }
+          const task = value.data?.capability_task
+          if (task === undefined) continue
+          runId = value.data?.run?.runId ?? ''
+          const failed = task.steps.find(step => step.status === 'running')
+          if (failed === undefined || !runId) throw new Error('未返回实际失败步骤')
+          return call('bid_plan_task', { work_id: task.work_id, from_index: failed.index, steps: [
+            { scope: { source: 'task' }, call: { capability: 'outline.update', input: { operations: [
+              { type: 'move_section', section_id: 'SEC-3', parent_id: null, order: 3 },
+            ] } } },
+            { scope: { source: 'previous_targets' }, call: { capability: 'outline.update', input: { operations: [
+              { type: 'update_section', section_id: 'SEC-3', title: '独立实施方案' },
+            ] } } },
+          ] })
+        }
+      }
+      throw new Error('任务检查缺少原目标和执行步骤')
+    },
+    () => call('bid_recover_task', { target: 'run', run_id: runId, instruction: '使用已有目录编辑能力完成原目标，按实际结果接续修改并保留正文。' }),
+    answer('已调整能力计划并继续。'),
+  )
+  try {
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: '把章节3提升到顶层，并改名为独立实施方案；保留正文。' }], source: { kind: 'user' } }))
+    await done.promise
+    await agent.whenIdle()
+    const outline = (await getOrCreateOutlineDraft(workspace)).outline
+    const section = outline.sections.find(item => item.id === 'SEC-3')!
+    const events = agent.session.events.slice(before)
+    await ctx.sessions.flush(agent.session)
+    return { section: { title: section.title, parent_id: section.parent_id, level: section.level },
+      bodyPreserved: await readFile(join(workspace.projectRoot, 'chapters/sections/0003.md'), 'utf8') === originalBody,
+      userMessages: events.filter(event => event.type === 'user/message' && event.data.source.kind === 'user').length,
+      calls: events.filter(event => event.type === 'tool/call').map(event => event.data.name),
+      completed: events.filter(event => event.type === 'bid.run.notice' && event.data.kind === 'completed').length }
+  } finally { release() }
 }
 
 /** @param ctx 测试装配。 @param root 临时工作区。 @returns 整本重生成后的 Draft 与阶段状态。 */

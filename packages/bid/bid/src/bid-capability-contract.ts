@@ -41,15 +41,17 @@ export const bidCapabilityInputSchema = z.discriminatedUnion('capability', [
     operations: z.array(tenderAnalysisEditOperationSchema).default([]),
     selected_scoring_ids: scoringIds.optional(),
   }).strict().refine(value => value.operations.length > 0 || value.selected_scoring_ids !== undefined) }).strict(),
-  z.object({ capability: z.literal('outline.generate'), input: z.object({}).strict() }).strict(),
+  z.object({ capability: z.literal('outline.generate'), input: z.object({}).strict() }).strict()
+    .describe('首次生成整本目录；已有确认目录时使用 outline.update 编辑结构。'),
   z.object({ capability: z.literal('outline.update'), input: z.object({
     operations: z.array(outlineEditOperationSchema).min(1),
     business_bindings: z.array(outlineBusinessBindingSchema).default([]),
     content_assignments: z.array(chapterBlockAssignmentSchema).default([]),
     allow_content_deletion: z.boolean().default(false),
     defer_content_migration: z.boolean().default(false),
-  }).strict() }).strict(),
-  z.object({ capability: z.literal('outline.refine'), input: z.object({ feedback: instruction }).strict() }).strict(),
+  }).strict() }).strict().describe('编辑已有目录的标题、职责和层级，支持新增、删除、移动、拆分、合并；project 范围可跨分支重组及调整顶层章节。保留未涉及内容，协调受影响的资料和正文索引。'),
+  z.object({ capability: z.literal('outline.refine'), input: z.object({ feedback: instruction }).strict() }).strict()
+    .describe('研究已有章节并深化其子树；每个研究任务只能修改自身子树，不能重组整本目录的顶层或跨分支移动。'),
   z.object({ capability: z.literal('chapter.reorganize'), input: z.object({
     instruction, source_section_ids: sectionIds,
     assignments: z.array(chapterBlockAssignmentSchema).min(1).optional(),
@@ -58,7 +60,7 @@ export const bidCapabilityInputSchema = z.discriminatedUnion('capability', [
   z.object({ capability: z.literal('evidence.research'), input: z.object({
     mode: z.enum(['replace', 'supplement']), reason: instruction,
     allow_outline_refinement: z.boolean(),
-  }).strict() }).strict(),
+  }).strict() }).strict().describe('补充或替换章节资料映射；允许结构深化时仍限于研究任务子树。不会替代全局目录编辑或正文写作。'),
   z.object({ capability: z.literal('writing.plan'), input: writingPlanInputSchema }).strict(),
   z.object({ capability: z.literal('chapter.write'), input: z.object({ instruction }).strict() }).strict(),
   z.object({ capability: z.literal('chapter.revise'), input: z.object({

@@ -3426,6 +3426,7 @@ type OutlineStructureIssue = { code: string; section_id: string; reason: string 
  * @param maxRepairAttempts - 质量报告格式修复上限。
  * @param signal - 本次运行的取消信号。
  * @param commits - 同一 Run 拥有的候选写入权限。
+ * @param request - 本次用户修改目标；复核实际目录是否满足，而非只检查业务覆盖。
  * @returns 当前目录与需局部重开的结构问题。
  */
 export async function reviewRefinedOutline(
@@ -3436,6 +3437,7 @@ export async function reviewRefinedOutline(
   maxRepairAttempts: number,
   signal: AbortSignal,
   commits: BidCommitScope,
+  request?: string,
 ): Promise<{ outline: OutlineArtifact; blockingIssues: OutlineStructureIssue[] }> {
   const subagents = agent.ctx.get('subagents')
   if (subagents === undefined) throw new Error('Bid outline review requires subagents service')
@@ -3478,6 +3480,10 @@ export async function reviewRefinedOutline(
     '当前阶段：evidence_mapping / Outline Review',
     '目录结构和 Writing Brief 已由各 Section 任务研究后合并；父节点正式总述在 Final Check 中根据最终任务生成和复核。',
     '只检查整本目录的业务层级、章节边界和 Requirement/Scoring/Response Point/Compliance 覆盖是否合理；不重新检索或重生成整本目录。',
+    ...(request === undefined ? [] : [
+      `本次用户修改目标：${request}`,
+      '逐项核对实际目录与本次目标。要求的结构变化必须体现在目录节点及其关系中，写作说明、覆盖关联或子任务完成不能替代。尚未实现的目录目标必须列为 blocking_issues；子任务无权修改不代表目标已经满足，不得降为建议。',
+    ]),
     '这是目录质量的独立第二意见，不以第一次 KEEP 为依据。先独立阅读 Structure Review Cards 的 S3 职责、最终 Blueprint 和中性 Research Findings，再核对已有判断。优先检查叶子过粗、过度拆分、同级职责重复或断裂，以及重要主题的目录导航价值；最后核对 Requirement/Scoring/Response Point 覆盖。引用身份和结构操作绑定由 Host 检查，不把 bookkeeping 当作本次主要任务。',
     '进行 Hidden Heading Pressure 验收：假设 S5 禁止自行创建正式目录标题，逐叶判断能否自然、完整地写成技术标正文。若多个不同对象、方法体系、输入输出或成果质量责任只能依赖事实上的子标题表达，应在 blocking_issues 中说明遗漏的目录深化。连续流程或没有独立评分点不能单独证明 KEEP；同一方法的普通步骤、参数和短注意事项也不应机械成节。不得用固定节点数量、维度条数、关键词或零新增判断。',
     '区分“同一方法内部的处理步骤”与“需要分别论证的技术任务”：每个步骤都能列出输入、输出和责任，不能仅据此认定需要正式章节。核对它们是否仍对同一对象运用同一方法、形成同一成果，并尝试用段落衔接、步骤列表和表格完整表达。若这些表达足够，保留叶子；若不足，blocking issue 必须指出实际方法或成果责任的差异及具体定位障碍，不能只罗列 writing_dimensions 或偏好更多标题。例行登记、过程质量记录和结果交接也不自动获得独立章节。',
@@ -4940,6 +4946,7 @@ async function executeEvidenceMappingRun(
           await writeJson(join(workspace.projectRoot, REFINED_OUTLINE_CANDIDATE_PATH), finalOutline, options.run.commits)
           let reviewedOutline = await reviewRefinedOutline(
             agent, workspace, { ...inputs, outline: finalOutline }, initialResults, options.maxRepairAttempts, signal, options.run.commits,
+            options.remap?.reason,
           )
           executionLog.outline_reviews ??= []
           executionLog.outline_reviews.push({ blocking_issues: reviewedOutline.blockingIssues })
@@ -4973,6 +4980,7 @@ async function executeEvidenceMappingRun(
             reviewedOutline = await reviewRefinedOutline(
               agent, workspace, { ...inputs, outline: finalOutline }, initialResults,
               options.maxRepairAttempts, signal, options.run.commits,
+              options.remap?.reason,
             )
             executionLog.outline_reviews.push({ blocking_issues: reviewedOutline.blockingIssues })
             await persistLog()

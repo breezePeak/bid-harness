@@ -12,7 +12,7 @@ Status: implemented
 
 显式 `/goal` 使用原生 Driver 和当前阶段公共工具，Bid Agent 对本地注册的 create_goal 安装精确 deny，模型工具视图不展示它；执行守卫也拒绝直接调用。Bid 只注册项目占用 Busy Gate；等待不消耗轮次，项目释放后重新请求同项目的 Driver。Bid 停止、重置和完成不更新 Goal；Goal 更新也不操作 Bid。Host 重启只按 Bid 持久状态恢复，不从历史绑定恢复 Goal activation。
 
-工具授权从当前未结束回合取得。直接用户消息或原生 Driver 接纳的当前 Goal 轮次可以授权；Goal 还须匹配 live Main Agent、当前 initiator、身份、revision 和 round。Work、队列和计划补丁仍保存 session_id 与 message_id；历史消息可验证既有请求，不能授权新调用。已入队请求保留原授权，不要求执行时用户回合仍开放。
+新任务授权从当前未结束回合取得。直接用户消息或原生 Driver 接纳的当前 Goal 轮次可以授权；Goal 还须匹配 live Main Agent、当前 initiator、身份、revision 和 round。Work、队列和计划补丁仍保存 session_id 与 message_id；历史消息不能授权新任务。同一可恢复 Work 的[能力重规划](../bug-fix/2026-09-29-bid-capability-replanning.md)可沿用原授权，已入队请求执行时也不要求用户回合仍开放。
 
 恢复工具只接受当前 live Bid Main Agent，按当前 Run、Work、revision、输入和失败指纹校验。bid.recovery.requested 保存模型方案与目标，重复失败再次通知主 Agent，同一 Work 与指纹下已接纳的相同方案被拒绝；Host 不生成替代方案。能力步骤在原输入身份与检查点上取得恢复上下文，现有模型执行器将方案送入匹配失败单元的提示。Host 重启自动续行若失败，保存当前 Run 的错误通知并唤醒主 Agent 解释阻断。
 

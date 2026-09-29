@@ -4,6 +4,7 @@ import { readFile, readdir } from 'node:fs/promises'
 import { z } from 'zod'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { hasBidTaskAuthorization, resolveBidToolAuthorization } from './bid-tool-authorization.ts'
+import { bidRunRecoveryEligibility } from './bid-recovery.ts'
 import { pendingCapabilityWorkIds, readPendingCapabilityRequests } from './bid-capability-queue.ts'
 import type { Session } from '@deepseek-ai/dsh-session'
 import type { AskUserQuestionAnswerItem, AskUserQuestionItem } from '@deepseek-ai/dsh-user-questions/types'
@@ -499,15 +500,15 @@ async function saveCheckpoint(
 }
 
 /**
- * 后续用户消息仅可替换尚未开始的步骤后缀，保持原 Work 请求不变。
+ * 替换未完成步骤后缀；可恢复失败允许主 Agent 沿用原授权，保留已完成步骤及不可变请求。
  * @param run 当前 Run 的检查点写入权限。
  * @param canonical 正式项目。
  * @param working Work 候选项目。
  * @param request 不可变请求。
- * @param session 保存真实后续用户消息的公开会话。
+ * @param session 保存用户授权和当前失败状态的公开会话。
  * @param authorization 本次补丁的用户消息身份。
  * @param fromIndex 待替换后缀的首个步骤索引。
- * @param steps 新的后续步骤，可为空以删除未开始后缀。
+ * @param steps 新的后续步骤，可为空以删除未开始后缀；失败步骤必须有替代步骤。
  * @param agent 当前工具调用者，用于验证本轮授权。
  * @returns 写入后的步骤检查点。
  */
@@ -517,26 +518,38 @@ export async function patchCapabilityTaskSteps(
   request: CapabilityTaskRequest, session: Session, authorization: CapabilityTaskRequest['authorization'],
   fromIndex: number, steps: readonly BidCapabilityStep[], agent?: Agent,
 ): Promise<CapabilityTaskCheckpoint> {
+  const recovery = bidRunRecoveryEligibility(session)
+  const recoverable = recovery.eligible && recovery.target?.workId === run.work.workId
+  const originalAuthorization = authorization.message_id === request.authorization.message_id
+  const automaticRecovery = recoverable && originalAuthorization && agent?.session === session
+    && session.header.origin !== 'subagent' && agent.ctx.get('agents')?.get(session.id) === agent
   if (authorization.session_id !== request.authorization.session_id || authorization.session_id !== session.id
-    || authorization.message_id === request.authorization.message_id
     || !hasBidTaskAuthorization(session, authorization)
-    || ((resolveBidToolAuthorization(agent ?? session) ?? resolveBidToolAuthorization(session))?.message_id !== authorization.message_id)) {
+    || (!automaticRecovery
+      && (resolveBidToolAuthorization(agent ?? session) ?? resolveBidToolAuthorization(session))?.message_id
+        !== authorization.message_id)) {
     throw new Error('BID_CAPABILITY_PLAN_PATCH_UNAUTHORIZED')
   }
   const checkpoint = await readCapabilityTaskCheckpoint(canonical, working, run, request, session)
-  if (checkpoint === null || checkpoint.steps.some(step => step.status === 'awaiting_input' || step.status === 'running')) {
+  if (checkpoint === null || checkpoint.steps.some((step, index) => step.status === 'awaiting_input'
+    || step.status === 'running' && (!recoverable || index < fromIndex))) {
     throw new Error('BID_CAPABILITY_PLAN_PATCH_NOT_READY')
   }
-  const existing = checkpoint.plan_patches.find(patch => patch.authorization.message_id === authorization.message_id)
-  if (existing !== undefined) {
-    if (existing.from_index !== fromIndex || JSON.stringify(existing.steps) !== JSON.stringify(steps)) {
-      throw new Error('BID_CAPABILITY_PLAN_PATCH_CONFLICT')
-    }
+  const existing = checkpoint.plan_patches.at(-1)
+  if (existing?.authorization.message_id === authorization.message_id
+    && existing.from_index === fromIndex && JSON.stringify(existing.steps) === JSON.stringify(steps)) {
     return checkpoint
   }
   if (!Number.isSafeInteger(fromIndex) || fromIndex < 0 || fromIndex > checkpoint.steps.length
-    || checkpoint.steps.slice(fromIndex).some(step => step.status !== 'pending' || step.answer_question_id !== undefined)
+    || checkpoint.steps.slice(fromIndex).some(step => step.status !== 'pending' && !(recoverable && step.status === 'running')
+      || step.answer_question_id !== undefined)
+    || steps.length === 0 && checkpoint.steps.slice(fromIndex).some(step => step.status === 'running')
     || fromIndex + steps.length === 0) throw new Error('BID_CAPABILITY_PLAN_PATCH_STARTED_STEP')
+  for (const step of checkpoint.steps.slice(fromIndex)) {
+    if (await readCapabilityStepReceipt(working, step.step_id) !== null) {
+      throw new Error('BID_CAPABILITY_PLAN_PATCH_STARTED_STEP: 步骤已有提交凭据，请先恢复并核对结果。')
+    }
+  }
   const replacement = steps.map((step, index) => ({
     step_id: stepId(run.work.workId, fromIndex + index),
     step: bidCapabilityStepSchema.parse(step), status: 'pending' as const, authorization,
