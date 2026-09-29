@@ -1686,6 +1686,7 @@ export class BidHostRuntime extends TypertRemoteService {
   private readonly queuedDrainRequested = new Set<BidProjectKey>()
   private readonly pendingRunDecisionControllers = new Map<string, AbortController>()
   private readonly recoveryNotices = new WeakMap<Session, string>()
+  private readonly executionQuestionNotices = new WeakSet<ActiveBidOperation>()
   private readonly recoveryAcceptances = new Map<string, Promise<{ accepted: true; run_id: string }>>()
   private readonly recoveryTasks = new Set<Promise<unknown>>()
   private readonly pendingWritingQuestions = new Map<BidProjectKey, ActiveWritingQuestion>()
@@ -3010,6 +3011,27 @@ export class BidHostRuntime extends TypertRemoteService {
     }, { global: true })
     ctx.inject(['tools'], (toolCtx) => {
       toolCtx.effect(() => toolCtx.tools.guard((execution) => {
+        if (execution.name === 'ask_user_question') {
+          const operation = [...this.inFlight.values()].find(active => active.executionHandle?.agent === execution.agent)
+          if (operation !== undefined) {
+            if (!this.executionQuestionNotices.has(operation)) {
+              this.executionQuestionNotices.add(operation)
+              const message = createUserMessage({
+                content: [{ type: 'text', text: [
+                  'Bid 后台执行 Agent 尝试直接等待用户回答，调用已被拒绝。请由你判断是否需要向用户说明或提问；后台任务仍按原执行链收敛。',
+                  `stage: ${operation.executionStage ?? 'unknown'}`,
+                  `execution_session_id: ${String(execution.agent.session.id)}`,
+                  `question: ${sanitizeBidErrorText(JSON.stringify(execution.arguments) ?? 'null', 1600)}`,
+                ].join('\n') }],
+                source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'notice', summary: 'Bid 后台提问交由主 Agent 处理' },
+              })
+              const main = this.ctx.agents.get(operation.session.id)
+              if (main?.session === operation.session) main.steer(message)
+              else operation.session.append('user/message', message, { surfaceOp: 'append' })
+            }
+            return 'BID_EXECUTION_QUESTION_REQUIRES_MAIN_AGENT'
+          }
+        }
         const session = execution.agent?.session
         if (session === undefined || !isBidMainSession(session)) return
         if ((execution.name === 'web_search' || execution.name === 'web_fetch') && !this.config.webSearchEnabled) {
@@ -3279,8 +3301,6 @@ export class BidHostRuntime extends TypertRemoteService {
     }
     if (request.action === 'bid_plan_task') {
       if (this.ctx.agents.get(session.id) !== agent) throw new Error('BID_CAPABILITY_DISPATCHER_UNAVAILABLE')
-      const authorization = resolveBidToolAuthorization(agent)
-      if (authorization === undefined) throw new Error('BID_CAPABILITY_USER_MESSAGE_REQUIRED')
       const operation = this.beginOperation(session)
       try {
         const state = await this.prepareOperation(operation)
@@ -3289,6 +3309,7 @@ export class BidHostRuntime extends TypertRemoteService {
           throw new Error('BID_CAPABILITY_PLAN_PATCH_NOT_READY')
         }
         const saved = capabilityTaskRequestSchema.parse(await readBidWorkRequest(operation.workspace, state.run.work))
+        const authorization = resolveBidToolAuthorization(agent) ?? saved.authorization
         const workingPaths = await prepareBidWorkingTree(operation.workspace, state.run.work)
         const working = new BidWorkspace(workingPaths.root, operation.workspace.config)
         let stepCount = 0
@@ -3299,7 +3320,7 @@ export class BidHostRuntime extends TypertRemoteService {
           stepCount = checkpoint.steps.length
         }, state)
         return { accepted: true, work_id: request.work_id, steps: stepCount,
-          message: '已保存未执行步骤；当前 Work 仍处于挂起状态，等待明确恢复。' }
+          message: '已保存未完成步骤；当前任务仍挂起。可恢复失败请调用 bid_recover_task 继续，用户停止的任务须等用户明确恢复。' }
       } finally { await this.finishOperation(session, operation) }
     }
     if (request.action === 'bid_outline_apply_operations'
