@@ -693,6 +693,23 @@ describe('SubagentRuntime.followup residency routing', () => {
 })
 
 describe('continuable child ownership', () => {
+  it('registers a fresh child under its runtime parent', async () => {
+    const hold = Promise.withResolvers<undefined>()
+    const { ctx, parent } = await setupWith(new GatedAdapter([
+      { chunks: textResponse('child done'), gate: hold.promise },
+    ]))
+    parkParent(ctx, parent)
+    const started = await ctx.subagents.startContinuable(startSpec(parent))
+    const child = ctx.agents.get(started.childId)!
+
+    expect(ctx.agents.isOwnedBy(child.id, parent)).toBe(true)
+    expect(ctx.agents.roots()).toContain(parent)
+    expect(ctx.agents.roots()).not.toContain(child)
+
+    hold.resolve(undefined)
+    await waitNoActivation(ctx, started.childId)
+  })
+
   it('keeps a parent Activation waiting until its child completes disposal', async () => {
     const releaseGrandchild = Promise.withResolvers<undefined>()
     const adapter = new GatedAdapter([
@@ -707,6 +724,13 @@ describe('continuable child ownership', () => {
       return found!
     })
     const grandchild = await ctx.subagents.startContinuable(startSpec(child))
+    const grandchildAgent = ctx.agents.get(grandchild.childId)!
+
+    expect(ctx.agents.isOwnedBy(child.id, parent)).toBe(true)
+    expect(ctx.agents.isOwnedBy(grandchildAgent.id, child)).toBe(true)
+    expect(ctx.agents.roots()).toContain(parent)
+    expect(ctx.agents.roots()).not.toContain(child)
+    expect(ctx.agents.roots()).not.toContain(grandchildAgent)
 
     await vi.waitFor(() => {
       expect(child.status).toBe('idle')
@@ -718,6 +742,26 @@ describe('continuable child ownership', () => {
 
     releaseGrandchild.resolve(undefined)
     await waitNoActivation(ctx, grandchild.childId)
+    await waitNoActivation(ctx, started.childId)
+  })
+
+  it('restores the runtime parent on cold resume', async () => {
+    const hold = Promise.withResolvers<undefined>()
+    const { ctx, parent } = await setupWith(new GatedAdapter([
+      { chunks: textResponse('first') },
+      { chunks: textResponse('resumed'), gate: hold.promise },
+    ]))
+    parkParent(ctx, parent)
+    const started = await ctx.subagents.startContinuable(startSpec(parent))
+    await waitNoActivation(ctx, started.childId)
+
+    await followup(ctx, parent, started.childId, message('continue'))
+    const resumedChild = ctx.agents.get(started.childId)!
+    expect(ctx.agents.isOwnedBy(resumedChild.id, parent)).toBe(true)
+    expect(ctx.agents.roots()).toContain(parent)
+    expect(ctx.agents.roots()).not.toContain(resumedChild)
+
+    hold.resolve(undefined)
     await waitNoActivation(ctx, started.childId)
   })
 

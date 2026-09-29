@@ -1067,16 +1067,17 @@ export class SubagentContinuationManager {
       return this.setupRegistry.apply(childCtx)
     }
     const observer = this.host.observeActivation(provider, childId, parent)
+    const runtimeOwnerCtx = this.ownerCtx.extend({ agent: parent })
     // Agent creation owns rollback before handle transfer. A rejection leaves
     // no resident Activation and therefore publishes no lifecycle edge.
     const handle: AgentHandle = create === undefined
-      ? await this.ownerCtx.agents.resume({
+      ? await runtimeOwnerCtx.agents.resume({
         resumeSessionId: childId,
         agentOptions: inputs.agentOptions,
         signal: inputs.signal,
         setup,
       })
-      : await this.ownerCtx.agents.create({
+      : await runtimeOwnerCtx.agents.create({
         sessionId: childId,
         meta: create.meta,
         seed: create.seed,
