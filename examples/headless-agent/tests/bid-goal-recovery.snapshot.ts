@@ -18,3 +18,14 @@ it.each(['tender_analysis', 'outline_generation', 'evidence_mapping'])('%s 默�
     startedRuns: stage === 'tender_analysis' ? 2 : stage === 'outline_generation' ? 3 : 4,
   })
 }, LOADER_SMOKE_TEST_TIMEOUT_MS)
+
+it('源码装配的 Host 拒绝通过更换指令重跑失效目录 Work', async () => {
+  const configPath = fileURLToPath(new URL('../bid-goal-recovery.cordis.snapshot.yml', import.meta.url))
+  const result = await runLoaderSmoke({
+    label: 'Bid stale 恢复拒绝源码装配', tempDirPrefix: 'dsh-bid-stale-recovery-snapshot-',
+    binScript: fileURLToPath(new URL('./fixtures/bid-goal-recovery-driver.ts', import.meta.url)),
+    configPath, binArgs: [configPath, 'stale'],
+    mode: 'src', tsconfigPath: fileURLToPath(new URL('../../../tsconfig.json', import.meta.url)),
+  })
+  expect(JSON.parse(result.stdout)).toEqual({ rejected: [true, true, true], toolAvailable: false, acceptedEvents: 0, startedRuns: 1 })
+}, LOADER_SMOKE_TEST_TIMEOUT_MS)

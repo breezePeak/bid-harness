@@ -43,6 +43,8 @@ S6 只对流程图、表格和图片执行最终页面视觉审核；标题、�
 
 ### 执行与恢复所有权
 
+自动恢复检查全部错误项；目录范围或依赖失效、目标无效、权限、数据损坏与不变量错误优先阻断，不因同时出现候选校验问题而重试。
+
 默认 S1～S6 流程不创建或绑定 Goal。执行器局部修复耗尽后保留挂起 Run、结构化错误及已完成检查点，主动唤醒主 Agent 分析原因。Host 在失败落盘并释放项目锁后以有界 plugin notice 调用 `steer()` 唤醒主 Agent。主 Agent 用 `bid_stage_inspect(view="recovery")` 读取真实错误、检查点和历史指令，再用 `bid_recover_task(instruction=...)` 提交具体方案。S5 已保存回答的计划失败也复用该入口，不重复询问用户。Host 只负责接纳、输入与权限校验、检查点续行和正式发布；主 Agent 不能代替用户确认。用户停止仍使用原生 Run 决策，等待输入仍使用原问题。
 
 只有用户显式 `/goal` 才创建 Goal。Goal Round 与普通主 Agent 使用相同的当前阶段公开工具；已有 Goal 可读取、更新或提前完成。项目有后台操作时 Busy Gate 只等待，不消耗轮数；后台释放项目后重新请求 Driver。Bid 停止、重置和 S5 完成不改变 Goal，Goal 暂停、清除或完成也不取消 Bid。Host 重启按 Bid 自身的 Run ID、project revision、输入指纹、检查点和停止状态续行，不检查或重新激活 Goal。
@@ -118,6 +120,8 @@ S3 在阶段中途生成只读的 analysis/scoring-response-points.json，并把
 遗漏 RP 时，Host 提供差集原文、所属评分项及当前目录，模型只提交局部编辑与具体 must_answer；Host 应用后重新规范化和校验。质量候选只记录问题，复核正常完成且目录版本未再变化后，Host 才发布正式报告的已检查清单。相同输入版本的失败重试复用有效 RP 清单和目录候选；输入变化使候选失效。成功停在 S3 用户确认，已有确认版本不被重试覆盖。详见[局部续修与复核条件](../../../.agents/notes/implemented/bug-fix/2026-09-07-bid-outline-response-point-recovery.md)。
 
 S4 与 S5 共用 `buildWritableSectionWorklist`。Host 为 S3 每个可写叶子创建一个 Initial Mapping Task，在并发上限内按代执行。Initial 与 Repair Child 先研究并通过结构化充分性判断，Host 才允许目录操作和章节任务固化；找到资料不会隐式占用材料提交状态。每个 Child 只展开当前 Section 职责、对应 S3 基线、局部差异和候选引用，并用 `global_outline_index` 获取全书轻量职责索引；无关兄弟的完整 Brief、Evidence 和全部 checkpoint 操作不重复注入。Child 只能修改 `outline_edit_scope_id` 指定的 Section 自身及其后代；拆分后的原节点不再提交叶子 Mapping，新叶在下一代各自成为一个任务，其他已完成 Section 不重跑。父任务读过的本地资料和 Web Source 身份作为 `research_candidates` 传给新叶，Host 不据此自动写入 Evidence。结构语义变化只使受影响章节及祖先的旧任务、材料和复核结论失效，纯 order/level 变化不触发失效。正式 Evidence Map 以 `chunk_refs` 保存精确 Web 证据范围；结构字段和输入身份必须严格校验，旧 S4 数据不用于恢复。
+
+同代 S4 任务及检查点按实际子树检测重叠；相同、祖先或后代范围按计划顺序合并，后续任务使用最新目录，独立分支仍并行。输入有效的已完成研究继续复用，合并时仍拒绝过期子树。
 
 S4 启动 Child 前复检 reference/reference_bid Corpus，损坏文件以 `EVIDENCE_MAPPING_CORPUS_INVALID` 报告身份与原因。程序根据标准化 Markdown 的实际标题位置、层级及现有分块行号定位正文，同名标题按出现位置区分，直接正文与包含子节的完整范围分别提供引用。`structure.json` 展示完整目录；无法确定对应的节点标记“定位未确定”，不推断缺失。跨标题分块显示全部实际覆盖范围。原始框架标题仅作结构输入，不进入事实 Evidence。
 

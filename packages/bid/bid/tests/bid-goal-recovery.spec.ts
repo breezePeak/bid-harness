@@ -34,6 +34,15 @@ it('keeps repairable candidate issues distinct from provider and input faults', 
   }]).recovery?.kind).toBe('blocked')
 })
 
+it.each(['EVIDENCE_MAPPING_OUTLINE_SCOPE_STALE', 'EVIDENCE_MAPPING_DEPENDENCY_STALE',
+  'OUTLINE_GENERATION_INPUT_CHANGED', 'PREVIOUS_TARGET_INVALID', 'EACCES', 'INVARIANT_VIOLATION'])
+('候选可修也不能掩盖后续 %s', (code) => {
+  expect(safeRecoverableBidFailure(work, new Error('failed'), [
+    { code: 'OUTLINE_GENERATION_CANDIDATE_INVALID', message: 'missing sections' },
+    { code, message: '当前输入无法安全继续', artifact: 'outline/outline.json' },
+  ]).recovery).toMatchObject({ kind: 'blocked', reason: '当前输入无法安全继续' })
+})
+
 it('保留能力步骤的 Mapping 模型错误码，允许主 Agent 定向修复', () => {
   const capabilityWork: BidWorkDescriptor = { ...work, kind: 'capability_task', stage: 'evidence_mapping' }
   const issues = [{ code: 'EVIDENCE_MAPPING_SUBAGENT_STRUCTURED_MISSING', artifact: 'MAP-REPAIR-S2.1',
