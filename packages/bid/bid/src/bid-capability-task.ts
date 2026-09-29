@@ -196,7 +196,12 @@ function stepCandidateWorkspace(working: BidWorkspace, parent: BidWorkDescriptor
   return { descriptor, workspace: new BidWorkspace(root, working.config) }
 }
 
-/** 读取当前能力步骤的私有资料映射工作区；其他步骤不复用项目根目录的旧日志。 */
+/**
+ * 读取当前能力步骤的私有资料映射工作区；其他步骤不复用项目根目录的旧日志。
+ * @param canonical 项目正式工作区。
+ * @param work 当前能力 Work。
+ * @returns 当前资料映射步骤的私有工作区；不适用时返回 null。
+ */
 export async function activeCapabilityMappingWorkspace(
   canonical: BidWorkspace, work: BidWorkDescriptor,
 ): Promise<BidWorkspace | null> {

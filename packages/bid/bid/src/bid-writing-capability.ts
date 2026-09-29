@@ -63,6 +63,7 @@ async function selectedLocations(
  * 当前步骤可以写入的章节路径和共享 S5 索引。
  * @param workspace 候选项目。
  * @param sectionIds 已解析的授权章节。
+ * @param mode write 允许更新资料索引；review 只允许章节和共享执行索引。
  * @returns 精确路径集合。
  */
 export async function allowedWritingCapabilityWrites(
@@ -208,6 +209,7 @@ export async function executeWritingCapability(
  * 局部候选必须保持全目录索引和目标章节的真实正文、元数据与审核绑定。
  * @param context 当前步骤候选。
  * @param targetIds 本次授权的可写叶节。
+ * @param allowPending 是否允许目标章节保持待处理状态。
  */
 export async function validateWritingCapability(
   context: Pick<BidCapabilityExecutionContext, 'working'>, targetIds: readonly string[], allowPending = false,

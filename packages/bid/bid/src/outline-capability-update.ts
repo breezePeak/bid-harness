@@ -183,8 +183,10 @@ export async function executeCapabilityOutlineUpdate(
 /**
  * 资料研究更新章节写作说明后，沿用目录任务的确认哈希和章节索引协调。
  * @param context 当前步骤候选与真实用户任务身份。
+ * @param old 更新前的已确认目录。
  * @param outline 研究完成并已通过资料校验的目录候选。
  * @param researchedIds 本轮已完成资料研究的叶节。
+ * @param previousEvidence 更新前的证据映射。
  * @returns 精确协调文件及仍待完成的正文任务。
  */
 export async function adoptCapabilityResearchedOutline(

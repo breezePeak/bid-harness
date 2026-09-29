@@ -17,6 +17,7 @@ export const answerBasisSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('section_responsibility'), section_id: text }).strict(),
 ])
 
+/** 单项章节回应的目标、依据及事实边界。 */
 export const sectionAnswerPlanItemSchema = z.object({
   targets: z.array(answerTargetSchema).min(1),
   mode: z.enum(['supported', 'proposal', 'gap']),
@@ -38,7 +39,9 @@ export const sectionAnswerPlanItemSchema = z.object({
 
 /** 缺失表示历史章节尚未完成依据准备；空数组也不表示任务已覆盖。 */
 export const sectionAnswerPlanSchema = z.array(sectionAnswerPlanItemSchema)
+/** Host 绑定目标与来源后的章节回应计划。 */
 export type SectionAnswerPlan = z.infer<typeof sectionAnswerPlanSchema>
+/** 章节必答项或适用 S2 记录的业务目标。 */
 export type AnswerTarget = z.infer<typeof answerTargetSchema>
 
 /** Child 使用短引用，来源身份和目标身份均由 Host 在接受时绑定。 */
@@ -55,8 +58,10 @@ export const sectionAnswerPlanInputSchema = z.array(z.object({
   boundary: text,
   required_input: text.optional(),
 }).strict())
+/** Child 使用短引用提交、待 Host 绑定的章节回应计划。 */
 export type SectionAnswerPlanInput = z.infer<typeof sectionAnswerPlanInputSchema>
 
+/** 章节规范任务列表中的单项及其业务目标。 */
 export interface AnswerChecklistItem {
   readonly item_ref: string
   readonly kind: AnswerTarget['kind']
