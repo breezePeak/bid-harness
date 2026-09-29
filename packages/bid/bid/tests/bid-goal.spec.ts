@@ -19,6 +19,7 @@ import { BidHostRuntime, BidRunCoordinator, BidWorkspace, checkpointBidProjectSt
 import { type BidWorkDescriptor } from '../src/control-plane-contract.ts'
 import type { Session } from '@deepseek-ai/dsh-session'
 import { safeRecoverableBidFailure } from '../src/bid-recovery.ts'
+import { inspectBidStage } from '../src/stage-interaction.ts'
 import * as ToolGoal from '@deepseek-ai/dsh-tool-goal'
 import { resolveBidToolAuthorization } from '../src/bid-tool-authorization.ts'
 import { seedCapabilityProject } from './capability-fixture.ts'
@@ -383,8 +384,8 @@ it('无 Goal 时主 Agent 恢复原 Run；重复失败再次 steer，相同指�
 
 
 it.each(['user_stop', 'awaiting_input', 'provider unavailable', 'quota exhausted', 'credential missing'] as const)(
-  '%s 不会唤醒主 Agent 自动重试', async (cause) => {
-    const { host, agent } = await setup('tender_analysis', false)
+  '%s 只在需要主 Agent 解释阻断时唤醒', async (cause) => {
+    const { host, agent, workspace } = await setup('tender_analysis', false)
     const steer = vi.spyOn(agent, 'steer')
     const operation = host.beginOperation(agent.session)
     await host.prepareOperation(operation)
@@ -393,7 +394,11 @@ it.each(['user_stop', 'awaiting_input', 'provider unavailable', 'quota exhausted
       safeRecoverableBidFailure(run.work, new Error(cause)))
     await host.finishOperation(agent.session, operation)
     await agent.whenIdle()
-    expect(steer).not.toHaveBeenCalled()
+    expect(steer).toHaveBeenCalledTimes(cause === 'user_stop' || cause === 'awaiting_input' ? 0 : 1)
+    if (cause !== 'user_stop' && cause !== 'awaiting_input') {
+      expect(await inspectBidStage(workspace, agent.session, undefined, 'recovery')).toMatchObject({ eligible: false })
+      expect(agent.session.events.filter(event => event.type === 'bid.run.started')).toHaveLength(1)
+    }
     expect(agent.ctx.tools.schemas(agent).map(tool => tool.name)).not.toContain('bid_recover_task')
   },
 )

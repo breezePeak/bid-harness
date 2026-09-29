@@ -101,6 +101,7 @@ export async function executeEvidenceCapability(
   try {
     await executeSectionResearch(context.agent, workspace, research, {
       ...settings, run: context.run,
+      ...(context.recovery === undefined ? {} : { recovery: context.recovery }),
       ...(context.resumeCandidate === undefined ? {} : { resumeCandidate: context.resumeCandidate }),
     })
   } catch (error) {
@@ -111,6 +112,7 @@ export async function executeEvidenceCapability(
     warnings.push('联网资料工具不可用；本轮只研究已授权本地资料，未证实的来源保留为资料缺口。')
     await executeSectionResearch(context.agent, workspace, research, {
       ...settings, webSearchEnabled: false, run: context.run,
+      ...(context.recovery === undefined ? {} : { recovery: context.recovery }),
       ...(context.resumeCandidate === undefined ? {} : { resumeCandidate: context.resumeCandidate }),
     })
   }

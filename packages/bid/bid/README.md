@@ -45,7 +45,7 @@ S6 只对流程图、表格和图片执行最终页面视觉审核；标题、�
 
 自动恢复检查全部错误项；目录范围或依赖失效、目标无效、权限、数据损坏与不变量错误优先阻断，不因同时出现候选校验问题而重试。
 
-默认 S1～S6 流程不创建或绑定 Goal。执行器局部修复耗尽后保留挂起 Run、结构化错误及已完成检查点，主动唤醒主 Agent 分析原因。Host 在失败落盘并释放项目锁后以有界 plugin notice 调用 `steer()` 唤醒主 Agent。主 Agent 用 `bid_stage_inspect(view="recovery")` 读取真实错误、检查点和历史指令，再用 `bid_recover_task(instruction=...)` 提交具体方案。S5 已保存回答的计划失败也复用该入口，不重复询问用户。Host 只负责接纳、输入与权限校验、检查点续行和正式发布；主 Agent 不能代替用户确认。用户停止仍使用原生 Run 决策，等待输入仍使用原问题。
+默认 S1～S6 流程不创建或绑定 Goal，模型工具目录隐藏 `create_goal`。执行器局部修复耗尽后保留挂起 Run、结构化错误及已完成检查点，主动唤醒主 Agent 分析原因；Provider、额度和凭证阻断也通知主 Agent，但不开放自动恢复。Host 在失败落盘并释放项目锁后以有界 plugin notice 调用 `steer()` 唤醒主 Agent。主 Agent 用 `bid_stage_inspect(view="recovery")` 读取真实错误、检查点和历史指令，再用 `bid_recover_task(instruction=...)` 提交具体方案；能力步骤从原检查点接收该指令，不改变原任务输入身份。S5 已保存回答的计划失败也复用该入口，不重复询问用户。Host 重启自动续行失败时保存当前 Run 诊断并通知主 Agent。Host 只负责接纳、输入与权限校验、检查点续行和正式发布；主 Agent 不能代替用户确认。用户停止仍使用原生 Run 决策，等待输入仍使用原问题。
 
 只有用户显式 `/goal` 才创建 Goal。Goal Round 与普通主 Agent 使用相同的当前阶段公开工具；已有 Goal 可读取、更新或提前完成。项目有后台操作时 Busy Gate 只等待，不消耗轮数；后台释放项目后重新请求 Driver。Bid 停止、重置和 S5 完成不改变 Goal，Goal 暂停、清除或完成也不取消 Bid。Host 重启按 Bid 自身的 Run ID、project revision、输入指纹、检查点和停止状态续行，不检查或重新激活 Goal。
 

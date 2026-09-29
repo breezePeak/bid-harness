@@ -687,13 +687,13 @@ export interface Config {
 }
 
 /**
- * Per-scope filter over global tools. Restrictions intersect and do not affect
- * scoped registrations or the reserved Code Mode transport.
+ * Per-scope filter over inherited tools and explicit own-scope denials.
+ * Allow-lists do not affect own registrations or the reserved Code Mode transport.
  */
 export interface ToolRestriction {
   /** Global tool names that stay visible; everything else is removed. */
   readonly allow?: readonly string[]
-  /** Global tool names removed from visibility. */
+  /** Inherited or own-scope tool names removed from visibility. */
   readonly deny?: readonly string[]
 }
 
@@ -754,6 +754,11 @@ class ToolLayer implements ScopeLayer {
         || (filter.deny !== undefined && filter.deny.has(name))) return false
     }
     return true
+  }
+
+  /** Own registrations ignore allow-lists but obey exact denials. */
+  denies(name: string): boolean {
+    return [...this.restrictions.values()].some(filter => filter.deny?.has(name) === true)
   }
 
   /** First monotonic denial from this layer's live guard registrations. */
@@ -1075,10 +1080,9 @@ export class ToolRuntime extends Service {
   }
 
   /**
-   * Restrict global tools for the calling agent scope. Empty filters, unknown
-   * names, scope-local names, and reserved transport names fail. Restrictions
-   * intersect; scoped registrations remain visible.
-   * @param filter - global-tool mask: `allow` (keep only) and/or `deny` (remove).
+   * Restrict inherited tools and explicitly denied own tools for the calling scope.
+   * Empty filters, unknown names, and reserved transport names fail.
+   * @param filter - inherited allow-list and inherited or own-scope deny-list.
    * @returns the exact disposer that lifts this restriction.
    */
   restrict(filter: ToolRestriction): () => void {
@@ -1098,10 +1102,12 @@ export class ToolRuntime extends Service {
     if ([...allow ?? [], ...deny ?? []].includes(RUN_CODE_NAME)) {
       throw new Error(`tools.restrict() cannot name reserved Code Mode presentation transport "${RUN_CODE_NAME}"; restrict end-capability tools instead`)
     }
-    const known = this.view(scope).restrictableNames
-    const unknown = [...allow ?? [], ...deny ?? []].filter(name => !known.has(name))
+    const view = this.view(scope)
+    const known = new Set([...view.restrictableNames, ...(this.layers.peek(scope)?.tools.keys() ?? [])])
+    const unknown = [...allow ?? []].filter(name => !view.restrictableNames.has(name))
+      .concat([...deny ?? []].filter(name => !known.has(name)))
     if (unknown.length > 0) {
-      throw new Error(`tools.restrict() names unknown global tool${unknown.length > 1 ? 's' : ''} ${unknown.map(n => `"${n}"`).join(', ')}; known global tools: ${[...known].sort().join(', ') || '(none)'}`)
+      throw new Error(`tools.restrict() names unknown global tool${unknown.length > 1 ? 's' : ''} ${unknown.map(n => `"${n}"`).join(', ')}; known global tools: ${[...view.restrictableNames].sort().join(', ') || '(none)'}`)
     }
     return this.layers.effect(
       this.ctx,
@@ -1191,7 +1197,7 @@ export class ToolRuntime extends Service {
     if (own !== undefined) {
       for (const [name, definition] of own.tools.entries()) {
         knownNames.add(name)
-        visible.set(name, definition)
+        if (!own.denies(name)) visible.set(name, definition)
       }
     }
     // Presentation infrastructure is resolved last and outside capability

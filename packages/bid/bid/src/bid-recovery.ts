@@ -193,11 +193,17 @@ export function bidWritingPlanRecoveryEligibility(session: Session): {
 /**
  * 检查主 Agent 是否对相同问题重复提交已经接纳的方案。
  * @param session 保存恢复审计的主会话。
+ * @param target 当前失败 Work 或写作请求。
  * @param fingerprint 当前失败与检查点指纹。
  * @param instruction 待接纳的模型方案。
  * @returns 该问题已有相同方案时为 true。
  */
-export function bidRecoveryInstructionRepeated(session: Session, fingerprint: string | undefined, instruction: string): boolean {
+export function bidRecoveryInstructionRepeated(session: Session,
+  target: { kind: 'run'; workId: string; runId: string } | { kind: 'writing_plan'; requestId: string; attemptId: string },
+  fingerprint: string | undefined, instruction: string): boolean {
   return session.events.some(event => event.type === 'bid.recovery.requested'
+    && (target.kind === 'run'
+      ? event.data.target.kind === 'run' && event.data.target.workId === target.workId
+      : event.data.target.kind === 'writing_plan' && event.data.target.requestId === target.requestId)
     && event.data.progressFingerprint === fingerprint && event.data.instruction.trim() === instruction.trim())
 }

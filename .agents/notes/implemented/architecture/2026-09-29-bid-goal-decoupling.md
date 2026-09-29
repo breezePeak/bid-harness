@@ -8,13 +8,13 @@ Status: implemented
 
 ## Decision
 
-默认 Bid 流程不创建 Goal。后台 Run 在局部修复耗尽后保存失败和检查点，再将失败通知交给当前主 Agent；通过 steer 在空闲时启动回合、运行中进入安全 step。主 Agent 使用阶段诊断和 bid_recover_task 的 instruction 处理问题；已回答的 S5 Writing Plan 失败复用保存的回答。Host 继续校验原 Run、project revision、输入身份和正式提交，用户停止与待确认问题保留原入口。
+默认 Bid 流程不创建 Goal。后台 Run 在局部修复耗尽后保存失败和检查点，再将失败通知交给当前主 Agent；通过 steer 在空闲时启动回合、运行中进入安全 step。可修复失败由主 Agent 使用阶段诊断和 bid_recover_task 的 instruction 处理；blocked 失败只唤醒主 Agent 说明阻断，不提供恢复工具或自动重试。已回答的 S5 Writing Plan 失败复用保存的回答。Host 继续校验原 Run、project revision、输入身份和正式提交，用户停止与待确认问题保留原入口。
 
-显式 `/goal` 使用原生 Driver 和当前阶段公共工具，模型不能 create_goal。Bid 只注册项目占用 Busy Gate；等待不消耗轮次，项目释放后重新请求同项目的 Driver。Bid 停止、重置和完成不更新 Goal；Goal 更新也不操作 Bid。Host 重启只按 Bid 持久状态恢复，不从历史绑定恢复 Goal activation。
+显式 `/goal` 使用原生 Driver 和当前阶段公共工具，Bid Agent 对本地注册的 create_goal 安装精确 deny，模型工具视图不展示它；执行守卫也拒绝直接调用。Bid 只注册项目占用 Busy Gate；等待不消耗轮次，项目释放后重新请求同项目的 Driver。Bid 停止、重置和完成不更新 Goal；Goal 更新也不操作 Bid。Host 重启只按 Bid 持久状态恢复，不从历史绑定恢复 Goal activation。
 
 工具授权从当前未结束回合取得。直接用户消息或原生 Driver 接纳的当前 Goal 轮次可以授权；Goal 还须匹配 live Main Agent、当前 initiator、身份、revision 和 round。Work、队列和计划补丁仍保存 session_id 与 message_id；历史消息可验证既有请求，不能授权新调用。已入队请求保留原授权，不要求执行时用户回合仍开放。
 
-恢复工具只接受当前 live Bid Main Agent，按当前 Run、Work、revision、输入和失败指纹校验。bid.recovery.requested 保存模型方案与目标，重复失败再次通知主 Agent，同一指纹下已接纳的相同方案被拒绝；Host 不生成替代方案。
+恢复工具只接受当前 live Bid Main Agent，按当前 Run、Work、revision、输入和失败指纹校验。bid.recovery.requested 保存模型方案与目标，重复失败再次通知主 Agent，同一 Work 与指纹下已接纳的相同方案被拒绝；Host 不生成替代方案。能力步骤在原输入身份与检查点上取得恢复上下文，现有模型执行器将方案送入匹配失败单元的提示。Host 重启自动续行若失败，保存当前 Run 的错误通知并唤醒主 Agent 解释阻断。
 
 本决策替代[自动 Goal 接管](../feature/2026-09-23-bid-s2-s5-goal-recovery.md)的运行时绑定，以及[持续恢复](../bug-fix/2026-09-28-bid-host-recovery-continuation.md)的 Goal 重激活及恢复授权。两份记录保留旧持久事件含义、错误分类、局部修复与提交边界。`bid.goal.bound` 和 `bid.goal.recovery.requested` 只供旧 Session 解码，不生产或消费新的运行时记录。
 

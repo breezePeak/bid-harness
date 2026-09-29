@@ -156,13 +156,13 @@ Registration is a trusted same-process contract. The registry borrows the typed 
 
 ```ts type-equiv
 /**
- * Per-scope filter over global tools. Restrictions intersect and do not affect
- * scoped registrations or the reserved Code Mode transport.
+ * Per-scope filter over inherited tools and explicit own-scope denials.
+ * Allow-lists do not affect own registrations or the reserved Code Mode transport.
  */
 interface ToolRestriction {
   /** Global tool names that stay visible; everything else is removed. */
   readonly allow?: readonly string[]
-  /** Global tool names removed from visibility. */
+  /** Inherited or own-scope tool names removed from visibility. */
   readonly deny?: readonly string[]
 }
 ```

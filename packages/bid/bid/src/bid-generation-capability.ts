@@ -58,7 +58,8 @@ export async function executeGenerationCapability(
   const workspace = context.working
   const writes = allowedGenerationWrites(call, context.sectionIds)
   const before = new Map(await Promise.all([...writes].map(async path => [path, await capabilityFileHash(workspace, path)] as const)))
-  const options = { run: context.run, maxRepairAttempts }
+  const options = { run: context.run, maxRepairAttempts,
+    ...(context.recovery === undefined ? {} : { recovery: context.recovery }) }
   if (call.capability === 'tender.analyze') {
     await executeTenderAnalysis(context.agent, workspace, buildBidStageTask('tender_analysis'), options)
   } else {

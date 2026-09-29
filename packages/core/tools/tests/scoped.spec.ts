@@ -158,6 +158,16 @@ describe('restrict()', () => {
     expect(await run(ctx, 'allowed-local', allowed.key)).toBe('ran:allowed-local')
   })
 
+  it('explicit deny hides a scope-local tool without hiding its siblings', async () => {
+    const ctx = await mount()
+    const { scope, key } = await mintAgentScope(ctx, 'local-deny')
+    scope.ctx.tools.register(tool('create_goal'))
+    scope.ctx.tools.register(tool('get_goal'))
+    scope.ctx.tools.restrict({ deny: ['create_goal'] })
+    expect(ctx.tools.schemas(key).map(tool => tool.name)).toEqual(['get_goal'])
+    expect(await run(ctx, 'create_goal', key)).toBe('Error: unknown tool "create_goal"')
+  })
+
   it('composes multiple restrictions by intersection and lifts each independently', async () => {
     const ctx = await mount()
     const { scope, key } = await mintAgentScope(ctx, 'a')

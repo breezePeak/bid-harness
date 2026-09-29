@@ -6,7 +6,7 @@ import { afterEach, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import SessionStore from '@deepseek-ai/dsh-session'
 import { BidWorkspace } from '../src/index.ts'
-import { safeRecoverableBidFailure, bidRunRecoveryEligibility } from '../src/bid-recovery.ts'
+import { safeRecoverableBidFailure, bidRunRecoveryEligibility, bidRecoveryInstructionRepeated } from '../src/bid-recovery.ts'
 import { inspectBidStage } from '../src/stage-interaction.ts'
 import type { BidRunData, BidWorkDescriptor } from '../src/control-plane-contract.ts'
 import { BidStageExecutionError } from '../src/control-plane-contract.ts'
@@ -32,6 +32,20 @@ it('keeps repairable candidate issues distinct from provider and input faults', 
   expect(safeRecoverableBidFailure(work, new Error('input changed'), [{
     code: 'OUTLINE_GENERATION_INPUT_CHANGED', message: 'source version changed',
   }]).recovery?.kind).toBe('blocked')
+})
+
+it('相同指纹与方案只在同一 Work 内视为重复', async () => {
+  const ctx = new Context()
+  cleanup.push(() => ctx.fiber.dispose())
+  await ctx.plugin(SessionStore)
+  const session = ctx.sessions.create()
+  session.append('bid.recovery.requested', { ownerSessionId: String(session.id),
+    target: { kind: 'run', workId: 'first', runId: 'run-first' }, unit: 'step',
+    instruction: '重查来源', progressFingerprint: 'same-fingerprint' })
+  expect(bidRecoveryInstructionRepeated(session,
+    { kind: 'run', workId: 'first', runId: 'run-again' }, 'same-fingerprint', '重查来源')).toBe(true)
+  expect(bidRecoveryInstructionRepeated(session,
+    { kind: 'run', workId: 'second', runId: 'run-second' }, 'same-fingerprint', '重查来源')).toBe(false)
 })
 
 it.each(['EVIDENCE_MAPPING_OUTLINE_SCOPE_STALE', 'EVIDENCE_MAPPING_DEPENDENCY_STALE',

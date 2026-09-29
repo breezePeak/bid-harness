@@ -33,6 +33,32 @@ it('完成凭据重新读取后不重复执行已发布步骤', async () => {
   expect(await readFile(join(fixture.workspace.projectRoot, 'chapters/local-review.json'))).toEqual(before)
 })
 
+it('原 Work 的失败步骤接收恢复指令，已完成步骤不重跑且输入身份不变', async () => {
+  const fixture = await capabilityRecoveryFixture()
+  disposals.push(fixture.dispose)
+  const calls: string[] = []
+  const instruction = '保留已完成正文，只处理失败章节'
+  let fail = true
+  const adapter = recoveryDispatcher()
+  const execute = adapter.execute.bind(adapter)
+  adapter.execute = async (call, context) => {
+    calls.push(call.capability)
+    if (call.capability === 'document.review' && fail) { fail = false; throw new Error('审核中断') }
+    if (call.capability === 'document.review') {
+      expect(context.rootWorkId).toBe(fixture.work.workId)
+      expect(context.recovery?.instruction).toBe(instruction)
+      expect(context.resumeCandidate).toBe(true)
+    }
+    return execute(call, context)
+  }
+  await expect(executeCapabilityTask(fixture.workspace, fixture.run(), adapter, fixture.agent, fixture.session))
+    .rejects.toThrow('审核中断')
+  const recovery = { workId: fixture.work.workId, unit: fixture.work.workId, instruction, issues: [] }
+  await expect(executeCapabilityTask(fixture.workspace, fixture.run(), adapter, fixture.agent, fixture.session, recovery))
+    .resolves.toMatchObject({ status: 'completed' })
+  expect(calls).toEqual(['chapter.review', 'document.review', 'document.review'])
+})
+
 it('输入来源在断点后变化则拒绝恢复，保留已完成候选和正式旧正文', async () => {
   const fixture = await capabilityRecoveryFixture()
   disposals.push(fixture.dispose)

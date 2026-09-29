@@ -214,6 +214,8 @@ async function inspectBidStageValue(
 ) {
   const task = session.events.reduce(reduceBidTaskState, BID_INITIAL_TASK_STATE)
   if (view === 'recovery') {
+    const runNotice = task.status === 'suspended' ? session.events.findLast(event =>
+      event.type === 'bid.run.notice' && event.data.noticeId === `run:${task.run.runId}:resume-failed`) : undefined
     const decision = task.stage === 'chapter_writing' && task.status === 'waiting_user'
       ? bidWritingPlanRecoveryEligibility(session) : bidRunRecoveryEligibility(session)
     let writingPlanDiagnostic: { readable: boolean; matchesTarget: boolean; error?: string } | undefined
@@ -260,6 +262,8 @@ async function inspectBidStageValue(
       progress_fingerprint: decision.fingerprint ?? null,
       writing_plan_diagnostic: writingPlanDiagnostic ?? null,
       artifact_diagnostic: artifactDiagnostic ?? null,
+      latest_run_notice: runNotice?.type === 'bid.run.notice'
+        ? { kind: runNotice.data.kind, severity: runNotice.data.severity, message: runNotice.data.message } : null,
       run_id: task.status === 'suspended' ? task.run.runId : null,
       cause: task.status === 'suspended' ? task.run.cause : null,
       failure: task.status === 'suspended' ? task.run.error ?? null
@@ -691,7 +695,7 @@ export function installStageInteractionTools(
       const strings: JsonSchemaNode = { type: 'array', items: text }
       const cas = { expected_revision: { type: 'integer' as const }, expected_draft_sha256: text }
       try {
-        if (toolCtx.tools.get('create_goal') !== undefined) disposers.push(tools.restrict({ deny: ['create_goal'] }))
+        if (toolCtx.tools.get('create_goal', agent) !== undefined) disposers.push(tools.restrict({ deny: ['create_goal'] }))
         for (const name of installed) {
           const properties: Record<string, JsonSchemaNode> = name === 'bid_stage_inspect' || name === 'bid_project_inspect' || name === 'bid_run_task' || name === 'bid_plan_task' || name === 'bid_resume_current_run' || name === 'bid_confirm_writing_plan'
             || name === 'bid_revise_chapter' || name === 'bid_plan_revision_batch' || name === 'bid_execute_revision_batch' || name === 'bid_pause_stage' || name === 'bid_resume_stage' || name === 'bid_set_flowchart_visual_review' || name === recoveryTool
@@ -875,7 +879,7 @@ export function installStageInteractionTools(
         }
         if (task.status === 'waiting_user') {
           disposers.push(tools.restrict({ allow: hasGoal
-            ? ['get_goal', 'update_goal'].filter(name => toolCtx.tools.get(name) !== undefined) : [] }))
+            ? ['get_goal', 'update_goal'].filter(name => toolCtx.tools.get(name, agent) !== undefined) : [] }))
         }
       } catch (error) {
         for (const dispose of disposers.reverse()) dispose()
@@ -917,7 +921,7 @@ export function installStageInteractionTools(
         if (tools === undefined) throw new Error('Bid stage interaction requires tools')
         if (!publicRestrictions.has(agent)) publicRestrictions.set(agent, tools.restrict({
           allow: toolCtx.get('goals')?.get(agent) === undefined ? []
-            : ['get_goal', 'update_goal'].filter(name => toolCtx.tools.get(name) !== undefined),
+            : ['get_goal', 'update_goal'].filter(name => toolCtx.tools.get(name, agent) !== undefined),
         }))
       } else if (!state.hasUser) releasePublic(agent)
       claimState.set(agent, state)
@@ -945,12 +949,11 @@ export function installStageInteractionTools(
       const failureMessage = messages.some(message => message.source.kind === 'plugin'
         && message.source.plugin === '@deepseek-ai/dsh-bid' && message.source.form === 'notice'
         && message.source.summary === 'Bid 执行失败，交由主 Agent 处理')
-        && (bidRunRecoveryEligibility(agent.session).eligible || bidWritingPlanRecoveryEligibility(agent.session).eligible)
       if (!goalRound && !hasUser && !failureMessage) return decision
       const resumed = agent.session.events.findLast(event => event.type === 'bid.project.resumed')
       const suspended = task.status === 'suspended' ? task.run : undefined
       const prompt = failureMessage
-        ? '你是当前 Bid Main Agent。Host 已保存真实失败状态，没有替你决定修复方式。先调用 bid_stage_inspect(view="recovery")，根据 failure、issues、checkpoint、已完成成果和历史恢复指令分析根因。只修当前失败范围并保留已完成成果；同一问题再次出现时必须改变步骤、顺序、范围、工具用法或提交内容。确定方案后调用 bid_recover_task，Host 只验证和执行。'
+        ? '你是当前 Bid Main Agent。Host 已保存真实失败状态。先调用 bid_stage_inspect(view="recovery") 分析 failure、issues、checkpoint 和已完成成果。eligible=true 时针对失败范围提出具体新方案并调用 bid_recover_task；eligible=false 时向用户解释真实阻断及需要的动作，不机械重试。'
         : suspended !== undefined ? renderSuspendedRunPrompt(
           task.stage,
           suspended.runId,

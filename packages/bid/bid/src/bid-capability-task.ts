@@ -559,11 +559,13 @@ export async function patchCapabilityTaskSteps(
  * @param dispatcher 已注册的业务能力适配器。
  * @param agent 执行模型工作的 Agent。
  * @param session 保存授权和原生问题的公开会话。
+ * @param recovery 当前 Work 的主 Agent 恢复指令，不参与步骤输入摘要。
  * @returns 已发布凭据或等待用户输入的步骤身份。
  */
 export async function executeCapabilityTask(
   canonical: BidWorkspace, run: BidRunContext, dispatcher: CapabilityTaskDispatcher,
   agent: BidCapabilityExecutionContext['agent'], session: Session,
+  recovery?: BidCapabilityExecutionContext['recovery'],
 ): Promise<CapabilityTaskOutcome> {
   if (run.work.kind !== 'capability_task') throw new Error('BID_CAPABILITY_WORK_REQUIRED')
   const request = capabilityTaskRequestSchema.parse(await readBidWorkRequest(canonical, run.work))
@@ -738,6 +740,7 @@ export async function executeCapabilityTask(
     const context: BidCapabilityExecutionContext = {
       canonical, working: stepWorking, agent, sourceSession: session,
       run: candidateRun, sectionIds: scope.sectionIds,
+      ...(recovery === undefined ? {} : { recovery }),
       ...(sectionScopeRoots === undefined ? {} : { sectionScopeRoots }),
       authorizedNewDescendants,
       stepDirectory: stepPaths.root, inputSources, baselineHashes: baseline, allowedWrites: writes,

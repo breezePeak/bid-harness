@@ -32,7 +32,7 @@ export async function executeDocumentReviewCapability(
   const ids = buildWritableSectionWorklist(outline).map(section => section.id)
   await validateWritingCapability(context, ids)
   const before = new Map(await Promise.all(REVIEW_PATHS.map(async path => [path, await capabilityFileHash(workspace, path)] as const)))
-  await executeDocumentReview(context.agent, workspace, context.run, maxRepairAttempts)
+  await executeDocumentReview(context.agent, workspace, context.run, maxRepairAttempts, context.recovery)
   await validateDocumentReviewCapability(context)
   const changed: string[] = []
   for (const path of REVIEW_PATHS) if (before.get(path) !== await capabilityFileHash(workspace, path)) changed.push(path)

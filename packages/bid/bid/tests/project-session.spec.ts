@@ -32,7 +32,7 @@ import {
 } from '@deepseek-ai/dsh-bid'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { prepareBidStageContextTransition } from '../src/stage-context.ts'
-import { isBidMainSession } from '../src/stage-interaction.ts'
+import { inspectBidStage, isBidMainSession } from '../src/stage-interaction.ts'
 import { parseChapterExecutionLog } from '../src/chapter-writing-plan-artifacts.ts'
 import { chapterContentSha256 } from '../src/chapter-revision.ts'
 import { readBidChapterCommandJournal } from '../src/chapter-command-journal.ts'
@@ -280,6 +280,27 @@ async function fixture(options: {
 }
 
 describe('Workspace 项目与独立 Session', () => {
+  it('Host 重启自动续行失败保存诊断并唤醒主 Agent', async () => {
+    const { ctx, workspace, fresh } = await fixture()
+    await seedProjectArtifacts(workspace)
+    await checkpointBidProjectState(workspace, { stage: 'tender_analysis', status: 'running' })
+    vi.spyOn(ctx.bid, 'resumeCurrentRun').mockRejectedValueOnce(new Error('续行输入文件不可读取'))
+    const agent = await fresh('restart-resume-failed')
+    await vi.waitFor(() => { expect(agent.session.events.filter(event => event.type === 'bid.run.notice'
+      && event.data.noticeId.endsWith(':resume-failed'))).toHaveLength(1) })
+    const notice = agent.session.events.find(event => event.type === 'bid.run.notice'
+      && event.data.noticeId.endsWith(':resume-failed'))
+    if (notice?.type !== 'bid.run.notice') throw new Error('缺少续行失败通知')
+    expect(notice.data.message).toContain('续行输入文件不可读取')
+    expect(agent.session.events.filter(event => event.type === 'user/message'
+      && event.data.source.kind === 'plugin' && event.data.source.form === 'notice')).toHaveLength(1)
+    expect(agent.session.events.some(event => event.type === 'bid.run.decision.required')).toBe(false)
+    expect(ctx.get('goals')).toBeUndefined()
+    expect(await inspectBidStage(workspace, agent.session, undefined, 'recovery')).toMatchObject({
+      eligible: false, latest_run_notice: { message: expect.stringContaining('续行输入文件不可读取') },
+    })
+  })
+
   it('Host 以单一 Run 接纳能力任务并在公开主会话留下完成凭据通知', async () => {
     const { ctx, workspace, fresh } = await fixture()
     await seedProjectArtifacts(workspace)
@@ -2182,6 +2203,8 @@ describe('Workspace 项目与独立 Session', () => {
     await seedProjectArtifacts(workspace)
     await checkpointBidProjectState(workspace, { stage: 'tender_analysis', status: 'failed' })
     const agent = await fresh('quiet-host-child-report')
+    await agent.whenIdle()
+    const initialMainRequests = adapter.requests.filter(request => String(request.sessionId) === String(agent.id)).length
     const stageGate = Promise.withResolvers<never[]>()
     void stageGate.promise.catch(() => {})
     executor.canExecute = stage => stage === 'tender_analysis'
@@ -2231,7 +2254,7 @@ describe('Workspace 项目与独立 Session', () => {
       }))
     }
     await agent.whenIdle()
-    expect(adapter.requests.filter(request => String(request.sessionId) === String(agent.id))).toHaveLength(0)
+    expect(adapter.requests.filter(request => String(request.sessionId) === String(agent.id))).toHaveLength(initialMainRequests)
 
     adapter.script.push(answer('招标分析提交不完整，Run 已挂起，可修正后恢复。'))
     stageGate.reject(new BidStageExecutionError([

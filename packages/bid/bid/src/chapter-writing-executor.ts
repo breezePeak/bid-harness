@@ -1722,10 +1722,12 @@ export async function executeChapterWriting(
  * @param workspace 当前步骤候选项目。
  * @param run 当前步骤的提交与取消身份。
  * @param maxRepairAttempts 模型协议的有界修复次数。
+ * @param recovery 当前失败审核单元的主 Agent 指令。
  * @returns 两份当前正文绑定的审核产物。
  */
 export async function executeDocumentReview(
   agent: Agent, workspace: BidWorkspace, run: BidRunContext, maxRepairAttempts: number,
+  recovery?: ModelStageExecutionOptions['recovery'],
 ): Promise<StageArtifact[]> {
   await waitForModelStageIdle(agent, run.signal)
   const outline = parseConfirmedOutlineArtifact(await readJson(workspace, 'outline/confirmed-outline.json'))
@@ -1743,9 +1745,10 @@ export async function executeDocumentReview(
       candidate_sha256: chapterCandidateSha256(markdown) }
   }))
   await writeGlobalComplianceReview(agent, workspace, outline, outlineHash, compliance, chapters,
-    await workspace.readManifest(), maxRepairAttempts, run, writingPlan, undefined, true)
+    await workspace.readManifest(), maxRepairAttempts, run, writingPlan, recovery, true)
   return reviewWritingPlanCompletion(agent, workspace, buildBidStageTask('chapter_writing'), {
     maxRepairAttempts, maxConcurrency: 1, maxCompletionRepairRounds: 0, run,
+    ...(recovery === undefined ? {} : { recovery }),
   }, [{ stage: 'chapter_writing', type: 'global_compliance_review', path: GLOBAL_REVIEW_PATH }], true)
 }
 

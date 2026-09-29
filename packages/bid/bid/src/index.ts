@@ -2018,7 +2018,7 @@ export class BidHostRuntime extends TypertRemoteService {
         }
         const main = this.ctx.agents.get(operation.session.id)
         if (main?.session === operation.session) {
-          this.steerMainAgentForRecovery(main.session)
+          this.steerMainAgentForFailure(main.session)
         }
         const goalDriver = this.ctx.get('goalRoundDriver')
         if (goalDriver !== undefined) {
@@ -2609,7 +2609,7 @@ export class BidHostRuntime extends TypertRemoteService {
           || !['BID_WRITING_PLAN_NOT_COMMITTED', 'BID_WRITING_PLAN_DISPATCH_FAILED'].includes(current.error?.code ?? '')) {
           throw new BidOrchestratorError('BID_RESUME_NOT_ALLOWED', 'S5 已保存答案不满足当前自动恢复条件。')
         }
-        if (bidRecoveryInstructionRepeated(agent.session, eligibility.fingerprint, recovery.instruction)) {
+        if (bidRecoveryInstructionRepeated(agent.session, eligibility.target, eligibility.fingerprint, recovery.instruction)) {
           throw new BidOrchestratorError('BID_RECOVERY_DUPLICATE_INSTRUCTION', '同一问题不能重复提交相同修复指令。')
         }
         agent.session.append('bid.recovery.requested', {
@@ -2855,28 +2855,43 @@ export class BidHostRuntime extends TypertRemoteService {
   }
 
   /** 在稳定失败落盘并释放项目锁后唤醒主 Agent，不选择业务修复方案。 */
-  private steerMainAgentForRecovery(session: Session): void {
+  private steerMainAgentForFailure(session: Session, diagnostic?: string): void {
     if (!this.isContextActive() || !isBidMainSession(session) || this.inFlight.has(projectKey(session))) return
     const agent = this.ctx.agents.get(session.id)
     if (agent?.session !== session) return
     const task = bidSessionTaskState(session)
+    const writing = session.events.findLast(event => event.type === 'bid.writing_entry.changed')
     const decision = task.stage === 'chapter_writing' && task.status === 'waiting_user'
       ? bidWritingPlanRecoveryEligibility(session) : bidRunRecoveryEligibility(session)
-    if (!decision.eligible || decision.target === undefined) return
-    const identity = JSON.stringify([decision.target, decision.fingerprint, decision.attempts])
+    const failedNotice = task.status === 'failed' ? session.events.findLast(event =>
+      event.type === 'bid.run.notice' && event.data.noticeId.endsWith(':failed') && event.data.stage === task.stage) : undefined
+    const target = decision.target ?? (task.status === 'failed' && failedNotice?.type === 'bid.run.notice'
+      ? { kind: 'failed_run', runId: failedNotice.data.runId } : undefined)
+    if (target === undefined || task.status === 'suspended'
+      && (task.run.cause === 'user_stop' || task.run.cause === 'awaiting_input')
+      || task.status === 'waiting_user' && (writing?.type !== 'bid.writing_entry.changed'
+        || writing.data.view.phase !== 'failed' || writing.data.view.request_state !== 'answered')) return
+    const identity = JSON.stringify([target, decision.fingerprint, decision.attempts, diagnostic])
     if (this.recoveryNotices.get(session) === identity) return
-    const writing = session.events.findLast(event => event.type === 'bid.writing_entry.changed')
     const failure = task.status === 'suspended' ? task.run.error
-      : writing?.type === 'bid.writing_entry.changed' ? writing.data.view.error ?? undefined : undefined
+      : task.status === 'failed' ? task.failure
+        : writing?.type === 'bid.writing_entry.changed' ? writing.data.view.error ?? undefined : undefined
+    const issues = task.status === 'suspended' ? task.run.error?.issues
+      : task.status === 'failed' ? task.failure.issues : undefined
     const facts = [
       '当前阶段执行失败，失败状态已保存。',
       `stage: ${task.stage}`,
-      `target: ${JSON.stringify(decision.target)}`,
+      `target: ${JSON.stringify(target)}`,
       `failure_code: ${failure?.code ?? 'BID_WRITING_PLAN_FAILED'}`,
-      `failure_unit: ${(task.status === 'suspended' ? task.run.error?.recovery?.unit : undefined) ?? 'writing_plan'}`,
-      `reason: ${sanitizeBidErrorText(decision.reason)}`,
-      ...(task.status === 'suspended' ? task.run.error?.issues : undefined)?.slice(0, 3).map(issue => `${sanitizeBidErrorText(issue.code)}: ${sanitizeBidErrorText(issue.message)}`) ?? [],
-      '已完成成果和 checkpoint 保持不变。先调用 bid_stage_inspect(view="recovery")，分析真实根因并形成具体修复方案，再调用 bid_recover_task。内部可修复错误不要要求用户选择 continue/restart/stop；Host 只验证和执行你的方案。',
+      `failure_unit: ${(task.status === 'suspended' ? task.run.error?.recovery?.unit
+        : task.status === 'failed' ? task.failure.recovery?.unit : undefined) ?? 'writing_plan'}`,
+      `reason: ${sanitizeBidErrorText(task.status === 'failed' ? task.failure.message : decision.reason)}`,
+      `recoverable: ${String(decision.eligible)}`,
+      ...(diagnostic === undefined ? [] : [`resume_error: ${sanitizeBidErrorText(diagnostic)}`]),
+      ...issues?.slice(0, 3).map(issue => `${sanitizeBidErrorText(issue.code)}: ${sanitizeBidErrorText(issue.message)}`) ?? [],
+      decision.eligible
+        ? '已完成成果和 checkpoint 保持不变。先调用 bid_stage_inspect(view="recovery") 分析根因，再用 bid_recover_task 提交具体方案。'
+        : '先调用 bid_stage_inspect(view="recovery") 分析真实阻断，向用户说明原因和需要的动作；不要机械重试。',
     ]
     agent.steer(createUserMessage({ content: [{ type: 'text', text: facts.join('\n') }],
       source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'notice', summary: 'Bid 执行失败，交由主 Agent 处理' } }))
@@ -3386,7 +3401,7 @@ export class BidHostRuntime extends TypertRemoteService {
           || decision.target.attemptId !== request.attempt_id || this.inFlight.has(key)) {
           throw new BidOrchestratorError('BID_RESUME_NOT_ALLOWED', decision.reason)
         }
-        if (bidRecoveryInstructionRepeated(session, decision.fingerprint, request.instruction)) {
+        if (bidRecoveryInstructionRepeated(session, decision.target, decision.fingerprint, request.instruction)) {
           throw new BidOrchestratorError('BID_RECOVERY_DUPLICATE_INSTRUCTION', '同一问题不能重复提交相同修复指令。')
         }
         const workspace = new BidWorkspace(key, workspaceConfig(this.config))
@@ -3408,7 +3423,7 @@ export class BidHostRuntime extends TypertRemoteService {
       if (!decision.eligible || decision.target?.runId !== request.run_id) {
         throw new BidOrchestratorError('BID_RESUME_NOT_ALLOWED', decision.reason)
       }
-      if (bidRecoveryInstructionRepeated(session, decision.fingerprint, request.instruction)) {
+      if (bidRecoveryInstructionRepeated(session, decision.target, decision.fingerprint, request.instruction)) {
         throw new BidOrchestratorError('BID_RECOVERY_DUPLICATE_INSTRUCTION', '同一问题不能重复提交相同修复指令。')
       }
       this.cancelRunDecisions(session)
@@ -4032,7 +4047,7 @@ export class BidHostRuntime extends TypertRemoteService {
             await this.ctx.agents.withoutInitiator(() => this.resumeCurrentRun(session, runId, revision))
           })
           this.recoveryTasks.add(continuation)
-          void continuation.catch((error: unknown) => {
+          void continuation.catch(async (error: unknown) => {
             const message = sanitizeBidErrorText(error instanceof Error ? error.message : String(error))
             this.ctx.logger.warn(`Bid Host 重启续行失败：${message}`)
             const current = bidSessionTaskState(session)
@@ -4040,7 +4055,8 @@ export class BidHostRuntime extends TypertRemoteService {
               || current.run.runId !== runId || this.inFlight.has(key)) return
             session.append('bid.run.notice', { noticeId: `run:${runId}:resume-failed`, supersedesTurn: null,
               runId, stage: current.stage, kind: 'interrupted', severity: 'error', message })
-            this.ensureRunDecision(agent)
+            await this.ctx.sessions.flush(session)
+            this.steerMainAgentForFailure(session, message)
           }).finally(() => { this.recoveryTasks.delete(continuation) })
         } else this.ensureRunDecision(agent)
         return
@@ -4779,7 +4795,7 @@ export class BidHostRuntime extends TypertRemoteService {
     const revision = state?.revision ?? 0
     await this.broadcastWritingEntryView(workspace, task, revision, [session])
     await this.ctx.sessions.flush(session)
-    this.steerMainAgentForRecovery(session)
+    this.steerMainAgentForFailure(session)
   }
 
   /**
@@ -5476,6 +5492,7 @@ export class BidHostRuntime extends TypertRemoteService {
       const dispatcher = this.capabilityTaskDispatcher ?? this.builtInCapabilityDispatcher
       const outcome = await run.activities.track(() => executeCapabilityTask(
         operation.workspace, run, dispatcher, agent, operation.session,
+        operation.recovery?.workId === run.work.workId ? operation.recovery : undefined,
       ))
       if (outcome.status === 'awaiting_input') {
         await operation.runs.suspend('awaiting_input')
@@ -5553,7 +5570,7 @@ export class BidHostRuntime extends TypertRemoteService {
           || eligibility.fingerprint === undefined) {
           throw new BidOrchestratorError('BID_RESUME_NOT_ALLOWED', '当前 Run 已失去自动恢复授权。')
         }
-        if (bidRecoveryInstructionRepeated(session, eligibility.fingerprint, recovery.instruction)) {
+        if (bidRecoveryInstructionRepeated(session, eligibility.target, eligibility.fingerprint, recovery.instruction)) {
           throw new BidOrchestratorError('BID_RECOVERY_DUPLICATE_INSTRUCTION', '同一问题不能重复提交相同修复指令。')
         }
         session.append('bid.recovery.requested', {

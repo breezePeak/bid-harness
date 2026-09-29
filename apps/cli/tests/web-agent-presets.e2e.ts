@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { mkdir, mkdtemp, readFile, stat, symlink, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
@@ -80,6 +80,8 @@ async function bootWeb(
     // and the URL prompt line — surface glue, not anything that decides an
     // agent's capabilities, which is all this file asserts.
     { id: 'web-runtime', disabled: true },
+    // Bid Host keeps its tool and stage policy while the port-backed Web runtime is absent.
+    { id: 'bid-host-runtime', inject: [], config: { trustedHosts: ['127.0.0.1'], webSearchEnabled: true } },
     { id: 'session-telemetry-otel', disabled: true },
     // A deployment-level skill on the host registry's GLOBAL layer — the same
     // registration shape a repository plugin's skill root uses. The layered
@@ -266,6 +268,25 @@ describe('the shipped Web composition', () => {
       expect(handle.agent.session.events.some(event => event.type === 'user/message')).toBe(false)
     } finally {
       await handle.dispose()
+    }
+  })
+
+  it('真实 Bid 主会话隐藏 create_goal，保留显式 Goal 控制', async () => {
+    const bidRoot = await mkdtemp(join(tmpdir(), 'dsh-bid-preset-'))
+    const handle = await ctx.agents.create({
+      sessionId: SessionId('preset-bid-goal-scope'),
+      meta: { agentPreset: 'bid', cwd: bidRoot },
+      setup: agentCtx => ctx.agentPresets.mount(agentCtx, 'bid').then(() => undefined),
+    })
+    try {
+      expect(toolNames(ctx, handle.agent)).not.toContain('create_goal')
+      expect(ctx.commands.list(handle.agent).map(command => command.name)).toContain('goal')
+      ctx.goals.create(handle.agent, { objective: '检查标书结果', maxGoalRounds: 1 })
+      expect(toolNames(ctx, handle.agent)).toEqual(expect.arrayContaining(['get_goal', 'update_goal']))
+      expect(toolNames(ctx, handle.agent)).not.toContain('create_goal')
+    } finally {
+      await handle.dispose()
+      await rm(bidRoot, { recursive: true, force: true })
     }
   })
 

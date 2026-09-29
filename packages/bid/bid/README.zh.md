@@ -43,6 +43,8 @@ S4 Initial Mapping 的客户可见编号检查只归当前任务可编辑的 Sec
 
 `capability_task` 用一个 Work 和一个 Run 顺序执行已注册适配器的能力步骤。Host 将真实用户消息、初始计划、输入摘要和任务前状态保存为不可变请求；`runs/<workId>/task-checkpoint.json` 保存已开始步骤、结果与后续授权的计划补丁。每步只在独立候选目录执行，Host 核对目标 ID 与精确文件清单后合并到 Work 候选；最终业务文件与 `requests/<workId>/result.json` 凭据同批发布。恢复先核对凭据和正式文件，已提交的 Work 只补 Run 结算及公开会话通知。`awaiting_input` 保留原 Work，并以持久化原生问题取得补充文本；用户停止使 Run 提交权限退休并等待 Child 收敛。适配器由 `BidHostRuntime.registerCapabilityTaskDispatcher()` 注册，`runCapabilityTask()` 仅接受当前公开主 Agent 与真实用户消息授权。
 
+主 Agent 对挂起能力 Work 的恢复指令作为执行上下文传给失败步骤；模型适配器仅在对应失败单元的提示中使用它，不改变不可变任务、输入摘要或已完成步骤。Provider、额度、凭证等阻断仍通知主 Agent 读取诊断并向用户说明，但不提供自动恢复工具。Host 重启续行失败保留当前 Run 的错误通知并唤醒主 Agent。
+
 等待输入的步骤将旧候选复制到新输入身份的候选项目，Host 在业务校验前对全部授权路径比较候选与 Work 的新增、改动和删除，并把差异并入同批发布凭据。每轮仍需输入时按本轮输入摘要发出新的原生问题，已保存的回答不会冒充下一轮回答。
 
 主 Agent 在所有 Bid 阶段都可用 `bid_project_inspect` 读取项目，用 `bid_run_task` 提交有序能力步骤。段落范围只接纳引用同一选区的单步 `chapter.revise`，后续计划补丁也不能扩大为整章或结构写入。挂起的能力 Work 可由后续真实用户消息调用 `bid_plan_task` 替换尚未开始的后缀；Host 保留已完成步骤和原任务范围，保存计划后仍等待明确恢复。旧目录、资料、写作计划及章节修订工具在原生确认或 S5 热插入边界保留既有处理，其余阶段按相同能力适配器执行；目录旧参数仍要匹配当前确认目录的 CAS 身份。运行中跨能力请求先保存到当前 Work 命令日志，收敛后由独立 Work 顺序执行。

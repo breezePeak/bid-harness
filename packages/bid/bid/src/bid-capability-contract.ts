@@ -3,6 +3,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import { z } from 'zod'
 import type { BidWorkspace } from './index.ts'
 import type { BidRunContext } from './run-coordinator.ts'
+import type { ModelStageExecutionOptions } from './model-stage-repair.ts'
 import type { AskUserQuestionAnswerItem } from '@deepseek-ai/dsh-user-questions/types'
 import { outlineEditOperationSchema } from './outline-confirmation-edits.ts'
 import { chapterRevisionReferenceSchema } from './chapter-revision.ts'
@@ -124,6 +125,7 @@ export interface BidCapabilityExecutionContext {
   /** 保存用户原话与能力授权的 Interaction Session。 */
   readonly sourceSession?: WritingMessageSession
   readonly run: BidRunContext
+  readonly recovery?: ModelStageExecutionOptions['recovery']
   readonly sectionIds: ReadonlySet<string> | null
   /** 用户选中的最小子树根；与可写叶节分开传入结构研究。 */
   readonly sectionScopeRoots?: readonly string[]

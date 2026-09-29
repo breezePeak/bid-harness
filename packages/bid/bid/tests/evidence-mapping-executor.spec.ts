@@ -2893,7 +2893,11 @@ describe('evidence-mapping Agent executor', () => {
     const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-evidence-executor-')))
     const material = await writeInputs(workspace)
     const fixture = mappingFixture(workspace, material)
-    const execution = executeEvidenceMapping(fixture.agent, workspace, buildBidStageTask('evidence_mapping'), { maxRepairAttempts: 1, maxConcurrency: 2 })
+    const execution = executeEvidenceMapping(fixture.agent, workspace, buildBidStageTask('evidence_mapping'), {
+      maxRepairAttempts: 1, maxConcurrency: 2,
+      recovery: { workId: 'research-work', unit: 'MAP-INIT-SEC-1',
+        instruction: '缩小到当前章节重新核对映射来源', issues: [] },
+    })
 
     await vi.waitFor(() => { expect(fixture.starts).toHaveLength(2) })
     expect(fixture.maxActive()).toBe(2)
@@ -2912,6 +2916,8 @@ describe('evidence-mapping Agent executor', () => {
       { task_id: 'MAP-INIT-SEC-2', title: '章节2', status: 'running', section_ids: ['SEC-2'], latest_issue: null },
     ] })
     const initialPrompt = promptText(fixture.starts[0]!.request.request)
+    expect(initialPrompt).toContain('缩小到当前章节重新核对映射来源')
+    expect(promptText(fixture.starts[1]!.request.request)).not.toContain('缩小到当前章节重新核对映射来源')
     expect(initialPrompt).toContain('current_section_scope：[{"id":"SEC-1"')
     expect(initialPrompt).toContain('current_section_baseline：[{"id":"SEC-1"')
     expect(initialPrompt).toContain('scoped_diffs：')
