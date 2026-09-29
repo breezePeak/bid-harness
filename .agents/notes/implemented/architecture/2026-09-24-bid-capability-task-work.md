@@ -8,7 +8,7 @@ Status: implemented
 
 ## Decision
 
-`capability_task` 是单一 Work kind。不可变请求绑定真实用户消息、任务目标、根范围、初始步骤、正式输入摘要和任务前状态；Host 生成 Work 与步骤 ID。`BidRunCoordinator` 为整个序列只接纳一个有效根 Run，步骤共用该 Run 的取消、Child 收敛与提交权限。`runs/<workId>/task-checkpoint.json` 记录完成结果、运行中步骤、等待输入和由后续真实用户消息授权的计划补丁；补丁只能替换尚未开始的后缀，不改请求 SHA。
+`capability_task` 是单一 Work kind。不可变请求绑定真实用户消息、任务目标、根范围、初始步骤、正式输入摘要和任务前状态；Host 生成 Work 与步骤 ID。`BidRunCoordinator` 为整个序列只接纳一个有效根 Run，步骤共用该 Run 的取消、Child 收敛与提交权限。`runs/<workId>/task-checkpoint.json` 记录完成结果、运行中步骤、等待输入和计划补丁；补丁不改请求 SHA，后续消息授权及失败时原授权复用见[能力重规划](../bug-fix/2026-09-29-bid-capability-replanning.md)。
 
 每一步使用独立候选目录。Host 按当前确认目录、任务根范围及前一步的真实 `target_section_ids` 解析作用域；适配器只能声明预先允许的精确文件。业务 Validator 核对结果后，步骤文件和步骤回执同批合并到 Work 候选。没有步骤回执时，重试从 Work 候选重新生成该步骤目录，避免把未发布的文件当作新基线。最终发布只替换已核对的文件，并在同一 PublicationBatch 写入 `requests/<workId>/result.json`。该凭据保存请求 SHA 与文件摘要，不复制正文。
 

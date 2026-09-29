@@ -9,6 +9,8 @@ import { parseEvidenceMapArtifact } from './evidence-mapping-artifacts.ts'
 import { parseConfirmedOutlineArtifact } from './outline-confirmation-artifacts.ts'
 import { parseOutlineArtifact } from './outline-generation-artifacts.ts'
 import { parseBidProjectState } from './project-state.ts'
+import { capabilityTaskCheckpointSchema, capabilityTaskRequestSchema } from './bid-capability-task.ts'
+import { readBidWorkRequest } from './work-descriptor.ts'
 import { outlineSectionScope } from './section-evidence-context.ts'
 import { parseTenderComplianceArtifact, parseTenderProjectArtifact, parseTenderRequirementsArtifact,
   parseTenderScoringArtifact } from './tender-analysis-artifacts.ts'
@@ -103,9 +105,27 @@ export async function inspectBidProject(
     }
     if (raw === undefined) return { ...base, available: false, missing: 'project-state.json' }
     const state = parseBidProjectState(JSON.parse(raw))
+    const work = state.run?.work
+    let capabilityTask
+    if (work?.kind === 'capability_task') {
+      const saved = capabilityTaskRequestSchema.parse(await readBidWorkRequest(workspace, work))
+      const rawCheckpoint = await optionalText(workspace, `runs/${work.workId}/task-checkpoint.json`)
+      const checkpoint = rawCheckpoint === undefined ? undefined
+        : capabilityTaskCheckpointSchema.parse(JSON.parse(rawCheckpoint))
+      if (checkpoint !== undefined && (checkpoint.work_id !== work.workId || checkpoint.request_sha256 !== work.requestSha256)) {
+        throw new Error('BID_CAPABILITY_CHECKPOINT_IDENTITY_MISMATCH')
+      }
+      capabilityTask = { work_id: work.workId, goal: saved.task.goal, scope: saved.task.scope,
+        steps: checkpoint?.steps.map((step, index) => ({ index, ...step.step, status: step.status,
+          ...step.status === 'completed' || step.status === 'awaiting_input' ? { result: step.result } : {} }))
+          ?? saved.task.steps.map((step, index) => ({ index, ...step, status: 'pending' })),
+      }
+    }
     return { ...base, available: true, data: request.object === 'task'
-      ? { stage: state.stage, status: state.status, run: state.run, revision: state.revision }
+      ? { stage: state.stage, status: state.status, run: state.run, revision: state.revision,
+        ...(capabilityTask === undefined ? {} : { capability_task: capabilityTask }) }
       : { status: state.status, run: state.run,
+        ...(capabilityTask === undefined ? {} : { capability_task: capabilityTask }),
         failure: state.status === 'failed' ? state.failure
           : state.status === 'suspended' ? state.run.error ?? null : null } }
   }

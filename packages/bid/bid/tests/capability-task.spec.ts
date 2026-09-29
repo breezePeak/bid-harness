@@ -5,7 +5,8 @@ import { Context } from '@deepseek-ai/cordis'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import SessionStore from '@deepseek-ai/dsh-session'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { BidWorkspace } from '../src/index.ts'
+import { BidWorkspace, checkpointBidProjectState } from '../src/index.ts'
+import { inspectBidProject } from '../src/bid-project-inspect.ts'
 import { activeCapabilityMappingWorkspace, askCapabilityTaskInput, capabilityTaskRequestSchema, executeCapabilityTask,
   findCapabilityTaskRequest, patchCapabilityTaskSteps, persistCapabilityTaskRequest,
   type CapabilityTaskDispatcher } from '../src/bid-capability-task.ts'
@@ -67,6 +68,57 @@ function dispatcher(failSecond = false) {
 }
 
 describe('同一 Work 的能力序列', () => {
+  it('主 Agent 沿用原授权替换可恢复失败步骤，保留已完成结果并继续后续能力', async () => {
+    const { ctx, workspace, session, descriptor, run, agent, authorization } = await fixture()
+    try {
+      const adapter = dispatcher(true)
+      await expect(executeCapabilityTask(workspace, run, adapter, agent, session)).rejects.toThrow('第二步暂时失败')
+      session.append('turn/start', { turn: 2 })
+      const main = { id: session.id, session, ctx: { get: (name: string) =>
+        name === 'agents' ? { get: () => main } : undefined } } as Parameters<typeof executeCapabilityTask>[3]
+      const request = capabilityTaskRequestSchema.parse(await readBidWorkRequest(workspace, descriptor))
+      const working = new BidWorkspace((await prepareBidWorkingTree(workspace, descriptor)).root, workspace.config)
+      const replacement = [{ scope: { source: 'task' as const }, call: {
+        capability: 'chapter.review' as const, input: { reason: '按章节复核未完成目标' },
+      } }, { scope: { source: 'task' as const }, call: {
+        capability: 'document.review' as const, input: { reason: '核对整项任务结果' },
+      } }]
+      const patch = (from = 1) => patchCapabilityTaskSteps(run, workspace, working, request, session,
+        authorization, from, replacement, main)
+      await expect(patch()).rejects.toThrow('BID_CAPABILITY_PLAN_PATCH_UNAUTHORIZED')
+      const state = { stage: 'chapter_writing' as const, status: 'suspended' as const, run: {
+        runId: run.runId, epoch: 1, baseProjectRevision: 0, controlRevision: 0, work: descriptor,
+        interactionSessionId: String(session.id), executionSessionId: 'execution-agent', startedAt: 1, updatedAt: 2,
+        cause: 'retry_exhausted' as const, error: { code: 'BID_EXECUTOR_ERROR', message: '需调整能力计划',
+          recovery: { kind: 'repair' as const, unit: descriptor.workId, reason: '原能力无法完成目标' } },
+      } }
+      session.append('bid.task.changed', { state: { ...state, run: { ...state.run, cause: 'user_stop' } } })
+      await expect(patch()).rejects.toThrow('BID_CAPABILITY_PLAN_PATCH_UNAUTHORIZED')
+      session.append('bid.task.changed', { state })
+      await checkpointBidProjectState(workspace, state)
+      const view = await inspectBidProject(workspace, { object: 'task' })
+      expect(view.data).toMatchObject({ capability_task: { work_id: descriptor.workId,
+        goal: request.task.goal, scope: request.task.scope, steps: [
+          { index: 0, status: 'completed', call: { capability: 'chapter.review' } },
+          { index: 1, status: 'running', call: { capability: 'document.review' } },
+        ] } })
+      await expect(patchCapabilityTaskSteps(run, workspace, working, request, session, authorization, 1, replacement,
+        { ...main, ctx: { get: () => undefined } } as typeof main)).rejects.toThrow('BID_CAPABILITY_PLAN_PATCH_UNAUTHORIZED')
+      await expect(patch(0)).rejects.toThrow('BID_CAPABILITY_PLAN_PATCH_STARTED_STEP')
+      const patched = await patch()
+      expect(patched.steps.map(step => step.status)).toEqual(['completed', 'pending', 'pending'])
+      expect(patched.steps[0]).toMatchObject({ result: { change_summary: '完成审核' } })
+      expect((await patch()).plan_patches).toHaveLength(1)
+      adapter.execute.mockImplementationOnce(async () => ({ result: { target_section_ids: [], changed_artifacts: [],
+        change_summary: '既有章节审核结果满足要求', warnings: [], missing_topics: [], needs_input: false } }))
+      await expect(executeCapabilityTask(workspace, createTestBidRunContext({ work: descriptor }), adapter, agent, session))
+        .resolves.toMatchObject({ status: 'completed' })
+      expect(adapter.execute.mock.calls.map(([call]) => call.capability))
+        .toEqual(['chapter.review', 'document.review', 'chapter.review', 'document.review'])
+      expect(await readFile(join(workspace.projectRoot, 'chapters/local-review.json'), 'utf8')).not.toContain('损坏')
+    } finally { await ctx.fiber.dispose() }
+  })
+
   it('新的整本目录深化先保存 Main Agent 的具体工作项，旧请求仍可解析', async () => {
     const { ctx, workspace, session } = await fixture()
     try {
@@ -266,8 +318,8 @@ describe('同一 Work 的能力序列', () => {
     } finally { await ctx.fiber.dispose() }
   })
 
-  it('步骤文件已合并但顶层检查点未写时，凭步骤回执恢复而不重复执行', async () => {
-    const { ctx, workspace, session, descriptor, run, agent } = await fixture()
+  it('步骤文件已合并但检查点未写时拒绝替换计划，凭回执恢复而不重复执行', async () => {
+    const { ctx, workspace, session, descriptor, run, agent, authorization } = await fixture()
     try {
       const adapter = dispatcher()
       const originalWrite = run.commits.writeJson.bind(run.commits)
@@ -280,6 +332,17 @@ describe('同一 Work 的能力序列', () => {
       })
       await expect(executeCapabilityTask(workspace, run, adapter, agent, session)).rejects.toThrow('检查点中断')
       expect(adapter.execute).toHaveBeenCalledOnce()
+      session.append('bid.task.changed', { state: { stage: 'chapter_writing', status: 'suspended', run: {
+        runId: run.runId, epoch: 1, baseProjectRevision: 0, controlRevision: 0, work: descriptor,
+        interactionSessionId: String(session.id), executionSessionId: 'execution-agent', startedAt: 1, updatedAt: 2,
+        cause: 'retry_exhausted', error: { code: 'BID_EXECUTOR_ERROR', message: '检查点中断',
+          recovery: { kind: 'repair', unit: descriptor.workId, reason: '恢复检查点' } },
+      } } })
+      const request = capabilityTaskRequestSchema.parse(await readBidWorkRequest(workspace, descriptor))
+      const working = new BidWorkspace((await prepareBidWorkingTree(workspace, descriptor)).root, workspace.config)
+      await expect(patchCapabilityTaskSteps(run, workspace, working, request, session, authorization, 0,
+        [{ scope: { source: 'task' }, call: { capability: 'document.review', input: { reason: '替换审核' } } }]))
+        .rejects.toThrow('步骤已有提交凭据')
       const resumed = createTestBidRunContext({ work: descriptor })
       await expect(executeCapabilityTask(workspace, resumed, adapter, agent, session))
         .resolves.toMatchObject({ status: 'completed' })

@@ -72,6 +72,7 @@ import { executeCapabilityTask, persistCapabilityTaskRequest } from '../src/bid-
 import { BID_CAPABILITIES } from '../src/bid-capability-registry.ts'
 import { allowedWritingCapabilityWrites } from '../src/bid-writing-capability.ts'
 import { persistBidWorkRequest } from '../src/work-descriptor.ts'
+import { safeRecoverableBidFailure } from '../src/bid-recovery.ts'
 
 const executeEvidenceMapping = (
   agent: Agent,
@@ -2505,6 +2506,56 @@ describe('evidence-mapping Agent executor', () => {
     await expect(dispatcher.validate(call, context, result)).resolves.toBeUndefined()
   })
 
+  it.each([2, 6])('%i 个章节仅更新编写要求而未实现平级目标时拒绝完成，并允许主 Agent 重规划', async (count) => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-unmet-outline-goal-')))
+    const sectionIds = Array.from({ length: count }, (_, index) => `SEC-${index + 1}`)
+    const material = await writeInputs(workspace, sectionIds)
+    const initialPath = join(workspace.projectRoot, 'outline/initial-confirmed-outline.json')
+    const outline = parseOutlineArtifact(JSON.parse(await readFile(initialPath, 'utf8')))
+    const parent = { ...outline.sections[0]!, id: 'ROOT', title: '项目服务方案', writable: false,
+      must_answer: [], requirement_ids: [], scoring_ids: [], scoring_response_point_ids: [],
+      scoring_response_points: [], summary: '统筹各项实施任务。' }
+    outline.sections = [parent, ...outline.sections.map(section => ({ ...section, parent_id: 'ROOT', level: 2 }))]
+    const original = JSON.stringify(outline)
+    await Promise.all(['initial-confirmed-outline.json', 'outline.json', 'confirmed-outline.json'].map(path =>
+      writeFile(join(workspace.projectRoot, 'outline', path), original)))
+    const fixture = mappingFixture(workspace, material)
+    const goal = '把项目服务方案下的各项技术任务分别提升为平级顶层目录。'
+    fixture.onReply.mockImplementation((_child, result) => {
+      for (const mapping of result.section_mappings) mapping.writing_brief.writing_notes = ['本节按独立任务展开实施方法与成果验收。']
+    })
+    fixture.serializeQuality.mockImplementation(text => JSON.stringify({ ...JSON.parse(text) as object,
+      blocking_issues: [{ section_id: 'ROOT', reason: '仅更新编写要求，各项技术任务仍挂在项目服务方案下，未实现平级目标。' }],
+    }))
+    const context: BidCapabilityExecutionContext = {
+      canonical: workspace, working: workspace, agent: fixture.agent,
+      run: createTestBidRunContext({ work: { kind: 'capability_task', stage: 'evidence_mapping', workId: 'UNMET-WORK',
+        requestRef: 'requests/unmet.json', requestSha256: '0'.repeat(64), inputFingerprint: '0'.repeat(64) } }),
+      sectionIds: null, stepDirectory: workspace.root,
+      inputSources: new Map(), baselineHashes: new Map(), allowedWrites: allowedEvidenceCapabilityWrites(),
+      stepId: 'UNMET-GOAL', rootWorkId: 'UNMET-WORK',
+      authorization: { session_id: 'SESSION', message_id: 'MESSAGE' }, inputSha256: '0'.repeat(64),
+    }
+    const dispatcher = createBidCapabilityDispatcher({ modelStageRepairAttempts: 0,
+      evidenceMappingMaxConcurrency: count, chapterWritingMaxConcurrency: 1, webSearchEnabled: false })
+    const failure = dispatcher.execute({ capability: 'outline.refine', input: { feedback: goal } }, context)
+      .then(() => { throw new Error('错误地把未达目标的目录标记为完成') }, (error: unknown) => error)
+    await vi.waitFor(() => { expect(fixture.starts).toHaveLength(count) })
+    fixture.starts.forEach((start) => { start.resolve() })
+    expect(safeRecoverableBidFailure(context.run.work, await failure))
+      .toMatchObject({ recovery: { kind: 'repair' }, issues: [{ code: 'OUTLINE_REFINEMENT_STRUCTURE_UNRESOLVED' }] })
+    expect(fixture.outlineReviewPrompts[0]).toContain(`本次用户修改目标：${goal}`)
+    expect(fixture.outlineReviewPrompts[0]).toContain('尚未实现的目录目标必须列为 blocking_issues')
+    expect(await readFile(join(workspace.projectRoot, 'outline/confirmed-outline.json'), 'utf8')).toBe(original)
+    const candidate = parseOutlineArtifact(JSON.parse(await readFile(join(workspace.projectRoot,
+      'outline/refined-outline.candidate.json'), 'utf8')))
+    expect(candidate.sections.filter(section => section.writable).every(section => section.parent_id === 'ROOT'
+      && section.writing_notes.includes('本节按独立任务展开实施方法与成果验收。'))).toBe(true)
+    const log = parseEvidenceMappingExecutionLog(JSON.parse(await readFile(join(workspace.projectRoot,
+      'analysis/evidence-mapping-log.json'), 'utf8')))
+    expect(log.tasks.filter(task => task.status === 'completed')).toHaveLength(count)
+  })
+
   it('选中非叶目录时先以整个子树作为结构研究任务，再研究新增叶节', async () => {
     const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-parent-refinement-')))
     const material = await writeInputs(workspace)
@@ -2547,6 +2598,8 @@ describe('evidence-mapping Agent executor', () => {
     const result = await execution
     expect(result.result.target_section_ids).toHaveLength(3)
     expect(fixture.starts[1]!.request.label).toContain('新增核验')
+    expect(fixture.outlineReviewPrompts[0]).toContain(`本次用户修改目标：${call.input.reason}`)
+    expect(fixture.outlineReviewPrompts[0]).toContain('子任务无权修改不代表目标已经满足')
   })
 
   it('局部补资料保持当前目录不变，只返回受影响章节及真实文件', async () => {

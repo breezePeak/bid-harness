@@ -3279,8 +3279,6 @@ export class BidHostRuntime extends TypertRemoteService {
     }
     if (request.action === 'bid_plan_task') {
       if (this.ctx.agents.get(session.id) !== agent) throw new Error('BID_CAPABILITY_DISPATCHER_UNAVAILABLE')
-      const authorization = resolveBidToolAuthorization(agent)
-      if (authorization === undefined) throw new Error('BID_CAPABILITY_USER_MESSAGE_REQUIRED')
       const operation = this.beginOperation(session)
       try {
         const state = await this.prepareOperation(operation)
@@ -3289,6 +3287,7 @@ export class BidHostRuntime extends TypertRemoteService {
           throw new Error('BID_CAPABILITY_PLAN_PATCH_NOT_READY')
         }
         const saved = capabilityTaskRequestSchema.parse(await readBidWorkRequest(operation.workspace, state.run.work))
+        const authorization = resolveBidToolAuthorization(agent) ?? saved.authorization
         const workingPaths = await prepareBidWorkingTree(operation.workspace, state.run.work)
         const working = new BidWorkspace(workingPaths.root, operation.workspace.config)
         let stepCount = 0
@@ -3299,7 +3298,7 @@ export class BidHostRuntime extends TypertRemoteService {
           stepCount = checkpoint.steps.length
         }, state)
         return { accepted: true, work_id: request.work_id, steps: stepCount,
-          message: '已保存未执行步骤；当前 Work 仍处于挂起状态，等待明确恢复。' }
+          message: '已保存未完成步骤；当前任务仍挂起。可恢复失败请调用 bid_recover_task 继续，用户停止的任务须等用户明确恢复。' }
       } finally { await this.finishOperation(session, operation) }
     }
     if (request.action === 'bid_outline_apply_operations'
