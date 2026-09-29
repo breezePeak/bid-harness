@@ -33,7 +33,7 @@ const generatedRoot = resolve(root, 'website/.generated')
  * @param environment Build environment containing an optional explicit public ref.
  * @returns The configured public ref, or `master`.
  */
-export function resolveRepositoryRef(environment: NodeJS.ProcessEnv): string {
+function resolveRepositoryRef(environment: NodeJS.ProcessEnv): string {
   return environment.DOCS_REPOSITORY_REF ?? 'master'
 }
 
@@ -194,7 +194,7 @@ export function rewriteMarkdown(source: string, options: RewriteMarkdownOptions)
  * @param page Publication manifest entry for the content.
  * @returns Markdown with projection-owned frontmatter fields.
  */
-export function addProjectionFrontmatter(markdown: string, page: Pick<DocsPage, 'source' | 'outline'>): string {
+function addProjectionFrontmatter(markdown: string, page: Pick<DocsPage, 'source' | 'outline'>): string {
   const fields = [
     `editSource: ${JSON.stringify(page.source)}`,
     ...(page.outline === undefined ? [] : [`outline: ${JSON.stringify(page.outline)}`]),
@@ -266,7 +266,7 @@ export function projectedPageContent(markdown: string, page: DocsPage): string {
  * would put a build-machine file on the site; `existsSync` alone, which is all
  * link resolution needs, does not answer that.
  */
-export function publishableImage(absPath: string, repoRoot: string): string | undefined {
+function publishableImage(absPath: string, repoRoot: string): string | undefined {
   const real = realpathSync(absPath)
   const inside = real === repoRoot || real.startsWith(`${repoRoot}${sep}`)
   return inside && statSync(real).isFile() ? real : undefined
@@ -436,7 +436,7 @@ function withoutFrontmatter(markdown: string, source: string): string {
  * @param source Repository-relative page source, named by frontmatter failures.
  * @returns Plain Markdown without frontmatter or repository chrome.
  */
-export function rawMarkdownPageContent(markdown: string, source: string): string {
+function rawMarkdownPageContent(markdown: string, source: string): string {
   return withoutRepositoryChrome(withoutFrontmatter(markdown, source))
 }
 
