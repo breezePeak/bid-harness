@@ -1585,7 +1585,11 @@ async function validateCompletedMappingState(
     compliance: inputs.compliance,
     responsePoints: inputs.responsePoints,
   }
+  const visibleScope = task.phase === 'initial' ? taskEditableSectionIds(researched, task) : undefined
   for (const field of customerFacingOutlineText(researched)) {
+    const sectionIndex = /^sections\.(\d+)\./u.exec(field.path)?.[1]
+    const sectionId = sectionIndex === undefined ? undefined : researched.sections[Number(sectionIndex)]?.id
+    if (visibleScope !== undefined && sectionId !== undefined && !visibleScope.has(sectionId)) continue
     const leaked = findBidInternalIdentifiers(field.text, customerTextContext)
     if (leaked.length > 0) {
       issues.push({

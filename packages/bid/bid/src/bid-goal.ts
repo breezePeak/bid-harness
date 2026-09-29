@@ -131,10 +131,13 @@ export class BidGoalBridge {
    * @param task - Authoritative project state loaded under the project lock.
    */
   rearmBoundActiveGoal(session: Session, task: BidTaskState): void {
+    const writingEntry = task.stage === 'chapter_writing'
+      ? session.events.findLast(event => event.type === 'bid.writing_entry.changed') : undefined
     if (!isBidMainSession(session)
       || !['tender_analysis', 'outline_generation', 'evidence_mapping', 'chapter_writing'].includes(task.stage)
-      || task.status !== 'suspended'
-      || ['user_stop', 'awaiting_input'].includes(task.run.cause)) return
+      || !['ready', 'waiting_user', 'suspended'].includes(task.status)
+      || (task.status === 'suspended' && ['user_stop', 'awaiting_input'].includes(task.run.cause))
+      || (writingEntry?.type === 'bid.writing_entry.changed' && writingEntry.data.view.continuation === 'paused')) return
     this.change(session, ({ agent, view }) => {
       if (bidGoalBinding(session)?.data.ownerSessionId !== String(session.id)
         || view.phase !== 'active' || view.activation !== 'disarmed'

@@ -1,6 +1,8 @@
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { createHash } from 'node:crypto'
+import { fileURLToPath } from 'node:url'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import SandboxedFileSystem from '../../../fs/fs-sandbox/src/index.ts'
 import SandboxPolicyService from '../../../sandbox/sandbox-policy/src/index.ts'
@@ -8,17 +10,20 @@ import { readDocumentOutlineHeadings } from '../src/outline-framework.ts'
 import { ensureTechnicalDeviationSection } from '../src/outline-generation-normalization.ts'
 import { mappingMaterialRef } from '../src/evidence-mapping-source-tools.ts'
 import { chapterLocation } from '../src/chapter-storage.ts'
-import type { Agent } from '@deepseek-ai/dsh-agent'
+import { emitAgentEvent, type Agent } from '@deepseek-ai/dsh-agent'
 import SessionStore, { SessionId, snapshotJsonValue } from '@deepseek-ai/dsh-session'
 import { Context } from '@deepseek-ai/cordis'
 import type { ContinuableStartSpec, SubagentProvider } from '@deepseek-ai/dsh-subagent'
 import type { ToolDefinition, ToolExecution, ToolExecutionResult, ToolRunContext } from '@deepseek-ai/dsh-tools'
-import { CONTEXT_WINDOW_EXCEEDED_CODE, createUserMessage } from '@deepseek-ai/dsh-llm'
+import { CONTEXT_WINDOW_EXCEEDED_CODE, createUserMessage, CallId, LlmAdapter, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
+import { boot } from '@deepseek-ai/dsh-app-boot'
 import {
   BidWorkspace,
   BidHostRuntime,
   BidOrchestrator,
+  BidRunCoordinator,
   checkpointBidProjectState,
+  readBidProjectState,
   getOrCreateOutlineDraft,
   replaceOutlineDraft,
   validateEvidenceMapping,
@@ -65,6 +70,7 @@ import { createBidCapabilityDispatcher } from '../src/bid-capability-dispatcher.
 import { executeCapabilityTask, persistCapabilityTaskRequest } from '../src/bid-capability-task.ts'
 import { BID_CAPABILITIES } from '../src/bid-capability-registry.ts'
 import { allowedWritingCapabilityWrites } from '../src/bid-writing-capability.ts'
+import { persistBidWorkRequest } from '../src/work-descriptor.ts'
 
 const executeEvidenceMapping = (
   agent: Agent,
@@ -3253,6 +3259,179 @@ describe('evidence-mapping Agent executor', () => {
     const settled = JSON.parse(await readFile(checkpointPath, 'utf8')) as { tasks: Array<{ task_id: string; completed: boolean }> }
     expect(settled.tasks.filter(task => task.task_id.startsWith('MAP-INIT-') && task.completed)).toHaveLength(8)
   })
+
+  it('Host 重启后 Goal Round 恢复 S4 的 7/8 checkpoint 和 SC-006 失败任务', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-evidence-goal-restart-'))
+    const workspace = new BidWorkspace(root)
+    const sectionIds = [...Array.from({ length: 7 }, (_, index) => `SEC-${String(index + 1)}`), 'S2.5']
+    const material = await writeInputs(workspace, sectionIds)
+    const scoringPath = join(workspace.projectRoot, 'analysis/scoring.json')
+    const scoring = parseTenderScoringArtifact(JSON.parse(await readFile(scoringPath, 'utf8')))
+    const scoringWithInternalId = parseTenderScoringArtifact({ ...scoring, scoring_items: [...scoring.scoring_items,
+      { ...scoring.scoring_items[0]!, id: 'SC-006', title: '评分六', raw_text: '评分六', criterion: '响应评分六' }] })
+    const catalogPath = join(workspace.projectRoot, 'analysis/scoring-response-points.json')
+    const catalog = parseScoringResponsePointCatalog(JSON.parse(await readFile(catalogPath, 'utf8')))
+    const catalogWithInternalId = createScoringResponsePointCatalog(scoringWithInternalId, { schema_version: 1,
+      points: [...catalog.points.map(({ scoring_id, order, text }) => ({ scoring_id, order, text })),
+        { scoring_id: 'SC-006', order: 1, text: '响应点六' }],
+    })
+    await writeFile(scoringPath, JSON.stringify(scoringWithInternalId))
+    await writeFile(catalogPath, JSON.stringify(catalogWithInternalId))
+    const outlinePath = join(workspace.projectRoot, 'outline/initial-confirmed-outline.json')
+    const outline = parseOutlineArtifact(JSON.parse(await readFile(outlinePath, 'utf8')))
+    outline.sections[7]!.scoring_ids.push('SC-006')
+    outline.sections[7]!.scoring_response_point_ids?.push('RP-000003')
+    outline.sections[7]!.scoring_response_points.push({ scoring_id: 'SC-006', response_point: '响应点六' })
+    outline.sections[7]!.summary = Array.from({ length: 6 }, () => 'SC-006 内部编号').join('；')
+    await writeFile(outlinePath, JSON.stringify(outline))
+    const qualityPath = join(workspace.projectRoot, 'outline/quality-report.json')
+    const quality = JSON.parse(await readFile(qualityPath, 'utf8')) as {
+      checked_scoring_ids: string[]
+      checked_scoring_response_point_ids: string[]
+    }
+    quality.checked_scoring_ids.push('SC-006')
+    quality.checked_scoring_response_point_ids.push('RP-000003')
+    await writeFile(qualityPath, JSON.stringify(quality))
+    await checkpointBidProjectState(workspace, { stage: 'tender_analysis', status: 'ready', run: null })
+
+    const configPath = fileURLToPath(new URL('../../../../examples/headless-agent/bid-goal-recovery.cordis.snapshot.yml', import.meta.url))
+    const ctx = await boot('bid-evidence-goal-restart', configPath)
+    try {
+      const sessionId = SessionId('bid-evidence-goal-restart')
+      class RecoveryAdapter extends LlmAdapter {
+        readonly requests: GenerateOptions[] = []
+        runId = ''
+        override resolveModel(provider: string, model: string): Promise<{ provider: string; id: string; name: string }> {
+          return Promise.resolve({ provider, id: model, name: model })
+        }
+        override async * stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+          if (options.sessionId !== sessionId) { yield { type: 'finish', reason: { kind: 'stop' } }; return }
+          this.requests.push(options)
+          const name = this.requests.length === 1 ? 'bid_stage_inspect' : 'bid_recover_task'
+          if (this.requests.length > 2) { yield { type: 'finish', reason: { kind: 'stop' } }; return }
+          const args = name === 'bid_stage_inspect' ? { view: 'recovery' }
+            : { target: 'run', run_id: this.runId, instruction: '只重做 S2.5 总述，清除内部编号并保留其他七个检查点。' }
+          yield { type: 'block-start', index: 0, blockType: 'tool-call' }
+          yield { type: 'block-end', index: 0, block: { type: 'tool-call', id: CallId(`${name}-${this.requests.length}`),
+            name, arguments: JSON.stringify(args) } }
+          yield { type: 'finish', reason: { kind: 'tool-calls' } }
+        }
+      }
+      const adapter = new RecoveryAdapter()
+      ctx.llm.registerAdapter(['mock'], adapter)
+      const { agent } = await ctx.agentLoop.createAgent(ctx, {
+        sessionId, agentOptions: { provider: 'mock', model: 'mock' }, meta: { cwd: root, agentPreset: 'bid' },
+      })
+      await ctx.plugin(BidHostRuntime)
+      interface Operation {
+        runs: BidRunCoordinator
+        controller: AbortController
+        recovery?: { workId: string; unit: string; instruction: string; issues: readonly { code: string; message: string }[] }
+      }
+      const host = ctx.bid as unknown as {
+        inFlight: Map<string, Operation>
+        beginOperation(session: typeof agent.session): Operation
+        prepareOperation(operation: Operation): Promise<unknown>
+        finishOperation(session: typeof agent.session, operation: Operation): Promise<void>
+        driveStartedSession(agent: Agent, cwd: string): Promise<void>
+        executionAgent(operation: Operation, stage: string): Promise<Agent>
+        automaticOrchestrator(agent: Agent, workspace: BidWorkspace, signal: AbortSignal, operation: Operation): BidOrchestrator
+      }
+      const s2Payload = { stage: 'tender_analysis' }
+      const s2Inputs = buildBidStageTask('tender_analysis').inputs.map(path => ({ path, sha256: null }))
+      const s2Work = await persistBidWorkRequest(workspace, 'stage_execution', 'tender_analysis', s2Payload,
+        { stage: 'tender_analysis', inputs: s2Inputs, payload: s2Payload })
+      const s2 = host.beginOperation(agent.session)
+      await host.prepareOperation(s2)
+      const admitted = await s2.runs.start(s2Work)
+      await s2.runs.complete(admitted, () => {
+        agent.session.append('bid.stage.completed', { stage: 'tender_analysis', status: 'completed', artifacts: [] })
+      })
+      await host.finishOperation(agent.session, s2)
+      const bound = agent.session.events.find(event => event.type === 'bid.goal.bound')
+      expect(bound?.type).toBe('bid.goal.bound')
+
+      await checkpointBidProjectState(workspace, { stage: 'evidence_mapping', status: 'waiting_user', run: null })
+      emitAgentEvent(ctx, agent, 'agent/session-start', { source: 'resume' })
+      await vi.waitFor(() => { expect(ctx.goals.get(agent)?.activation).toBe('armed') })
+      await vi.waitFor(() => { expect(host.inFlight.size).toBe(0) })
+      expect(ctx.goals.get(agent)).toMatchObject({ activation: 'armed', roundsStarted: 0 })
+      expect(await readBidProjectState(workspace)).toMatchObject({ stage: 'evidence_mapping', status: 'waiting_user' })
+      await checkpointBidProjectState(workspace, { stage: 'evidence_mapping', status: 'ready', run: null })
+      const first = mappingFixture(workspace, material)
+      const resumed = mappingFixture(workspace, material, false, {
+        'MAP-INIT-S2.5': [{ type: 'update_section', section_id: 'S2.5',
+          summary: '说明当前章节的实施安排、责任分工和交付条件。' }],
+      })
+      const s4Payload = { stage: 'evidence_mapping' }
+      const s4Inputs = await Promise.all(buildBidStageTask('evidence_mapping').inputs.map(async path => ({
+        path, sha256: createHash('sha256').update(await readFile(join(workspace.projectRoot, path))).digest('hex'),
+      })))
+      const s4Work = await persistBidWorkRequest(workspace, 'stage_execution', 'evidence_mapping', s4Payload,
+        { stage: 'evidence_mapping', inputs: s4Inputs, payload: s4Payload })
+      host.executionAgent = async () => agent
+      host.automaticOrchestrator = (_execution, _workspace, signal, operation) => new BidOrchestrator(
+        agent.session,
+        { canExecute: stage => stage === 'evidence_mapping', execute: async (task, run) => {
+          if (run.resumeOf === undefined) adapter.runId = run.runId
+          return executeEvidenceMappingImplementation(run.resumeOf === undefined ? first.agent : resumed.agent,
+            workspace, task, { run, maxRepairAttempts: 0, maxConcurrency: 1,
+              ...(operation.recovery === undefined ? {} : { recovery: operation.recovery }) })
+        } },
+        { validate: (stage, refs) => validateEvidenceMapping(workspace, stage, refs) },
+        signal, undefined, operation.runs, async () => s4Work,
+      )
+      const started = host.driveStartedSession(agent, root)
+      for (let index = 0; index < 8; index++) {
+        await vi.waitFor(() => { expect(first.starts).toHaveLength(index + 1) }, { timeout: 5_000 })
+        first.starts[index]!.resolve()
+      }
+      await started
+      const failed = await readBidProjectState(workspace)
+      expect(failed).toMatchObject({ stage: 'evidence_mapping', status: 'suspended',
+        run: { runId: adapter.runId, error: { issues: [{ code: 'EVIDENCE_MAPPING_INTERNAL_ID_VISIBLE' }],
+          recovery: { kind: 'repair' } } } })
+      const checkpointPath = join(workspace.projectRoot, 'analysis/evidence-mapping-checkpoint.json')
+      const checkpoint = JSON.parse(await readFile(checkpointPath, 'utf8')) as {
+        tasks: Array<{ task_id: string; completed: boolean }>
+      }
+      expect(checkpoint.tasks.filter(task => task.completed)).toHaveLength(7)
+      await vi.waitFor(() => { expect(resumed.starts).toHaveLength(1) }, { timeout: 10_000 })
+      expect(mappingTaskId(resumed.starts[0]!.request.request)).toBe('MAP-INIT-S2.5')
+      resumed.starts[0]!.resolve()
+      await vi.waitFor(() => { expect(host.inFlight.size).toBe(0) }, { timeout: 10_000 })
+      expect(await readBidProjectState(workspace)).toMatchObject({ stage: 'evidence_mapping', status: 'waiting_user' })
+      await agent.whenIdle()
+      const events = agent.session.events
+      const recoveries = events.filter(event => event.type === 'bid.goal.recovery.requested')
+      expect(events.filter(event => event.type === 'bid.goal.bound')).toHaveLength(1)
+      expect(ctx.goals.get(agent)?.roundsStarted).toBe(1)
+      expect(events.filter(event => event.type === 'tool/call').map(event => event.data.name))
+        .toEqual(expect.arrayContaining(['bid_stage_inspect', 'bid_recover_task']))
+      const inspection = events.find(event => event.type === 'tool/result'
+        && event.data.message.source.callId === 'bid_stage_inspect-1')
+      expect(JSON.stringify(inspection)).toContain(adapter.runId)
+      expect(JSON.stringify(inspection)).toContain(s4Work.workId)
+      expect(JSON.stringify(inspection)).toContain('EVIDENCE_MAPPING_INTERNAL_ID_VISIBLE')
+      expect(JSON.stringify(inspection)).toContain('SC-006')
+      expect(JSON.stringify(inspection)).toContain('\\"completed\\":7')
+      expect(JSON.stringify(inspection)).toContain('previous_instructions')
+      expect(recoveries).toHaveLength(1)
+      expect(recoveries[0]?.data.target).toMatchObject({ kind: 'run', workId: s4Work.workId, runId: failed?.status === 'suspended' ? failed.run.runId : '' })
+      expect(events.some(event => event.type === 'bid.run.started' && event.data.run.resumeOf?.runId === adapter.runId)).toBe(true)
+      for (const task of checkpoint.tasks.filter(task => task.completed)) expect(resumed.taskAttempts.has(task.task_id)).toBe(false)
+      expect(resumed.taskAttempts.get('MAP-INIT-S2.5')).toBe(1)
+      const published = parseOutlineArtifact(JSON.parse(await readFile(join(workspace.projectRoot, 'outline/outline.json'), 'utf8')))
+      expect(published.sections.find(section => section.id === 'S2.5')?.summary).not.toContain('SC-006')
+      expect(published.sections.find(section => section.id === 'S2.5')?.scoring_ids).toContain('SC-006')
+      const settled = JSON.parse(await readFile(checkpointPath, 'utf8')) as { tasks: Array<{ task_id: string; completed: boolean }> }
+      expect(settled.tasks.filter(task => task.task_id.startsWith('MAP-INIT-') && task.completed)).toHaveLength(8)
+      expect(events.some(event => event.type === 'bid.run.decision.required' || event.type === 'bid.user_confirmation.received'
+        || (event.type === 'user/message' && event.data.source.kind === 'user'))).toBe(false)
+      expect(adapter.requests[0]?.messages.some(message => message.content.some(block => block.type === 'text'
+        && block.text.includes('bid_stage_inspect(view="recovery")')))).toBe(true)
+    } finally { await ctx.fiber.dispose(); await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }) }
+  }, 30_000)
 
   it('恢复前目录输入变化会失效 completed checkpoint 并重跑受影响任务', async () => {
     const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-evidence-stale-checkpoint-')))
