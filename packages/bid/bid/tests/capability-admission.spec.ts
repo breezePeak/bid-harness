@@ -25,6 +25,7 @@ it.each(['outline_generation', 'evidence_mapping', 'chapter_writing', 'docx_expo
       const session = ctx.sessions.create()
       const message = createUserMessage({ content: [{ type: 'text', text: '把第一条要求改为明确实施边界' }],
         source: { kind: 'user' } })
+      session.append('turn/start', { turn: 1 })
       session.append('user/message', message, { surfaceOp: 'append' })
       const task = { goal: '把第一条要求改为明确实施边界', scope: { kind: 'project' as const },
         steps: [{ scope: { source: 'task' as const }, call: { capability: 'tender.update' as const,

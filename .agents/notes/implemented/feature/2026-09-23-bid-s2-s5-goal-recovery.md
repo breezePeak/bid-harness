@@ -8,7 +8,9 @@ Bid 的阶段执行由 Host 和执行子代理持有，主交互 Agent 保持可
 
 ## Decision
 
-Bid Host 在 S2 Run 的 running 检查点成功后，将一个原生 Goal 绑定到同一主 Session。驱动器的同步等待门只在该 Session 存在当前可自动修复的挂起工作时放行 Round；等待不改变 Goal 生命周期，也不消耗 Round。Host 继续负责 S2～S5 的正常调度、用户确认和写作提问。
+运行时 Goal 绑定与恢复授权由[Bid 与 Goal 解耦](../architecture/2026-09-29-bid-goal-decoupling.md)替代。以下记录旧 Session 中绑定和恢复事件的含义及原取舍；旧事件仅保留读取定义，不据此授权或调度；现有恢复工具由 Bid 主会话直接调用。
+
+旧实现中，Bid Host 在 S2 Run 的 running 检查点成功后，将一个原生 Goal 绑定到同一主 Session。驱动器的同步等待门只在该 Session 存在当前可自动修复的挂起工作时放行 Round；等待不改变 Goal 生命周期，也不消耗 Round。Host 继续负责 S2～S5 的正常调度、用户确认和写作提问。
 
 Host 将执行器和最终校验的实际问题分类并保存在 Run failure 中。主 Agent 通过 `bid_stage_inspect(view="recovery")` 读取有界诊断，再用 `bid_recover_task` 提交当前目标的改进指令。Host 在原项目锁内复核 Goal、Run 或写作请求身份、输入指纹、停止状态和预算，持久化一次恢复事件，然后复用原 Run 恢复或已回答写作计划的派发入口。工具在新 Run 的 running 检查点持久化后返回；S2～S5 的真实执行模型只接收与失败单元匹配的指令，正式产物仍经原提交和校验流程。
 
@@ -24,4 +26,4 @@ Host 将执行器和最终校验的实际问题分类并保存在 Run failure �
 
 ## Consequences
 
-自动修复仍受原生 Goal 总轮数及原执行器局部修复预算限制。主 Agent 可以给出处理办法，但不能修改正式 Artifact、伪造用户确认或替代 Host 校验；确定的外部阻断回到人工决策。绑定和恢复记录成为会话回放中可重建的授权与策略诊断依据。
+旧自动修复仍受原生 Goal 总轮数及原执行器局部修复预算限制。主 Agent 可以给出处理办法，但不能修改正式 Artifact、伪造用户确认或替代 Host 校验；确定的外部阻断回到人工决策。绑定和恢复记录成为会话回放中可重建的授权与策略诊断依据。

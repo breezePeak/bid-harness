@@ -525,3 +525,12 @@ describe('pure helpers', () => {
     ])).toBe('ab')
   })
 })
+
+it('保留不含 Goal 的 Bid 恢复审计事件及 Main Agent 指令', async () => {
+  const harness = harnessWith({ FAKE_BID_RECOVERY: '1' })
+  const result = await harness.run('核对恢复记录')
+  expect(result.events.find(event => event.type === 'bid.recovery.requested')?.data).toEqual({
+    ownerSessionId: result.sessionId, target: { kind: 'run', workId: 'work-1', runId: 'run-1' },
+    unit: 'outline/outline.json', instruction: '核对原文并修正当前章节。', progressFingerprint: 'a'.repeat(64),
+  })
+})

@@ -2423,6 +2423,7 @@ describe('evidence-mapping Agent executor', () => {
     await sessionContext.plugin(SessionStore)
     const session = sessionContext.sessions.create()
     const message = createUserMessage({ content: [{ type: 'text', text: '离线研究当前目录' }], source: { kind: 'user' } })
+    session.append('turn/start', { turn: 1 })
     session.append('user/message', message, { surfaceOp: 'append' })
     const task = { goal: '离线研究当前目录', scope: { kind: 'sections' as const, section_ids: ['SEC-1'] },
       steps: [{ scope: { source: 'task' as const }, call: { capability: 'evidence.research' as const,
@@ -3261,7 +3262,7 @@ describe('evidence-mapping Agent executor', () => {
     expect(settled.tasks.filter(task => task.task_id.startsWith('MAP-INIT-') && task.completed)).toHaveLength(8)
   })
 
-  it('Host 重启后 Goal Round 恢复 S4 的 7/8 checkpoint 和 SC-006 失败任务', async () => {
+  it('无需 Goal，主 Agent 分析 S4 错误并恢复 7/8 checkpoint 的失败任务', async () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-evidence-goal-restart-'))
     const workspace = new BidWorkspace(root)
     const sectionIds = [...Array.from({ length: 7 }, (_, index) => `SEC-${String(index + 1)}`), 'S2.5']
@@ -3311,7 +3312,8 @@ describe('evidence-mapping Agent executor', () => {
           const name = this.requests.length === 1 ? 'bid_stage_inspect' : 'bid_recover_task'
           if (this.requests.length > 2) { yield { type: 'finish', reason: { kind: 'stop' } }; return }
           const args = name === 'bid_stage_inspect' ? { view: 'recovery' }
-            : { target: 'run', run_id: this.runId, instruction: '只重做 S2.5 总述，清除内部编号并保留其他七个检查点。' }
+            : { target: 'run', run_id: this.runId,
+              instruction: '只重做 S2.5 总述，清除内部编号并保留其他七个检查点。' }
           yield { type: 'block-start', index: 0, blockType: 'tool-call' }
           yield { type: 'block-end', index: 0, block: { type: 'tool-call', id: CallId(`${name}-${this.requests.length}`),
             name, arguments: JSON.stringify(args) } }
@@ -3350,13 +3352,12 @@ describe('evidence-mapping Agent executor', () => {
       })
       await host.finishOperation(agent.session, s2)
       const bound = agent.session.events.find(event => event.type === 'bid.goal.bound')
-      expect(bound?.type).toBe('bid.goal.bound')
+      expect(bound).toBeUndefined()
 
       await checkpointBidProjectState(workspace, { stage: 'evidence_mapping', status: 'waiting_user', run: null })
       emitAgentEvent(ctx, agent, 'agent/session-start', { source: 'resume' })
-      await vi.waitFor(() => { expect(ctx.goals.get(agent)?.activation).toBe('armed') })
       await vi.waitFor(() => { expect(host.inFlight.size).toBe(0) })
-      expect(ctx.goals.get(agent)).toMatchObject({ activation: 'armed', roundsStarted: 0 })
+      expect(ctx.goals.get(agent)).toBeUndefined()
       expect(await readBidProjectState(workspace)).toMatchObject({ stage: 'evidence_mapping', status: 'waiting_user' })
       await checkpointBidProjectState(workspace, { stage: 'evidence_mapping', status: 'ready', run: null })
       const first = mappingFixture(workspace, material)
@@ -3404,9 +3405,9 @@ describe('evidence-mapping Agent executor', () => {
       expect(await readBidProjectState(workspace)).toMatchObject({ stage: 'evidence_mapping', status: 'waiting_user' })
       await agent.whenIdle()
       const events = agent.session.events
-      const recoveries = events.filter(event => event.type === 'bid.goal.recovery.requested')
-      expect(events.filter(event => event.type === 'bid.goal.bound')).toHaveLength(1)
-      expect(ctx.goals.get(agent)?.roundsStarted).toBe(1)
+      const recoveries = events.filter(event => event.type === 'bid.recovery.requested')
+      expect(events.filter(event => event.type === 'bid.goal.bound')).toHaveLength(0)
+      expect(ctx.goals.get(agent)).toBeUndefined()
       expect(events.filter(event => event.type === 'tool/call').map(event => event.data.name))
         .toEqual(expect.arrayContaining(['bid_stage_inspect', 'bid_recover_task']))
       const inspection = events.find(event => event.type === 'tool/result'
@@ -3416,9 +3417,7 @@ describe('evidence-mapping Agent executor', () => {
       expect(JSON.stringify(inspection)).toContain('EVIDENCE_MAPPING_INTERNAL_ID_VISIBLE')
       expect(JSON.stringify(inspection)).toContain('SC-006')
       expect(JSON.stringify(inspection)).toContain('\\"completed\\":7')
-      expect(JSON.stringify(inspection)).toContain('previous_instructions')
       expect(recoveries).toHaveLength(1)
-      expect(recoveries[0]?.data.target).toMatchObject({ kind: 'run', workId: s4Work.workId, runId: failed?.status === 'suspended' ? failed.run.runId : '' })
       expect(events.some(event => event.type === 'bid.run.started' && event.data.run.resumeOf?.runId === adapter.runId)).toBe(true)
       for (const task of checkpoint.tasks.filter(task => task.completed)) expect(resumed.taskAttempts.has(task.task_id)).toBe(false)
       expect(resumed.taskAttempts.get('MAP-INIT-S2.5')).toBe(1)
@@ -3427,10 +3426,10 @@ describe('evidence-mapping Agent executor', () => {
       expect(published.sections.find(section => section.id === 'S2.5')?.scoring_ids).toContain('SC-006')
       const settled = JSON.parse(await readFile(checkpointPath, 'utf8')) as { tasks: Array<{ task_id: string; completed: boolean }> }
       expect(settled.tasks.filter(task => task.task_id.startsWith('MAP-INIT-') && task.completed)).toHaveLength(8)
-      expect(events.some(event => event.type === 'bid.run.decision.required' || event.type === 'bid.user_confirmation.received'
+      expect(events.some(event => event.type === 'bid.user_confirmation.received'
         || (event.type === 'user/message' && event.data.source.kind === 'user'))).toBe(false)
       expect(adapter.requests[0]?.messages.some(message => message.content.some(block => block.type === 'text'
-        && block.text.includes('bid_stage_inspect(view="recovery")')))).toBe(true)
+        && block.text.includes('真实失败状态')))).toBe(true)
     } finally { await ctx.fiber.dispose(); await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }) }
   }, 30_000)
 

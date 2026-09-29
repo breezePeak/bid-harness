@@ -8,9 +8,9 @@ S2～S5 的内部错误可能没有恢复元数据，或在 Run 收尾时直接�
 
 ## Decision
 
-Host 在 Run 收尾时用完整错误码集合识别确定的输入、权限、模型服务和数据安全阻断；其他 S2～S5 内部失败保留 `suspended` Run 与恢复诊断。短暂连接错误可以重试。主 Agent 的接管次数和连续相同指纹来自 `bid.goal.recovery.requested`，仅用于提示改变策略；相同指纹下完全重复的指令被 Host 拒绝。原生 Goal 的总轮数仍限制自动对话。
+Host 在 Run 收尾时用完整错误码集合识别确定的输入、权限、模型服务和数据安全阻断；其他 S2～S5 内部失败保留 `suspended` Run 与恢复诊断。短暂连接错误可以重试。失败由[主 Agent 恢复工具](../architecture/2026-09-29-bid-goal-decoupling.md)分析和处理；Host 不代替主 Agent 决定修复方案。
 
-Session 启动后，Bid Host 按持久化的 `bid.goal.bound` 核对主会话、Goal 身份、active 阶段和剩余轮数，为 S2～S5 的 `ready`、`waiting_user` 和可续行 `suspended` 项目恢复进程内 activation；没有可恢复目标时不启动 Goal Round。用户暂停、停止、等待输入和 S5 明确停止的写作入口不自动恢复。Host 把遗留 running Run 持久化为 `suspended(host_restart)`，释放启动操作后按精确 Run ID 与项目 revision 调用原恢复入口。原 Executor 的检查点、输入指纹与提交栅栏决定能否续行；恢复失败保留诊断并交给用户处理。
+Host 把遗留 running Run 持久化为 `suspended(host_restart)`，释放启动操作后按精确 Run ID 与项目 revision 调用原恢复入口，不依赖 Goal。原 Executor 的检查点、输入指纹与提交栅栏决定能否续行；用户停止、等待输入和 S5 明确停止的写作入口不自动恢复。Goal 重激活由上述解耦决策替代；重复指令检查使用独立的 bid.recovery.requested 事件。
 
 S2～S5 的 Host-owned Run 在兜底结算、后台目录交互、目录重生成、目录确认、章节修订和批量修订发生内部错误时保存结构化 recovery metadata。目录重生成候选返回失败也作为失败 Run 结算；错误码和结构化 issues 保留输入、权限及 Provider 的阻断分类。目录确认仍要求用户确认，主 Agent 只恢复已经授权的候选执行。
 
@@ -24,10 +24,10 @@ S4 Initial Mapping 只检查本任务可编辑子树的客户可见编号，避�
 
 **非模型执行器错误全部结算为 failed。** 缺失恢复元数据和模型协议错误会进入同一终态，主 Agent 无法分析真实诊断并改变处理办法；确定的外部与安全问题仍明确阻断。
 
-**重复指纹或固定次数后停止。** 相同检查点不能证明新策略无效；拒绝完全相同的指令并沿用原生 Goal 总轮数，避免机械重试而不新增 Bid 预算。
+**重复指纹或固定次数后停止。** 相同检查点不能证明新策略无效；原设计要求改变策略并沿用原生 Goal 总轮数，未新增 Bid 预算；当前由主 Agent 根据诊断决定下一步。
 
 **让主 Agent 直接修改正式文件或重置阶段。** 这会绕过原 Executor 的局部范围、用户确认及 Run 提交栅栏。
 
 ## Consequences
 
-内部程序错误也可能消耗原生 Goal 轮数，直到外部修复代码；诊断和恢复指令留在 Session 中以供定位。Host 重启续行与主 Agent 修复复用同一项目锁和原 Work 检查点。定向测试覆盖混合错误分类、重复指令、Goal 在等待用户与就绪状态的重启授权、Host-owned Run 错误结算、精确 Run 续行、S3 新 Run 局部修复、S4 锁定摘要编辑，以及 Goal Round 接管后保留七个已完成任务并修正剩余任务的内部编号总述。
+主 Agent 的错误分析仍可能需要外部修复代码；诊断和恢复指令留在 Session 中以供定位。Host 重启续行与主 Agent 修复复用同一项目锁和原 Work 检查点。测试覆盖混合错误分类、Host-owned Run 错误结算、精确 Run 续行、S3 新 Run 局部修复、S4 锁定摘要编辑，以及无 Goal 时主 Agent 接管并保留七个已完成任务。

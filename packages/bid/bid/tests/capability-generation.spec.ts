@@ -27,6 +27,7 @@ it('招标分析任务接纳时登记真实 Manifest 输入', async () => {
   try {
     const session = ctx.sessions.create()
     const message = createUserMessage({ content: [{ type: 'text', text: '分析招标文件' }], source: { kind: 'user' } })
+    session.append('turn/start', { turn: 1 })
     session.append('user/message', message, { surfaceOp: 'append' })
     const work = await persistCapabilityTaskRequest(workspace, session, 'tender_analysis', {
       goal: '分析招标文件', scope: { kind: 'project' }, steps: [{ scope: { source: 'task' },

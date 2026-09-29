@@ -95,7 +95,10 @@ export const bidCapabilityTaskSchema = z.object({
     && actual.end === expected.end && actual.text === expected.text
 }, 'BID_CAPABILITY_PARAGRAPH_PLAN_INVALID')
 
-/** 新的整本目录深化任务须由 Main Agent 提交可见的具体工作项。 */
+/**
+ * 新的整本目录深化任务须由 Main Agent 提交可见的具体工作项。
+ * @param task 待校验的能力任务。
+ */
 export function validateCapabilityTaskWorkItems(task: BidCapabilityTask): void {
   if (task.scope.kind === 'project' && task.steps.some(step => step.call.capability === 'outline.refine')
     && task.work_items === undefined) {

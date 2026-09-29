@@ -2,6 +2,9 @@
 import { createHash } from 'node:crypto'
 import { readFile, readdir } from 'node:fs/promises'
 import { z } from 'zod'
+import type { Agent } from '@deepseek-ai/dsh-agent'
+import { hasBidTaskAuthorization, resolveBidToolAuthorization } from './bid-tool-authorization.ts'
+import { pendingCapabilityWorkIds, readPendingCapabilityRequests } from './bid-capability-queue.ts'
 import type { Session } from '@deepseek-ai/dsh-session'
 import type { AskUserQuestionAnswerItem, AskUserQuestionItem } from '@deepseek-ai/dsh-user-questions/types'
 import { BidWorkspace } from './index.ts'
@@ -193,7 +196,12 @@ function stepCandidateWorkspace(working: BidWorkspace, parent: BidWorkDescriptor
   return { descriptor, workspace: new BidWorkspace(root, working.config) }
 }
 
-/** 读取当前能力步骤的私有资料映射工作区；其他步骤不复用项目根目录的旧日志。 */
+/**
+ * 读取当前能力步骤的私有资料映射工作区；其他步骤不复用项目根目录的旧日志。
+ * @param canonical 项目正式工作区。
+ * @param work 当前能力 Work。
+ * @returns 当前资料映射步骤的私有工作区；不适用时返回 null。
+ */
 export async function activeCapabilityMappingWorkspace(
   canonical: BidWorkspace, work: BidWorkDescriptor,
 ): Promise<BidWorkspace | null> {
@@ -281,15 +289,26 @@ async function fileHash(workspace: BidWorkspace, path: string): Promise<string |
  * @param authorization 真实用户消息身份。
  * @param inputPaths 本任务读取的正式文件路径。
  * @param returnState 完成后恢复的任务前状态。
+ * @param agent 工具调用的 live Agent；延迟队列须已有匹配的持久请求。
  * @returns 可由 Run 恢复的 Work 描述符。
  */
 export async function persistCapabilityTaskRequest(
   workspace: BidWorkspace, session: Session, stage: BidStage, task: BidCapabilityTask,
   authorization: CapabilityTaskRequest['authorization'], inputPaths: readonly string[],
-  returnState: CapabilityTaskRequest['return_state'],
+  returnState: CapabilityTaskRequest['return_state'], agent?: Agent,
 ): Promise<BidWorkDescriptor> {
-  if (authorization.session_id !== session.id || !session.events.some(event => event.type === 'user/message'
-    && event.data.source.kind === 'user' && String(event.data.id) === authorization.message_id)) {
+  const current = resolveBidToolAuthorization(agent ?? session) ?? resolveBidToolAuthorization(session)
+  const matches = current?.session_id === authorization.session_id && current.message_id === authorization.message_id
+  let queued = false
+  if (!matches) {
+    for (const workId of await pendingCapabilityWorkIds(workspace)) {
+      queued ||= (await readPendingCapabilityRequests(workspace, workId)).some(({ request }) =>
+        request.authorization.session_id === authorization.session_id
+        && request.authorization.message_id === authorization.message_id
+        && JSON.stringify({ ...request.task, steps: request.task.steps.filter(step => step.call.capability !== 'docx.export') }) === JSON.stringify(task))
+    }
+  }
+  if (!hasBidTaskAuthorization(session, authorization) || (!matches && !queued)) {
     throw new Error('BID_CAPABILITY_USER_MESSAGE_REQUIRED')
   }
   if (task.scope.kind !== 'project') {
@@ -423,8 +442,7 @@ export async function readCapabilityTaskCheckpoint(
   let expected = request.task.steps.map(step => ({ step, authorization: request.authorization }))
   for (const patch of checkpoint.plan_patches) {
     if (patch.from_index > expected.length || patch.authorization.session_id !== session.id
-      || !session.events.some(event => event.type === 'user/message'
-        && event.data.source.kind === 'user' && String(event.data.id) === patch.authorization.message_id)) {
+      || !hasBidTaskAuthorization(session, patch.authorization)) {
       throw new Error('BID_CAPABILITY_CHECKPOINT_PATCH_INVALID')
     }
     expected = [...expected.slice(0, patch.from_index),
@@ -490,18 +508,19 @@ async function saveCheckpoint(
  * @param authorization 本次补丁的用户消息身份。
  * @param fromIndex 待替换后缀的首个步骤索引。
  * @param steps 新的后续步骤，可为空以删除未开始后缀。
+ * @param agent 当前工具调用者，用于验证本轮授权。
  * @returns 写入后的步骤检查点。
  */
 export async function patchCapabilityTaskSteps(
   run: Pick<BidRunContext, 'work'> & { readonly commits: Pick<BidRunContext['commits'], 'writeJson'> },
   canonical: BidWorkspace, working: BidWorkspace,
   request: CapabilityTaskRequest, session: Session, authorization: CapabilityTaskRequest['authorization'],
-  fromIndex: number, steps: readonly BidCapabilityStep[],
+  fromIndex: number, steps: readonly BidCapabilityStep[], agent?: Agent,
 ): Promise<CapabilityTaskCheckpoint> {
   if (authorization.session_id !== request.authorization.session_id || authorization.session_id !== session.id
     || authorization.message_id === request.authorization.message_id
-    || !session.events.some(event => event.type === 'user/message'
-      && event.data.source.kind === 'user' && String(event.data.id) === authorization.message_id)) {
+    || !hasBidTaskAuthorization(session, authorization)
+    || ((resolveBidToolAuthorization(agent ?? session) ?? resolveBidToolAuthorization(session))?.message_id !== authorization.message_id)) {
     throw new Error('BID_CAPABILITY_PLAN_PATCH_UNAUTHORIZED')
   }
   const checkpoint = await readCapabilityTaskCheckpoint(canonical, working, run, request, session)

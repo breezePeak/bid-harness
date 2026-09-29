@@ -31,6 +31,7 @@ async function fixture() {
   await ctx.plugin(SessionStore)
   const session = ctx.sessions.create()
   const message = createUserMessage({ content: [{ type: 'text', text: '审核章节和整书' }], source: { kind: 'user' } })
+  session.append('turn/start', { turn: 1 })
   session.append('user/message', message, { surfaceOp: 'append' })
   const task = { goal: '审核章节和整书', scope: { kind: 'project' as const }, steps: [
     { scope: { source: 'task' as const }, call: { capability: 'chapter.review' as const, input: { reason: '审核章节' } } },
@@ -70,6 +71,7 @@ describe('同一 Work 的能力序列', () => {
     const { ctx, workspace, session } = await fixture()
     try {
       const message = createUserMessage({ content: [{ type: 'text', text: '重构整本评分目录' }], source: { kind: 'user' } })
+      session.append('turn/start', { turn: 1 })
       session.append('user/message', message, { surfaceOp: 'append' })
       const authorization = { session_id: String(session.id), message_id: String(message.id) }
       const task = bidCapabilityTaskSchema.parse({ goal: '重构整本评分目录', scope: { kind: 'project' }, steps: [{
@@ -118,6 +120,7 @@ describe('同一 Work 的能力序列', () => {
         { ...previous, task, authorization: historicalAuthorization }, previous.input_sources)
       await expect(findCapabilityTaskRequest(workspace, historicalAuthorization)).resolves.toEqual(historical)
       const message = createUserMessage({ content: [{ type: 'text', text: '执行拆分并修改正文' }], source: { kind: 'user' } })
+      session.append('turn/start', { turn: 1 })
       session.append('user/message', message, { surfaceOp: 'append' })
       const next = { session_id: String(session.id), message_id: String(message.id) }
       await expect(persistCapabilityTaskRequest(workspace, session, 'chapter_writing', task, next,
@@ -141,6 +144,7 @@ describe('同一 Work 的能力序列', () => {
     try {
       const session = ctx.sessions.create()
       const original = createUserMessage({ content: [{ type: 'text', text: '缩短选中段落' }], source: { kind: 'user' } })
+      session.append('turn/start', { turn: 1 })
       session.append('user/message', original, { surfaceOp: 'append' })
       const task = { goal: '缩短选中段落', scope: { kind: 'paragraphs' as const, reference }, steps: [{
         scope: { source: 'task' as const }, call: { capability: 'chapter.revise' as const,
@@ -157,6 +161,7 @@ describe('同一 Work 的能力序列', () => {
       const agent = { id: 'paragraph-agent' } as Parameters<typeof executeCapabilityTask>[3]
       await expect(executeCapabilityTask(workspace, run, noExecution, agent, session)).rejects.toThrow('计划待补丁')
       const next = createUserMessage({ content: [{ type: 'text', text: '改成整章写作' }], source: { kind: 'user' } })
+      session.append('turn/start', { turn: 1 })
       session.append('user/message', next, { surfaceOp: 'append' })
       const request = capabilityTaskRequestSchema.parse(await readBidWorkRequest(workspace, work))
       const working = new BidWorkspace((await prepareBidWorkingTree(workspace, work)).root, workspace.config)
@@ -199,6 +204,7 @@ describe('同一 Work 的能力序列', () => {
       await expect(executeCapabilityTask(workspace, run, adapter, agent, session)).rejects.toThrow('等待计划调整')
       expect(base.execute).toHaveBeenCalledOnce()
       const message = createUserMessage({ content: [{ type: 'text', text: '调整整书审核范围' }], source: { kind: 'user' } })
+      session.append('turn/start', { turn: 1 })
       session.append('user/message', message, { surfaceOp: 'append' })
       const authorization = { session_id: String(session.id), message_id: String(message.id) }
       const request = capabilityTaskRequestSchema.parse(await readBidWorkRequest(workspace, descriptor))

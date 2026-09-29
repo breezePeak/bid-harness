@@ -89,10 +89,9 @@ export function bidRecoveryFingerprint(work: BidWorkDescriptor, failure: BidTask
 /**
  * Current run target and durable history shared by admission, inspect, and recovery.
  * @param session - Main Session containing the current Run and audit history.
- * @param goalId - Bound native Goal identity.
  * @returns Exact target, history and reason for admission.
  */
-export function bidRunRecoveryEligibility(session: Session, goalId: string): {
+export function bidRunRecoveryEligibility(session: Session): {
   eligible: boolean
   reason: string
   attempts: number
@@ -108,8 +107,8 @@ export function bidRunRecoveryEligibility(session: Session, goalId: string): {
     return { eligible: false, reason: '当前没有 S2～S5 挂起 Run。', attempts: 0, sameProblemCount: 0, previousInstructions: [], requiresStrategyChange: false }
   }
   const { run } = task
-  const history = session.events.flatMap(event => event.type === 'bid.goal.recovery.requested'
-    && event.data.goalId === goalId && event.data.target.kind === 'run'
+  const history = session.events.flatMap(event => event.type === 'bid.recovery.requested'
+    && event.data.target.kind === 'run'
     && event.data.target.workId === run.work.workId ? [event.data] : [])
   const attempts = history.length
   const target = { kind: 'run' as const, runId: run.runId, workId: run.work.workId }
@@ -150,10 +149,9 @@ export function renderBidRecoveryContext(recovery: ModelStageExecutionOptions['r
 /**
  * Durable S5 answered-plan failure visible without opening its on-disk answer.
  * @param session - Main Session containing the writing-entry projection.
- * @param goalId - Bound native Goal identity.
  * @returns Exact answered request and automatic recovery budget.
  */
-export function bidWritingPlanRecoveryEligibility(session: Session, goalId: string): {
+export function bidWritingPlanRecoveryEligibility(session: Session): {
   eligible: boolean
   reason: string
   attempts: number
@@ -172,8 +170,8 @@ export function bidWritingPlanRecoveryEligibility(session: Session, goalId: stri
     return { eligible: false, reason: '没有已保存的 S5 写作要求。', attempts: 0, sameProblemCount: 0, previousInstructions: [], requiresStrategyChange: false }
   }
   const target = { kind: 'writing_plan' as const, requestId, attemptId }
-  const history = session.events.flatMap(event => event.type === 'bid.goal.recovery.requested'
-    && event.data.goalId === goalId && event.data.target.kind === 'writing_plan'
+  const history = session.events.flatMap(event => event.type === 'bid.recovery.requested'
+    && event.data.target.kind === 'writing_plan'
     && event.data.target.requestId === requestId ? [event.data] : [])
   const attempts = history.length
   const fingerprint = createHash('sha256').update(JSON.stringify([requestId, attemptId, view?.error?.code])).digest('hex')
@@ -189,4 +187,16 @@ export function bidWritingPlanRecoveryEligibility(session: Session, goalId: stri
     return { eligible: false, reason: view?.error?.message ?? 'S5 计划不满足自动修复条件。', ...details }
   }
   return { eligible: true, reason: view.error?.message ?? '已保存答案的计划未提交。', ...details }
+}
+
+/**
+ * 检查主 Agent 是否对相同问题重复提交已经接纳的方案。
+ * @param session 保存恢复审计的主会话。
+ * @param fingerprint 当前失败与检查点指纹。
+ * @param instruction 待接纳的模型方案。
+ * @returns 该问题已有相同方案时为 true。
+ */
+export function bidRecoveryInstructionRepeated(session: Session, fingerprint: string | undefined, instruction: string): boolean {
+  return session.events.some(event => event.type === 'bid.recovery.requested'
+    && event.data.progressFingerprint === fingerprint && event.data.instruction.trim() === instruction.trim())
 }

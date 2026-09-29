@@ -26,6 +26,7 @@ export async function capabilityRecoveryFixture() {
   await ctx.plugin(SessionStore)
   const session = ctx.sessions.create()
   const message = createUserMessage({ content: [{ type: 'text', text: '审核两个范围' }], source: { kind: 'user' } })
+  session.append('turn/start', { turn: 1 })
   session.append('user/message', message, { surfaceOp: 'append' })
   const task = { goal: '审核两个范围', scope: { kind: 'project' as const }, steps: [
     { scope: { source: 'task' as const }, call: { capability: 'chapter.review' as const, input: { reason: '审核章节' } } },

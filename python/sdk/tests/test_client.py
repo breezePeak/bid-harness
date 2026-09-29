@@ -42,6 +42,11 @@ for line in sys.stdin:
         print(json.dumps({"jsonrpc": "2.0", "method": "session.event", "params": {"sessionId": params["sessionId"], "event": {"type": "agent/inbox/spliced", "data": {"target": "next-turn", "start": 0, "inserted": [{"id": "message-1"}]}}}}), flush=True)
         print(json.dumps({"jsonrpc": "2.0", "method": "session.status", "params": {"sessionId": params["sessionId"], "status": "running"}}), flush=True)
         print(json.dumps({"jsonrpc": "2.0", "id": msg["id"], "result": {"messageId": "message-1"}}), flush=True)
+        print(json.dumps({"jsonrpc": "2.0", "method": "session.event", "params": {
+            "sessionId": params["sessionId"], "event": {"type": "bid.recovery.requested", "data": {
+                "ownerSessionId": params["sessionId"], "target": {"kind": "run", "workId": "work-1", "runId": "run-1"},
+                "unit": "outline/outline.json", "instruction": "核对原文并修正当前章节。", "progressFingerprint": "a" * 64,
+            }}}}), flush=True)
         print(json.dumps({
             "jsonrpc": "2.0",
             "method": "session.event",
@@ -88,7 +93,8 @@ for line in sys.stdin:
     elif method == "shutdown":
         print(json.dumps({"jsonrpc": "2.0", "id": msg["id"], "result": {}}), flush=True)
         break
-""".strip()
+""".strip(),
+        encoding="utf-8",
     )
 
     with DeepSeekHarness(
@@ -110,6 +116,11 @@ for line in sys.stdin:
     assert result.final_response == "hello from runtime"
     assert result.finish_reason == "max-tokens"
     assert result.events[-1]["type"] == "turn/end"
+    assert next(event["data"] for event in result.events if event["type"] == "bid.recovery.requested") == {
+        "ownerSessionId": "main", "target": {"kind": "run", "workId": "work-1", "runId": "run-1"},
+        "unit": "outline/outline.json", "instruction": "核对原文并修正当前章节。", "progressFingerprint": "a" * 64,
+    }
+
     dumped_env = json.loads(env_dump.read_text())
     assert dumped_env["DEEPSEEK_API_KEY"] == "env-key"
     assert dumped_env["DEEPSEEK_BASE_URL"] == "http://127.0.0.1:4321"
