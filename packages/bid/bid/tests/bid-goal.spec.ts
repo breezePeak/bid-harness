@@ -14,8 +14,9 @@ import ToolRuntime from '@deepseek-ai/dsh-tools'
 import UserQuestionService from '@deepseek-ai/dsh-user-questions'
 import GoalService from '@deepseek-ai/dsh-goal'
 import * as GoalRoundDriver from '@deepseek-ai/dsh-goal-round-driver'
-import { BidHostRuntime, BidRunCoordinator, BidWorkspace, checkpointBidProjectState, readBidProjectState } from '../src/index.ts'
-import type { BidWorkDescriptor } from '../src/control-plane-contract.ts'
+import { BidHostRuntime, BidRunCoordinator, BidWorkspace, checkpointBidProjectState, readBidProjectState,
+  type BidRunContext } from '../src/index.ts'
+import { BidStageExecutionError, type BidWorkDescriptor } from '../src/control-plane-contract.ts'
 import type { Session } from '@deepseek-ai/dsh-session'
 import { persistBidWorkRequest } from '../src/work-descriptor.ts'
 import { buildBidStageTask } from '../src/runtime-state.ts'
@@ -208,12 +209,84 @@ it('仅重启已绑定且活跃的 Bid Goal，不恢复用户停止或暂停', a
     expect(ctx.goals.get(agent)?.activation).toBe('disarmed')
     bridge.rearmBoundActiveGoal(agent.session, { ...task, run: { ...task.run, cause: 'awaiting_input' } })
     bridge.rearmBoundActiveGoal(agent.session, { stage: 'tender_analysis', status: 'waiting_user', run: null })
-    expect(ctx.goals.get(agent)?.activation).toBe('disarmed')
+    expect(ctx.goals.get(agent)).toMatchObject({ activation: 'armed', roundsStarted: 0 })
+    ctx.goals.disarm(agent)
+    bridge.rearmBoundActiveGoal(agent.session, { stage: 'outline_generation', status: 'ready', run: null })
+    expect(ctx.goals.get(agent)).toMatchObject({ activation: 'armed', roundsStarted: 0 })
+    ctx.goals.disarm(agent)
     bridge.rearmBoundActiveGoal(agent.session, task)
     expect(ctx.goals.get(agent)?.activation).toBe('armed')
     const paused = ctx.goals.pause(agent, ctx.goals.get(agent)!)
     bridge.rearmBoundActiveGoal(agent.session, task)
     expect(ctx.goals.get(agent)).toMatchObject({ id: paused.id, phase: 'paused' })
+  } finally { disposeGate() }
+})
+
+it('waiting_user 启动时恢复绑定 Goal，但不运行恢复轮或代替用户确认', async () => {
+  const { ctx, host, agent, workspace } = await setup('tender_analysis')
+  const goal = ctx.goals.create(agent, { objective: '完成 S2～S5' })
+  agent.session.append('bid.goal.bound', { goalId: goal.id, ownerSessionId: String(agent.session.id), initialS2WorkId: 's2' })
+  await checkpointBidProjectState(workspace, { stage: 'outline_generation', status: 'waiting_user', run: null })
+  ctx.goals.disarm(agent)
+  const driver = host as unknown as { driveStartedSession(agent: Agent, cwd: string): Promise<void> }
+  await driver.driveStartedSession(agent, workspace.root)
+  expect(ctx.goals.get(agent)).toMatchObject({ activation: 'armed', roundsStarted: 0 })
+  expect(await readBidProjectState(workspace)).toMatchObject({ stage: 'outline_generation', status: 'waiting_user' })
+  expect(agent.session.events.some(event => event.type === 'bid.run.decision.required'
+    || event.type === 'bid.user_confirmation.received')).toBe(false)
+})
+
+it('ready 启动时恢复绑定 Goal，由 Host 正常驱动阶段且不消耗恢复轮', async () => {
+  const { ctx, host, agent, workspace } = await setup('tender_analysis')
+  const goal = ctx.goals.create(agent, { objective: '完成 S2～S5' })
+  agent.session.append('bid.goal.bound', { goalId: goal.id, ownerSessionId: String(agent.session.id), initialS2WorkId: 's2' })
+  await checkpointBidProjectState(workspace, { stage: 'evidence_mapping', status: 'ready', run: null })
+  ctx.goals.disarm(agent)
+  const drive = vi.fn(async () => {})
+  const driver = host as unknown as {
+    driveStartedSession(agent: Agent, cwd: string): Promise<void>
+    executionAgent(operation: Operation, stage: string): Promise<Agent>
+    automaticOrchestrator(): { drive(): Promise<void> }
+  }
+  driver.executionAgent = async () => agent
+  driver.automaticOrchestrator = () => ({ drive })
+  await driver.driveStartedSession(agent, workspace.root)
+  expect(drive).toHaveBeenCalledOnce()
+  expect(ctx.goals.get(agent)).toMatchObject({ activation: 'armed', roundsStarted: 0 })
+  expect(agent.session.events.some(event => event.type === 'bid.run.decision.required')).toBe(false)
+})
+
+it('Host 兜底结算 S2 Run 保存 repair metadata', async () => {
+  const { ctx, host, agent, workspace } = await setup('tender_analysis')
+  const disposeGate = ctx.goalRoundDriver.registerGate(() => 'wait')
+  try {
+    const operation = host.beginOperation(agent.session)
+    await host.prepareOperation(operation)
+    await operation.runs.start(work('tender_analysis'))
+    await host.finishOperation(agent.session, operation)
+    expect(await readBidProjectState(workspace)).toMatchObject({ stage: 'tender_analysis', status: 'suspended',
+      run: { cause: 'retry_exhausted', error: { recovery: { kind: 'repair' } } } })
+  } finally { disposeGate() }
+})
+
+it('后台目录交互保留结构化问题和 repair metadata', async () => {
+  const { ctx, host, agent, workspace } = await setup('tender_analysis')
+  const disposeGate = ctx.goalRoundDriver.registerGate(() => 'wait')
+  try {
+    await checkpointBidProjectState(workspace, { stage: 'outline_generation', status: 'ready', run: null })
+    const operation = host.beginOperation(agent.session)
+    await host.prepareOperation(operation)
+    const descriptor: BidWorkDescriptor = { ...work('tender_analysis'), kind: 'outline_regeneration', stage: 'outline_generation' }
+    const run = await operation.runs.start(descriptor)
+    const issues = [{ code: 'OUTLINE_SHARED_RESPONSE_POINT_MISSING', artifact: 'outline/outline.json', message: '响应点缺失' }]
+    vi.spyOn(run.activities, 'track').mockRejectedValueOnce(new BidStageExecutionError(issues))
+    const runtime = host as unknown as { finishDetachedOutlineInteraction(
+      agent: Agent, operation: Operation, executionAgent: Agent, workspace: BidWorkspace,
+      request: unknown, stage: 'outline_generation', run: BidRunContext,
+    ): Promise<void> }
+    await runtime.finishDetachedOutlineInteraction(agent, operation, agent, workspace, {}, 'outline_generation', run)
+    expect(await readBidProjectState(workspace)).toMatchObject({ stage: 'outline_generation', status: 'suspended',
+      run: { cause: 'retry_exhausted', error: { issues, recovery: { kind: 'repair', unit: 'outline/outline.json' } } } })
   } finally { disposeGate() }
 })
 

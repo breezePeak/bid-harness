@@ -43,6 +43,10 @@ S6 只对流程图、表格和图片执行最终页面视觉审核；标题、�
 
 ### 执行与恢复所有权
 
+Bid Host 在 Host 或 Session 重启后依据持久化的 `bid.goal.bound` 核对主会话、Goal 身份和活跃状态，恢复 S2～S5 `ready`、`waiting_user` 或可续行 `suspended` 状态下的进程内 activation。只有存在可自动恢复的目标时才启动 Goal Round；用户停止、等待人工输入、暂停的 Goal 和 S5 明确停止的写作入口均不自动恢复。S2～S5 的 Host-owned Run 因内部错误挂起时保存结构化 recovery metadata；裸 `executor_error` 消息不能作为内部错误的最终结算。明确的输入、权限和 Provider 阻断仍停在外部处理边界。
+
+S4 Initial Mapping 的客户可见编号检查只归当前任务可编辑的 Section 子树所有；其他章节的总述问题由各自任务处理，Final Check 仍检查完整目录。修复客户可见总述时保留正式目录中的评分 ID 绑定。
+
 每个 Host 入口明确归入 Long Run、Project Mutation、Pure Read 或 Independent DOCX Operation。Long Run 在启动前持久化请求和输入身份，以 Work Descriptor 区分完整阶段、文件接入、资料重映射、目录重生成、目录确认及章节修订；恢复按原 work kind 分派，并复用 `runs/<workId>/work/` 候选与匹配输入指纹的检查点，不按 stage 猜测。每个 Run 的持久化快照记录 Interaction Session 与 Execution Session 身份；Host 在 Execution Session 中运行执行器及其 Child、Writer 和 Reviewer，Interaction Session 始终可处理项目聊天。Run 启动后，执行器、Child、Worker、Parser 和 Renderer 统一使用 `run.signal` 并登记 Activity；只有调度、Agent、Child、Activity 与 Commit 全部收敛后才持久化 suspended 或 completed。
 
 Long Run 的正式文件只能由 Commit Scope 发布，短确定性修改由带 expected project revision 的 Project Mutation 提交，读取入口不创建或刷新文件。两种写入所有者共用 crash-safe PublicationBatch；项目读取先对 commit intent 前滚或清理未提交批次。项目 revision 只随 Run 控制转换或 Project Mutation 增长，同一 Run 的进度与 command journal 不把 revision 当 checkpoint 计数器。S5 steering 在响应 accepted 前写入 durable command journal；挂起主 S5 Run 保留自身身份，恢复时才应用已保存修订。独立 Word 操作不改变 Workflow revision，但 DOCX、Markdown 快照和 `lastExport` 使用同一 PublicationBatch。

@@ -8,16 +8,21 @@ import { createUserMessage, type UserMessage } from '@deepseek-ai/dsh-llm'
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
 import {
   BidHostRuntime, BidOrchestrator, BidWorkspace, checkpointBidProjectState, createScoringResponsePointCatalog,
-  getOrCreateOutlineDraft, parseEvidenceMapArtifact, parseOutlineArtifact, validateEvidenceMapping,
+  getOrCreateOutlineDraft, parseEvidenceMapArtifact, parseOutlineArtifact, readBidProjectState, validateEvidenceMapping,
   TECHNICAL_DEVIATION_SECTION_ID,
   type BidRunContext, type BidStageTask, type Config, type OutlineArtifact, type OutlineDraftView,
 } from '@deepseek-ai/dsh-bid'
 import { executeEvidenceMappingFinalCheck } from '../src/evidence-mapping-executor.ts'
+import { executeOutlineGeneration } from '../src/outline-generation-executor.ts'
 import { prepareBidStageContextTransition } from '../src/stage-context.ts'
 
 vi.mock('../src/evidence-mapping-executor.ts', async importOriginal => ({
   ...await importOriginal<typeof import('../src/evidence-mapping-executor.ts')>(),
   executeEvidenceMappingFinalCheck: vi.fn(),
+}))
+vi.mock('../src/outline-generation-executor.ts', async importOriginal => ({
+  ...await importOriginal<typeof import('../src/outline-generation-executor.ts')>(),
+  executeOutlineGeneration: vi.fn(),
 }))
 
 const identity = (draft: OutlineDraftView) => ({ expected_revision: draft.revision, expected_draft_sha256: draft.draft_outline_sha256 })
@@ -111,6 +116,32 @@ beforeEach(() => {
 })
 
 describe('S4 Draft 最终确认', () => {
+  it('已授权目录重生成的内部错误保存 repair metadata', async () => {
+    const f = await fixture()
+    try {
+      const draft = await getOrCreateOutlineDraft(f.workspace)
+      vi.mocked(executeOutlineGeneration).mockRejectedValueOnce(new Error('目录候选生成协议未完成'))
+      await expect(f.host.regenerateOutline(f.session, { ...identity(draft), feedback: '明确方案标题' }))
+        .resolves.toMatchObject({ ok: false, error: { code: 'BID_REGENERATE_FAILED' } })
+      expect(executeOutlineGeneration).toHaveBeenCalledOnce()
+      expect(await readBidProjectState(f.workspace)).toMatchObject({ stage: 'evidence_mapping', status: 'suspended',
+        run: { cause: 'retry_exhausted', error: { recovery: { kind: 'repair' } } } })
+      expect(f.session.events.some(event => event.type === 'bid.user_confirmation.received')).toBe(false)
+    } finally { await f.ctx.fiber.dispose() }
+  })
+
+  it('目录重生成的权限错误保持 blocked', async () => {
+    const f = await fixture()
+    try {
+      const draft = await getOrCreateOutlineDraft(f.workspace)
+      vi.mocked(executeOutlineGeneration).mockRejectedValueOnce(Object.assign(new Error('permission denied'), { code: 'EACCES' }))
+      await expect(f.host.regenerateOutline(f.session, { ...identity(draft), feedback: '明确方案标题' }))
+        .resolves.toMatchObject({ ok: false, error: { code: 'BID_REGENERATE_FAILED' } })
+      expect(await readBidProjectState(f.workspace)).toMatchObject({ status: 'failed', run: null,
+        failure: { recovery: { kind: 'blocked' }, issues: [{ code: 'EACCES' }] } })
+    } finally { await f.ctx.fiber.dispose() }
+  })
+
   it('读取已确认 S3 基线；移动保存和重新读取不修改基线或 Evidence', async () => {
     const f = await fixture()
     try {

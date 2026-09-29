@@ -33,6 +33,10 @@ S4 的映射计划和检查点通过当前 Agent 的文件系统服务提交；�
 
 `stopRun` 同时取消发起停止的会话回复和项目后台 Run，保留待处理的用户消息；后台执行收敛并保存挂起状态后返回。主会话空闲时也可停止后台 Run。
 
+Bid Host 在 Host 或 Session 重启后依据持久化的 `bid.goal.bound` 核对主会话、Goal 身份和活跃状态，恢复 S2～S5 `ready`、`waiting_user` 或可续行 `suspended` 状态下的进程内 activation。只有存在可自动恢复的目标时才启动 Goal Round；用户停止、等待人工输入、暂停的 Goal 和 S5 明确停止的写作入口均不自动恢复。S2～S5 的 Host-owned Run 因内部错误挂起时保存结构化 recovery metadata；裸 `executor_error` 消息不能作为内部错误的最终结算。明确的输入、权限和 Provider 阻断仍停在外部处理边界。
+
+S4 Initial Mapping 的客户可见编号检查只归当前任务可编辑的 Section 子树所有；其他章节的总述问题由各自任务处理，Final Check 仍检查完整目录。修复客户可见总述时保留正式目录中的评分 ID 绑定。
+
 S2 Run 首次通过 running 检查点后，Host 把一个原生 Goal 绑定到同一主会话；S1 和独立 S6 不取得该目标。后台阶段正常运行或等待用户正式确认时，Goal Round 暂缓且不消耗轮数。S2～S5 的内部执行或校验失败在本地修复耗尽后交回主 Agent；主 Agent 读取 `bid_stage_inspect(view="recovery")` 的失败单元、连续相同问题次数和最近指令，再调用 `bid_recover_task` 提交不同的具体办法，Host 拒绝相同问题的重复指令，原执行子代理按原提交和校验流程继续。重复问题和接管次数用于要求换策略，不终止修复；自动续行仍受原生 Goal 总轮数约束。Host 重启后重新确认自己绑定的 active Goal，并按原 Run ID、项目 revision 和检查点自动续行；用户停止与等待真实输入保持人工边界，输入身份变化和确定的模型基础设施故障停止自动修复。Goal 完成只跟随 S5 正式完成，不触发 Word 导出。
 
 `project-state.json` 是项目进度的持久化来源，schema version 4 扁平保存 `stage`、`status`、`run`、单调递增 revision 和 `updated_at`，不保存聊天消息、工具调用、提示词或摘要。读取器会把结构合法的 v3 状态归一为 v4，后续写入只使用 v4。Bid Session 启动时从 `session.header.cwd` 定位项目；缺少状态文件时初始化 S1 等待上传，否则通过 `bid.project.resumed` 恢复当前 Session 的 Projection。Workspace 的“+”继续调用 `sessions.create()`：新 Session 不读取其他 Session 的聊天或模型上下文，也不建立父会话关系。

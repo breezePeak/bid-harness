@@ -1473,12 +1473,14 @@ async function executeOutlineRegenerationCandidate(
     ])
     return { ok: true, value: { stage: run.work.stage, status: 'waiting_user', run: null } }
   } catch (error: unknown) {
+    const originalCode = error !== null && typeof error === 'object' && 'code' in error ? error.code : undefined
     return { ok: false, error: {
       code: 'BID_REGENERATE_FAILED',
       message: error instanceof Error && error.message === 'change-set-mismatch'
         ? 'The regeneration change set does not match the candidate.'
         : `The regenerated outline candidate is invalid: ${error instanceof Error ? error.message : String(error)}`,
-      issues: validationIssues,
+      issues: validationIssues.length > 0 ? validationIssues : error instanceof BidStageExecutionError ? error.issues
+        : typeof originalCode === 'string' ? [{ code: originalCode, message: error instanceof Error ? error.message : String(error) }] : [],
       current: draft,
     } }
   }
@@ -1992,10 +1994,12 @@ export class BidHostRuntime extends TypertRemoteService {
         if (operation.retirement !== undefined) {
           await operation.retirement
         } else {
-          if (operation.runs.current !== undefined && this.inFlight.get(key) === operation) {
-            operation.suspension ??= operation.runs.suspend('executor_error', {
-              message: '阶段执行已中断，已保存完成进度。',
-            })
+          const current = operation.runs.current
+          if (current !== undefined && this.inFlight.get(key) === operation) {
+            const failure = safeRecoverableBidFailure(current.work, new Error('阶段执行已中断，已保存完成进度。'))
+            operation.suspension ??= operation.runs.suspend(
+              failure.recovery?.kind === 'repair' ? 'retry_exhausted' : 'executor_error', failure,
+            )
           }
           await operation.suspension
           if (operation.suspension === undefined && this.isContextActive()) await this.checkpoint(operation)
@@ -3692,10 +3696,9 @@ export class BidHostRuntime extends TypertRemoteService {
         }
       } catch (error: unknown) {
         if (run !== undefined && operation.runs.current === run) {
-          await operation.runs.suspend(
-            run.signal.aborted ? 'user_stop' : 'executor_error',
-            { code: 'BID_REVISION_BATCH_FAILED', message: error instanceof Error ? error.message : String(error) },
-          )
+          const failure = safeRecoverableBidFailure(run.work, error)
+          await operation.runs.suspend(run.signal.aborted ? 'user_stop'
+            : failure.recovery?.kind === 'repair' ? 'retry_exhausted' : 'executor_error', failure)
         }
         try {
           const batch = await readRevisionBatch(operation.workspace, request.batch_id)
@@ -3966,9 +3969,10 @@ export class BidHostRuntime extends TypertRemoteService {
               session.append('bid.user_confirmation.required', { stage: task.stage, status: 'waiting_user' })
             })
           } else if (operation.runs.current !== undefined) {
-            await operation.runs.suspend(run?.signal.aborted === true ? 'user_stop' : 'executor_error', {
-              message: '阶段交互未完成，已保留工作候选供恢复。',
-            })
+            const failure = safeRecoverableBidFailure(operation.runs.current.work,
+              new Error('阶段交互未完成，已保留工作候选供恢复。'))
+            await operation.runs.suspend(run?.signal.aborted === true ? 'user_stop'
+              : failure.recovery?.kind === 'repair' ? 'retry_exhausted' : 'executor_error', failure)
           }
         }
         try { await this.ctx.sessions.flush(session) } finally { await this.finishOperation(session, operation) }
@@ -4005,9 +4009,10 @@ export class BidHostRuntime extends TypertRemoteService {
           agent.session.append('bid.user_confirmation.required', { stage, status: 'waiting_user' })
         })
       } else if (operation.runs.current === run) {
-        await operation.runs.suspend(run.signal.aborted ? 'user_stop' : 'executor_error', {
-          message: failure instanceof Error ? failure.message : '阶段交互未完成，已保留工作候选供恢复。',
-        })
+        const error = safeRecoverableBidFailure(run.work,
+          failure ?? new Error('阶段交互未完成，已保留工作候选供恢复。'))
+        await operation.runs.suspend(run.signal.aborted ? 'user_stop'
+          : error.recovery?.kind === 'repair' ? 'retry_exhausted' : 'executor_error', error)
       }
     } catch (error: unknown) {
       this.ctx.logger.warn(`Bid 后台阶段交互结算失败：${String(error)}`)
@@ -4032,12 +4037,17 @@ export class BidHostRuntime extends TypertRemoteService {
     let driven = false
     try {
       const task = await this.prepareOperation(operation)
-      this.bidGoalBridge?.rearmBoundActiveGoal(session, task)
       const workspace = new BidWorkspace(cwd, workspaceConfig(this.config))
+      const writingStopped = task.stage === 'chapter_writing' && (
+        this.writingEntryStops.has(key)
+        || (await readWritingEntryStop(workspace)) !== undefined
+        || (await readWritingRequest(workspace))?.continuation === 'paused'
+      )
+      if (!writingStopped) this.bidGoalBridge?.rearmBoundActiveGoal(session, task)
       if (task.status === 'suspended') {
         const bound = bidGoalBinding(session)
         const goal = this.ctx.get('goals')?.get(agent)
-        if (task.run.cause === 'host_restart' && bound?.data.ownerSessionId === String(session.id)
+        if (!writingStopped && task.run.cause === 'host_restart' && bound?.data.ownerSessionId === String(session.id)
           && goal?.id === bound.data.goalId && goal.phase === 'active' && goal.activation === 'armed'
           && task.run.work.kind !== 'file_intake'
           && ['tender_analysis', 'outline_generation', 'evidence_mapping', 'chapter_writing'].includes(task.stage)) {
@@ -4063,10 +4073,7 @@ export class BidHostRuntime extends TypertRemoteService {
         return
       }
       if (task.stage === 'chapter_writing' && task.status !== 'running') {
-        const isStopped = this.writingEntryStops.has(key)
-          || (await readWritingEntryStop(workspace)) !== undefined
-          || (await readWritingRequest(workspace))?.continuation === 'paused'
-        if (isStopped) {
+        if (writingStopped) {
           await this.broadcastWritingEntryView(workspace, task, operation.projectRevision, [session])
           await this.ctx.sessions.flush(session)
           return
@@ -6127,6 +6134,7 @@ export class BidHostRuntime extends TypertRemoteService {
     const operation = this.beginOperation(session)
     let run: BidRunContext | undefined
     let workSettled = false
+    let suspensionError: unknown
     try {
       const runtime = await this.prepareOperation(operation)
       if (!getBidClientProjection(runtime).allowedActions.includes('revise_chapter')) {
@@ -6150,6 +6158,7 @@ export class BidHostRuntime extends TypertRemoteService {
       })
       return { ok: true, value: await this.getReviewChapter(session, parsed.data.reference.section_id) }
     } catch (error: unknown) {
+      suspensionError = error
       const reason = error instanceof Error ? error.message : ''
       if (reason.includes('BID_CHAPTER_REVISION_CONFLICT')) return reject('BID_CHAPTER_REVISION_CONFLICT', '章节正文已变化，请重新选择章节或段落。')
       if (reason.includes('BID_CHAPTER_REVISION_SELECTION_INVALID')) return reject('BID_CHAPTER_REVISION_SELECTION_INVALID', '请选择同一章节中的一个或相邻多个完整段落。')
@@ -6158,10 +6167,16 @@ export class BidHostRuntime extends TypertRemoteService {
       return reject('BID_CHAPTER_REVISION_FAILED', '原章节 Writer 未完成修订，正文已保留，请重试。')
     } finally {
       if (run !== undefined && operation.runs.current === run) {
-        await operation.runs.suspend(run.signal.aborted ? 'user_stop' : 'executor_error', {
-          code: 'BID_CHAPTER_REVISION_FAILED',
-          message: workSettled ? '章节修订未完成状态提交。' : '章节修订未完成，已保存可恢复进度。',
-        })
+        const reason = suspensionError instanceof Error ? suspensionError.message : ''
+        const blockedCode = ['BID_CHAPTER_REVISION_CONFLICT', 'BID_CHAPTER_REVISION_SELECTION_INVALID',
+          'BID_CHAPTER_REVISION_NOT_WRITABLE', 'BID_CHAPTER_REVISION_CONTEXT_UNAVAILABLE']
+          .find(code => reason.includes(code))
+        const failure = safeRecoverableBidFailure(run.work, blockedCode === undefined
+          ? suspensionError ?? { code: 'BID_CHAPTER_REVISION_FAILED',
+            message: workSettled ? '章节修订未完成状态提交。' : '章节修订未完成，已保存可恢复进度。' }
+          : { code: blockedCode, message: reason })
+        await operation.runs.suspend(run.signal.aborted ? 'user_stop'
+          : failure.recovery?.kind === 'repair' ? 'retry_exhausted' : 'executor_error', failure)
       }
       await this.finishOperation(session, operation)
     }
@@ -7432,6 +7447,7 @@ export class BidHostRuntime extends TypertRemoteService {
     const operation = this.beginOperation(session)
     let run: BidRunContext | undefined
     let workSettled = false
+    let suspensionError: unknown
     try {
       const runtime = await this.prepareOperation(operation)
       if (!getBidClientProjection(runtime).allowedActions.includes('confirm_outline')) return { ok: false, error: { code: 'BID_CONFIRM_NOT_ALLOWED', message: 'Outline confirmation is not allowed in the current Bid stage state.' } }
@@ -7467,13 +7483,15 @@ export class BidHostRuntime extends TypertRemoteService {
       await this.ctx.sessions.flush(session)
       return { ok: true, value: next }
     } catch (error) {
+      suspensionError = error
       return { ok: false, error: { code: 'BID_CONFIRM_FAILED', message: error instanceof Error ? error.message : String(error), ...(error instanceof BidStageExecutionError ? { issues: error.issues } : {}) } }
     } finally {
       if (run !== undefined && operation.runs.current === run) {
-        await operation.runs.suspend(run.signal.aborted ? 'user_stop' : 'executor_error', {
-          code: 'BID_CONFIRM_FAILED',
-          message: workSettled ? '目录确认未完成状态提交。' : '目录确认候选未完成，已保留供恢复。',
+        const failure = safeRecoverableBidFailure(run.work, suspensionError ?? {
+          code: 'BID_CONFIRM_FAILED', message: workSettled ? '目录确认未完成状态提交。' : '目录确认候选未完成，已保留供恢复。',
         })
+        await operation.runs.suspend(run.signal.aborted ? 'user_stop'
+          : failure.recovery?.kind === 'repair' ? 'retry_exhausted' : 'executor_error', failure)
       }
       await this.finishOperation(session, operation)
     }
@@ -7497,6 +7515,8 @@ export class BidHostRuntime extends TypertRemoteService {
     const operation = this.beginOperation(session)
     let run: BidRunContext | undefined
     let workSettled = false
+    let suspensionError: unknown
+    let suspensionIssues: readonly StageValidationIssue[] | undefined
     let task = BID_INITIAL_TASK_STATE
     try {
       task = await this.prepareOperation(operation)
@@ -7516,9 +7536,14 @@ export class BidHostRuntime extends TypertRemoteService {
         admittedRun,
         this.config,
       ))
-      workSettled = true
+      workSettled = result.ok
+      if (!result.ok) {
+        suspensionError = result.error
+        suspensionIssues = result.error.issues
+      }
       return result
     } catch (error: unknown) {
+      suspensionError = error
       if (error instanceof BidOrchestratorError && error.code === 'BID_OUTLINE_FEEDBACK_REQUIRED') return { ok: false, error: { code: 'BID_OUTLINE_FEEDBACK_REQUIRED', message: '请输入目录修改意见。' } }
       return { ok: false, error: { code: 'BID_REGENERATE_FAILED', message: 'The Bid Host could not regenerate the outline.' } }
     } finally {
@@ -7530,10 +7555,11 @@ export class BidHostRuntime extends TypertRemoteService {
             })
           })
         } else {
-          await operation.runs.suspend(run.signal.aborted ? 'user_stop' : 'executor_error', {
-            code: 'BID_REGENERATE_FAILED',
-            message: '目录重生成未完成，已保留工作候选供恢复。',
-          })
+          const failure = safeRecoverableBidFailure(run.work, suspensionError ?? {
+            code: 'BID_REGENERATE_FAILED', message: '目录重生成未完成，已保留工作候选供恢复。',
+          }, suspensionIssues)
+          await operation.runs.suspend(run.signal.aborted ? 'user_stop'
+            : failure.recovery?.kind === 'repair' ? 'retry_exhausted' : 'executor_error', failure)
         }
       }
       try { await this.ctx.sessions.flush(session) } finally { await this.finishOperation(session, operation) }
