@@ -8,7 +8,7 @@ Bid 阶段开始时会持久化 `bid.stage.started`，但 Host 进程在 Executo
 
 ## Decision
 
-Host 把“项目状态存在 running 或 cancelling Run，但新进程没有对应 operation”视为中断执行。`agent/session-start` 在运行任何 Executor 前保留 Workflow 业务进度并持久化 `host_restart` 挂起；恢复结果是项目状态与 Session 事件中的事实，而不是浏览器推测。已绑定且可继续的 S2～S5 Goal 由[Host 自动续行](2026-09-28-bid-host-recovery-continuation.md)恢复精确 Run；其他意外挂起可按[聊天续行](2026-09-26-bid-interrupted-run-chat-resume.md)处理，执行核对由[统一 Run 生命周期](../architecture/2026-09-13-bid-workflow-run-lifecycle.md)拥有。
+Host 把“项目状态存在 running 或 cancelling Run，但新进程没有对应 operation”视为中断执行。`agent/session-start` 在运行任何 Executor 前保留 Workflow 业务进度并持久化 `host_restart` 挂起；恢复结果是项目状态与 Session 事件中的事实，而不是浏览器推测。可继续的 S2～S5 Run 由[Host 自动续行](2026-09-28-bid-host-recovery-continuation.md)恢复精确 Run；其他意外挂起可按[聊天续行](2026-09-26-bid-interrupted-run-chat-resume.md)处理，执行核对由[统一 Run 生命周期](../architecture/2026-09-13-bid-workflow-run-lifecycle.md)拥有。
 
 同一 Orchestrator 上的并发 `drive()` 仍共享已安装的 operation，不会把真正在执行的 Run 标记为中断。恢复不接管内存 Promise 或调度状态；各阶段 Executor 按持久检查点核对并复用已完成工作。
 
@@ -22,7 +22,7 @@ composer block 只禁止普通消息和依赖消息上下文的输入控件。�
 
 **保持 `running`，由用户发送普通消息直接续跑。** 上一个进程的 Promise、Agent 等待和 Child Session 调度状态无法在新进程中继续；普通消息只能促使 Main Agent 检查并发起精确恢复。
 
-**不核对原 Work 就自动重跑当前阶段。** 进程停止可能留下部分 Artifact 和已发起的外部工作；Host 先持久化挂起，已绑定的 Goal 再按原 Run 身份、输入和检查点恢复，不把中断误报为新的成功执行。
+**不核对原 Work 就自动重跑当前阶段。** 进程停止可能留下部分 Artifact 和已发起的外部工作；Host 先持久化挂起，Host 再按原 Run 身份、输入和检查点恢复，不把中断误报为新的成功执行。
 
 **只在浏览器把长时间 `running` 显示为可恢复。** 不采用，因为多个 Client 会产生不同的超时判断，项目状态与 Session 日志仍然保留错误的运行状态。
 
@@ -34,4 +34,4 @@ composer block 只禁止普通消息和依赖消息上下文的输入控件。�
 
 ## Consequences
 
-Host 重启后，中断的 Bid Run 会稳定进入 `host_restart` 挂起；已绑定且可继续的 S2～S5 Goal 自动恢复，其他情况页面保持 Composer 可用，用户可以在聊天中明确要求继续，也可从 `+` 命令菜单把 S2～S5 重置到当前或更早阶段。运行中的阶段能在全部 Agent 工作停止后安全回退，不会与正在写入的 Worker 并发删除文件。项目状态文件负责跨 Session 进度，当前 Session 的日志负责执行记录和 Projection；恢复同步与锁归属见[Workspace 项目记录](../architecture/2026-09-03-bid-workspace-project.md)。
+Host 重启后，中断的 Bid Run 会稳定进入 `host_restart` 挂起；可继续的 S2～S5 Run 自动恢复，其他情况页面保持 Composer 可用，用户可以在聊天中明确要求继续，也可从 `+` 命令菜单把 S2～S5 重置到当前或更早阶段。运行中的阶段能在全部 Agent 工作停止后安全回退，不会与正在写入的 Worker 并发删除文件。项目状态文件负责跨 Session 进度，当前 Session 的日志负责执行记录和 Projection；恢复同步与锁归属见[Workspace 项目记录](../architecture/2026-09-03-bid-workspace-project.md)。

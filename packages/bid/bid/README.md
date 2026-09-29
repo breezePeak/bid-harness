@@ -43,7 +43,11 @@ S6 只对流程图、表格和图片执行最终页面视觉审核；标题、�
 
 ### 执行与恢复所有权
 
-Bid Host 在 Host 或 Session 重启后依据持久化的 `bid.goal.bound` 核对主会话、Goal 身份和活跃状态，恢复 S2～S5 `ready`、`waiting_user` 或可续行 `suspended` 状态下的进程内 activation。只有存在可自动恢复的目标时才启动 Goal Round；用户停止、等待人工输入、暂停的 Goal 和 S5 明确停止的写作入口均不自动恢复。S2～S5 的 Host-owned Run 因内部错误挂起时保存结构化 recovery metadata；裸 `executor_error` 消息不能作为内部错误的最终结算。明确的输入、权限和 Provider 阻断仍停在外部处理边界。
+默认 S1～S6 流程不创建或绑定 Goal。执行器局部修复耗尽后保留挂起 Run、结构化错误及已完成检查点，主动唤醒主 Agent 分析原因。Host 在失败落盘并释放项目锁后以有界 plugin notice 调用 `steer()` 唤醒主 Agent。主 Agent 用 `bid_stage_inspect(view="recovery")` 读取真实错误、检查点和历史指令，再用 `bid_recover_task(instruction=...)` 提交具体方案。S5 已保存回答的计划失败也复用该入口，不重复询问用户。Host 只负责接纳、输入与权限校验、检查点续行和正式发布；主 Agent 不能代替用户确认。用户停止仍使用原生 Run 决策，等待输入仍使用原问题。
+
+只有用户显式 `/goal` 才创建 Goal。Goal Round 与普通主 Agent 使用相同的当前阶段公开工具；已有 Goal 可读取、更新或提前完成。项目有后台操作时 Busy Gate 只等待，不消耗轮数；后台释放项目后重新请求 Driver。Bid 停止、重置和 S5 完成不改变 Goal，Goal 暂停、清除或完成也不取消 Bid。Host 重启按 Bid 自身的 Run ID、project revision、输入指纹、检查点和停止状态续行，不检查或重新激活 Goal。
+
+新能力请求只接受当前用户回合或原生 Driver 已接纳的当前 live Main Agent Goal 轮次；持久化授权仍只保存 Session ID 和消息 ID。旧消息不能授权新调用，已接纳队列保留原授权继续执行。`bid.recovery.requested` 记录主 Agent 的目标、失败单元、指令和进度指纹；同一问题不接受已经用过的相同指令，Host 不生成替代方案。旧 `bid.goal.bound` 与 `bid.goal.recovery.requested` 仅保留会话读取定义，不参与运行时调度。
 
 S4 Initial Mapping 的客户可见编号检查只归当前任务可编辑的 Section 子树所有；其他章节的总述问题由各自任务处理，Final Check 仍检查完整目录。修复客户可见总述时保留正式目录中的评分 ID 绑定。
 
@@ -81,7 +85,7 @@ Word 模板上传、模板库选择、格式确认、独立格式建议和导出
 
 S1–S5 与 `docx_export` 的 `running` 和 `completed` 均开放普通消息，S2–S5 的 `waiting_user` 继续开放交互。公开消息通过正式 `Agent.steer()` 和 inbox 留在发起消息的 Interaction Session；Host 为每个 Long Run 创建独立 Execution Session，阶段执行、Child、Writer 与 Reviewer 不占用聊天 Agent。同项目的其他顶层 Session 也能读取项目快照并聊天，但不能取得第二个项目写入所有者。运行态和完成态公开回合挂载当前阶段工具及项目级只读检查，私有 finish 工具及继承的通用工具不进入用户请求 Schema。
 
-S2、S3 和 S5 的私有协议只在 Execution Session 中运行；Execution Agent 消费直属 Child 的 report 和 settled 消息，Interaction Session 始终过滤这些原始消息。Run 挂起、attention_required 或最终完成时，Host 只把阶段、状态、原因、错误码、摘要和最多三条问题作为 `@deepseek-ai/dsh-bid` instruction 注入 Interaction Agent；空闲 Agent 不被唤醒，下次用户消息会一并取得该持久 inbox 消息。连续用户消息由各自聊天 Agent 保持原顺序，单次回复的结束或失败不结算阶段 operation，也不等待执行 Agent idle。
+S2、S3 和 S5 的私有协议只在 Execution Session 中运行；Execution Agent 消费直属 Child 的 report 和 settled 消息，Interaction Session 始终过滤这些原始消息。Run 挂起、attention_required 或最终完成时，Host 只把阶段、状态、原因、错误码、摘要和最多三条问题作为 `@deepseek-ai/dsh-bid` instruction 注入 Interaction Agent；内部错误挂起在 Run 结算后唤醒空闲主 Agent，让其分析并处理；完成和普通进度通知留到下一次对话。连续用户消息由各自聊天 Agent 保持原顺序，单次回复的结束或失败不结算阶段 operation，也不等待执行 Agent idle。
 
 Main Agent 通过只读 `bid_stage_inspect` 读取有界阶段快照。快照包含阶段状态、开始时间、最近公开事件和当前产物摘要；S4 额外返回任务计数，S5 返回至多一百个章节的 Writer/Reviewer 状态、最近问题、当前页数估算和 Word 格式身份。只有 `task_contract_context` 或正文引用检查才读取对应详细上下文，普通进度问题不会把完整招标书、全部 Artifact 或执行日志送入模型。S3/S4 等待确认时另提供 `bid_outline_apply_operations`、`bid_outline_regenerate_scope`，S4 提供 `bid_evidence_remap`。编号和标题由模型根据 inspect 的当前目录树解析为实际 Section ID，不要求用户填写内部 ID。检查结果、交互提示和工具结果都进入会话日志；动态工具集合改变后续请求的工具前缀，已记录的历史消息不改写。
 

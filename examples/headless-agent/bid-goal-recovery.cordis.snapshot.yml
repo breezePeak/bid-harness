@@ -15,3 +15,6 @@
   config:
     defaultMaxGoalRounds: 1
 - name: '@deepseek-ai/dsh-goal-round-driver'
+- name: '@deepseek-ai/dsh-commands'
+- name: '@deepseek-ai/dsh-command-goal'
+- name: '@deepseek-ai/dsh-tool-goal'

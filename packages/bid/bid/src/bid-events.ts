@@ -44,6 +44,7 @@ export const BID_SESSION_EVENT_TYPES = [
   'bid.schema.warning',
   'bid.goal.bound',
   'bid.goal.recovery.requested',
+  'bid.recovery.requested',
   'bid.capability.input.required',
   'bid.capability.input.received',
 ] as const
@@ -223,14 +224,31 @@ declare module '@deepseek-ai/dsh-session/types' {
     /** schema_version 诊断；不改变 stage、gate、run 或可用动作。 */
     'bid.schema.warning': BidSchemaWarning
     /**
-     * Host 在 S2 接纳时绑定原生 Goal，后续阶段沿用其身份。
+     * 主 Agent 对已保存失败的修复要求，不依赖 Goal。
+     * @param ownerSessionId 当前主会话身份。
+     * @param target 精确失败的 Run 或写作请求。
+     * @param unit 当前失败单元。
+     * @param instruction 主 Agent 提交的具体修复方案。
+     * @param progressFingerprint 恢复前的问题与检查点摘要。
+     */
+    'bid.recovery.requested': {
+      ownerSessionId: string
+      target: { kind: 'run'; workId: string; runId: string } | { kind: 'writing_plan'; requestId: string; attemptId: string }
+      unit: string
+      instruction: string
+      progressFingerprint: string
+    }
+    /**
+     * 旧版 Goal 绑定，仅用于历史日志回放；运行时不再生产或消费。
+     * @deprecated replay-only
      * @param goalId 原生 Goal 身份。
      * @param ownerSessionId 公开主会话身份。
      * @param initialS2WorkId 已接纳的 S2 Work 身份。
      */
     'bid.goal.bound': { goalId: string; ownerSessionId: string; initialS2WorkId: string }
     /**
-     * 对精确失败工作接纳的一条持久恢复指令。
+     * 旧版 Goal 恢复指令，仅用于历史日志回放；运行时不再生产或消费。
+     * @deprecated replay-only
      * @param goalId 授权本次恢复的原生 Goal。
      * @param ownerSessionId 公开主会话身份。
      * @param target 精确失败的 Run 或写作请求。

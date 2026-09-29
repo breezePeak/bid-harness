@@ -32,6 +32,7 @@ it('同一能力 Work 先更正招标理解再改目录，正式正文仅按实�
   const session = ctx.sessions.create()
   const message = createUserMessage({ content: [{ type: 'text', text: '更正第三章理解并修改目录标题' }],
     source: { kind: 'user' } })
+  session.append('turn/start', { turn: 1 })
   session.append('user/message', message, { surfaceOp: 'append' })
   const task = bidCapabilityTaskSchema.parse({ goal: '更正第三章理解并修改目录标题', scope: { kind: 'project' }, steps: [
     { scope: { source: 'task' as const }, call: { capability: 'tender.update' as const,
@@ -81,6 +82,7 @@ it('移动已有章节后保持身份和正文文件，导出按新目录顺序�
   const session = ctx.sessions.create()
   const message = createUserMessage({ content: [{ type: 'text', text: '将第三章移到第一章前面，不改正文' }],
     source: { kind: 'user' } })
+  session.append('turn/start', { turn: 1 })
   session.append('user/message', message, { surfaceOp: 'append' })
   const task = bidCapabilityTaskSchema.parse({ goal: '将第三章移到第一章前面，不改正文',
     scope: { kind: 'project' }, steps: [{ scope: { source: 'task' },
@@ -130,6 +132,7 @@ it('同一完成项目连续更正要求、移动合并章节和局部约束后�
   const agent = { id: 'deterministic-main' } as Parameters<typeof executeCapabilityTask>[3]
   const run = async (goal: string, capability: 'tender.update' | 'outline.update', input: unknown) => {
     const message = createUserMessage({ content: [{ type: 'text', text: goal }], source: { kind: 'user' } })
+    session.append('turn/start', { turn: 1 })
     session.append('user/message', message, { surfaceOp: 'append' })
     const task = bidCapabilityTaskSchema.parse({ goal, scope: { kind: 'project' }, steps: [{
       scope: { source: 'task' }, call: { capability, input },

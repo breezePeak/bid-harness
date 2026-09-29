@@ -41,6 +41,7 @@ import { buildWritableSectionWorklist } from './section-evidence-context.ts'
 import { assertNoLinkedPath, within } from './workspace-path.ts'
 import type { BidRunData } from './control-plane-contract.ts'
 import { bidRunRecoveryEligibility, bidWritingPlanRecoveryEligibility } from './bid-recovery.ts'
+import { resolveBidToolAuthorization } from './bid-tool-authorization.ts'
 
 const identity = { expected_revision: z.number().int().positive(), expected_draft_sha256: z.string().regex(/^[a-f0-9]{64}$/u) }
 const scope = z.array(z.string().min(1)).min(1)
@@ -91,7 +92,7 @@ export const stageInteractionSchema = z.union([
   }).strict(),
 ])
 
-const names = [
+const BID_INTERACTION_TOOL_NAMES = [
   'bid_stage_inspect',
   'bid_outline_apply_operations',
   'bid_outline_regenerate_scope',
@@ -213,14 +214,8 @@ async function inspectBidStageValue(
 ) {
   const task = session.events.reduce(reduceBidTaskState, BID_INITIAL_TASK_STATE)
   if (view === 'recovery') {
-    const binding = session.events.findLast(event => event.type === 'bid.goal.bound')
-    const decision = binding?.type === 'bid.goal.bound'
-      ? task.stage === 'chapter_writing' && task.status === 'waiting_user'
-        ? bidWritingPlanRecoveryEligibility(session, binding.data.goalId)
-        : bidRunRecoveryEligibility(session, binding.data.goalId)
-      : { eligible: false, reason: '当前会话没有已绑定的 Bid Goal。', attempts: 0,
-        sameProblemCount: 0, previousInstructions: [], requiresStrategyChange: false,
-        target: undefined }
+    const decision = task.stage === 'chapter_writing' && task.status === 'waiting_user'
+      ? bidWritingPlanRecoveryEligibility(session) : bidRunRecoveryEligibility(session)
     let writingPlanDiagnostic: { readable: boolean; matchesTarget: boolean; error?: string } | undefined
     let artifactDiagnostic: { path: string; readable: boolean; reason?: string } | undefined
     const artifact = task.status === 'suspended'
@@ -262,6 +257,7 @@ async function inspectBidStageValue(
       requires_strategy_change: decision.requiresStrategyChange,
       previous_instructions: decision.previousInstructions,
       target: decision.target ?? null,
+      progress_fingerprint: decision.fingerprint ?? null,
       writing_plan_diagnostic: writingPlanDiagnostic ?? null,
       artifact_diagnostic: artifactDiagnostic ?? null,
       run_id: task.status === 'suspended' ? task.run.runId : null,
@@ -604,7 +600,7 @@ function renderSuspendedRunPrompt(
     reason === undefined ? undefined : `中断原因：${reason}`,
     '先按用户完整语义判断：继续未完成任务、带新约束继续、修改当前阶段，或只进行问答。不得通过“继续”等关键词硬编码意图。',
     interrupted
-      ? '用户明确要求继续当前挂起任务时调用 bid_resume_current_run，传入当前 Run ID 和项目 revision；普通询问保持只读。'
+      ? '用户明确要求继续时调用 bid_resume_current_run，传入当前 Run ID 和项目 revision；内部可修复失败由主 Agent inspect 后调用 bid_recover_task，普通询问保持只读。'
       : '挂起 Run 的继续、当前阶段重跑或停止由 Host 通过 DSH 原生用户提问处理；普通消息不视为这些决策的答案。',
     stage === 'chapter_writing' && workKind === 'stage_execution'
       ? interrupted
@@ -662,13 +658,10 @@ export function installStageInteractionTools(
       const chatResume = suspended !== undefined && suspended.cause !== 'user_stop' && suspended.cause !== 'awaiting_input'
       const stage = isBidMainSession(agent.session) ? task.stage : undefined
       const scope = stage === undefined ? undefined : `${stage}:${suspended === undefined ? task.status : `suspended:${suspended.runId}`}`
-      const bound = agent.session.events.findLast(event => event.type === 'bid.goal.bound')
-      const goal = toolCtx.get('goals') as { get(agent: Agent): { id: string; phase: string; activation: string } | undefined } | undefined
-      const recoveryAvailable = bound?.type === 'bid.goal.bound' && goal?.get(agent)?.id === bound.data.goalId
-        && goal.get(agent)?.phase === 'active' && goal.get(agent)?.activation === 'armed'
-        && (bidRunRecoveryEligibility(agent.session, bound.data.goalId).eligible
-          || bidWritingPlanRecoveryEligibility(agent.session, bound.data.goalId).eligible)
-      const actualScope = `${scope ?? 'none'}:${recoveryAvailable ? bound.data.goalId : 'no-recovery'}`
+      const recoveryAvailable = bidRunRecoveryEligibility(agent.session).eligible
+        || bidWritingPlanRecoveryEligibility(agent.session).eligible
+      const hasGoal = toolCtx.get('goals')?.get(agent) !== undefined
+      const actualScope = `${scope ?? 'none'}:${String(hasGoal)}:${String(recoveryAvailable)}`
       const existing = mounted.get(agent)
       if (existing?.scope === actualScope) return
       existing?.dispose()
@@ -677,18 +670,18 @@ export function installStageInteractionTools(
       const tools = agent.ctx.get('tools')
       if (tools === undefined) throw new Error('Bid stage interaction requires tools')
       const available = task.status === 'ready' || task.status === 'failed'
-        ? [names[0]]
+        ? [BID_INTERACTION_TOOL_NAMES[0]]
         : suspended !== undefined
           ? task.stage === 'chapter_writing' && suspended.work.kind === 'stage_execution'
-            ? [names[0], names[4], names[5], names[10]]
-            : [names[0]]
+            ? [BID_INTERACTION_TOOL_NAMES[0], BID_INTERACTION_TOOL_NAMES[4], BID_INTERACTION_TOOL_NAMES[5], BID_INTERACTION_TOOL_NAMES[10]]
+            : [BID_INTERACTION_TOOL_NAMES[0]]
           : task.status !== 'waiting_user'
-            ? task.stage === 'chapter_writing' ? [names[0], names[4], names[5], names[6], names[7], ...(task.status === 'running' ? [...names.slice(8, 10), names[10]] : [])]
-              : task.stage === 'docx_export' && task.status === 'completed' ? [names[0], names[5], names[6], names[7]]
-                : task.status === 'running' ? [names[0], ...names.slice(8, 10)] : [names[0]]
-            : stage === 'tender_analysis' ? names.slice(0, 1)
-              : stage === 'outline_generation' ? names.slice(0, 3)
-                : stage === 'evidence_mapping' ? names.slice(0, 4) : [names[0], names[4]]
+            ? task.stage === 'chapter_writing' ? [BID_INTERACTION_TOOL_NAMES[0], BID_INTERACTION_TOOL_NAMES[4], BID_INTERACTION_TOOL_NAMES[5], BID_INTERACTION_TOOL_NAMES[6], BID_INTERACTION_TOOL_NAMES[7], ...(task.status === 'running' ? [...BID_INTERACTION_TOOL_NAMES.slice(8, 10), BID_INTERACTION_TOOL_NAMES[10]] : [])]
+              : task.stage === 'docx_export' && task.status === 'completed' ? [BID_INTERACTION_TOOL_NAMES[0], BID_INTERACTION_TOOL_NAMES[5], BID_INTERACTION_TOOL_NAMES[6], BID_INTERACTION_TOOL_NAMES[7]]
+                : task.status === 'running' ? [BID_INTERACTION_TOOL_NAMES[0], ...BID_INTERACTION_TOOL_NAMES.slice(8, 10)] : [BID_INTERACTION_TOOL_NAMES[0]]
+            : stage === 'tender_analysis' ? BID_INTERACTION_TOOL_NAMES.slice(0, 1)
+              : stage === 'outline_generation' ? BID_INTERACTION_TOOL_NAMES.slice(0, 3)
+                : stage === 'evidence_mapping' ? BID_INTERACTION_TOOL_NAMES.slice(0, 4) : [BID_INTERACTION_TOOL_NAMES[0], BID_INTERACTION_TOOL_NAMES[4]]
       const installed = [...new Set([...available, 'bid_project_inspect', 'bid_run_task', 'bid_plan_task',
         'bid_outline_apply_operations', 'bid_outline_regenerate_scope', 'bid_evidence_remap',
         'bid_confirm_writing_plan', 'bid_revise_chapter', ...(chatResume ? ['bid_resume_current_run'] : []),
@@ -698,6 +691,7 @@ export function installStageInteractionTools(
       const strings: JsonSchemaNode = { type: 'array', items: text }
       const cas = { expected_revision: { type: 'integer' as const }, expected_draft_sha256: text }
       try {
+        if (toolCtx.tools.get('create_goal') !== undefined) disposers.push(tools.restrict({ deny: ['create_goal'] }))
         for (const name of installed) {
           const properties: Record<string, JsonSchemaNode> = name === 'bid_stage_inspect' || name === 'bid_project_inspect' || name === 'bid_run_task' || name === 'bid_plan_task' || name === 'bid_resume_current_run' || name === 'bid_confirm_writing_plan'
             || name === 'bid_revise_chapter' || name === 'bid_plan_revision_batch' || name === 'bid_execute_revision_batch' || name === 'bid_pause_stage' || name === 'bid_resume_stage' || name === 'bid_set_flowchart_visual_review' || name === recoveryTool
@@ -853,12 +847,12 @@ export function installStageInteractionTools(
           }
           const definition: ToolDefinition = {
             name,
-            description: name === 'bid_resume_current_run' ? '仅在用户明确要求继续时，按当前 Run ID 和项目 revision 恢复挂起任务；Host 验证后异步执行。'
-              : name === recoveryTool ? '仅对 bid_stage_inspect(view=recovery) 返回的当前失败目标提交改进处理办法；Host 验证后异步恢复原任务。'
+            description: name === recoveryTool ? '主 Agent 对 inspect recovery 的当前失败目标提交具体修复办法，Host 校验并执行；相同问题必须改变策略。'
+              : name === 'bid_resume_current_run' ? '按当前 Run ID 和项目 revision 继续已授权任务；内部可修复失败使用 bid_recover_task。'
                 : name === 'bid_stage_inspect' ? '读取当前阶段的有界权威快照；传正文引用时校验原文身份并返回受控正文。'
                   : name === 'bid_project_inspect' ? '按真实项目对象与章节 ID 分页读取已保存资料；不依赖当前阶段，也不修改项目。'
-                    : name === 'bid_run_task' ? '用当前真实用户消息授权有序业务能力任务；Host 核对项目输入、范围和候选文件，再发布实际结果。提问与讨论不得调用。'
-                      : name === 'bid_plan_task' ? '用后续真实用户消息替换当前能力 Work 尚未开始的步骤后缀；已完成、运行中和等待输入的步骤不可改。'
+                    : name === 'bid_run_task' ? '用当前用户消息或原生 Goal 轮次授权有序业务能力任务；Host 核对项目输入、范围和候选文件，再发布实际结果。提问与讨论不得调用。'
+                      : name === 'bid_plan_task' ? '用后续用户消息或原生 Goal 轮次替换当前能力 Work 尚未开始的步骤后缀；已完成、运行中和等待输入的步骤不可改。'
                         : name === 'bid_set_flowchart_visual_review' ? '设置当前 S5 work 的流程图视觉检查策略。skip 表示后续不再启动新的流程图视觉确认；required 表示恢复正常视觉确认。设置会写入当前 work 的命令日志并在挂起恢复后继续生效。'
                           : name === 'bid_pause_stage' ? '仅在用户明确要求暂停时阻止后续阶段任务启动；已经运行的任务继续收敛。'
                             : name === 'bid_resume_stage' ? '仅在用户明确要求继续时释放当前阶段的新任务调度门。'
@@ -880,8 +874,8 @@ export function installStageInteractionTools(
           disposers.push(tools.register(definition))
         }
         if (task.status === 'waiting_user') {
-          disposers.push(tools.restrict({ allow: bound?.type === 'bid.goal.bound'
-            ? ['get_goal', 'update_goal'] : [] }))
+          disposers.push(tools.restrict({ allow: hasGoal
+            ? ['get_goal', 'update_goal'].filter(name => toolCtx.tools.get(name) !== undefined) : [] }))
         }
       } catch (error) {
         for (const dispose of disposers.reverse()) dispose()
@@ -890,7 +884,7 @@ export function installStageInteractionTools(
       mounted.set(agent, { scope: actualScope, dispose: () => { for (const dispose of disposers.reverse()) dispose() } })
     }
     const publicRestrictions = new Map<Agent, () => void>()
-    const claimState = new Map<Agent, { turn: number; boundary: string; hasUser: boolean; goalRound: boolean }>()
+    const claimState = new Map<Agent, { turn: number; boundary: string; hasUser: boolean }>()
     const releasePublic = (agent: Agent): void => {
       publicRestrictions.get(agent)?.()
       publicRestrictions.delete(agent)
@@ -900,19 +894,11 @@ export function installStageInteractionTools(
       const session = subject?.session
       if (subject === undefined || session === undefined || !isBidMainSession(session)) return
       const task = session.events.reduce(reduceBidTaskState, BID_INITIAL_TASK_STATE)
-      const claim = claimState.get(subject)
-      if (claim?.goalRound && !claim.hasUser
-        && !['get_goal', 'update_goal', 'bid_stage_inspect', 'bid_project_inspect', recoveryTool].includes(exec.name)) return 'BID_GOAL_RECOVERY_TOOL_REQUIRED'
-      if (exec.name === 'bid_resume_current_run' && !claim?.hasUser) return 'BID_USER_CONTINUATION_REQUIRED'
-      const args = typeof exec.arguments === 'object' && exec.arguments !== null
-        ? exec.arguments as Record<string, unknown> : undefined
-      if (claim?.goalRound && !claim.hasUser && exec.name === 'bid_stage_inspect'
-        && args?.['view'] !== 'recovery') return 'BID_GOAL_RECOVERY_INSPECT_REQUIRED'
-      if (exec.name === 'update_goal' && args?.['action'] === 'complete'
-        && !(task.stage === 'chapter_writing' && task.status === 'completed')) return 'BID_GOAL_NOT_COMPLETE'
+      if (exec.name === 'create_goal') return 'BID_EXPLICIT_GOAL_COMMAND_REQUIRED'
+      if (exec.name === 'bid_resume_current_run' && resolveBidToolAuthorization(subject) === undefined) return 'BID_USER_CONTINUATION_REQUIRED'
       if ((task.status === 'waiting_user' || task.status === 'suspended' || interacting(session) || publicRestrictions.has(subject))
-        && !names.includes(exec.name as typeof names[number]) && exec.name !== recoveryTool
-        && exec.name !== 'get_goal' && exec.name !== 'update_goal') return 'BID_STAGE_TOOL_REQUIRED'
+        && !BID_INTERACTION_TOOL_NAMES.includes(exec.name as typeof BID_INTERACTION_TOOL_NAMES[number])
+        && exec.name !== recoveryTool && exec.name !== 'get_goal' && exec.name !== 'update_goal') return 'BID_STAGE_TOOL_REQUIRED'
     }))
     toolCtx.on('agent/inbox/claimed', ({ agent, message, turn }) => {
       if (!isBidMainSession(agent.session)) return
@@ -924,15 +910,15 @@ export function installStageInteractionTools(
       const priorStep = prior?.type === 'step/end' ? prior.data.step : 0
       const boundary = `${String(turn)}:${String(priorStep)}`
       const state = previous?.boundary === boundary ? previous
-        : { turn, boundary, hasUser: false, goalRound: previous?.turn === turn && previous.goalRound }
+        : { turn, boundary, hasUser: false }
       if (message.source.kind === 'user') {
         state.hasUser = true
         const tools = agent.ctx.get('tools')
         if (tools === undefined) throw new Error('Bid stage interaction requires tools')
-        if (!publicRestrictions.has(agent)) publicRestrictions.set(agent, tools.restrict({ allow: [] }))
-      } else if (message.source.kind === 'goal' && message.source.round > 0) {
-        const bound = agent.session.events.findLast(event => event.type === 'bid.goal.bound')
-        state.goalRound = bound?.type === 'bid.goal.bound' && bound.data.goalId === message.source.goalId
+        if (!publicRestrictions.has(agent)) publicRestrictions.set(agent, tools.restrict({
+          allow: toolCtx.get('goals')?.get(agent) === undefined ? []
+            : ['get_goal', 'update_goal'].filter(name => toolCtx.tools.get(name) !== undefined),
+        }))
       } else if (!state.hasUser) releasePublic(agent)
       claimState.set(agent, state)
     }, { global: true })
@@ -956,10 +942,15 @@ export function installStageInteractionTools(
       if (decision.kind === 'reject' || !isBidMainSession(agent.session)) return decision
       const goalRound = messages.some(message => message.source.kind === 'goal' && message.source.round > 0)
       const hasUser = messages.some(message => message.source.kind === 'user')
-      if (!goalRound && !hasUser) return decision
+      const failureMessage = messages.some(message => message.source.kind === 'plugin'
+        && message.source.plugin === '@deepseek-ai/dsh-bid' && message.source.form === 'notice'
+        && message.source.summary === 'Bid 执行失败，交由主 Agent 处理')
+        && (bidRunRecoveryEligibility(agent.session).eligible || bidWritingPlanRecoveryEligibility(agent.session).eligible)
+      if (!goalRound && !hasUser && !failureMessage) return decision
       const resumed = agent.session.events.findLast(event => event.type === 'bid.project.resumed')
       const suspended = task.status === 'suspended' ? task.run : undefined
-      const prompt = goalRound && !hasUser ? '你仍是当前主交互 Agent。当前阶段由 Host 持有的 subagent 执行，本轮只处理 Host 报告的失败。先调用 bid_stage_inspect(view="recovery")，对比当前问题、检查点和最近指令；重复问题必须改变步骤、顺序、范围或工具用法，不能提交相同办法。仅修失败单元，不改正式确认或绕过校验。然后调用 bid_recover_task 提交具体改进办法；受理后只说明正在恢复。'
+      const prompt = failureMessage
+        ? '你是当前 Bid Main Agent。Host 已保存真实失败状态，没有替你决定修复方式。先调用 bid_stage_inspect(view="recovery")，根据 failure、issues、checkpoint、已完成成果和历史恢复指令分析根因。只修当前失败范围并保留已完成成果；同一问题再次出现时必须改变步骤、顺序、范围、工具用法或提交内容。确定方案后调用 bid_recover_task，Host 只验证和执行。'
         : suspended !== undefined ? renderSuspendedRunPrompt(
           task.stage,
           suspended.runId,
@@ -977,7 +968,7 @@ export function installStageInteractionTools(
                 ? renderIdleStageInteractionPrompt(task.stage, task.status) : undefined
       if (prompt === undefined) return decision
       const progress = task.status === 'running' ? renderCurrentRunProgress(task.run) : undefined
-      const context = `${prompt}\n${CAPABILITY_TASK_GUIDANCE}${progress === undefined ? '' : `\n${progress}`}`
+      const context = `${prompt}\nBid 模式不通过模型创建 Goal。Goal 只能由用户显式 /goal 创建；已有 Goal 可正常读取和更新。后台失败交由你分析并通过当前公开能力处理；Host 只校验和执行。\n${CAPABILITY_TASK_GUIDANCE}${progress === undefined ? '' : `\n${progress}`}`
       return { kind: 'enter', messages: [createUserMessage({ content: [{ type: 'text', text: context }], source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'instructions' } }), ...decision.messages] }
     }, { global: true })
     for (const agent of ctx.agents.list()) sync(agent)

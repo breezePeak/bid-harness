@@ -13,7 +13,6 @@ import SessionStore, { SessionId, type Session } from '@deepseek-ai/dsh-session'
 import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import SubagentRuntime from '@deepseek-ai/dsh-subagent'
-import { GoalId } from '@deepseek-ai/dsh-goal'
 import * as spawn from '@deepseek-ai/dsh-subagent-spawn-in-process'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime, { type ToolDefinition } from '@deepseek-ai/dsh-tools'
@@ -287,6 +286,7 @@ describe('Workspace 项目与独立 Session', () => {
     await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'completed' })
     const agent = await fresh('capability-host-main')
     const message = createUserMessage({ content: [{ type: 'text', text: '审核当前章节' }], source: { kind: 'user' } })
+    agent.session.append('turn/start', { turn: 1 })
     agent.session.append('user/message', message, { surfaceOp: 'append' })
     const dispatcher: CapabilityTaskDispatcher = {
       allowedWrites: async () => new Set(['chapters/local-review.json']),
@@ -324,6 +324,7 @@ describe('Workspace 项目与独立 Session', () => {
     await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'completed' })
     const agent = await fresh('capability-native-input-main')
     const message = createUserMessage({ content: [{ type: 'text', text: '审核当前章节并补齐问题' }], source: { kind: 'user' } })
+    agent.session.append('turn/start', { turn: 1 })
     agent.session.append('user/message', message, { surfaceOp: 'append' })
     const reply = Promise.withResolvers<AskUserQuestionAnswer>()
     let question: AskUserQuestionItem | undefined
@@ -373,6 +374,7 @@ describe('Workspace 项目与独立 Session', () => {
     await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'completed' })
     const agent = await fresh('capability-stop-main')
     const message = createUserMessage({ content: [{ type: 'text', text: '重新审核章节' }], source: { kind: 'user' } })
+    agent.session.append('turn/start', { turn: 1 })
     agent.session.append('user/message', message, { surfaceOp: 'append' })
     const started = Promise.withResolvers<undefined>()
     const released = Promise.withResolvers<undefined>()
@@ -424,6 +426,7 @@ describe('Workspace 项目与独立 Session', () => {
     await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'completed' })
     const agent = await fresh('capability-committed-restart-main')
     const message = createUserMessage({ content: [{ type: 'text', text: '审核已有正文' }], source: { kind: 'user' } })
+    agent.session.append('turn/start', { turn: 1 })
     agent.session.append('user/message', message, { surfaceOp: 'append' })
     const work = await persistCapabilityTaskRequest(workspace, agent.session, 'chapter_writing', {
       goal: '审核已有正文', scope: { kind: 'project' }, steps: [{ scope: { source: 'task' },
@@ -460,6 +463,7 @@ describe('Workspace 项目与独立 Session', () => {
     await checkpointBidProjectState(first.workspace, { stage: 'chapter_writing', status: 'completed' })
     const agent = await first.fresh('capability-host-restart')
     const message = createUserMessage({ content: [{ type: 'text', text: '审核已保存正文' }], source: { kind: 'user' } })
+    agent.session.append('turn/start', { turn: 1 })
     agent.session.append('user/message', message, { surfaceOp: 'append' })
     await first.ctx.sessions.flush(agent.session)
     const work = await persistCapabilityTaskRequest(first.workspace, agent.session, 'chapter_writing', {
@@ -500,12 +504,13 @@ describe('Workspace 项目与独立 Session', () => {
     expect(third.adapter.requests.filter(request => request.sessionId !== again.session.id)).toHaveLength(0)
   })
 
-  it('Run 登记后内部错误保留挂起 Work，未绑定 Goal 的新 Session 不自动恢复', async () => {
+  it('Run 登记后内部错误保留挂起 Work，新 Session 保留非重启失败边界', async () => {
     const first = await fixture({ withPersistence: true })
     await seedProjectArtifacts(first.workspace)
     await checkpointBidProjectState(first.workspace, { stage: 'chapter_writing', status: 'completed' })
     const agent = await first.fresh('capability-admission-restart')
     const message = createUserMessage({ content: [{ type: 'text', text: '审核已保存正文' }], source: { kind: 'user' } })
+    agent.session.append('turn/start', { turn: 1 })
     agent.session.append('user/message', message, { surfaceOp: 'append' })
     await first.ctx.sessions.flush(agent.session)
     const task = { goal: '审核已保存正文', scope: { kind: 'project' as const }, steps: [{
@@ -529,12 +534,13 @@ describe('Workspace 项目与独立 Session', () => {
       .rejects.toMatchObject({ code: 'ENOENT' })
   })
 
-  it('首个能力步骤后内部错误保留挂起 Run，未绑定 Goal 不自动重试', async () => {
+  it('首个能力步骤后内部错误保留挂起 Run，失败后等待原生恢复决策', async () => {
     const first = await fixture({ withPersistence: true })
     await seedProjectArtifacts(first.workspace)
     await checkpointBidProjectState(first.workspace, { stage: 'chapter_writing', status: 'completed' })
     const agent = await first.fresh('capability-step-restart')
     const message = createUserMessage({ content: [{ type: 'text', text: '先审章节再审全书' }], source: { kind: 'user' } })
+    agent.session.append('turn/start', { turn: 1 })
     agent.session.append('user/message', message, { surfaceOp: 'append' })
     await first.ctx.sessions.flush(agent.session)
     const calls: string[] = []
@@ -749,6 +755,7 @@ describe('Workspace 项目与独立 Session', () => {
     const agent = await fresh('capability-main-tool')
     const message = createUserMessage({ content: [{ type: 'text', text: '更正第一条招标要求的理解' }],
       source: { kind: 'user' } })
+    agent.session.append('turn/start', { turn: 1 })
     agent.session.append('user/message', message, { surfaceOp: 'append' })
     const result = await ctx.tools.execute({ agent, name: 'bid_run_task', arguments: { task: {
       goal: '更正第一条招标要求的理解', scope: { kind: 'project' }, steps: [{
@@ -769,6 +776,7 @@ describe('Workspace 项目与独立 Session', () => {
     await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'completed' })
     const agent = await fresh('capability-plan-patch-main')
     const first = createUserMessage({ content: [{ type: 'text', text: '审核章节和整书' }], source: { kind: 'user' } })
+    agent.session.append('turn/start', { turn: 1 })
     agent.session.append('user/message', first, { surfaceOp: 'append' })
     const work = await persistCapabilityTaskRequest(workspace, agent.session, 'chapter_writing', {
       goal: '审核章节和整书', scope: { kind: 'project' }, steps: [
@@ -793,6 +801,7 @@ describe('Workspace 项目与独立 Session', () => {
     await checkpointStoredBidProjectState(workspace, { stage: 'chapter_writing', status: 'suspended',
       run: { ...suspended, cause: 'executor_error', error: { message: '等待后续计划' } } })
     const correction = createUserMessage({ content: [{ type: 'text', text: '整书审核只检查一致性' }], source: { kind: 'user' } })
+    agent.session.append('turn/start', { turn: 1 })
     agent.session.append('user/message', correction, { surfaceOp: 'append' })
     const patched = await ctx.tools.execute({ agent, name: 'bid_plan_task', arguments: {
       work_id: work.workId, from_index: 1, steps: [{ scope: { source: 'task' },
@@ -816,6 +825,7 @@ describe('Workspace 项目与独立 Session', () => {
     const baseline = await readCapabilityOutlineBaseline(workspace)
     const message = createUserMessage({ content: [{ type: 'text', text: '把第三章标题改为实施检查' }],
       source: { kind: 'user' } })
+    agent.session.append('turn/start', { turn: 1 })
     agent.session.append('user/message', message, { surfaceOp: 'append' })
     const result = await ctx.tools.execute({ agent, name: 'bid_outline_apply_operations', arguments: {
       expected_revision: baseline.revision, expected_draft_sha256: baseline.draft_outline_sha256,
@@ -855,6 +865,7 @@ describe('Workspace 项目与独立 Session', () => {
     })
     const message = createUserMessage({ content: [{ type: 'text', text: '更正第一条招标要求' }],
       source: { kind: 'user' } })
+    agent.session.append('turn/start', { turn: 1 })
     agent.session.append('user/message', message, { surfaceOp: 'append' })
     const queued = await ctx.tools.execute({ agent, name: 'bid_run_task', arguments: { task: {
       goal: '更正第一条招标要求', scope: { kind: 'project' }, steps: [{ scope: { source: 'task' },
@@ -1104,6 +1115,7 @@ describe('Workspace 项目与独立 Session', () => {
     await checkpointBidProjectState(workspace, { stage: 'tender_analysis', status: 'waiting_user' })
     const b = await fresh('session-b')
     expect((await ctx.bid.getTenderAnalysisForConfirmation(b.session)).project.project_name).toBe('项目 A')
+    b.session.append('turn/start', { turn: 1 })
     b.session.append('user/message', createUserMessage({
       content: [{ type: 'text', text: 'S2 原始评分含有已排除的 SC-009。' }],
       source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'instructions' },
@@ -1499,6 +1511,7 @@ describe('Workspace 项目与独立 Session', () => {
     await seedProjectArtifacts(workspace)
     await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'completed' })
     const agent = await fresh('capability-docx-export')
+    agent.session.append('turn/start', { turn: 1 })
     agent.session.append('user/message', createUserMessage({ content: [{ type: 'text', text: '导出 Word' }],
       source: { kind: 'user' } }), { surfaceOp: 'append' })
     const execute = () => ctx.tools.execute({ agent, name: 'bid_run_task', arguments: { task: {
@@ -1523,6 +1536,7 @@ describe('Workspace 项目与独立 Session', () => {
     await writeFile(firstMetadataPath, JSON.stringify({ ...firstMetadata, flowcharts: [] }))
     await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'completed' })
     const agent = await fresh('capability-update-export')
+    agent.session.append('turn/start', { turn: 1 })
     agent.session.append('user/message', createUserMessage({ content: [{ type: 'text', text: '更正要求并导出' }],
       source: { kind: 'user' } }), { surfaceOp: 'append' })
     const result = await ctx.tools.execute({ agent, name: 'bid_run_task', arguments: { task: {
@@ -1658,7 +1672,7 @@ describe('Workspace 项目与独立 Session', () => {
   })
 
   it('S5 运行中固定技术偏离表未完成时清空预置行并导出后续正文', async () => {
-    const { ctx, workspace, fresh } = await fixture()
+    const { ctx, workspace, fresh, executor, executeStage } = await fixture()
     const outline = await seedProjectArtifacts(workspace)
     const technical = {
       ...outline.sections[0]!,
@@ -1680,21 +1694,28 @@ describe('Workspace 项目与独立 Session', () => {
       handoff: { section_id: TECHNICAL_DEVIATION_SECTION_ID, decisions: [], terminology: [], numbers_and_parameters: [],
         interfaces: [], deployment_constraints: [], cross_reference_targets: [], unresolved_topics: [] },
     }))
-    await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'running' })
+    await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'failed' })
     const agent = await fresh('partial-technical-deviation')
 
-    const exported = await ctx.bid.exportDocx(agent.session, null)
+    const gate = Promise.withResolvers<never[]>()
+    executor.canExecute = stage => stage === 'chapter_writing'
+    executeStage.mockImplementationOnce(() => gate.promise)
+    const retry = resumeRun(ctx, agent.session)
+    await vi.waitFor(() => { expect(executeStage).toHaveBeenCalledOnce() })
+    try {
+      const exported = await ctx.bid.exportDocx(agent.session, null)
 
-    expect(exported).toMatchObject({ ok: true })
-    if (!exported.ok) throw new Error('阶段性 Word 导出失败')
-    expect(exported.value.warnings?.map(warning => warning.code)).toContain('DOCX_EXPORT_TECHNICAL_DEVIATION_PENDING')
-    const bytes = await readFile(join(workspace.projectRoot, exported.value.path))
-    const document = await (await JSZip.loadAsync(bytes)).file('word/document.xml')!.async('string')
-    const table = document.match(/<w:tbl>[^]*?dsh-technical-deviation-table[^]*?<\/w:tbl>/u)?.[0] ?? ''
-    expect(table.match(/<w:tr(?:\s[^>]*)?>[^]*?<\/w:tr>/gu)).toHaveLength(1)
-    expect(table).not.toContain('满足、响应')
-    expect(document).toContain('已有正文')
-    expect(document).not.toContain('BID_DOCX_TECHNICAL_DEVIATION_SOURCE_MISSING')
+      expect(exported, JSON.stringify(exported)).toMatchObject({ ok: true })
+      if (!exported.ok) throw new Error('阶段性 Word 导出失败')
+      expect(exported.value.warnings?.map(warning => warning.code)).toContain('DOCX_EXPORT_TECHNICAL_DEVIATION_PENDING')
+      const bytes = await readFile(join(workspace.projectRoot, exported.value.path))
+      const document = await (await JSZip.loadAsync(bytes)).file('word/document.xml')!.async('string')
+      const table = document.match(/<w:tbl>[^]*?dsh-technical-deviation-table[^]*?<\/w:tbl>/u)?.[0] ?? ''
+      expect(table.match(/<w:tr(?:\s[^>]*)?>[^]*?<\/w:tr>/gu)).toHaveLength(1)
+      expect(table).not.toContain('满足、响应')
+      expect(document).toContain('已有正文')
+      expect(document).not.toContain('BID_DOCX_TECHNICAL_DEVIATION_SOURCE_MISSING')
+    } finally { gate.resolve([]); await retry }
   })
 
   it('阶段重置等待执行器结束期间拒绝 Word 写入，重置结束后恢复', async () => {
@@ -1740,7 +1761,7 @@ describe('Workspace 项目与独立 Session', () => {
 
     const exported = await ctx.bid.exportDocx(agent.session, null)
 
-    expect(exported).toMatchObject({ ok: true })
+    expect(exported, JSON.stringify(exported)).toMatchObject({ ok: true })
     if (!exported.ok) throw new Error('已有正文应可导出')
     expect(exported.value.warnings?.map(warning => warning.code)).toContain('DOCX_EXPORT_CONTENT_SNAPSHOT')
     expect(await readFile(join(workspace.projectRoot, exported.value.path.replace(/\.docx$/u, '.md')), 'utf8')).toContain('已有正文。')
@@ -1778,6 +1799,7 @@ describe('Workspace 项目与独立 Session', () => {
     await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'completed' })
     const agent = await fresh('multi-turn-contract')
     for (const content of ['第二章写详细一点。', '对，其他章节不用动。']) {
+      agent.session.append('turn/start', { turn: 1 })
       agent.session.append('user/message', createUserMessage({
         content: [{ type: 'text', text: content }], source: { kind: 'user' },
       }), { surfaceOp: 'append' })
@@ -2211,6 +2233,7 @@ describe('Workspace 项目与独立 Session', () => {
     await agent.whenIdle()
     expect(adapter.requests.filter(request => String(request.sessionId) === String(agent.id))).toHaveLength(0)
 
+    adapter.script.push(answer('招标分析提交不完整，Run 已挂起，可修正后恢复。'))
     stageGate.reject(new BidStageExecutionError([
       { code: 'TENDER_ANALYSIS_SUBMISSION_INCOMPLETE', message: '招标分析缺少必需记录。' },
       { code: 'SECOND_ISSUE', message: '第二条关键问题。' },
@@ -2228,13 +2251,12 @@ describe('Workspace 项目与独立 Session', () => {
       allowedActions: ['send_message'],
     })
 
-    adapter.script.push(answer('招标分析提交不完整，Run 已挂起，可修正后恢复。'))
-    agent.steer(createUserMessage({ content: [{ type: 'text', text: '怎么回事？' }], source: { kind: 'user' } }))
     await agent.whenIdle()
 
     const request = adapter.requests.findLast(candidate => String(candidate.sessionId) === String(agent.id))
     const requestText = request?.messages.flatMap(message => message.content)
       .filter(block => block.type === 'text').map(block => block.text).join('\n')
+    expect(requestText).toContain('当前阶段执行失败，失败状态已保存。')
     expect(requestText).toContain('Host execution update:')
     expect(requestText).toContain('阶段：tender_analysis')
     expect(requestText).toContain('状态：suspended')
@@ -2502,7 +2524,7 @@ describe('Workspace 项目与独立 Session', () => {
     } finally { gate.resolve(undefined); release(); await retry }
   })
 
-  it('后端中断的 running 在原阶段挂起，保留已有章节且不自动提问或执行', async () => {
+  it('后端重启按原 Work 自动续行 S5 并保留已有章节', async () => {
     const { ctx, workspace, fresh, executor } = await fixture()
     await seedProjectArtifacts(workspace)
     await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'running' })
@@ -2512,18 +2534,16 @@ describe('Workspace 项目与独立 Session', () => {
     const dispose = ctx.userQuestions.registerProvider({ ask: asked })
     try {
       const b = await fresh('session-b')
-      expect(runtime(b.session)).toMatchObject({ stage: 'chapter_writing', status: 'suspended' })
+      expect(runtime(b.session)).toMatchObject({ stage: 'chapter_writing', status: 'completed' })
       expect(await readBidProjectState(workspace)).toMatchObject({
-        stage: 'chapter_writing', status: 'suspended',
-        run: { work: { stage: 'chapter_writing' }, cause: 'host_restart' },
+        stage: 'chapter_writing', status: 'completed',
       })
       expect(asked).not.toHaveBeenCalled()
       expect(b.session.events.some(event => event.type === 'bid.run.decision.required')).toBe(false)
-      expect(ctx.tools.schemas(b).map(tool => tool.name)).toContain('bid_resume_current_run')
       expect(b.session.events.find(event => event.type === 'bid.run.notice')).toMatchObject({
         data: { kind: 'interrupted', severity: 'error' },
       })
-      expect(executor.execute).not.toHaveBeenCalled()
+      expect(executor.execute).toHaveBeenCalled()
     } finally {
       dispose()
     }
@@ -2793,18 +2813,10 @@ describe('Workspace 项目与独立 Session', () => {
     if (before?.status !== 'suspended') throw new Error('测试项目没有挂起 S5 Run')
     expect(ctx.tools.schemas(agent).map(tool => tool.name)).toContain('bid_set_flowchart_visual_review')
 
-    agent.session.append('bid.goal.bound', {
-      goalId: 'visual-policy-goal', ownerSessionId: String(agent.id), initialS2WorkId: 'prior-s2-work',
-    })
-    emitAgentEvent(ctx, agent, 'agent/inbox/claimed', {
-      message: createUserMessage({ content: [{ type: 'text', text: '检查恢复方案' }],
-        source: { kind: 'goal', goalId: GoalId('visual-policy-goal'), revision: 1, round: 1 } }), turn: 1,
-    })
     const policyRequest = {
       agent, name: 'bid_set_flowchart_visual_review', arguments: { policy: 'skip' },
       callId: CallId('suspended-s5-visual-policy'), signal: new AbortController().signal,
     }
-    expect((await ctx.tools.execute(policyRequest)).isError).toBe(true)
     emitAgentEvent(ctx, agent, 'agent/inbox/claimed', {
       message: createUserMessage({ content: [{ type: 'text', text: '继续，不用视觉检查' }], source: { kind: 'user' } }), turn: 1,
     })

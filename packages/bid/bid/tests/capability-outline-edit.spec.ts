@@ -334,6 +334,7 @@ describe('目录能力候选', () => {
       const session = ctx.sessions.create()
       const message = createUserMessage({ content: [{ type: 'text', text: '把第一章拆成准备和实施并迁移正文' }],
         source: { kind: 'user' } })
+      session.append('turn/start', { turn: 1 })
       session.append('user/message', message, { surfaceOp: 'append' })
       const deferred = interrupt === 'missing_followup' || interrupt === 'user_deferred'
       const task = bidCapabilityTaskSchema.parse({ goal: '拆分并迁移第一章', allow_pending_content: interrupt === 'user_deferred',

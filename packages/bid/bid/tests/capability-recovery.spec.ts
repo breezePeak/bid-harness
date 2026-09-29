@@ -88,6 +88,7 @@ it('资料任务登记后来源分块丢失时预检给出具体来源错误', a
   await ctx.plugin(SessionStore)
   const session = ctx.sessions.create()
   const message = createUserMessage({ content: [{ type: 'text', text: '仅补第三章资料' }], source: { kind: 'user' } })
+  session.append('turn/start', { turn: 1 })
   session.append('user/message', message, { surfaceOp: 'append' })
   const work = await persistCapabilityTaskRequest(workspace, session, 'chapter_writing', {
     goal: '仅补第三章资料', scope: { kind: 'sections', section_ids: ['SEC-3'] },
@@ -178,6 +179,7 @@ it('段落引用在接纳后变化时，恢复拒绝旧选区且不启动 Writer
   const reference = { scope: 'paragraphs' as const, section_id: 'SEC-1',
     content_sha256: chapterContentSha256(markdown), start, end: start + text.length, text }
   const message = createUserMessage({ content: [{ type: 'text', text: '缩短选中段落' }], source: { kind: 'user' } })
+  session.append('turn/start', { turn: 1 })
   session.append('user/message', message, { surfaceOp: 'append' })
   const work = await persistCapabilityTaskRequest(workspace, session, 'chapter_writing', {
     goal: '缩短选中段落', scope: { kind: 'paragraphs', reference },
@@ -206,6 +208,7 @@ it('接纳后目标章节被移除时，旧任务拒绝改写相邻章节', asyn
   await ctx.plugin(SessionStore)
   const session = ctx.sessions.create()
   const message = createUserMessage({ content: [{ type: 'text', text: '修改第一章标题' }], source: { kind: 'user' } })
+  session.append('turn/start', { turn: 1 })
   session.append('user/message', message, { surfaceOp: 'append' })
   const work = await persistCapabilityTaskRequest(workspace, session, 'chapter_writing', {
     goal: '修改第一章标题', scope: { kind: 'sections', section_ids: ['SEC-1'] },
