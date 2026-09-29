@@ -15,6 +15,7 @@ import type { GenerateOptions, MessageId, StreamChunk } from '@deepseek-ai/dsh-l
 import { CallId, createUserMessage, LlmAdapter } from '@deepseek-ai/dsh-llm'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import InvariantRegistry from '@deepseek-ai/dsh-invariants'
+import UserQuestionService from '@deepseek-ai/dsh-user-questions'
 import { MockAdapter, maxTokensResponse, textResponse, toolCallResponse } from '../../../core/agent-loop/tests/mock-adapter.ts'
 import SubagentRuntime, {
   SubagentError,
@@ -693,6 +694,37 @@ describe('SubagentRuntime.followup residency routing', () => {
 })
 
 describe('continuable child ownership', () => {
+  it('rejects a user question from a real continuable child before reaching the provider', async () => {
+    const hold = Promise.withResolvers<undefined>()
+    const { ctx, parent } = await setupWith(new GatedAdapter([
+      { chunks: textResponse('child done'), gate: hold.promise },
+    ]))
+    parkParent(ctx, parent)
+    await ctx.plugin(UserQuestionService)
+    const ask = vi.fn(async () => ({ answers: [{ id: 'confirm', selected: ['yes'] }] }))
+    ctx.userQuestions.registerProvider({ ask })
+    const started = await ctx.subagents.startContinuable(startSpec(parent))
+
+    try {
+      const child = ctx.agents.get(started.childId)!
+      expect(ctx.agents.isOwnedBy(child.id, parent)).toBe(true)
+      expect(ctx.agents.roots()).toContain(parent)
+      expect(ctx.agents.roots()).not.toContain(child)
+
+      const questions = [{ id: 'confirm', question: 'Proceed?' }]
+      await expect(ctx.userQuestions.ask({ questions, agent: child }))
+        .rejects.toMatchObject({ code: 'DELEGATED_CALLER' })
+      expect(ask).not.toHaveBeenCalled()
+
+      await expect(ctx.userQuestions.ask({ questions, agent: parent }))
+        .resolves.toEqual({ answers: [{ id: 'confirm', selected: ['yes'] }] })
+      expect(ask).toHaveBeenCalledOnce()
+    } finally {
+      hold.resolve(undefined)
+      await waitNoActivation(ctx, started.childId)
+    }
+  })
+
   it('registers a fresh child under its runtime parent', async () => {
     const hold = Promise.withResolvers<undefined>()
     const { ctx, parent } = await setupWith(new GatedAdapter([
