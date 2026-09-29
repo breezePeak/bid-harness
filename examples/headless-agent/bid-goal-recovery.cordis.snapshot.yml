@@ -11,6 +11,7 @@
 - name: '@deepseek-ai/dsh-subagent'
 - name: '@deepseek-ai/dsh-session-projection'
 - name: '@deepseek-ai/dsh-user-questions'
+- name: '@deepseek-ai/dsh-tool-ask-user'
 - name: '@deepseek-ai/dsh-goal'
   config:
     defaultMaxGoalRounds: 1
