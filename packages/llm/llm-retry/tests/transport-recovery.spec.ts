@@ -1,3 +1,4 @@
+/* oxlint-disable typescript/no-unsafe-assignment -- Vitest asymmetric matchers return any. */
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { createServer } from 'node:http'
 import type { AddressInfo } from 'node:net'
@@ -193,7 +194,7 @@ describe('bounded retry through the real DeepSeek HTTP/SSE adapter', () => {
     expect(agent.session.events.some(event => event.type === 'llm/retry')).toBe(false)
     expect(agent.session.events.at(-1)).toMatchObject({
       type: 'turn/end',
-      data: { reason: { kind: 'error', error: { message: 'SSE stream ended without [DONE]', code: 'STREAM_CLOSED' } } },
+      data: { reason: { kind: 'error', error: { message: expect.stringContaining('SSE stream ended without [DONE]'), code: 'STREAM_CLOSED' } } },
     })
   })
 

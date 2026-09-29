@@ -241,7 +241,7 @@ interface SessionPersistenceSnapshot {
 
 ## Cordis API
 
-Generated from source by `scripts/gen-cordis-catalog.ts` (verified fresh by `pnpm run verify-cordis-catalog` in doc-sync; regenerate with `pnpm run gen-cordis-catalog`) — the language sides differ only in locale-specific paired document paths. Signature blocks use a `ts cordis-catalog` fence and keep the original source JSDoc; dispatch modes are defined in the [primer](../cordis-primer.zh.md#dispatch-modes), and the framework-inherited `ctx` API lives in [cordis-api/inherited.md](../cordis-api/inherited.md).
+本区由 `scripts/gen-cordis-catalog.ts` 根据源码生成，`pnpm run verify-cordis-catalog` 检查内容是否最新。签名代码块保留源码 JSDoc；事件派发模式见 [Cordis 入门](../cordis-primer.zh.md#dispatch-modes)，框架继承的 `ctx` API 见 [Cordis API](../cordis-api/inherited.md)。
 
 <a id="ctxsessionpersistence--sessionpersistence-abstract-seam"></a>
 
@@ -294,6 +294,14 @@ abstract create(meta: SessionHeader): Promise<void>
  * @param events - the contiguous batch to persist, in seq order.
  */
 abstract append(id: SessionId, events: readonly SessionEvent[]): Promise<void>
+
+/**
+ * Permanently remove one detached Session's durable log and coordinator
+ * state. A live Session must be stopped before this operation begins.
+ * @param id - Session identity to remove.
+ * @returns whether durable state existed and was removed.
+ */
+delete(id: SessionId): Promise<boolean>
 
 /**
  * Prepare the exact unpublished Session used by resume. Implementations may

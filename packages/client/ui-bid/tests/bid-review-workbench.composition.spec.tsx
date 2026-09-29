@@ -157,7 +157,9 @@ describe('S5 Review Workbench & Composer REAL-Composition Integration', () => {
         ),
         actions: store.actions,
         useSessions: <S,>(selector: (state: never) => S): S => selector({ byId: { bid: { agentPreset: 'bid' } } } as never),
-        useProjection: () => ({ allowedActions: [], runtime: { stage: 'chapter_writing', status: 'running' } }),
+        useProjection: (key: string) => key === 'bid.runtime'
+          ? { allowedActions: [], task: { stage: 'chapter_writing', status: 'running', run: null } }
+          : undefined,
         renderSlot: (name: string) => <div data-slot={name} />,
         getWorkbench: remoteGetWorkbench,
         getChapter: remoteGetChapter,
@@ -168,16 +170,17 @@ describe('S5 Review Workbench & Composer REAL-Composition Integration', () => {
         sessionId: 'bid' as SessionId,
         disabled: false,
         useSessions: <S,>(selector: (state: never) => S): S => selector({ byId: { bid: { agentPreset: 'bid' } } } as never),
-        useProjection: () => ({
+        useProjection: (key: string) => key === 'bid.runtime' ? ({
           allowedActions: ['request_writing_requirements', 'auto_start_chapter_writing'],
-          runtime: { stage: 'chapter_writing', status: 'running' },
+          task: { stage: 'chapter_writing', status: 'running', run: null },
           composer: { enabled: true },
-        }),
+        }) : undefined,
         useStore: (select: (state: { mode: string }) => unknown) => select({ mode: 'manual' }),
         actions: { setMode: vi.fn(), markAttempted: vi.fn(), clearAttempted: vi.fn() },
         t: (key: string) => key,
         getDetails: vi.fn(async () => ({})),
         setRealtimeChatMode: vi.fn(),
+        setBackgroundActivity: vi.fn(),
         setDetailsAvailable: vi.fn(),
         setComposerBlock: vi.fn(),
         selectReviewView: vi.fn(),
@@ -198,7 +201,7 @@ describe('S5 Review Workbench & Composer REAL-Composition Integration', () => {
         sessionId: 'bid' as SessionId,
         disabled: false,
         useSessions: (select: (state: unknown) => unknown) => select({ byId: { bid: { agentPreset: 'bid' } } }),
-        useProjection: () => ({ runtime: { stage: 'chapter_writing', status: 'running' } }),
+        useProjection: () => ({ task: { stage: 'chapter_writing', status: 'running', run: null } }),
         useStore: (selector: (state: ReturnType<typeof store.getSnapshot>) => unknown) => (
           selector(useSyncExternalStore(l => store.subscribe(l), () => store.getSnapshot()))
         ),

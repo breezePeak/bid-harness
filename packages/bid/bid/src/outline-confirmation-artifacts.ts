@@ -20,7 +20,7 @@ export const OUTLINE_DRAFT_SCHEMA_VERSION = 1 as const
 
 const sha256Schema = z.string().regex(/^[a-f0-9]{64}$/u)
 
-/** Strict schema for the durable S5 decision record. */
+/** 正式目录的授权记录；旧确认记录可省略 authorization。 */
 export const outlineConfirmationSchema = z.object({
   schema_version: recordOnlySchemaVersion(OUTLINE_CONFIRMATION_SCHEMA_VERSION),
   scope: z.literal('technical_bid'),
@@ -29,6 +29,11 @@ export const outlineConfirmationSchema = z.object({
   confirmed_outline_sha256: sha256Schema,
   confirmed_draft_revision: z.number().int().positive(),
   confirmed_draft_sha256: sha256Schema,
+  authorization: z.discriminatedUnion('source', [
+    z.object({ source: z.literal('user_confirmation') }).strict(),
+    z.object({ source: z.literal('user_task'), work_id: z.string().min(1),
+      session_id: z.string().min(1), message_id: z.string().min(1) }).strict(),
+  ]).optional(),
 }).strict()
 
 /** Strict Host draft envelope used as the sole S5 business state. */
@@ -41,7 +46,7 @@ export const outlineDraftSchema = z.object({
   outline: outlineArtifactSchema,
 }).strict()
 
-/** Durable user decision that establishes the S6 outline input. */
+/** 将当前目录授权为后续写作输入的持久记录。 */
 export type OutlineConfirmationArtifact = z.infer<typeof outlineConfirmationSchema>
 /** Host-persisted S5 draft and optimistic-concurrency identity. */
 export type OutlineDraftView = z.infer<typeof outlineDraftSchema>
@@ -56,9 +61,9 @@ export function parseOutlineDraft(value: unknown): OutlineDraftView {
 }
 
 /**
- * Parse one strict S5 confirmation record.
+ * 解析一条完整的正式目录授权记录。
  * @param value Untrusted persisted confirmation value.
- * @returns Validated outline confirmation record.
+ * @returns 已核对的目录授权记录。
  */
 export function parseOutlineConfirmationArtifact(value: unknown): OutlineConfirmationArtifact {
   return outlineConfirmationSchema.parse(value)

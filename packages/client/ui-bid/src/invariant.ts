@@ -11,7 +11,7 @@ export const name = 'client-ui-bid-invariant'
 /** Service required before the companion can reserve package ownership. */
 export const inject = ['invariants']
 
-/** Bid state remains owned by the Host projection; this UI package owns no runtime relationship to assert. */
+/** No runtime invariant: Bid 状态由 Host 投影持有，UI 不拥有可检查的运行时关系。 */
 const install: InvariantInstaller = () => {}
 
 /**

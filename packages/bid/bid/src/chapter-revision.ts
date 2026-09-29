@@ -96,21 +96,18 @@ export interface BatchRevisionScope {
 /**
  * 合并重叠或相邻的段落授权范围，返回不重叠且按 start 升序排列的范围列表。
  * @param ranges 原始范围列表。
+ * @returns 合并后互不重叠、按起点升序排列的范围。
  */
-export function mergeParagraphRanges(ranges: readonly { readonly start: number; readonly end: number }[]): { start: number; end: number }[] {
-  if (ranges.length === 0) return []
+export function mergeParagraphRanges(
+  ranges: readonly { readonly start: number; readonly end: number }[],
+): { start: number; end: number }[] {
   const sorted = [...ranges].sort((a, b) => a.start - b.start)
-  const merged: { start: number; end: number }[] = [{ start: sorted[0]!.start, end: sorted[0]!.end }]
-  for (let i = 1; i < sorted.length; i++) {
-    const current = sorted[i]!
-    const last = merged[merged.length - 1]!
-    if (current.start <= last.end) {
-      last.end = Math.max(last.end, current.end)
-    } else {
-      merged.push({ start: current.start, end: current.end })
-    }
-  }
-  return merged
+  return sorted.reduce<{ start: number; end: number }[]>((merged, current) => {
+    const last = merged.at(-1)
+    if (last !== undefined && current.start <= last.end) last.end = Math.max(last.end, current.end)
+    else merged.push({ start: current.start, end: current.end })
+    return merged
+  }, [])
 }
 
 /**

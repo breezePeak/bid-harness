@@ -1,4 +1,4 @@
-/** Pure archive-format, legacy-pair, and immutable-manifest helpers. */
+/** Pure archive-format and immutable-manifest helpers. */
 
 import { createHash } from 'node:crypto'
 import { basename } from 'node:path'
@@ -13,14 +13,6 @@ export interface ArchiveManifest {
 /** Hash one archived artifact independently of the repository's Git object format. */
 function archiveContentHash(content: Buffer): string {
   return `sha256:${createHash('sha256').update(content).digest('hex')}`
-}
-
-/** Compute the SHA-1 Git blob id used by bilingual consistency sidecars. */
-export function gitBlobHash(content: Buffer): string {
-  const hash = createHash('sha1')
-  hash.update(`blob ${content.byteLength}\0`)
-  hash.update(content)
-  return hash.digest('hex')
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -60,6 +52,7 @@ export function validateArchiveManifestExtension(
 ): string[] {
   const errors: string[] = []
   for (const [path, expected] of Object.entries(baseline.files)) {
+    if (path.endsWith('.i18n.yaml')) continue
     const actual = current.files[path]
     if (actual === undefined) errors.push(`${path}: sealed manifest entry is missing`)
     else if (actual !== expected) errors.push(`${path}: sealed manifest hash changed`)
@@ -77,28 +70,15 @@ function validDate(value: string): boolean {
   return date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day
 }
 
-interface Triplet {
+interface ArchiveRecord {
   source?: Buffer
   zh?: Buffer
-  meta?: Buffer
-}
-
-function pairMeta(content: string): Map<string, string> | undefined {
-  const entries = new Map<string, string>()
-  for (const line of content.split('\n')) {
-    if (line === '' || line.startsWith('#')) continue
-    const match = /^([^:#]+\.md): ([0-9a-f]{40})$/.exec(line)
-    if (match?.[1] === undefined || match[2] === undefined) return undefined
-    entries.set(match[1], match[2])
-  }
-  return entries
 }
 
 function validateHeader(
   path: string,
   content: Buffer,
   sourceBase: string,
-  switcher: 'source' | 'chinese' | undefined,
 ): string[] {
   const errors: string[] = []
   const lines = content.toString('utf8').split('\n')
@@ -112,23 +92,17 @@ function validateHeader(
     errors.push(`${path}: archive date ${archived} predates the note filename`)
   }
   if (lines[4] !== '') errors.push(`${path}: line 5 must be blank`)
-  const expectedSwitcher = switcher === 'chinese'
-    ? `[English](${sourceBase}.md) | 中文`
-    : `English | [中文](${sourceBase}.zh.md)`
-  if (switcher !== undefined && lines[5] !== expectedSwitcher) {
-    errors.push(`${path}: line 6 must be ${JSON.stringify(expectedSwitcher)}`)
-  }
   return errors
 }
 
-/** Validate the closed kind tree, archive headers, and complete legacy bilingual records. */
+/** 校验归档类别、正文文件名和归档头部，不要求语言配对。 */
 export function validateArchiveArtifacts(artifacts: ReadonlyMap<string, Buffer>): string[] {
   const errors: string[] = []
-  const triplets = new Map<string, Triplet>()
+  const records = new Map<string, ArchiveRecord>()
   for (const [path, content] of artifacts) {
-    const match = /^([^/]+)\/(\d{4}-\d{2}-\d{2}-.+?)(\.zh\.md|\.i18n\.yaml|\.md)$/.exec(path)
+    const match = /^([^/]+)\/(\d{4}-\d{2}-\d{2}-.+?)(\.zh\.md|\.md)$/.exec(path)
     if (match?.[1] === undefined || match[2] === undefined || match[3] === undefined) {
-      errors.push(`${path}: expected {kind}/yyyy-mm-dd-topic.{md,zh.md,i18n.yaml}`)
+      errors.push(`${path}: expected {kind}/yyyy-mm-dd-topic.{md,zh.md}`)
       continue
     }
     if (!(AGENT_NOTE_CLASSES as readonly string[]).includes(match[1])) {
@@ -136,46 +110,23 @@ export function validateArchiveArtifacts(artifacts: ReadonlyMap<string, Buffer>)
       continue
     }
     const key = `${match[1]}/${match[2]}`
-    const triplet = triplets.get(key) ?? {}
-    if (match[3] === '.md') triplet.source = content
-    else if (match[3] === '.zh.md') triplet.zh = content
-    else triplet.meta = content
-    triplets.set(key, triplet)
+    const record = records.get(key) ?? {}
+    if (match[3] === '.md') record.source = content
+    else record.zh = content
+    records.set(key, record)
   }
 
-  for (const [key, triplet] of [...triplets].sort(([left], [right]) => left.localeCompare(right))) {
+  for (const [key, record] of [...records].sort(([left], [right]) => left.localeCompare(right))) {
     const sourcePath = `${key}.md`
     const zhPath = `${key}.zh.md`
-    const metaPath = `${key}.i18n.yaml`
-    const { source, zh, meta } = triplet
+    const { source, zh } = record
     if (source === undefined) {
       errors.push(`${key}: archived record is missing ${sourcePath}`)
       continue
     }
     const sourceBase = basename(key)
-    const hasLegacyPair = zh !== undefined || meta !== undefined
-    if (!hasLegacyPair) {
-      errors.push(...validateHeader(sourcePath, source, sourceBase, undefined))
-      continue
-    }
-    if (zh === undefined || meta === undefined) {
-      const missing = zh === undefined ? zhPath : metaPath
-      errors.push(`${key}: incomplete legacy bilingual record; missing ${missing}`)
-      continue
-    }
-    errors.push(...validateHeader(sourcePath, source, sourceBase, 'source'))
-    errors.push(...validateHeader(zhPath, zh, sourceBase, 'chinese'))
-    const sourceDate = /^Archived: (\d{4}-\d{2}-\d{2})$/m.exec(source.toString('utf8'))?.[1]
-    const zhDate = /^Archived: (\d{4}-\d{2}-\d{2})$/m.exec(zh.toString('utf8'))?.[1]
-    if (sourceDate !== undefined && zhDate !== undefined && sourceDate !== zhDate) {
-      errors.push(`${key}: English and Chinese archive dates differ (${sourceDate} vs ${zhDate})`)
-    }
-    const pair = pairMeta(meta.toString('utf8'))
-    if (pair === undefined || pair.size !== 2
-      || pair.get(`${sourceBase}.md`) !== gitBlobHash(source)
-      || pair.get(`${sourceBase}.zh.md`) !== gitBlobHash(zh)) {
-      errors.push(`${metaPath}: consistency record must contain the current Git blob hashes of both archived sides`)
-    }
+    errors.push(...validateHeader(sourcePath, source, sourceBase))
+    if (zh !== undefined) errors.push(...validateHeader(zhPath, zh, sourceBase))
   }
   return errors
 }

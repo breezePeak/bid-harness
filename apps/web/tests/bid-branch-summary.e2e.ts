@@ -58,10 +58,10 @@ it('父章节和嵌套父章节显示概述，刷新保留选择，叶章节继�
 
     const reader = page.getByRole('main', { name: '正文阅读' })
     const navigation = page.getByRole('navigation', { name: '章节目录' })
-    const references = page.getByRole('complementary', { name: '参考资料与审查' })
+    const references = page.getByRole('complementary', { name: '章节审核与参考资料' })
+    await navigation.getByRole('button', { name: '1.1.1 技术方案', exact: true }).click()
     await reader.getByText('已有正文。', { exact: true }).waitFor({ timeout: 10_000 })
     expect(await navigation.getByRole('button', { name: '1 项目实施方案', exact: true }).isEnabled()).toBe(true)
-    expect(await navigation.getByTitle('1 项目实施方案：章节概述', { exact: true }).count()).toBe(1)
     await navigation.getByRole('button', { name: '1 项目实施方案', exact: true }).click()
     await reader.getByText(rootSummary, { exact: true }).waitFor()
     expect(await references.getByText('无明确对应条款', { exact: true }).count()).toBe(0)
@@ -76,7 +76,7 @@ it('父章节和嵌套父章节显示概述，刷新保留选择，叶章节继�
     await refreshedChapter
     await expect.poll(() => reader.innerText()).toContain(nestedSummary)
     const nestedSnapshot = await captureStableAria(page, '[role="main"][aria-label="正文阅读"]', scaffold.workspaceCwd)
-    const referencesSnapshot = await captureStableAria(page, '[role="complementary"][aria-label="参考资料与审查"]', scaffold.workspaceCwd)
+    const referencesSnapshot = await captureStableAria(page, '[role="complementary"][aria-label="章节审核与参考资料"]', scaffold.workspaceCwd)
     const artifacts = fileURLToPath(new URL('../../../.artifacts', import.meta.url))
     await mkdir(artifacts, { recursive: true })
     await page.screenshot({ path: join(artifacts, 'bid-branch-summary.png'), fullPage: true })

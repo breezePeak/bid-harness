@@ -35,7 +35,7 @@
 
 .header {
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   align-items: center;
   gap: 10px;
   width: 100%;
@@ -54,11 +54,15 @@
 }
 
 .title {
-  flex: none;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
   font-size: 13px;
   line-height: 24px;
   font-weight: 500;
   color: var(--dsw-alias-label-primary);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .progress {

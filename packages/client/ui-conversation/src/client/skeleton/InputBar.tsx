@@ -243,9 +243,8 @@ export function InputBar({
   // collapsed selection, but honoring direction keeps a future range-preserving
   // path from revealing its anchor instead of its focus.
   const revealSelectionFocus = (el: HTMLTextAreaElement): void => {
-    // selectionStart/End are number|null in lib.dom; the type-aware lint program narrows them.
     const caret = el.selectionDirection === 'backward' ? el.selectionStart : el.selectionEnd
-    revealCaret(caret ?? el.value.length)
+    revealCaret(caret)
   }
 
   // Unlock (mount / session switch) returns focus to the box, and owns the
@@ -312,10 +311,9 @@ export function InputBar({
     return () => { el.removeEventListener('wheel', onWheel) }
   }, [])
 
-  // selectionStart/End are number|null in lib.dom; the type-aware lint program narrows them.
   const selectionOf = (el: HTMLTextAreaElement) => ({
-    start: el.selectionStart ?? 0,
-    end: el.selectionEnd ?? el.selectionStart ?? 0,
+    start: el.selectionStart,
+    end: el.selectionEnd,
   })
 
   // The machine's occurrence math needs the edit's real range, and a controlled
@@ -361,6 +359,7 @@ export function InputBar({
     // IME guard so a composition-closing Shift+Enter still breaks the line.
     if (e.key === 'Enter' && e.shiftKey) return
     // keyCode 229 is the legacy IME-composition signal engines emit without isComposing.
+    // oxlint-disable-next-line typescript/no-deprecated -- legacy IME events still use keyCode 229
     const composing = composingRef.current || e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229
     if (!composing && !machineBusy && !locked
       && (e.key === 'Backspace' || e.key === 'Delete')) {
@@ -443,8 +442,7 @@ export function InputBar({
     pendingEditRef.current = null
     safariNativeShrinkRef.current = safari && next.length < draft.length
     keyboard.setDraft(next, editRangeOf(pending, draft.length, next.length))
-    // selectionStart is number|null in lib.dom; the type-aware lint program narrows it.
-    keyboard.track(next, e.target.selectionStart ?? next.length)
+    keyboard.track(next, e.target.selectionStart)
   }
 
   const onCopyOrCut = (e: React.ClipboardEvent<HTMLTextAreaElement>, cut: boolean): void => {

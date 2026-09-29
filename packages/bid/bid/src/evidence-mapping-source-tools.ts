@@ -40,8 +40,17 @@ export function mappingSourceCatalog(locations: readonly MappingCorpusLocation[]
 
 const readSchema = z.object({ source_ref: z.string().min(1) }).strict()
 const searchSchema = z.object({ scope_ref: z.string().min(1), keywords: z.array(z.string().min(1)).min(1) }).strict()
-const sourceListSchema = z.object({ offset: z.number().int().nonnegative().default(0), limit: z.number().int().min(1).max(50).default(20), filter: z.string().min(1).optional() }).strict()
-const chunkListSchema = z.object({ source_ref: z.string().regex(/^W:WEB-[a-f0-9]{16}$/u), offset: z.number().int().nonnegative().default(0), limit: z.number().int().min(1).max(50).default(20), heading: z.string().min(1).optional() }).strict()
+const sourceListSchema = z.object({
+  offset: z.number().int().nonnegative().default(0),
+  limit: z.number().int().min(1).max(50).default(20),
+  filter: z.string().min(1).optional(),
+}).strict()
+const chunkListSchema = z.object({
+  source_ref: z.string().regex(/^W:WEB-[a-f0-9]{16}$/u),
+  offset: z.number().int().nonnegative().default(0),
+  limit: z.number().int().min(1).max(50).default(20),
+  heading: z.string().min(1).optional(),
+}).strict()
 
 type TextSource = { fileIndex: number; location: MappingCorpusLocation; start: number; end: number; chunk?: MappingCorpusLocation['chunks'][number] }
 type SearchHit = { source_ref: string; file_id: string; name: string; line: number; excerpt: string; heading_paths: string[][] }

@@ -272,7 +272,10 @@ describe('Word 导出页面', () => {
     const { props, actions, templateId } = fixture()
     const running = { operationId: 'export-1', templateId, startedAt: 1, updatedAt: 2,
       status: 'running', phase: 'exporting', message: '正在生成 Word' }
-    const view = render(<BidWordExport {...props} useProjection={(key: string) => key === 'bid.docx_export' ? running : props.useProjection(key as never)}/> )
+    const view = render(<BidWordExport {...props} useProjection={(key: string) => {
+      if (key === 'bid.docx_export') return running
+      props.useProjection(key as never)
+    }} />)
     await screen.findByTitle('Word 效果预览')
     fireEvent.click(screen.getByRole('button', { name: '导出中 · 查看任务' }))
     expect(actions.showTask).toHaveBeenCalledOnce()
@@ -280,7 +283,7 @@ describe('Word 导出页面', () => {
     view.unmount()
 
     let complete!: (value: { path: string }) => void
-    vi.mocked(actions.generate).mockImplementationOnce(() => new Promise(resolve => { complete = resolve }))
+    vi.mocked(actions.generate).mockImplementationOnce(() => new Promise((resolve) => { complete = resolve }))
     const next = render(<BidWordExport {...props}/> )
     await screen.findByTitle('Word 效果预览')
     fireEvent.click(screen.getByRole('button', { name: '导出 Word' }))
@@ -295,7 +298,10 @@ describe('Word 导出页面', () => {
     const { props, actions, templateId } = fixture()
     const completed = { operationId: 'export-1', templateId, startedAt: 1, updatedAt: 2,
       status: 'completed', phase: 'finalizing', message: 'Word 导出完成', path: 'output/bid.docx', warnings: [] }
-    render(<BidWordExport {...props} useProjection={(key: string) => key === 'bid.docx_export' ? completed : props.useProjection(key as never)}/> )
+    render(<BidWordExport {...props} useProjection={(key: string) => {
+      if (key === 'bid.docx_export') return completed
+      props.useProjection(key as never)
+    }} />)
     await screen.findByTitle('Word 效果预览')
     fireEvent.click(screen.getByRole('radio', { name: /系统默认模板/u }))
     await waitFor(() => { expect(actions.getFormat).toHaveBeenLastCalledWith(null) })
@@ -487,7 +493,10 @@ describe('Word 导出页面', () => {
     const completed = { operationId: 'export-1', templateId: 'a'.repeat(64), startedAt: 1, updatedAt: 2,
       status: 'completed', phase: 'finalizing', message: 'Word 导出完成', path: 'output/bid.docx',
       warnings: [{ code: 'DOCX_EXPORT_MODE_FALLBACK', message: downgradeMsg }] }
-    rendered.rerender(<BidWordExport {...props} useProjection={(key: string) => key === 'bid.docx_export' ? completed : props.useProjection(key as never)}/> )
+    rendered.rerender(<BidWordExport {...props} useProjection={(key: string) => {
+      if (key === 'bid.docx_export') return completed
+      props.useProjection(key as never)
+    }} />)
     const feedback = await screen.findByText(downgradeMsg)
     expect(feedback.closest('header')).not.toBeNull()
     expect(feedback.className).toContain('exportFeedbackSuccess')

@@ -4,16 +4,17 @@ import { resolveEvidenceChunk } from './evidence-chunk.ts'
 import { parseChapterMetadata, parseChapterWritingManifest } from './chapter-writing-artifacts.ts'
 import { chapterCandidateSha256, parseChapterReviewArtifact } from './chapter-writing-review-artifacts.ts'
 import { parseOrMigrateChapterExecutionLog, parseChapterExecutionPlan, validateChapterExecutionPlan } from './chapter-writing-plan-artifacts.ts'
-import { buildChapterWorklist, validateChapterReview } from './chapter-writing-executor.ts'
+import { buildChapterWorklist, chapterEvidenceInputFingerprint, pickChapterContext, validateChapterReview } from './chapter-writing-executor.ts'
 import { sectionVisibleRequirements } from './section-evidence-context.ts'
 import { validateGlobalComplianceReview, type GlobalComplianceChapter } from './chapter-writing-global-review.ts'
 import { parseGlobalComplianceReviewArtifact } from './chapter-writing-global-review-artifacts.ts'
 import { validateChapterHeadings } from './chapter-headings.ts'
+import { readChapterLocations } from './chapter-storage.ts'
 import type { BidStage, StageArtifact, StageValidationIssue, StageValidationResult } from './control-plane-contract.ts'
-import type { LocalEvidenceMaterial, WebEvidenceMaterial } from './evidence-mapping-artifacts.ts'
+import { parseEvidenceMapArtifact, type LocalEvidenceMaterial, type WebEvidenceMaterial } from './evidence-mapping-artifacts.ts'
 import { parseConfirmedOutlineArtifact, outlineArtifactSha256 } from './outline-confirmation-artifacts.ts'
 import { catalogMatchesScoring, parseScoringResponsePointCatalog } from './scoring-response-point-artifacts.ts'
-import { parseTenderScoringArtifact, parseTenderRequirementsArtifact, parseTenderComplianceArtifact } from './tender-analysis-artifacts.ts'
+import { parseTenderProjectArtifact, parseTenderScoringArtifact, parseTenderRequirementsArtifact, parseTenderComplianceArtifact } from './tender-analysis-artifacts.ts'
 import { assertNoLinkedPath, within } from './workspace-path.ts'
 import { estimateChapterWritingPages } from './page-estimate.ts'
 import { parseWritingPlan, validateWritingPlan } from './writing-requirements.ts'
@@ -224,10 +225,16 @@ export async function validateChapterWriting(
     }
   }
   const writable = new Map(outline.sections.filter(section => section.writable).map(section => [section.id, section]))
-  const expectedPaths = new Map(buildChapterWorklist(outline).map((section, index) => {
-    const serial = String(index + 1).padStart(4, '0')
-    return [section.id, { content: `chapters/sections/${serial}.md`, metadata: `chapters/meta/${serial}.json` }] as const
-  }))
+  let locations: Awaited<ReturnType<typeof readChapterLocations>>
+  try { locations = await readChapterLocations(workspace) } catch (error) {
+    reject(issues, 'CHAPTER_WRITING_STORAGE_INVALID', error instanceof Error ? error.message : String(error), LOG)
+    return { ok: false, issues }
+  }
+  const expectedPaths = new Map(buildChapterWorklist(outline).map(section => [section.id, {
+    content: locations.get(section.id)?.contentPath,
+    metadata: locations.get(section.id)?.metadataPath,
+    serial: locations.get(section.id)?.storageSerial,
+  }] as const))
   const actual = new Set<string>()
   const globalChapters: GlobalComplianceChapter[] = []
   const semanticBaselines = new Map<string, { markdown: string; sha256: string; currentSha256: string }>()
@@ -238,8 +245,8 @@ export async function validateChapterWriting(
     const section = writable.get(chapter.section_id)
     if (section === undefined) { reject(issues, 'CHAPTER_WRITING_SECTION_UNKNOWN', 'A chapter references an unknown or structural section.', MANIFEST); continue }
     const expectedPath = expectedPaths.get(chapter.section_id)
-    if (expectedPath === undefined || chapter.content_path !== expectedPath.content) {
-      reject(issues, 'CHAPTER_WRITING_CONTENT_PATH_INVALID', 'A chapter body path must match its confirmed traversal position.', chapter.content_path)
+    if (expectedPath?.content === undefined || chapter.content_path !== expectedPath.content) {
+      reject(issues, 'CHAPTER_WRITING_CONTENT_PATH_INVALID', 'A chapter body path must match its fixed section identity.', chapter.content_path)
     }
     if (JSON.stringify(chapter.requirement_ids) !== JSON.stringify(section.requirement_ids)
       || JSON.stringify(chapter.scoring_ids) !== JSON.stringify(section.scoring_ids)
@@ -252,7 +259,7 @@ export async function validateChapterWriting(
     }
     for (const answer of chapter.covered_must_answer) if (!section.must_answer.includes(answer)) reject(issues, 'CHAPTER_WRITING_MUST_ANSWER_UNKNOWN', 'A chapter records a must-answer outside its confirmed section.', MANIFEST)
     for (const answer of section.must_answer) if (!chapter.covered_must_answer.includes(answer)) reject(issues, 'CHAPTER_WRITING_MUST_ANSWER_MISSING', 'A chapter omits a required must-answer from its metadata.', MANIFEST)
-    if (expectedPath !== undefined) {
+    if (expectedPath?.metadata !== undefined) {
       const metadataRaw = await readJson(workspace, expectedPath.metadata, issues)
       if (metadataRaw !== undefined) {
         try {
@@ -361,9 +368,10 @@ export async function validateChapterWriting(
       globalReviewValidationChapters.push(chapter)
       continue
     }
-    const serial = expectedPaths.get(chapter.section_id)?.content.slice(-7, -3)
-    const path = serial === undefined ? undefined
-      : await resolveSemanticRevisionPath(workspace, serial, chapter.section_id, expected, chapter.candidate_sha256)
+    const storageSerial = expectedPaths.get(chapter.section_id)?.serial
+    const path = storageSerial === undefined ? undefined
+      : await resolveSemanticRevisionPath(workspace, String(storageSerial).padStart(4, '0'),
+        chapter.section_id, expected, chapter.candidate_sha256)
     if (path?.valid !== true || path.from_markdown === undefined) {
       reject(issues, 'GLOBAL_COMPLIANCE_CHAPTER_STALE', '文档级核验引用的章节正文版本没有有效语义修订链。', GLOBAL_REVIEW)
       continue
@@ -457,9 +465,32 @@ export async function validateChapterWriting(
     }
   }
   const chapterById = new Map(chapters.chapters.map(chapter => [chapter.section_id, chapter]))
+  const evidenceRaw = await readJson(workspace, 'analysis/evidence-map.json', issues)
+  const projectRaw = await readJson(workspace, 'analysis/project.json', issues)
+  const webRaw = await readJson(workspace, 'analysis/web-evidence-sources.json', issues)
+  if (evidenceRaw === undefined || projectRaw === undefined || webRaw === undefined) return { ok: false, issues }
+  let evidence: ReturnType<typeof parseEvidenceMapArtifact>
+  let project: ReturnType<typeof parseTenderProjectArtifact>
+  let sources: ReturnType<typeof parseWebEvidenceSourcesArtifact>['sources']
+  let corpus: Awaited<ReturnType<typeof workspace.readManifest>>
+  try {
+    evidence = parseEvidenceMapArtifact(evidenceRaw)
+    project = parseTenderProjectArtifact(projectRaw)
+    sources = parseWebEvidenceSourcesArtifact(webRaw).sources
+    corpus = await workspace.readManifest()
+  } catch {
+    reject(issues, 'CHAPTER_WRITING_EVIDENCE_INPUT_INVALID', '当前 Evidence、项目事实或 Web 账本无法用于章节审核。',
+      'analysis/evidence-map.json')
+    return { ok: false, issues }
+  }
   for (const sectionLog of executionLog.sections) {
     const planned = plan.sections.find(section => section.section_id === sectionLog.section_id)
-    if (planned === undefined) continue
+    const section = writable.get(sectionLog.section_id)
+    const location = locations.get(sectionLog.section_id)
+    if (planned === undefined || section === undefined || location === undefined) continue
+    const fingerprint = chapterEvidenceInputFingerprint(pickChapterContext({ section, location,
+      project, requirements, scoring, compliance, evidence, responsePointCatalog: catalog.points,
+      outline, writingPlan }), corpus, sources)
     const expectedDependencies = planned.depends_on.flatMap((dependency) => {
       const chapter = chapterById.get(dependency.section_id)
       const body = globalChapters.find(item => item.section_id === dependency.section_id)
@@ -469,10 +500,12 @@ export async function validateChapterWriting(
         handoff_sha256: chapterCandidateSha256(JSON.stringify(chapter.handoff)),
       }]
     })
+    // Writer 记录启动时的 Evidence；补搜可在 Reviewer 前合法更新它，最终审核必须绑定当前 Evidence。
     for (const role of ['writer', 'reviewer'] as const) {
       const childId = role === 'writer' ? sectionLog.final_writer_child_session_id : sectionLog.final_reviewer_child_session_id
       const attempt = sectionLog.attempts.findLast(item => item.role === role && item.child_session_id === childId && item.accepted)
       if (attempt === undefined || attempt.input.plan_version > writingPlan.plan_version
+        || role === 'reviewer' && attempt.input.evidence_sha256 !== fingerprint
         || attempt.input.section_epoch !== sectionLog.epoch
         || attempt.input.dependencies.length !== expectedDependencies.length
         || attempt.input.dependencies.some((dependency, index) => {

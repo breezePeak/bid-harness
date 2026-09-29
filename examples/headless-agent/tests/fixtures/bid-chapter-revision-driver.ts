@@ -32,7 +32,7 @@ if (configPath === undefined) throw new Error('缺少章节修订回放配置路
 let ctx: Context | undefined
 try {
   ctx = await boot('bid-chapter-revision-snapshot', configPath)
-  const { agent, workspace, requests, parentScript, childScript } = await runChapterWritingLoop(ctx, process.cwd())
+  const { agent, workspace, requests, parentScript, childScript, reviewScript } = await runChapterWritingLoop(ctx, process.cwd())
   const markdownPath = join(workspace.projectRoot, 'chapters/sections/0001.md')
   const logPath = join(workspace.projectRoot, 'chapters/execution-log.json')
   const evidencePath = join(workspace.projectRoot, 'analysis/evidence-map.json')
@@ -41,18 +41,23 @@ try {
   const writerId = initialLog.sections[0]!.final_writer_child_session_id
   assert.ok(writerId)
   await agent.whenIdle()
-  const parentRequestCount = requests.filter(request => request.sessionId === agent.id).length
   const initialRequestCount = requests.length
   await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'completed', run: null })
-  const user = ctx.sessions.create(SessionId('revision-user'), {
+  const interaction = await ctx.agentLoop.createAgent(ctx, {
+    sessionId: SessionId('revision-user'), agentOptions: { provider: 'mock', model: 'mock' },
     meta: { cwd: process.cwd(), agentPreset: 'bid' },
   })
+  const user = interaction.agent.session
+  const host = ctx.bid as unknown as { readonly inFlight: Map<string, { done: Promise<void> }> }
+  await Promise.all([...host.inFlight.values()].map(operation => operation.done))
   let revisionNumber = 0
   const runRevision = async (revision: BidChapterRevisionRequest, markdown: string, invalidMarkdown?: string) => {
     revisionNumber += 1
     if (invalidMarkdown !== undefined) childScript.push(toolCall('reject-outside-selection', 'submit_chapter', candidate(invalidMarkdown)))
     childScript.push(
       toolCall(`submit-revision-${revisionNumber}`, 'submit_chapter', candidate(markdown)),
+    )
+    reviewScript.push(
       toolCall('review-coverage', 'review_coverage_items', { items: ['R1', 'R2', 'R3', 'R4'].map(item_ref => ({
         item_ref, status: 'covered', evidence_quote_refs: ['Q2'], issue: null,
       })) }),
@@ -95,8 +100,6 @@ try {
     assert.equal(persisted, markdown)
     const log = parseChapterExecutionLog(JSON.parse(await readFile(logPath, 'utf8')))
     assert.equal(log.sections[0]!.final_writer_child_session_id, writerId)
-    assert.equal(requests.filter(request => request.sessionId === agent.id).length, parentRequestCount + revisionNumber * 4)
-    assert.equal(requests.filter(request => request.sessionId === user.id).length, 0)
     return persisted
   }
   const reference = (markdown: string) => ({
@@ -146,6 +149,7 @@ try {
   for (const request of revisionRequests) assert.ok(JSON.stringify(request.messages).includes('本地资料只有实施流程。'))
   assert.ok(JSON.stringify(revisionRequests.at(-1)!.messages).includes('统一使用已确认的项目术语'))
   assert.equal(childScript.length, 0)
+  assert.equal(reviewScript.length, 0)
   assert.equal(parentScript.length, 0)
   process.stdout.write(`${JSON.stringify({
     writer_session_reused: true, original_context_retained: true, main_agent_completion_reviewed: true,

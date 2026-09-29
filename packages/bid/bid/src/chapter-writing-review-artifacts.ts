@@ -99,6 +99,8 @@ export const chapterReviewArtifactSchema = chapterReviewSchema.extend({
   candidate_sha256: z.string().regex(/^[a-f0-9]{64}$/u),
   writer_child_session_id: z.string().min(1),
   reviewer_child_session_id: z.string().min(1),
+  /** Scoped review request identity; legacy full-stage reports omit it. */
+  request_sha256: z.string().regex(/^[a-f0-9]{64}$/u).optional(),
 }).strict()
 
 /** Parsed review conclusion. */

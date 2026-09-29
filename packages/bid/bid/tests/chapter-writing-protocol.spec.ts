@@ -399,6 +399,25 @@ describe('S5 Reviewer 分批记录', () => {
     }, invalid)).toContainEqual(expect.objectContaining({ code: 'CHAPTER_REVIEW_EXTERNAL_INPUT_GAP_INVALID' }))
   })
 
+  it('外部资料缺口不清空正文中无依据的企业声明', async () => {
+    const { agent, call } = await harness()
+    const context = reviewContext()
+    const runtime = attachChapterReview(agent, context, new Map([['Q1', '我方已有三项资质。']]), evidence, 0)
+    await call('review_coverage_items', { items: buildChapterReviewChecklist(context).map(item => item.item_ref === 'R1'
+      ? { item_ref: item.item_ref, status: 'missing', evidence_quote_refs: [], issue: '尚缺人员履历。' }
+      : covered(item.item_ref)) })
+    await call('review_acceptance_criteria', { items: [{ criterion_id: 'AC-000002', status: 'met', evidence_quote_refs: [], reason: '已检查。' }] })
+    await call('review_global_constraints', { items: [{ compliance_id: 'GLOBAL-1', status: 'not_applicable', evidence_quote_refs: [], issue: '不适用。' }] })
+    await call('review_claims', { items: [{ claim_quote_ref: 'Q1', kind: 'project_fact', status: 'unsupported',
+      source_reference: null, issue: '资质没有项目资料证明。' }] })
+    await call('set_review_summary', { quality_checks: quality, blocking_issues: [], assignment_conflicts: [],
+      external_input_gaps: [{ item_ref: 'R1', required_material: '人员履历', reason: '当前资料未提供。' }], external_input_only: true })
+    await call('finish_chapter_review', {})
+    expect(runtime.captured()?.verdict).toBe('repair')
+    expect(runtime.captured()?.blocking_issues.join()).toContain('声明无依据')
+    expect(runtime.captured()?.external_input_gaps).toHaveLength(1)
+  })
+
   it('来源和 Q 身份属于当前包，Web 或 handoff 不能洗成企业事实证据', async () => {
     const { agent, call } = await harness()
     attachChapterReview(agent, reviewContext(), new Map([['Q1', '正文']]), evidence, 0)

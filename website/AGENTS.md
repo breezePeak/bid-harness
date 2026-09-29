@@ -1,15 +1,9 @@
-# AGENTS.md — Documentation website adapter
+# AGENTS.md — 中文文档站
 
-Follow the [root instructions](../AGENTS.md), the [documentation standard](../docs/AGENTS.md), and the [documentation-site sync workflow](../.agents/skills/dsh-doc-site-sync/SKILL.md).
+遵循[根目录规则](../AGENTS.md)、[文档标准](../docs/AGENTS.md)和[文档站同步流程](../.agents/skills/dsh-doc-site-sync/SKILL.md)。
 
-## Keep documentation content out of this tree
+`website/` 只存放 VitePress 配置、展示资源与发布清单；正文和生成参考留在所属的 `docs/` 目录，再由 [docs.ts](docs.ts) 选择中文页面发布。不要在此目录维护文档副本或英文路由树。
 
-`website/` owns only VitePress configuration, presentation assets, and the publication manifest. This file is the only maintained Markdown file in this subtree.
+投影器写入可丢弃的 `website/.generated/`。不要编辑或提交 `.generated/`、`.cache/` 或 `.dist/`。构建会为每个页面生成原始 Markdown 地址，并在根目录生成 `llms.txt`；这些产物由发布清单生成。
 
-Keep canonical prose and generated catalogs in their owning `docs/` tier, then expose selected pages through [docs.ts](docs.ts). Never add locale, route, API, or copied documentation trees such as `website/zh-CN/`, `website/en/`, or `website/api/`.
-
-The projector writes disposable Markdown to the ignored `website/.generated/` directory. Never edit or commit `.generated/`, `.cache/`, or `.dist/`.
-
-The build also emits each route's raw-Markdown twin (with a parent-level alias per index route) and a root `llms.txt` index into `.dist/`, so a page's URL, minus any trailing slash, plus `.md` serves it as plain Markdown. Both derive from the publication manifest at build time; neither is ever a file in this tree.
-
-Run `pnpm docs:check` after changing this subtree; the gate rejects additional non-ignored Markdown under `website/`.
+修改本目录后运行定向的文档站检查。

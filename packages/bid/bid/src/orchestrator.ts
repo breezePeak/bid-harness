@@ -78,9 +78,13 @@ export type BidOrchestratorErrorCode =
   | 'BID_AUTOMATIC_STAGE_NOT_ALLOWED'
   | 'BID_PROGRAM_STAGE_NOT_ALLOWED'
   | 'BID_RESUME_NOT_ALLOWED'
+  | 'BID_RECOVERY_DUPLICATE_INSTRUCTION'
   | 'BID_STAGE_RESET_NOT_ALLOWED'
   | 'BID_WRITING_ENTRY_ACTION_NOT_ALLOWED'
 
+/**
+ * 阶段开始前的能力准入钩子。
+ */
 export type BidBeforeStageStart = (
   stage: BidStage,
   resumeOf?: BidRunResumeIdentity,
@@ -176,7 +180,7 @@ export class BidOrchestrator {
     return this.begin(async () => {
       const resumeOf: BidRunResumeIdentity = {
         runId: suspended.runId,
-        cause: suspended.cause ?? 'host_restart',
+        cause: suspended.cause,
       }
       const settlement = await this.executeStage(state.stage, resumeOf, suspended.work, onAccepted)
       return settlement === 'completed' ? this.driveLoop() : this.state
@@ -186,13 +190,14 @@ export class BidOrchestrator {
   /**
    * Execute the current program-owned stage once without driving its successor.
    * @returns the log-derived state after the stage records completion or failure.
-   * @throws {@link BidOrchestratorError} unless the current stage is an idle ready program stage.
+   * @throws {@link BidOrchestratorError} unless the current stage can accept a program action.
    */
   runCurrentProgramStage(): Promise<BidTaskState> {
     this.assertIdle()
     const state = this.state
     const policy = getBidStagePolicy(state.stage)
-    if (policy.executor !== 'program' || state.status !== 'ready') {
+    if (policy.executor !== 'program' || (state.status !== 'ready'
+      && !(state.stage === 'file_intake' && state.status === 'waiting_user'))) {
       throw new BidOrchestratorError(
         'BID_PROGRAM_STAGE_NOT_ALLOWED',
         `cannot run Bid program stage ${JSON.stringify(state.stage)} while status is ${JSON.stringify(state.status)}`,
@@ -226,13 +231,13 @@ export class BidOrchestrator {
   }
 
   /**
-   * Execute a ready before-execution stage after its Host-owned plan has been confirmed.
+   * 执行已保存写作计划且处于 ready 的 S5。
    * @returns State after the confirmed stage settles.
    */
   runConfirmedStage(): Promise<BidTaskState> {
     this.assertIdle()
     const state = this.state
-    if (state.status !== 'ready' || getBidStagePolicy(state.stage).userGate !== 'before_execution') {
+    if (state.status !== 'ready' || state.stage !== 'chapter_writing') {
       throw new BidOrchestratorError(
         'BID_AUTOMATIC_STAGE_NOT_ALLOWED',
         `cannot run confirmed Bid stage ${JSON.stringify(state.stage)} while status is ${JSON.stringify(state.status)}`,
@@ -441,8 +446,9 @@ export class BidOrchestrator {
         return 'waiting_user'
       }
       if (error instanceof BidStageExecutionError) {
-        await this.runs.suspend('retry_exhausted', stage === 'file_intake'
-          ? safeBidRunError(error, error.issues) : safeRecoverableBidFailure(work, error, error.issues))
+        const failure = stage === 'file_intake'
+          ? safeBidRunError(error, error.issues) : safeRecoverableBidFailure(work, error, error.issues)
+        await this.runs.suspend(failure.recovery?.kind === 'repair' ? 'retry_exhausted' : 'executor_error', failure)
         return 'failed'
       }
       await this.runs.suspend('executor_error', stage === 'file_intake'
@@ -458,10 +464,10 @@ export class BidOrchestrator {
         message: stage === 'tender_analysis' ? '招标分析结果未通过校验。' : '当前阶段结果未通过校验。',
         issues: validation.issues,
       }
-      await this.runs.suspend('retry_exhausted', {
-        ...failure,
-        recovery: stage === 'file_intake' || stage === 'docx_export' ? undefined
-          : safeRecoverableBidFailure(work, failure, validation.issues, true).recovery,
+      const recovery = stage === 'file_intake' || stage === 'docx_export' ? undefined
+        : safeRecoverableBidFailure(work, failure, validation.issues).recovery
+      await this.runs.suspend(recovery?.kind === 'repair' ? 'retry_exhausted' : 'executor_error', {
+        ...failure, recovery,
       })
       return 'failed'
     }
@@ -475,7 +481,7 @@ export class BidOrchestrator {
     try {
       commitContext = await this.prepareStageContextTransition(stage)
     } catch (error: unknown) {
-      await this.runs.suspend('executor_error', safeBidRunError(error))
+      await this.runs.suspend('executor_error', safeRecoverableBidFailure(work, error))
       return 'failed'
     }
     if (signalAborted(run.signal)) { await this.runs.suspend('user_stop'); return 'aborted' }

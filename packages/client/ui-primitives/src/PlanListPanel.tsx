@@ -126,7 +126,7 @@ export function PlanListPanel({ items, running, labels, testId, summary }: PlanL
           onClick={() => { setCollapsed(value => !value) }}
         >
           <span className={css.lead} aria-hidden><IconChecklistOutline14 /></span>
-          <span className={css.title}>{labels.title}</span>
+          <span className={css.title} title={labels.title}>{labels.title}</span>
           <span className={css.progress}>{progressLabel(items, running, labels)}</span>
           {summary && (
             <span className={css.summary} role="status" aria-label={summary.label}>

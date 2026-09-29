@@ -162,8 +162,20 @@ describe('BrowseDirectoryPicker', () => {
   })
 
   it('lists the home directory when no path is given', async () => {
-    const listing = await capability.list()
-    expect(listing.path).toBe(homedir())
+    const homeKey = process.platform === 'win32' ? 'USERPROFILE' : 'HOME'
+    const previousHome = process.env[homeKey]
+    process.env[homeKey] = root
+    try {
+      expect(homedir()).toBe(root)
+      const listing = await capability.list()
+      expect(listing.path).toBe(root)
+    } finally {
+      if (process.platform === 'win32') {
+        if (previousHome === undefined) delete process.env.USERPROFILE
+        else process.env.USERPROFILE = previousHome
+      } else if (previousHome === undefined) delete process.env.HOME
+      else process.env.HOME = previousHome
+    }
   })
 
   it('throws directory-unreadable for a missing target', async () => {

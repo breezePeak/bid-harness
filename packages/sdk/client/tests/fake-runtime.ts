@@ -7,6 +7,7 @@
  * `session.finished`, then the response), and `shutdown`.
  *
  * Script vocabulary (all optional):
+ * - `FAKE_BID_RECOVERY`: 发出不含 Goal 的 Bid 恢复审计事件。
  * - `FAKE_TEXT`: assistant text for each turn (default `hello from fake runtime`).
  * - `FAKE_STATUS`: the `session.finished` status (default `ok`).
  * - `FAKE_REASON_KIND`: the `session.finished` reason kind (default `completed`; `none` omits the reason).
@@ -95,6 +96,10 @@ function runTurn(sessionId: string): void {
     return
   }
   event(sessionId, 'turn/start', { turn: 0 })
+  if (env.FAKE_BID_RECOVERY !== undefined) event(sessionId, 'bid.recovery.requested', {
+    ownerSessionId: sessionId, target: { kind: 'run', workId: 'work-1', runId: 'run-1' },
+    unit: 'outline/outline.json', instruction: '核对原文并修正当前章节。', progressFingerprint: 'a'.repeat(64),
+  })
   event(sessionId, 'assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text } })
   if (env.FAKE_MALFORMED_MESSAGE !== undefined) {
     event(sessionId, 'assistant/message', {

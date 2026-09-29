@@ -31,7 +31,6 @@ import { z as zod } from 'zod'
 import { extractDocument, type ExtractDocumentInput, type ExtractDocumentResult } from './document-extract.ts'
 import { chunkDocument, DEFAULT_DOCUMENT_CHUNK_CONFIG, type DocumentChunkConfig } from './document-chunk.ts'
 import { validateFileIntake } from './file-intake-validator.ts'
-import { executeTenderAnalysis } from './tender-analysis-executor.ts'
 import { validateTenderAnalysis, validateTenderAnalysisCandidate } from './tender-analysis-validator.ts'
 import { parseTenderComplianceArtifact, parseTenderProjectArtifact, parseTenderRequirementsArtifact, parseTenderScoringArtifact } from './tender-analysis-artifacts.ts'
 import {
@@ -54,7 +53,7 @@ import { assertBidMainSession, inspectBidStage, installStageInteractionTools, is
 import { prepareBidStageContextTransition, recoverOverflowedBidStageContext, resetBidStageContext } from './stage-context.ts'
 import { parseOutlineEditOperations } from './outline-confirmation-edits.ts'
 import { outlineArtifactSha256, parseOutlineConfirmationArtifact, parseConfirmedOutlineArtifact, type OutlineDraftView, type OutlineReviewContext } from './outline-confirmation-artifacts.ts'
-import { getOrCreateOutlineDraft, mutateOutlineDraft, replaceOutlineDraft, type OutlineDraftIdentityRequest, type OutlineDraftMutationRequest, type OutlineDraftMutationResult } from './outline-draft-store.ts'
+import { getOrCreateOutlineDraft, readCapabilityOutlineBaseline, mutateOutlineDraft, replaceOutlineDraft, type OutlineDraftIdentityRequest, type OutlineDraftMutationRequest, type OutlineDraftMutationResult } from './outline-draft-store.ts'
 import { validateOutlineDraftForConfirmation } from './outline-confirmation-validator.ts'
 import { parseOutlineRegenerationChangeSet, regenerationChangeSetMatches } from './outline-regeneration-artifacts.ts'
 import {
@@ -66,7 +65,6 @@ import {
   type ChapterWritingControl,
   type FlowchartVisualReviewPolicy,
 } from './chapter-writing-executor.ts'
-import { validateChapterWriting } from './chapter-writing-validator.ts'
 import { suggestDocxFormat } from './docx-format-suggestions.ts'
 import { readDocxXml } from './docx-template.ts'
 import { renderDocx, docxAssetHash } from './docx-render.ts'
@@ -89,6 +87,22 @@ import { estimateChapterWritingPages, estimateDocxMarkdownPages } from './page-e
 import { CHAPTER_EXECUTION_LOG_SCHEMA_VERSION, parseOrMigrateChapterExecutionLog, type ChapterExecutionLog } from './chapter-writing-plan-artifacts.ts'
 import { CHAPTER_REVIEW_SCHEMA_VERSION, chapterCandidateSha256, parseChapterReviewArtifact, type ChapterReviewArtifact } from './chapter-writing-review-artifacts.ts'
 import { parseChapterMetadata } from './chapter-writing-artifacts.ts'
+import { readChapterLocation, readChapterLocations } from './chapter-storage.ts'
+import { BID_CAPABILITIES, defaultBidCapabilityForStage } from './bid-capability-registry.ts'
+import {
+  activeCapabilityMappingWorkspace, askCapabilityTaskInput, executeCapabilityTask, patchCapabilityTaskSteps,
+  readCapabilityAwaitingInput, persistCapabilityTaskRequest, findCapabilityTaskRequest,
+  capabilityTaskRequestSchema, capabilityTaskCheckpointSchema,
+  type CapabilityTaskDispatcher, type CapabilityTaskRequest,
+} from './bid-capability-task.ts'
+import { readCapabilityPublicationReceipt } from './bid-capability-changes.ts'
+import {
+  bidCapabilityTaskSchema, validateCapabilityTaskContentFollowup, validateCapabilityTaskWorkItems, type BidCapabilityTask,
+} from './bid-capability-contract.ts'
+import { createBidCapabilityDispatcher, type BidCapabilityDispatcher } from './bid-capability-dispatcher.ts'
+import { cancelCapabilityRequestsForReset, enqueueCapabilityRequest, markCapabilityRequestApplied, markCapabilityRequestAppliedWithLease,
+  pendingCapabilityWorkIds, readPendingCapabilityRequests } from './bid-capability-queue.ts'
+import { inspectBidProject } from './bid-project-inspect.ts'
 import { renderFlowchartSvg, validateFlowchartSpec } from './flowchart.ts'
 import {
   createNativeVisioExport,
@@ -159,15 +173,16 @@ import { BID_INITIAL_TASK_STATE, buildBidStageTask, getBidClientProjection, getB
 import { BidRunCoordinator, type BidCommitScope, type BidRunContext } from './run-coordinator.ts'
 import { sanitizeBidErrorText } from './safe-error.ts'
 import { bidProjectTaskState, checkpointBidProjectState, commitBidProjectMutation, readBidProjectState, type BidProjectState } from './project-state.ts'
-import { publishBidBatch, type BidPublicationLease } from './publication-batch.ts'
+import { publishBidBatch, reconcileBidPublications, type BidPublicationLease } from './publication-batch.ts'
 import { bidInputFingerprint, bidResetWorkPaths, persistBidWorkRequest, readBidWorkRequest } from './work-descriptor.ts'
 import { prepareBidWorkingTree, publishBidWorkingPaths } from './working-tree.ts'
 import { assertNoLinkedPath, within, atomicBytes } from './workspace-path.ts'
 import { BID_STAGES, BidStageExecutionError, isBidDocumentRole } from './control-plane-contract.ts'
 import { BID_BINARY_UPLOAD_PATH, BID_UPLOAD_FILES_HEADER, BID_UPLOAD_SESSION_HEADER } from './control-plane-contract.ts'
 import { appendBidSchemaWarning, createBidSchemaWarning } from './bid-events.ts'
-import { BidGoalBridge, bidGoalBinding } from './bid-goal.ts'
-import { bidRunRecoveryEligibility, bidWritingPlanRecoveryEligibility, safeRecoverableBidFailure } from './bid-recovery.ts'
+import type {} from '@deepseek-ai/dsh-goal-round-driver'
+import { bidRecoveryInstructionRepeated, bidRunRecoveryEligibility, bidWritingPlanRecoveryEligibility, safeRecoverableBidFailure } from './bid-recovery.ts'
+import { resolveBidToolAuthorization } from './bid-tool-authorization.ts'
 import type { BidSessionEventMap } from './bid-events.ts'
 import {
   applyWritingPlanInput,
@@ -194,7 +209,7 @@ import { writingEntryIntentSchema } from './writing-entry-contract.ts'
 import { recordOnlySchemaVersion } from './schema-version.ts'
 import type { BidBeforeStageStart } from './orchestrator.ts'
 import { assessBoundedMetric } from './acceptance-criteria.ts'
-import { readBidChapterCommandJournal, writeBidChapterCommandJournal, type BidChapterCommandRecord } from './chapter-command-journal.ts'
+import { readBidChapterCommandJournal, withBidCommandJournalLock, writeBidChapterCommandJournal, type BidChapterCommandRecord } from './chapter-command-journal.ts'
 import type {
   BidDetailsView,
   BidChapterRevisionRequest,
@@ -217,10 +232,13 @@ import type {
   BidReviewMaterialView,
   BidRevisionTaskStatus,
   BidRunNotice,
+  BidRunData,
   BidRunDecision,
   BidRunDecisionType,
   BidStage,
+  BidWorkDescriptor,
   BidTaskState,
+  BidCapabilityPlanView,
   BidDocumentRole,
   BidBinaryUploadFile,
   BidUploadFile,
@@ -298,6 +316,7 @@ export type {
   BidRevisionIssueReference,
   BidRevisionQueueErrorCode,
   BidRevisionComparisonResult,
+  BidCapabilityPlanView,
 } from './control-plane-contract.ts'
 export { BID_SESSION_EVENT_TYPES, appendBidSchemaWarning, createBidSchemaWarning } from './bid-events.ts'
 export type { BidSchemaWarning, BidSchemaWarningReason, BidSessionEventMap, BidSessionEventType } from './bid-events.ts'
@@ -376,6 +395,17 @@ export { parseChapterWritingCompletionState } from './chapter-writing-completion
 export type { ChapterWritingCompletionState } from './chapter-writing-completion-review.ts'
 export { buildGlobalComplianceEvidence, validateGlobalComplianceReview } from './chapter-writing-global-review.ts'
 export * from './chapter-writing-plan-artifacts.ts'
+export {
+  bidCapabilityInputSchema, bidCapabilityResultSchema, bidCapabilityScopeSchema,
+  bidCapabilityStepSchema, bidCapabilityStepScopeSchema, bidCapabilityTaskSchema,
+} from './bid-capability-contract.ts'
+export type {
+  BidCapabilityCall, BidCapabilityExecutionContext, BidCapabilityId, BidCapabilityResult,
+  BidCapabilityScope, BidCapabilityStepScope,
+} from './bid-capability-contract.ts'
+export { BID_CAPABILITIES, resolveCapabilityStepScope, validateCapabilityResult, verifyCapabilityTaskScope } from './bid-capability-registry.ts'
+export { bidProjectInspectSchema, inspectBidProject } from './bid-project-inspect.ts'
+export type { BidProjectInspectRequest, BidProjectInspectResult } from './bid-project-inspect.ts'
 export {
   REVISION_QUEUE_PATH,
   REVISION_QUEUE_SCHEMA_VERSION,
@@ -879,6 +909,7 @@ interface ActiveBidOperation {
   executionSessionId?: SessionId
   executionHandle?: AgentHandle
   executionStage?: BidStage
+  lastAdmittedWorkId?: string
   readonly stageControl: HostStageSchedulerControl
   readonly writingControl: HostChapterWritingControl
   readonly runs: BidRunCoordinator
@@ -1009,9 +1040,13 @@ class HostChapterWritingControl implements ChapterWritingControl {
     this.workId = workId
     this.commits = commits
     this.records = await readBidChapterCommandJournal(workspace, workId)
-    this.commands.splice(0, this.commands.length, ...this.records.flatMap(record => record.status === 'pending'
-      ? [{ ...(record.command as ChapterWritingCommand), commandId: record.id }]
-      : []))
+    this.commands.splice(0, this.commands.length, ...this.records.flatMap((record) => {
+      if (record.status !== 'pending' || typeof record.command !== 'object' || record.command === null
+        || !('kind' in record.command)) return []
+      const kind = record.command.kind
+      return kind === 'writing_plan' || kind === 'revision' || kind === 'flowchart_visual_review_policy'
+        ? [{ ...(record.command as ChapterWritingCommand), commandId: record.id }] : []
+    }))
   }
 
   async enqueue(command: ChapterWritingCommand): Promise<void> {
@@ -1020,11 +1055,11 @@ class HostChapterWritingControl implements ChapterWritingControl {
     const commits = this.commits
     if (workspace === undefined || workId === undefined || commits === undefined) throw new Error('BID_CHAPTER_COMMAND_JOURNAL_UNBOUND')
     const record: BidChapterCommandRecord = { id: randomUUID(), status: 'pending', command }
-    this.writes = this.writes.then(async () => {
-      const records = [...this.records, record]
+    this.writes = this.writes.then(() => withBidCommandJournalLock(workspace, workId, async () => {
+      const records = [...await readBidChapterCommandJournal(workspace, workId), record]
       await writeBidChapterCommandJournal(workspace, workId, records, commits)
       this.records = records
-    })
+    }))
     await this.writes
     this.commands.push({ ...command, commandId: record.id })
     for (const listener of this.listeners) listener()
@@ -1038,6 +1073,7 @@ class HostChapterWritingControl implements ChapterWritingControl {
     for (let index = this.records.length - 1; index >= 0; index -= 1) {
       const command = this.records[index]?.command as ChapterWritingCommand | undefined
       if (command?.kind === 'flowchart_visual_review_policy'
+        // oxlint-disable-next-line typescript/no-unnecessary-condition -- 日志记录来自持久化文件。
         && (command.policy === 'required' || command.policy === 'skip')) return command.policy
     }
     return 'required'
@@ -1062,11 +1098,13 @@ class HostChapterWritingControl implements ChapterWritingControl {
     if (workspace === undefined || workId === undefined || commits === undefined) throw new Error('BID_CHAPTER_COMMAND_JOURNAL_UNBOUND')
     const ids = new Set(commands.flatMap(command => command.commandId === undefined ? [] : [command.commandId]))
     this.writes = this.writes.then(async () => {
-      const records = this.records.map(record => ids.has(record.id) ? { ...record, status: 'applied' as const } : record)
-      await commits.publish(async (lease) => {
+      let records: BidChapterCommandRecord[] = []
+      await commits.publish(lease => withBidCommandJournalLock(workspace, workId, async () => {
+        records = (await readBidChapterCommandJournal(workspace, workId))
+          .map(record => ids.has(record.id) ? { ...record, status: 'applied' as const } : record)
         await write(lease)
         await writeBidChapterCommandJournal(workspace, workId, records, lease)
-      })
+      }))
       this.records = records
     })
     await this.writes
@@ -1174,7 +1212,7 @@ async function readWritingRequest(workspace: BidWorkspace): Promise<WritingReque
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
     throw error
   }
-  const parsed = JSON.parse(raw)
+  const parsed: unknown = JSON.parse(raw)
   if (parsed !== null && typeof parsed === 'object' && 'prompt_event' in parsed) {
     return undefined
   }
@@ -1230,6 +1268,7 @@ async function readHostWork(
   descriptor: import('./control-plane-contract.ts').BidWorkDescriptor,
 ): Promise<unknown> {
   const payload = await readBidWorkRequest(workspace, descriptor)
+  if (descriptor.kind === 'capability_task') return payload
   if (bidInputFingerprint(await hostWorkInputIdentity(workspace, descriptor.stage, payload))
     !== descriptor.inputFingerprint) throw new Error('BID_WORK_INPUT_FINGERPRINT_MISMATCH')
   return payload
@@ -1435,12 +1474,14 @@ async function executeOutlineRegenerationCandidate(
     ])
     return { ok: true, value: { stage: run.work.stage, status: 'waiting_user', run: null } }
   } catch (error: unknown) {
+    const originalCode = error !== null && typeof error === 'object' && 'code' in error ? error.code : undefined
     return { ok: false, error: {
       code: 'BID_REGENERATE_FAILED',
       message: error instanceof Error && error.message === 'change-set-mismatch'
         ? 'The regeneration change set does not match the candidate.'
         : `The regenerated outline candidate is invalid: ${error instanceof Error ? error.message : String(error)}`,
-      issues: validationIssues,
+      issues: validationIssues.length > 0 ? validationIssues : error instanceof BidStageExecutionError ? error.issues
+        : typeof originalCode === 'string' ? [{ code: originalCode, message: error instanceof Error ? error.message : String(error) }] : [],
       current: draft,
     } }
   }
@@ -1534,6 +1575,7 @@ async function executeOutlineConfirmationCandidate(
         confirmed_outline_sha256: outlineArtifactSha256(outline),
         confirmed_draft_revision: draft.revision,
         confirmed_draft_sha256: draft.draft_outline_sha256,
+        authorization: { source: 'user_confirmation' },
       }))
     }
   })
@@ -1636,7 +1678,14 @@ export class BidHostRuntime extends TypertRemoteService {
   private readonly docxInFlight = new Set<BidProjectKey>()
   private readonly docxExports = new Map<SessionId, Promise<BidDocxExportResult>>()
   private readonly pendingRunDecisions = new Map<string, Promise<void>>()
+  private readonly pendingCapabilityInputs = new Map<string, Promise<void>>()
+  private readonly pendingCapabilityInputControllers = new Map<string, AbortController>()
+  private capabilityTaskDispatcher: CapabilityTaskDispatcher | undefined
+  private readonly builtInCapabilityDispatcher: BidCapabilityDispatcher
+  private readonly queuedDrains = new Set<BidProjectKey>()
+  private readonly queuedDrainRequested = new Set<BidProjectKey>()
   private readonly pendingRunDecisionControllers = new Map<string, AbortController>()
+  private readonly recoveryNotices = new WeakMap<Session, string>()
   private readonly recoveryAcceptances = new Map<string, Promise<{ accepted: true; run_id: string }>>()
   private readonly recoveryTasks = new Set<Promise<unknown>>()
   private readonly pendingWritingQuestions = new Map<BidProjectKey, ActiveWritingQuestion>()
@@ -1657,10 +1706,22 @@ export class BidHostRuntime extends TypertRemoteService {
       readonly error: Error
     }
   >()
-  private bidGoalBridge: BidGoalBridge | undefined
 
   private isContextActive(): boolean {
     return this.ctx.fiber.state === FiberState.ACTIVE
+  }
+
+  /**
+   * 安装能力步骤执行器；后续能力适配器共用此单一 Run 入口。
+   * @param dispatcher 负责授权文件、执行和业务校验的适配器。
+   * @returns 仅移除当前注册实例的 disposer。
+   */
+  registerCapabilityTaskDispatcher(dispatcher: CapabilityTaskDispatcher): () => void {
+    if (this.capabilityTaskDispatcher !== undefined) throw new Error('BID_CAPABILITY_DISPATCHER_ALREADY_REGISTERED')
+    this.capabilityTaskDispatcher = dispatcher
+    return () => {
+      if (this.capabilityTaskDispatcher === dispatcher) this.capabilityTaskDispatcher = undefined
+    }
   }
 
   /** Word 操作按项目互斥，可与任意会话的阶段执行并行；阶段重置期间拒绝写入。 */
@@ -1798,14 +1859,12 @@ export class BidHostRuntime extends TypertRemoteService {
           // Admission diagnostics must never turn a durably admitted Run into a failed Run.
           this.ctx.logger.warn('Bid Run admission diagnostics unavailable.')
         }
-        if (run.work.kind === 'stage_execution' && run.work.stage === 'tender_analysis') {
-          this.bidGoalBridge?.onS2Admitted(current.session, run)
-        }
+        current.lastAdmittedWorkId = run.work.workId
       },
       (notice, run) => {
         this.injectHostExecutionUpdate(session, {
           stage: run.work.stage,
-          status: 'suspended',
+          status: run.cause === 'executor_error' ? 'failed' : 'suspended',
           cause: run.cause,
           code: run.error?.code,
           message: run.error?.message ?? notice.message,
@@ -1930,10 +1989,12 @@ export class BidHostRuntime extends TypertRemoteService {
         if (operation.retirement !== undefined) {
           await operation.retirement
         } else {
-          if (operation.runs.current !== undefined && this.inFlight.get(key) === operation) {
-            operation.suspension ??= operation.runs.suspend('executor_error', {
-              message: '阶段执行已中断，已保存完成进度。',
-            })
+          const current = operation.runs.current
+          if (current !== undefined && this.inFlight.get(key) === operation) {
+            const failure = safeRecoverableBidFailure(current.work, new Error('阶段执行已中断，已保存完成进度。'))
+            operation.suspension ??= operation.runs.suspend(
+              failure.recovery?.kind === 'repair' ? 'retry_exhausted' : 'executor_error', failure,
+            )
           }
           await operation.suspension
           if (operation.suspension === undefined && this.isContextActive()) await this.checkpoint(operation)
@@ -1947,12 +2008,33 @@ export class BidHostRuntime extends TypertRemoteService {
         if (this.inFlight.get(key) === operation) this.inFlight.delete(key)
         operation.settle()
         const settledTask = bidSessionTaskState(operation.session)
-        if (settledTask.stage === 'chapter_writing' && settledTask.status === 'completed') {
-          this.bidGoalBridge?.complete(operation.session)
+        if (operation.lastAdmittedWorkId !== undefined && settledTask.status !== 'suspended') {
+          void this.drainPersistedCapabilityRequests(operation.session)
+            .catch((error: unknown) => {
+              this.ctx.logger.warn(`Bid 排队能力任务调度失败：${sanitizeBidErrorText(
+                error instanceof Error ? error.message : String(error),
+              )}`)
+            })
         }
-        this.bidGoalBridge?.request(operation.session)
         const main = this.ctx.agents.get(operation.session.id)
-        if (main?.session === operation.session && settledTask.status === 'suspended') {
+        if (main?.session === operation.session) {
+          this.steerMainAgentForRecovery(main.session)
+        }
+        const goalDriver = this.ctx.get('goalRoundDriver')
+        if (goalDriver !== undefined) {
+          for (const agent of this.ctx.agents.list()) {
+            if (!isBidMainSession(agent.session)) continue
+            let candidate: BidProjectKey
+            try { candidate = projectKey(agent.session) } catch (error: unknown) {
+              // 已删除或不可访问的其他工作区不阻止当前项目收尾。
+              if (['ENOENT', 'EACCES', 'EPERM'].includes((error as NodeJS.ErrnoException).code ?? '')) continue
+              throw error
+            }
+            if (candidate === key) goalDriver.request(agent)
+          }
+        }
+        if (main?.session === operation.session && settledTask.status === 'suspended'
+          && settledTask.run.cause !== 'host_restart') {
           this.ensureRunDecision(main)
         }
       }
@@ -1965,32 +2047,62 @@ export class BidHostRuntime extends TypertRemoteService {
     let state = saved
     if (state === undefined) state = await checkpointBidProjectState(operation.workspace, BID_INITIAL_TASK_STATE)
     else if (state.status === 'running') {
-      const interruptedState = suspendForHostRestart(state)
-      if (interruptedState.status !== 'suspended') throw new Error('BID_HOST_RESTART_STATE_INVALID')
-      const interrupted = interruptedState.run
-      state = await checkpointBidProjectState(operation.workspace, interruptedState)
-      const notice: BidRunNotice = {
-        noticeId: `run:${interrupted.runId}:suspended`,
-        supersedesTurn: null,
-        runId: interrupted.runId,
-        stage: state.stage,
-        kind: 'interrupted',
-        severity: 'error',
-        message: '当前阶段已中断，已保存已完成进度。',
+      const unfinished = state.run
+      const committed = unfinished.work.kind === 'capability_task'
+        ? await this.readCommittedCapabilityTask(operation.workspace, unfinished.work) : null
+      if (committed !== null) {
+        state = await checkpointBidProjectState(operation.workspace, committed.return_state)
+        if (!operation.session.events.some(event => event.type === 'bid.run.completed'
+          && event.data.run.runId === unfinished.runId)) {
+          operation.session.append('bid.run.completed', { run: { ...unfinished, updatedAt: Date.now() } })
+        }
+        this.appendCapabilityCompletionNotice(operation.session, unfinished)
+      } else {
+        const interruptedState = suspendForHostRestart(state)
+        if (interruptedState.status !== 'suspended') throw new Error('BID_HOST_RESTART_STATE_INVALID')
+        const interrupted = interruptedState.run
+        state = await checkpointBidProjectState(operation.workspace, interruptedState)
+        const notice: BidRunNotice = {
+          noticeId: `run:${interrupted.runId}:suspended`,
+          supersedesTurn: null,
+          runId: interrupted.runId,
+          stage: state.stage,
+          kind: 'interrupted',
+          severity: 'error',
+          message: '当前阶段已中断，已保存已完成进度。',
+        }
+        operation.session.append('bid.run.notice', notice)
+        this.injectHostExecutionUpdate(operation.session, {
+          stage: state.stage,
+          status: 'suspended',
+          cause: interrupted.cause,
+          message: notice.message,
+        })
       }
-      operation.session.append('bid.run.notice', notice)
-      this.injectHostExecutionUpdate(operation.session, {
-        stage: state.stage,
-        status: 'suspended',
-        cause: interrupted.cause,
-        message: notice.message,
-      })
+    }
+    const lastStarted = operation.session.events.findLast(event => event.type === 'bid.run.started')
+    if (state.status !== 'running' && state.status !== 'suspended'
+      && lastStarted?.type === 'bid.run.started' && lastStarted.data.run.work.kind === 'capability_task'
+      && !operation.session.events.some(event => event.type === 'bid.run.notice'
+        && event.data.noticeId === `work:${lastStarted.data.run.work.workId}:completed`)) {
+      const request = await this.readCommittedCapabilityTask(operation.workspace, lastStarted.data.run.work)
+      if (request !== null && isDeepStrictEqual(request.return_state, bidProjectTaskState(state))) {
+        this.appendCapabilityCompletionNotice(operation.session, lastStarted.data.run)
+      }
     }
     operation.projectRevision = state.revision
     operation.session.append('bid.project.resumed', { state: bidProjectTaskState(state), revision: state.revision })
     operation.ready = true
     await this.publishProjectState(operation, state)
     return bidProjectTaskState(state)
+  }
+
+  private async readCommittedCapabilityTask(
+    workspace: BidWorkspace, work: BidWorkDescriptor,
+  ): Promise<CapabilityTaskRequest | null> {
+    await reconcileBidPublications(workspace.root, workspace.projectRoot)
+    const receipt = await readCapabilityPublicationReceipt(workspace, work.workId, work.requestSha256)
+    return receipt === null ? null : capabilityTaskRequestSchema.parse(await readBidWorkRequest(workspace, work))
   }
 
   /** 只广播控制状态；每个 Session 保留独立的聊天、工具及模型上下文。 */
@@ -2080,6 +2192,7 @@ export class BidHostRuntime extends TypertRemoteService {
     const task = bidSessionTaskState(session)
     if (task.status !== 'suspended') return undefined
     const { run } = task
+    if (run.cause !== 'user_stop') return undefined
     const decisionKey = runDecisionKey(session, task.stage, run.runId, 'run_recovery')
     const options = task.stage === 'file_intake'
       ? [{ label: RUN_DECISION_OPTIONS.continue }, { label: RUN_DECISION_OPTIONS.stop }]
@@ -2103,9 +2216,10 @@ export class BidHostRuntime extends TypertRemoteService {
     const { session } = agent
     if (!isBidMainSession(session)) return
     const current = this.currentRunDecision(session)
-    if (current === undefined) return
-    if (this.bidGoalBridge?.canRecover(session)) {
-      this.cancelRunDecisions(session)
+    if (current === undefined) {
+      const task = bidSessionTaskState(session)
+      if (task.status === 'suspended' && task.run.cause === 'awaiting_input'
+        && task.run.work.kind === 'capability_task') this.ensureCapabilityInput(agent)
       return
     }
     const received = session.events.findLast(event => event.type === 'bid.run.decision.received'
@@ -2119,6 +2233,48 @@ export class BidHostRuntime extends TypertRemoteService {
     const task = this.askRunDecision(agent, request, controller)
     this.pendingRunDecisions.set(request.decisionKey, task)
     void task
+  }
+
+  /** 同一悬挂 Run 仅开放一个持久化问题；答案保存后续行原 Work。 */
+  private ensureCapabilityInput(agent: Agent): void {
+    if (!this.isContextActive()) return
+    const task = bidSessionTaskState(agent.session)
+    if (task.status !== 'suspended' || task.run.cause !== 'awaiting_input'
+      || task.run.work.kind !== 'capability_task') return
+    const key = task.run.runId
+    if (this.pendingCapabilityInputs.has(key)) return
+    const controller = new AbortController()
+    this.pendingCapabilityInputControllers.set(key, controller)
+    const pending = this.askAndResumeCapabilityInput(agent, task.run, controller).catch((error: unknown) => {
+      if (!controller.signal.aborted) this.ctx.logger.warn(`Bid 能力输入提问未完成：${sanitizeBidErrorText(String(error))}`)
+    }).finally(() => {
+      this.pendingCapabilityInputs.delete(key)
+      this.pendingCapabilityInputControllers.delete(key)
+    })
+    this.pendingCapabilityInputs.set(key, pending)
+    void pending
+  }
+
+  private async askAndResumeCapabilityInput(
+    agent: Agent, suspended: Extract<BidTaskState, { status: 'suspended' }>['run'], controller: AbortController,
+  ): Promise<void> {
+    const workspace = new BidWorkspace(projectKey(agent.session), workspaceConfig(this.config))
+    const outcome = await readCapabilityAwaitingInput(workspace, suspended.work.workId, suspended.work.requestSha256)
+    if (outcome === null) throw new Error('BID_CAPABILITY_AWAITING_STEP_MISSING')
+    const answered = await askCapabilityTaskInput(agent.session, suspended.work.workId, outcome,
+      async (question) => {
+        const reply = await this.ctx.userQuestions.ask({ agent, questions: [question], signal: controller.signal })
+        const item = reply.answers.find(answer => answer.id === question.id)
+        if (item === undefined) throw new Error('BID_CAPABILITY_INPUT_ANSWER_MISSING')
+        return item
+      }, async () => { await this.ctx.sessions.flush(agent.session) })
+    if (!answered || controller.signal.aborted || !this.isContextActive()) return
+    const current = bidSessionTaskState(agent.session)
+    if (current.status !== 'suspended' || current.run.runId !== suspended.runId
+      || current.run.cause !== 'awaiting_input') return
+    const resumed = agent.session.events.findLast(event => event.type === 'bid.project.resumed')
+    if (resumed?.type !== 'bid.project.resumed') throw new Error('BID_CAPABILITY_RESUME_REVISION_MISSING')
+    await this.resumeCurrentRun(agent.session, suspended.runId, resumed.data.revision)
   }
 
   private cancelRunDecisions(session: Session): void {
@@ -2137,8 +2293,7 @@ export class BidHostRuntime extends TypertRemoteService {
       }
       const answer = await this.ctx.userQuestions.ask({ agent, questions: [request.question], signal: controller.signal })
       const current = bidSessionTaskState(agent.session)
-      if (controller.signal.aborted || current.status !== 'suspended' || current.run.runId !== request.runId
-        || this.bidGoalBridge?.canRecover(agent.session)) return
+      if (controller.signal.aborted || current.status !== 'suspended' || current.run.runId !== request.runId) return
       const decision = selectedRunDecision(request.question, answer)
       if (decision === undefined) throw new Error('BID_RUN_DECISION_INVALID')
       agent.session.append('bid.run.decision.received', {
@@ -2166,7 +2321,6 @@ export class BidHostRuntime extends TypertRemoteService {
     if (decision === 'continue') {
       const current = bidSessionTaskState(agent.session)
       if (current.status !== 'suspended' || current.run.runId !== request.runId) return
-      this.bidGoalBridge?.resumeAfterReset(agent.session)
       const resumed = agent.session.events.findLast(event => event.type === 'bid.project.resumed')
       const revision = resumed?.type === 'bid.project.resumed'
         ? resumed.data.revision : undefined
@@ -2287,7 +2441,7 @@ export class BidHostRuntime extends TypertRemoteService {
       return
     }
     try {
-      if (accepted && request !== undefined) await this.scheduleWritingPlanProcessing(pending.agent, request)
+      if (accepted) await this.scheduleWritingPlanProcessing(pending.agent, request)
     } catch (error: unknown) {
       this.ctx.logger.warn(`Bid S5 计划处理启动失败：${String(error)}`)
     }
@@ -2405,9 +2559,10 @@ export class BidHostRuntime extends TypertRemoteService {
   private async scheduleWritingPlanProcessing(
     agent: Agent,
     request: WritingRequest,
-    recovery?: { goalId: string; instruction: string },
+    recovery?: { instruction: string },
   ): Promise<boolean> {
     if (!this.isContextActive()) return false
+    const expectedRecovery = recovery === undefined ? undefined : bidWritingPlanRecoveryEligibility(agent.session)
     const key = projectKey(agent.session)
     const dispatch = await this.withWritingEntryOperation(agent.session, async (operation, workspace) => {
       const current = await readWritingRequest(workspace)
@@ -2438,26 +2593,26 @@ export class BidHostRuntime extends TypertRemoteService {
         const failed: WritingRequest = {
           ...current,
           processing: { message_id: existing.messageId, state: 'failed', turn: existing.turn },
-          error: { code: 'BID_WRITING_PLAN_NOT_COMMITTED', message: '写作要求已保存，但本轮未成功提交写作计划。请点击"继续处理已保存要求"。' },
+          error: { code: 'BID_WRITING_PLAN_NOT_COMMITTED', message: '写作要求已保存，但本轮未成功提交写作计划。主 Agent 将读取诊断并处理。' },
           processing_message_id: undefined,
         }
         await this.mutateProject(operation, lease => writeWritingRequest(workspace, failed, lease))
         return null
       }
       if (recovery !== undefined) {
-        const eligibility = bidWritingPlanRecoveryEligibility(agent.session, recovery.goalId)
-        const bound = bidGoalBinding(agent.session)
-        const goal = this.ctx.get('goals')?.get(agent)
+        const eligibility = bidWritingPlanRecoveryEligibility(agent.session)
         if (!eligibility.eligible || eligibility.fingerprint === undefined
+          || eligibility.fingerprint !== expectedRecovery?.fingerprint
+          || current.confirmed_outline_sha256 !== sha256
           || eligibility.target?.requestId !== current.request_id || eligibility.target.attemptId !== current.attempt_id
-          || bound?.data.goalId !== recovery.goalId || goal?.id !== recovery.goalId
-          || goal.phase !== 'active' || goal.activation !== 'armed'
           || current.processing?.state !== 'failed'
           || !['BID_WRITING_PLAN_NOT_COMMITTED', 'BID_WRITING_PLAN_DISPATCH_FAILED'].includes(current.error?.code ?? '')) {
           throw new BidOrchestratorError('BID_RESUME_NOT_ALLOWED', 'S5 已保存答案不满足当前自动恢复条件。')
         }
-        agent.session.append('bid.goal.recovery.requested', {
-          goalId: recovery.goalId,
+        if (bidRecoveryInstructionRepeated(agent.session, eligibility.fingerprint, recovery.instruction)) {
+          throw new BidOrchestratorError('BID_RECOVERY_DUPLICATE_INSTRUCTION', '同一问题不能重复提交相同修复指令。')
+        }
+        agent.session.append('bid.recovery.requested', {
           ownerSessionId: String(agent.session.id),
           target: { kind: 'writing_plan', requestId: current.request_id, attemptId: current.attempt_id },
           unit: 'writing_plan',
@@ -2508,7 +2663,7 @@ export class BidHostRuntime extends TypertRemoteService {
       try {
         await this.withWritingEntryOperation(agent.session, async (operation, workspace) => {
           const current = await readWritingRequest(workspace)
-          if (current?.request_id !== request.request_id || current?.attempt_id !== request.attempt_id) return
+          if (current?.request_id !== request.request_id || current.attempt_id !== request.attempt_id) return
           const failed: WritingRequest = {
             ...current,
             processing: { message_id: String(dispatch.id), state: 'failed', turn: null },
@@ -2568,11 +2723,11 @@ export class BidHostRuntime extends TypertRemoteService {
       if (turnEnded) {
         await this.withWritingEntryOperation(agent.session, async (operation, ws) => {
           const current = await readWritingRequest(ws)
-          if (current?.request_id !== request.request_id || current?.attempt_id !== request.attempt_id) return
+          if (current?.request_id !== request.request_id || current.attempt_id !== request.attempt_id) return
           const failed: WritingRequest = {
             ...current,
             processing: { ...processing, state: 'failed' },
-            error: { code: 'BID_WRITING_PLAN_NOT_COMMITTED', message: '写作要求已保存，但本轮未成功提交写作计划。请点击"继续处理已保存要求"。' },
+            error: { code: 'BID_WRITING_PLAN_NOT_COMMITTED', message: '写作要求已保存，但本轮未成功提交写作计划。主 Agent 将读取诊断并处理。' },
           }
           await this.mutateProject(operation, lease => writeWritingRequest(ws, failed, lease))
         })
@@ -2580,7 +2735,7 @@ export class BidHostRuntime extends TypertRemoteService {
       }
       const newRequest = await this.withWritingEntryOperation(agent.session, async (operation, ws) => {
         const current = await readWritingRequest(ws)
-        if (current?.request_id !== request.request_id || current?.attempt_id !== request.attempt_id) return null
+        if (current?.request_id !== request.request_id || current.attempt_id !== request.attempt_id) return null
         const nextAttempt = randomUUID()
         const updated: WritingRequest = {
           ...current,
@@ -2595,6 +2750,7 @@ export class BidHostRuntime extends TypertRemoteService {
       if (newRequest !== null) await this.scheduleWritingPlanProcessing(agent, newRequest)
       return
     }
+    // oxlint-disable-next-line typescript/no-unnecessary-condition -- 恢复时从磁盘读取处理状态。
     if (processing.state === 'running') {
       if (existing !== undefined && existing.messageId === processing.message_id && existing.turn !== null) {
         const turnEnded = existing.agent.session.events.some(
@@ -2604,11 +2760,11 @@ export class BidHostRuntime extends TypertRemoteService {
       }
       await this.withWritingEntryOperation(agent.session, async (operation, ws) => {
         const current = await readWritingRequest(ws)
-        if (current?.request_id !== request.request_id || current?.attempt_id !== request.attempt_id) return
+        if (current?.request_id !== request.request_id || current.attempt_id !== request.attempt_id) return
         const failed: WritingRequest = {
           ...current,
           processing: { ...processing, state: 'failed' },
-          error: { code: 'BID_WRITING_PLAN_NOT_COMMITTED', message: '写作要求已保存，但本轮未成功提交写作计划。请点击"继续处理已保存要求"。' },
+          error: { code: 'BID_WRITING_PLAN_NOT_COMMITTED', message: '写作要求已保存，但本轮未成功提交写作计划。主 Agent 将读取诊断并处理。' },
         }
         await this.mutateProject(operation, lease => writeWritingRequest(ws, failed, lease))
       })
@@ -2632,7 +2788,7 @@ export class BidHostRuntime extends TypertRemoteService {
     try {
       await this.withWritingEntryOperation(entry.agent.session, async (operation, workspace) => {
         const current = await readWritingRequest(workspace)
-        if (current?.request_id !== entry.requestId || current?.attempt_id !== entry.attemptId
+        if (current?.request_id !== entry.requestId || current.attempt_id !== entry.attemptId
           || current.owner_session_id !== entry.ownerSessionId) {
           if (this.processingWritingPlans.get(entry.key) === entry) this.processingWritingPlans.delete(entry.key)
           return
@@ -2660,7 +2816,7 @@ export class BidHostRuntime extends TypertRemoteService {
             ...current,
             processing: { message_id: entry.messageId, state: 'failed', turn: entry.turn },
             error: reason.kind === 'completed'
-              ? { code: 'BID_WRITING_PLAN_NOT_COMMITTED', message: '写作要求已保存，但本轮未成功提交写作计划。请点击"继续处理已保存要求"。' }
+              ? { code: 'BID_WRITING_PLAN_NOT_COMMITTED', message: '写作要求已保存，但本轮未成功提交写作计划。主 Agent 将读取诊断并处理。' }
               : { code: reason.kind === 'error' ? reason.error?.code ?? 'BID_WRITING_PLAN_MODEL_ERROR' : 'BID_WRITING_PLAN_TURN_INTERRUPTED',
                 message: sanitizeBidErrorText(reason.error?.message ?? `写作计划回合因 ${reason.kind} 中断。`) },
           }
@@ -2698,6 +2854,35 @@ export class BidHostRuntime extends TypertRemoteService {
     await this.publishProjectState(operation, state)
   }
 
+  /** 在稳定失败落盘并释放项目锁后唤醒主 Agent，不选择业务修复方案。 */
+  private steerMainAgentForRecovery(session: Session): void {
+    if (!this.isContextActive() || !isBidMainSession(session) || this.inFlight.has(projectKey(session))) return
+    const agent = this.ctx.agents.get(session.id)
+    if (agent?.session !== session) return
+    const task = bidSessionTaskState(session)
+    const decision = task.stage === 'chapter_writing' && task.status === 'waiting_user'
+      ? bidWritingPlanRecoveryEligibility(session) : bidRunRecoveryEligibility(session)
+    if (!decision.eligible || decision.target === undefined) return
+    const identity = JSON.stringify([decision.target, decision.fingerprint, decision.attempts])
+    if (this.recoveryNotices.get(session) === identity) return
+    const writing = session.events.findLast(event => event.type === 'bid.writing_entry.changed')
+    const failure = task.status === 'suspended' ? task.run.error
+      : writing?.type === 'bid.writing_entry.changed' ? writing.data.view.error ?? undefined : undefined
+    const facts = [
+      '当前阶段执行失败，失败状态已保存。',
+      `stage: ${task.stage}`,
+      `target: ${JSON.stringify(decision.target)}`,
+      `failure_code: ${failure?.code ?? 'BID_WRITING_PLAN_FAILED'}`,
+      `failure_unit: ${(task.status === 'suspended' ? task.run.error?.recovery?.unit : undefined) ?? 'writing_plan'}`,
+      `reason: ${sanitizeBidErrorText(decision.reason)}`,
+      ...(task.status === 'suspended' ? task.run.error?.issues : undefined)?.slice(0, 3).map(issue => `${sanitizeBidErrorText(issue.code)}: ${sanitizeBidErrorText(issue.message)}`) ?? [],
+      '已完成成果和 checkpoint 保持不变。先调用 bid_stage_inspect(view="recovery")，分析真实根因并形成具体修复方案，再调用 bid_recover_task。内部可修复错误不要要求用户选择 continue/restart/stop；Host 只验证和执行你的方案。',
+    ]
+    agent.steer(createUserMessage({ content: [{ type: 'text', text: facts.join('\n') }],
+      source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'notice', summary: 'Bid 执行失败，交由主 Agent 处理' } }))
+    this.recoveryNotices.set(session, identity)
+  }
+
   /** Queue one durable Host summary without waking an idle Interaction Agent. */
   private injectHostExecutionUpdate(session: Session, update: HostExecutionUpdate): void {
     const message = createUserMessage({
@@ -2730,6 +2915,7 @@ export class BidHostRuntime extends TypertRemoteService {
   constructor(ctx: Context, config: Config = DEFAULT_HOST_RUNTIME_CONFIG) {
     super(ctx, 'bid')
     this.config = config
+    this.builtInCapabilityDispatcher = createBidCapabilityDispatcher(config)
     for (const authority of config.trustedHosts) assertBidUploadTrustedAuthority(authority)
     ctx.effect(
       () => registerBidRuntimeProjection(ctx.sessionProjections, config),
@@ -2756,47 +2942,17 @@ export class BidHostRuntime extends TypertRemoteService {
     installStageInteractionTools(ctx,
       (agent, request, signal) => this.executeStageInteraction(agent, request, signal),
       session => isBidMainSession(session) && this.inFlight.get(projectKey(session))?.interaction === true)
-    ctx.inject(['goals', 'goalRoundDriver'], (goalCtx) => {
-      const bridge = new BidGoalBridge(goalCtx, (session) => {
-        if (this.inFlight.has(projectKey(session))) return false
-        const bound = session.events.findLast(event => event.type === 'bid.goal.bound')
-        return bound?.type === 'bid.goal.bound'
-          && (bidRunRecoveryEligibility(session, bound.data.goalId).eligible
-            || bidWritingPlanRecoveryEligibility(session, bound.data.goalId).eligible)
-      }, (session) => {
-        const agent = this.ctx.agents.get(session.id)
-        if (agent?.session === session && bidSessionTaskState(session).status === 'suspended') this.ensureRunDecision(agent)
+    ctx.on('agent/session-start', ({ agent }) => {
+      if (!isBidMainSession(agent.session)) return
+      void this.drainPersistedCapabilityRequests(agent.session).catch((error: unknown) => {
+        this.ctx.logger.warn(`Bid 排队能力任务恢复失败：${sanitizeBidErrorText(
+          error instanceof Error ? error.message : String(error),
+        )}`)
       })
-      this.bidGoalBridge = bridge
-      goalCtx.on('goal/changed', ({ agent, change }) => {
-        const session = agent.session
-        if (!isBidMainSession(session) || this.ctx.agents.get(session.id) !== agent
-          || bidGoalBinding(session)?.data.goalId !== change.ref.id || bridge.isInternalChange(session)) return
-        if (change.operation === 'pause' || change.operation === 'clear') {
-          void this.handleUserStop(session).catch((error: unknown) => {
-            this.ctx.logger.warn(`Bid Goal 停止处理失败：${sanitizeBidErrorText(error instanceof Error ? error.message : String(error))}`)
-          })
-        } else if (change.operation === 'resume') {
-          const task = bidSessionTaskState(session)
-          if (task.status === 'suspended' && (task.run.cause === 'user_stop' || task.run.cause === 'host_restart')
-            && !this.inFlight.has(projectKey(session))) {
-            const resumed = session.events.findLast(event => event.type === 'bid.project.resumed')
-            if (resumed?.type === 'bid.project.resumed') {
-              const running = this.ctx.agents.withoutInitiator(() => this.resumeCurrentRun(session, task.run.runId, resumed.data.revision))
-              this.recoveryTasks.add(running)
-              void running.catch((error: unknown) => {
-                this.ctx.logger.warn(`Bid Goal 显式继续失败：${sanitizeBidErrorText(error instanceof Error ? error.message : String(error))}`)
-              }).finally(() => { this.recoveryTasks.delete(running) })
-            }
-          } else bridge.request(session)
-        } else if (change.operation === 'block' || change.operation === 'complete') {
-          if (bidSessionTaskState(session).status === 'suspended') this.ensureRunDecision(agent)
-        }
-      }, { global: true })
-      goalCtx.effect(() => async () => {
-        if (this.bidGoalBridge === bridge) this.bidGoalBridge = undefined
-        await bridge.dispose()
-      }, 'bid: native Goal bridge')
+    }, { global: true })
+    ctx.inject(['goalRoundDriver'], (goalCtx) => {
+      goalCtx.effect(() => goalCtx.goalRoundDriver.registerGate(agent =>
+        isBidMainSession(agent.session) && this.inFlight.has(projectKey(agent.session)) ? 'wait' : undefined))
     })
     ctx.on('agent/pre-step', async ({ agent }, next) => {
       const decision = await next()
@@ -2826,7 +2982,7 @@ export class BidHostRuntime extends TypertRemoteService {
             stale = true
           } else {
             const current = await readWritingRequest(workspace)
-            if (current?.request_id !== entry.requestId || current?.attempt_id !== entry.attemptId
+            if (current?.request_id !== entry.requestId || current.attempt_id !== entry.attemptId
               || current.continuation === 'paused') stale = true
           }
         } catch {
@@ -2874,7 +3030,7 @@ export class BidHostRuntime extends TypertRemoteService {
           entry.turn = turn
           void this.withWritingEntryOperation(agent.session, async (operation, workspace) => {
             const current = await readWritingRequest(workspace)
-            if (current?.request_id !== entry.requestId || current?.attempt_id !== entry.attemptId) return
+            if (current?.request_id !== entry.requestId || current.attempt_id !== entry.attemptId) return
             if (current.processing?.message_id !== entry.messageId || current.state !== 'answered') return
             const updated: WritingRequest = {
               ...current,
@@ -2890,7 +3046,6 @@ export class BidHostRuntime extends TypertRemoteService {
     }, { global: true })
     ctx.on('session/event', (session, event) => {
       if (isBidMainSession(session)) {
-        if (event.type === 'bid.writing_entry.changed') this.bidGoalBridge?.request(session)
         if (event.type === 'bid.task.changed' && event.data.state.status === 'waiting_user'
           && event.data.state.reason !== undefined) {
           this.injectHostExecutionUpdate(session, {
@@ -2949,14 +3104,14 @@ export class BidHostRuntime extends TypertRemoteService {
           if (!stopExists) {
             void this.withWritingEntryOperation(agent.session, async (operation, workspace) => {
               const current = await readWritingRequest(workspace)
-              if (current?.request_id !== entry.requestId || current?.attempt_id !== entry.attemptId) return
+              if (current?.request_id !== entry.requestId || current.attempt_id !== entry.attemptId) return
               const { sha256 } = await confirmedOutline(workspace)
               const plan = await readCurrentWritingPlan(workspace, sha256)
               if (plan !== undefined) return
               const failed: WritingRequest = {
                 ...current,
                 processing: { message_id: entry.messageId, state: 'failed', turn: entry.turn },
-                error: { code: 'BID_WRITING_PLAN_NOT_COMMITTED', message: '写作要求已保存，但本轮未成功提交写作计划。请点击"继续处理已保存要求"。' },
+                error: { code: 'BID_WRITING_PLAN_NOT_COMMITTED', message: '写作要求已保存，但本轮未成功提交写作计划。主 Agent 将读取诊断并处理。' },
               }
               await this.mutateProject(operation, lease => writeWritingRequest(workspace, failed, lease))
             }).catch((error: unknown) => {
@@ -2989,13 +3144,17 @@ export class BidHostRuntime extends TypertRemoteService {
       }), 'bid: DOCX template upload route')
     })
     ctx.effect(() => () => {
+      for (const controller of this.pendingRunDecisionControllers.values()) controller.abort(new Error('BID_HOST_DISPOSED'))
+      this.pendingRunDecisionControllers.clear()
+      for (const controller of this.pendingCapabilityInputControllers.values()) controller.abort(new Error('BID_HOST_DISPOSED'))
+      this.pendingCapabilityInputControllers.clear()
       for (const pending of this.pendingWritingQuestions.values()) pending.controller.abort(new Error('BID_HOST_DISPOSED'))
       this.pendingWritingQuestions.clear()
       for (const entry of this.processingWritingPlans.values()) {
         this.discardWritingPlanMessage(entry)
       }
       this.processingWritingPlans.clear()
-    }, 'bid: dispose native writing questions')
+    }, 'bid: dispose native questions')
   }
 
   /** Validate and durably commit one Main-Agent-submitted S5 writing plan. */
@@ -3096,16 +3255,124 @@ export class BidHostRuntime extends TypertRemoteService {
     const request = stageInteractionSchema.parse(input)
     if (!isBidMainSession(session)) throw new BidOrchestratorError('BID_ACTION_NOT_ALLOWED', '阶段工具只供 Bid Main Agent 使用。')
     const key = projectKey(session)
+    if (request.action === 'bid_project_inspect') {
+      const canonical = new BidWorkspace(key, workspaceConfig(this.config))
+      return inspectBidProject(canonical, request.query, this.inFlight.get(key)?.workspace)
+    }
+    if (request.action === 'bid_run_task') {
+      return this.runCapabilityTaskFromTool(agent, request.task)
+    }
+    if (request.action === 'bid_plan_task') {
+      if (this.ctx.agents.get(session.id) !== agent) throw new Error('BID_CAPABILITY_DISPATCHER_UNAVAILABLE')
+      const authorization = resolveBidToolAuthorization(agent)
+      if (authorization === undefined) throw new Error('BID_CAPABILITY_USER_MESSAGE_REQUIRED')
+      const operation = this.beginOperation(session)
+      try {
+        const state = await this.prepareOperation(operation)
+        if (state.status !== 'suspended' || state.run.work.kind !== 'capability_task'
+          || state.run.work.workId !== request.work_id || state.run.cause === 'awaiting_input') {
+          throw new Error('BID_CAPABILITY_PLAN_PATCH_NOT_READY')
+        }
+        const saved = capabilityTaskRequestSchema.parse(await readBidWorkRequest(operation.workspace, state.run.work))
+        const workingPaths = await prepareBidWorkingTree(operation.workspace, state.run.work)
+        const working = new BidWorkspace(workingPaths.root, operation.workspace.config)
+        let stepCount = 0
+        await this.mutateProject(operation, async (lease) => {
+          const checkpoint = await patchCapabilityTaskSteps({ work: state.run.work,
+            commits: { writeJson: (path, value) => lease.writeJson(path, value) } },
+          operation.workspace, working, saved, session, authorization, request.from_index, request.steps, agent)
+          stepCount = checkpoint.steps.length
+        }, state)
+        return { accepted: true, work_id: request.work_id, steps: stepCount,
+          message: '已保存未执行步骤；当前 Work 仍处于挂起状态，等待明确恢复。' }
+      } finally { await this.finishOperation(session, operation) }
+    }
+    if (request.action === 'bid_outline_apply_operations'
+      || request.action === 'bid_outline_regenerate_scope' || request.action === 'bid_evidence_remap') {
+      const workspace = new BidWorkspace(key, workspaceConfig(this.config))
+      const persisted = await readBidProjectState(workspace)
+      const state = persisted === undefined ? bidSessionTaskState(session) : bidProjectTaskState(persisted)
+      const native = state.status === 'waiting_user' && (request.action === 'bid_evidence_remap'
+        ? state.stage === 'evidence_mapping'
+        : state.stage === 'outline_generation' || state.stage === 'evidence_mapping')
+      if (!native) {
+        const baseline = await readCapabilityOutlineBaseline(workspace)
+        if (request.expected_revision !== baseline.revision
+          || request.expected_draft_sha256 !== baseline.draft_outline_sha256) {
+          return { ok: false, error: { code: 'BID_OUTLINE_DRAFT_CONFLICT', current: baseline } }
+        }
+        const task = request.action === 'bid_outline_apply_operations' ? {
+          goal: '按用户要求调整目录', scope: { kind: 'project' }, steps: [{ scope: { source: 'task' },
+            call: { capability: 'outline.update', input: { operations: request.operations,
+              business_bindings: request.business_bindings ?? [] } } }],
+        } : request.action === 'bid_outline_regenerate_scope' ? {
+          goal: '按用户要求深化选中目录', scope: { kind: 'sections', section_ids: request.section_ids },
+          steps: [{ scope: { source: 'task' }, call: { capability: 'outline.refine',
+            input: { feedback: request.feedback } } }],
+        } : {
+          goal: '按用户要求更新选中资料', scope: { kind: 'sections', section_ids: request.section_ids },
+          steps: [{ scope: { source: 'task' }, call: { capability: 'evidence.research',
+            input: { mode: request.mode, reason: request.reason ?? '重新核对该范围的资料',
+              allow_outline_refinement: false } } }],
+        }
+        return this.runCapabilityTaskFromTool(agent, bidCapabilityTaskSchema.parse(task))
+      }
+    }
+    if (request.action === 'bid_confirm_writing_plan') {
+      const state = bidSessionTaskState(session)
+      if (state.stage !== 'chapter_writing') {
+        const { action: _action, ...input } = request
+        return this.runCapabilityTaskFromTool(agent, bidCapabilityTaskSchema.parse({
+          goal: '按用户要求更新写作计划', scope: { kind: 'project' }, steps: [{ scope: { source: 'task' },
+            call: { capability: 'writing.plan', input } }],
+        }))
+      }
+    }
+    if (request.action === 'bid_revise_chapter') {
+      const state = bidSessionTaskState(session)
+      if (state.stage !== 'chapter_writing' && state.stage !== 'docx_export') {
+        return this.runCapabilityTaskFromTool(agent, bidCapabilityTaskSchema.parse({
+          goal: request.instruction,
+          scope: request.reference.scope === 'paragraphs'
+            ? { kind: 'paragraphs', reference: request.reference }
+            : { kind: 'sections', section_ids: [request.reference.section_id] },
+          steps: [{ scope: { source: 'task' }, call: { capability: 'chapter.revise',
+            input: { instruction: request.instruction, reference: request.reference } } }],
+        }))
+      }
+    }
     if (request.action === 'bid_pause_stage') return this.setStagePaused(session, true)
     if (request.action === 'bid_resume_stage') return this.setStagePaused(session, false)
+    if (request.action === 'bid_resume_current_run') {
+      if (resolveBidToolAuthorization(agent) === undefined) throw new Error('BID_USER_CONTINUATION_REQUIRED')
+      if (this.ctx.agents.get(session.id) !== agent) {
+        throw new BidOrchestratorError('BID_ACTION_NOT_ALLOWED', '当前主会话无法恢复挂起任务。')
+      }
+      const current = bidSessionTaskState(session)
+      if (current.status !== 'suspended' || current.run.cause === 'user_stop'
+        || current.run.cause === 'awaiting_input') {
+        throw new BidOrchestratorError('BID_RESUME_NOT_ALLOWED', '当前任务不在可由聊天继续的挂起状态。')
+      }
+      this.cancelRunDecisions(session)
+      const accepted = Promise.withResolvers<{ accepted: true; run_id: string }>()
+      const task = this.ctx.agents.withoutInitiator(() => this.resumeCurrentRun(
+        session, request.run_id, request.expected_project_revision,
+        (run) => { accepted.resolve({ accepted: true, run_id: run.runId }) },
+      ))
+      this.recoveryTasks.add(task)
+      void task.then(() => {
+        accepted.reject(new Error('BID_RESUME_NOT_ADMITTED'))
+      }, (error: unknown) => {
+        accepted.reject(error)
+        this.ctx.logger.warn(`Bid 用户继续任务失败：${sanitizeBidErrorText(error instanceof Error ? error.message : String(error))}`)
+      }).finally(() => {
+        this.recoveryTasks.delete(task)
+      })
+      return accepted.promise
+    }
     if (request.action === 'bid_recover_task') {
-      const bound = bidGoalBinding(session)
-      const goalService = this.ctx.get('goals')
-      const goal = goalService?.get(agent)
-      if (bound?.data.ownerSessionId !== String(session.id) || goal?.id !== bound.data.goalId
-        || goal.phase !== 'active' || goal.activation !== 'armed'
-        || this.ctx.agents.get(session.id) !== agent) {
-        throw new BidOrchestratorError('BID_ACTION_NOT_ALLOWED', '当前主会话没有有效的 Bid Goal 恢复授权。')
+      if (!isBidMainSession(session) || this.ctx.agents.get(session.id) !== agent) {
+        throw new BidOrchestratorError('BID_ACTION_NOT_ALLOWED', '当前调用者不是 live Bid Main Agent。')
       }
       if (request.target === 'writing_plan') {
         const processing = this.processingWritingPlans.get(key)
@@ -3114,10 +3381,13 @@ export class BidHostRuntime extends TypertRemoteService {
           return { accepted: true, already_processing: true,
             writing_request_id: processing.requestId, attempt_id: processing.attemptId }
         }
-        const decision = bidWritingPlanRecoveryEligibility(session, goal.id)
+        const decision = bidWritingPlanRecoveryEligibility(session)
         if (!decision.eligible || decision.target?.requestId !== request.writing_request_id
           || decision.target.attemptId !== request.attempt_id || this.inFlight.has(key)) {
           throw new BidOrchestratorError('BID_RESUME_NOT_ALLOWED', decision.reason)
+        }
+        if (bidRecoveryInstructionRepeated(session, decision.fingerprint, request.instruction)) {
+          throw new BidOrchestratorError('BID_RECOVERY_DUPLICATE_INSTRUCTION', '同一问题不能重复提交相同修复指令。')
         }
         const workspace = new BidWorkspace(key, workspaceConfig(this.config))
         const saved = await readWritingRequest(workspace)
@@ -3127,16 +3397,19 @@ export class BidHostRuntime extends TypertRemoteService {
           throw new BidOrchestratorError('BID_RESUME_NOT_ALLOWED', '已保存写作要求已变化。')
         }
         const accepted = await this.ctx.agents.withoutInitiator(() => this.scheduleWritingPlanProcessing(
-          agent, saved, { goalId: goal.id, instruction: request.instruction },
+          agent, saved, { instruction: request.instruction },
         ))
         return { accepted, writing_request_id: saved.request_id, attempt_id: saved.attempt_id }
       }
       const recoveryKey = `${String(session.id)}:${request.run_id}`
       const existing = this.recoveryAcceptances.get(recoveryKey)
       if (existing !== undefined) return existing
-      const decision = bidRunRecoveryEligibility(session, goal.id)
+      const decision = bidRunRecoveryEligibility(session)
       if (!decision.eligible || decision.target?.runId !== request.run_id) {
         throw new BidOrchestratorError('BID_RESUME_NOT_ALLOWED', decision.reason)
+      }
+      if (bidRecoveryInstructionRepeated(session, decision.fingerprint, request.instruction)) {
+        throw new BidOrchestratorError('BID_RECOVERY_DUPLICATE_INSTRUCTION', '同一问题不能重复提交相同修复指令。')
       }
       this.cancelRunDecisions(session)
       const resumed = session.events.findLast(event => event.type === 'bid.project.resumed')
@@ -3146,7 +3419,7 @@ export class BidHostRuntime extends TypertRemoteService {
       const task = this.ctx.agents.withoutInitiator(() => this.resumeCurrentRun(
         session, request.run_id, resumed.data.revision,
         (run) => { accepted.resolve({ accepted: true, run_id: run.runId }) },
-        { goalId: goal.id, instruction: request.instruction },
+        { instruction: request.instruction },
       ))
       this.recoveryTasks.add(task)
       void task.then(() => {
@@ -3181,10 +3454,13 @@ export class BidHostRuntime extends TypertRemoteService {
         const queue = await readRevisionQueue(workspace)
         const outline = (await confirmedOutline(workspace)).outline
         const worklist = buildWritableSectionWorklist(outline)
+        const locations = await readChapterLocations(workspace)
         const sectionHashes = new Map<string, string>()
-        for (const [index, section] of worklist.entries()) {
+        for (const section of worklist) {
+          const assigned = locations.get(section.id)
+          if (assigned === undefined) continue
           try {
-            const markdown = await readFile(within(workspace.projectRoot, `chapters/sections/${String(index + 1).padStart(4, '0')}.md`), 'utf8')
+            const markdown = await readFile(within(workspace.projectRoot, assigned.contentPath), 'utf8')
             sectionHashes.set(section.id, chapterContentSha256(markdown))
           } catch (error) {
             if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
@@ -3240,7 +3516,11 @@ export class BidHostRuntime extends TypertRemoteService {
           within(workspace.projectRoot, 'outline/confirmed-outline.json'), 'utf8',
         )))
         const worklist = buildChapterWorklist(outline)
-        const sectionSerials = new Map(worklist.map((section, index) => [section.id, String(index + 1).padStart(4, '0')]))
+        const locations = await readChapterLocations(workspace)
+        const sectionSerials = new Map(worklist.flatMap((section) => {
+          const assigned = locations.get(section.id)
+          return assigned === undefined ? [] : [[section.id, String(assigned.storageSerial).padStart(4, '0')] as const]
+        }))
         const batchTasks: RevisionBatchTaskExecution[] = batch.tasks.map((task) => {
           const issues = task.issue_ids.map((id) => {
             const issue = issueMap.get(id)
@@ -3394,10 +3674,9 @@ export class BidHostRuntime extends TypertRemoteService {
         }
       } catch (error: unknown) {
         if (run !== undefined && operation.runs.current === run) {
-          await operation.runs.suspend(
-            run.signal.aborted ? 'user_stop' : 'executor_error',
-            { code: 'BID_REVISION_BATCH_FAILED', message: error instanceof Error ? error.message : String(error) },
-          )
+          const failure = safeRecoverableBidFailure(run.work, error)
+          await operation.runs.suspend(run.signal.aborted ? 'user_stop'
+            : failure.recovery?.kind === 'repair' ? 'retry_exhausted' : 'executor_error', failure)
         }
         try {
           const batch = await readRevisionBatch(operation.workspace, request.batch_id)
@@ -3627,6 +3906,7 @@ export class BidHostRuntime extends TypertRemoteService {
             expected_revision: request.expected_revision,
             expected_draft_sha256: request.expected_draft_sha256,
             operations: parseOutlineEditOperations(request.operations),
+            ...(request.business_bindings === undefined ? {} : { business_bindings: request.business_bindings }),
           }, lease)
           if (!mutation.ok) throw Object.assign(new Error('BID_OUTLINE_MUTATION_REJECTED'), { mutation })
         }).catch((error: unknown) => {
@@ -3667,9 +3947,10 @@ export class BidHostRuntime extends TypertRemoteService {
               session.append('bid.user_confirmation.required', { stage: task.stage, status: 'waiting_user' })
             })
           } else if (operation.runs.current !== undefined) {
-            await operation.runs.suspend(run?.signal.aborted === true ? 'user_stop' : 'executor_error', {
-              message: '阶段交互未完成，已保留工作候选供恢复。',
-            })
+            const failure = safeRecoverableBidFailure(operation.runs.current.work,
+              new Error('阶段交互未完成，已保留工作候选供恢复。'))
+            await operation.runs.suspend(run?.signal.aborted === true ? 'user_stop'
+              : failure.recovery?.kind === 'repair' ? 'retry_exhausted' : 'executor_error', failure)
           }
         }
         try { await this.ctx.sessions.flush(session) } finally { await this.finishOperation(session, operation) }
@@ -3706,9 +3987,10 @@ export class BidHostRuntime extends TypertRemoteService {
           agent.session.append('bid.user_confirmation.required', { stage, status: 'waiting_user' })
         })
       } else if (operation.runs.current === run) {
-        await operation.runs.suspend(run.signal.aborted ? 'user_stop' : 'executor_error', {
-          message: failure instanceof Error ? failure.message : '阶段交互未完成，已保留工作候选供恢复。',
-        })
+        const error = safeRecoverableBidFailure(run.work,
+          failure ?? new Error('阶段交互未完成，已保留工作候选供恢复。'))
+        await operation.runs.suspend(run.signal.aborted ? 'user_stop'
+          : error.recovery?.kind === 'repair' ? 'retry_exhausted' : 'executor_error', error)
       }
     } catch (error: unknown) {
       this.ctx.logger.warn(`Bid 后台阶段交互结算失败：${String(error)}`)
@@ -3734,15 +4016,37 @@ export class BidHostRuntime extends TypertRemoteService {
     try {
       const task = await this.prepareOperation(operation)
       const workspace = new BidWorkspace(cwd, workspaceConfig(this.config))
+      const writingStopped = task.stage === 'chapter_writing' && (
+        this.writingEntryStops.has(key)
+        || (await readWritingEntryStop(workspace)) !== undefined
+        || (await readWritingRequest(workspace))?.continuation === 'paused'
+      )
       if (task.status === 'suspended') {
-        this.ensureRunDecision(agent)
+        if (!writingStopped && task.run.cause === 'host_restart'
+          && task.run.work.kind !== 'file_intake'
+          && ['tender_analysis', 'outline_generation', 'evidence_mapping', 'chapter_writing'].includes(task.stage)) {
+          const { runId } = task.run
+          const revision = operation.projectRevision
+          const continuation = operation.done.then(async () => {
+            if (!this.isContextActive() || this.inFlight.has(key)) return
+            await this.ctx.agents.withoutInitiator(() => this.resumeCurrentRun(session, runId, revision))
+          })
+          this.recoveryTasks.add(continuation)
+          void continuation.catch((error: unknown) => {
+            const message = sanitizeBidErrorText(error instanceof Error ? error.message : String(error))
+            this.ctx.logger.warn(`Bid Host 重启续行失败：${message}`)
+            const current = bidSessionTaskState(session)
+            if (current.status !== 'suspended' || current.run.cause !== 'host_restart'
+              || current.run.runId !== runId || this.inFlight.has(key)) return
+            session.append('bid.run.notice', { noticeId: `run:${runId}:resume-failed`, supersedesTurn: null,
+              runId, stage: current.stage, kind: 'interrupted', severity: 'error', message })
+            this.ensureRunDecision(agent)
+          }).finally(() => { this.recoveryTasks.delete(continuation) })
+        } else this.ensureRunDecision(agent)
         return
       }
       if (task.stage === 'chapter_writing' && task.status !== 'running') {
-        const isStopped = this.writingEntryStops.has(key)
-          || (await readWritingEntryStop(workspace)) !== undefined
-          || (await readWritingRequest(workspace))?.continuation === 'paused'
-        if (isStopped) {
+        if (writingStopped) {
           await this.broadcastWritingEntryView(workspace, task, operation.projectRevision, [session])
           await this.ctx.sessions.flush(session)
           return
@@ -3813,13 +4117,19 @@ export class BidHostRuntime extends TypertRemoteService {
     workspace: BidWorkspace,
     signal: AbortSignal | undefined,
     operation: ActiveBidOperation,
+    intake?: {
+      readonly incoming: readonly IncomingFile[]
+      readonly failures: readonly BidFileIntakeFileResult[]
+      readonly work: BidWorkDescriptor
+      readonly onImported: (files: ImportedFile[]) => void
+    },
   ): BidOrchestrator {
     let intakeFiles: IncomingFile[] = []
     let importedFiles: ImportedFile[] = []
     return new BidOrchestrator(
       operation.session,
       {
-        canExecute: stage => stage === 'file_intake' || stage === 'tender_analysis' || stage === 'evidence_mapping' || stage === 'outline_generation' || stage === 'chapter_writing',
+        canExecute: stage => stage === 'file_intake' || defaultBidCapabilityForStage(stage) !== undefined,
         execute: async (task, run) => {
           this.setExecutionAgentStage(operation, agent, task.stage)
           await run.scheduler.waitUntilRunnable(run.signal)
@@ -3827,6 +4137,10 @@ export class BidHostRuntime extends TypertRemoteService {
             if (run.work.kind !== 'file_intake') throw new Error('BID_FILE_INTAKE_WORK_REQUIRED')
             intakeFiles = await readFileIntakeWork(workspace, run.work)
             importedFiles = await workspace.import(intakeFiles, run)
+            intake?.onImported(importedFiles)
+            if (intake !== undefined && intake.failures.length > 0) {
+              throw new Error('file intake could not decode every selected file')
+            }
             return [{ stage: 'file_intake', type: 'manifest', path: 'manifest.json' }]
           }
           if (task.stage === 'docx_export') return executeDocxExport(
@@ -3837,47 +4151,27 @@ export class BidHostRuntime extends TypertRemoteService {
             undefined,
             createDocxVisualReviewer(this.ctx, operation.session, run.signal),
           )
-          switch (task.stage) {
-            case 'tender_analysis': return executeTenderAnalysis(agent, workspace, task, {
-              maxRepairAttempts: this.config.modelStageRepairAttempts,
-              run,
-              ...(operation.recovery?.workId === run.work.workId ? { recovery: operation.recovery } : {}),
-            })
-            case 'evidence_mapping': return executeEvidenceMapping(agent, workspace, task, {
-              maxRepairAttempts: this.config.modelStageRepairAttempts,
-              maxConcurrency: this.config.evidenceMappingMaxConcurrency,
-              webSearchEnabled: this.config.webSearchEnabled,
-              run,
-              ...(operation.recovery?.workId === run.work.workId ? { recovery: operation.recovery } : {}),
-            })
-            case 'outline_generation': return executeOutlineGeneration(agent, workspace, task, {
-              maxRepairAttempts: this.config.modelStageRepairAttempts, run,
-              ...(operation.recovery?.workId === run.work.workId ? { recovery: operation.recovery } : {}),
-            })
-            case 'chapter_writing': {
-              await operation.writingControl.bind(workspace, run.work.workId, run.commits)
-              return executeChapterWriting(agent, workspace, task, {
-                maxRepairAttempts: this.config.modelStageRepairAttempts,
-                maxConcurrency: this.config.chapterWritingMaxConcurrency,
-                maxCompletionRepairRounds: this.config.chapterWritingCompletionRepairRounds,
-                webSearchEnabled: this.config.webSearchEnabled,
-                run,
-                control: operation.writingControl,
-                ...(operation.recovery?.workId === run.work.workId ? { recovery: operation.recovery } : {}),
-              })
-            }
+          if (defaultBidCapabilityForStage(task.stage) === 'chapter.write') {
+            await operation.writingControl.bind(workspace, run.work.workId, run.commits)
           }
+          return this.builtInCapabilityDispatcher.executeDefault(task, {
+            agent, workspace, run,
+            maxRepairAttempts: this.config.modelStageRepairAttempts,
+            evidenceMappingMaxConcurrency: this.config.evidenceMappingMaxConcurrency,
+            chapterWritingMaxConcurrency: this.config.chapterWritingMaxConcurrency,
+            chapterWritingCompletionRepairRounds: this.config.chapterWritingCompletionRepairRounds,
+            webSearchEnabled: this.config.webSearchEnabled,
+            writingControl: operation.writingControl,
+            ...(operation.recovery?.workId === run.work.workId ? { recovery: operation.recovery } : {}),
+          })
         },
       },
       {
         validate: (stage, artifacts) => {
           switch (stage) {
-            case 'file_intake': return validateFileIntake(workspace, importedFiles, stage, artifacts, intakeFiles)
+            case 'file_intake': return validateFileIntake(workspace, importedFiles, stage, artifacts, intake?.incoming ?? intakeFiles)
             case 'docx_export': return validateDocxExport(workspace, stage, artifacts)
-            case 'tender_analysis': return validateTenderAnalysis(workspace, stage, artifacts)
-            case 'evidence_mapping': return validateEvidenceMapping(workspace, stage, artifacts)
-            case 'chapter_writing': return validateChapterWriting(workspace, stage, artifacts)
-            case 'outline_generation': return validateOutlineGeneration(workspace, stage, artifacts)
+            default: return this.builtInCapabilityDispatcher.validateDefault(stage, workspace, artifacts)
           }
         },
       },
@@ -3890,6 +4184,14 @@ export class BidHostRuntime extends TypertRemoteService {
       ),
       operation.runs,
       async (stage) => {
+        if (stage === 'file_intake' && intake !== undefined) return intake.work
+        if (stage === 'chapter_writing' && !await hasCurrentWritingPlan(workspace)) {
+          const current = await confirmedOutline(workspace)
+          const plan = createAutomaticWritingPlan(current.outline, current.sha256)
+          const planPath = within(workspace.projectRoot, WRITING_PLAN_PATH)
+          await assertNoLinkedPath(workspace.root, planPath)
+          await this.mutateProject(operation, lease => lease.writeJson(planPath, plan))
+        }
         return persistHostWork(workspace, 'stage_execution', stage, { stage })
       },
       this.createBeforeStageStart(operation, workspace),
@@ -3987,7 +4289,6 @@ export class BidHostRuntime extends TypertRemoteService {
       throw new BidOrchestratorError('BID_STAGE_RESET_NOT_ALLOWED', '不能重置尚未开始的阶段。')
     }
     this.cancelRunDecisions(session)
-    this.bidGoalBridge?.pause(session)
     const operation = this.beginOperation(session)
     operation.reservedForReset = true
     let resetCompleted = false
@@ -4053,6 +4354,8 @@ export class BidHostRuntime extends TypertRemoteService {
         ? { stage, status: 'waiting_user', run: null }
         : { stage, status: 'ready', run: null }
       await this.mutateProject(operation, async (lease) => {
+        const canceled = await cancelCapabilityRequestsForReset(workspace, paths, lease)
+        if (canceled > 0) this.ctx.logger.info(`Bid 重置取消 ${canceled} 项输入已失效的排队能力任务。`)
         const invalidatedExports = await invalidateDocxLastExports(workspace, lease)
         const registeredExports = await clearDocxExportArtifacts(workspace, lease)
         const outputPaths = [...new Set(workspace.config.outputDirectory === DEFAULT_BID_CONFIG.outputDirectory
@@ -4068,8 +4371,6 @@ export class BidHostRuntime extends TypertRemoteService {
       session.append('bid.task.changed', { state: resetState })
       await this.ctx.sessions.flush(session)
       resetCompleted = true
-      if (stage === 'file_intake') this.bidGoalBridge?.clearAfterS1Reset(session)
-      if (stage !== 'file_intake' && stage !== 'docx_export') this.bidGoalBridge?.resumeAfterReset(session)
       if (resetState.status !== 'ready') return bidSessionTaskState(session)
       operation.reservedForReset = false
       detached = true
@@ -4090,6 +4391,7 @@ export class BidHostRuntime extends TypertRemoteService {
   /**
    * Ask the Main Agent for manual S5 writing requirements.
    * @param session - live Bid Session waiting before chapter writing.
+   * @param intent - whether to ensure or retry the writing request.
    * @returns the unchanged waiting state after the request is durably queued.
    */
   @Remote('requestWritingRequirements')
@@ -4189,11 +4491,7 @@ export class BidHostRuntime extends TypertRemoteService {
   ): Promise<WritingEntryEffect> {
     if (currentPlan !== undefined) return { kind: 'none' }
     if (stop !== undefined || currentRequest?.continuation === 'paused') return { kind: 'none' }
-    if (currentRequest !== undefined) {
-      if (currentRequest.owner_session_id !== String(session.id)) return { kind: 'none' }
-      if (currentRequest.state === 'answered' || currentRequest.state === 'dismissed'
-        || currentRequest.state === 'consumed' || currentRequest.state === 'awaiting_answer') return { kind: 'none' }
-    }
+    if (currentRequest !== undefined) return { kind: 'none' }
     const request = writingRequestSchema.parse({
       schema_version: WRITING_REQUEST_SCHEMA_VERSION,
       request_id: randomUUID(),
@@ -4309,7 +4607,7 @@ export class BidHostRuntime extends TypertRemoteService {
       }
       return { kind: 'none' }
     }
-    if (intent.mode === 'retry_answer') {
+    {
       const unsaved = this.unsavedWritingAnswers.get(key)
       if (unsaved === undefined) {
         throw new BidOrchestratorError('BID_WRITING_ENTRY_ACTION_NOT_ALLOWED', '没有待重试的未保存答案。')
@@ -4425,7 +4723,7 @@ export class BidHostRuntime extends TypertRemoteService {
       phase = 'paused'
     } else if (isFailed) {
       phase = 'failed'
-    } else if (hasPlan && task.run === null) {
+    } else if (hasPlan) {
       phase = 'ready'
     } else if (request?.state === 'awaiting_answer') {
       phase = 'awaiting_answer'
@@ -4481,6 +4779,7 @@ export class BidHostRuntime extends TypertRemoteService {
     const revision = state?.revision ?? 0
     await this.broadcastWritingEntryView(workspace, task, revision, [session])
     await this.ctx.sessions.flush(session)
+    this.steerMainAgentForRecovery(session)
   }
 
   /**
@@ -4565,8 +4864,9 @@ export class BidHostRuntime extends TypertRemoteService {
   /** 统一用户停止处理：覆盖运行中 Run、在线提问以及已回答但尚未启动写作的窗口。 */
   private handleUserStop(session: Session): Promise<void> {
     if (!isBidMainSession(session)) return Promise.resolve()
-    this.bidGoalBridge?.pause(session)
     const key = projectKey(session)
+    const task = bidSessionTaskState(session)
+    if (task.status === 'suspended') this.pendingCapabilityInputControllers.get(task.run.runId)?.abort(new Error('BID_CAPABILITY_USER_STOP'))
     const existing = this.writingEntryStops.get(key)
     if (existing?.state === 'pending') {
       return existing.done
@@ -4665,7 +4965,7 @@ export class BidHostRuntime extends TypertRemoteService {
             processing: undefined,
             processing_message_id: undefined,
           }
-        } else if (writingRequest.state === 'dismissed') {
+        } else {
           updatedRequest = writingRequest
         }
       }
@@ -4792,74 +5092,12 @@ export class BidHostRuntime extends TypertRemoteService {
       validateBidFileBatch(incoming, workspace.config)
       const intakeWork = await persistFileIntakeWork(workspace, incoming)
       let imported: ImportedFile[] = []
-      const orchestrator = new BidOrchestrator(
-        session,
-        {
-          canExecute: stage => stage === 'tender_analysis' || stage === 'evidence_mapping' || stage === 'outline_generation' || stage === 'chapter_writing',
-          execute: async (task, run) => {
-            await run.scheduler.waitUntilRunnable(run.signal)
-            if (task.stage === 'file_intake') {
-              try {
-                const durableFiles = await readFileIntakeWork(workspace, run.work)
-                imported = await workspace.import(durableFiles, run)
-              } catch {
-                throw new Error('file intake could not persist the selected files')
-              }
-              if (failures.length > 0) {
-                throw new Error('file intake could not decode every selected file')
-              }
-              const artifact: StageArtifact = { stage: 'file_intake', type: 'manifest', path: 'manifest.json' }
-              return [artifact]
-            }
-            if (task.stage === 'docx_export') return executeDocxExport(
-              workspace,
-              run,
-              undefined,
-              undefined,
-              undefined,
-              createDocxVisualReviewer(this.ctx, session, run.signal),
-            )
-            const repair = {
-              maxRepairAttempts: this.config.modelStageRepairAttempts,
-              run,
-            }
-            if (task.stage === 'tender_analysis') return executeTenderAnalysis(agent, workspace, task, repair)
-            if (task.stage === 'evidence_mapping') return executeEvidenceMapping(agent, workspace, task, {
-              ...repair,
-              maxConcurrency: this.config.evidenceMappingMaxConcurrency,
-              webSearchEnabled: this.config.webSearchEnabled,
-            })
-            if (task.stage === 'outline_generation') return executeOutlineGeneration(agent, workspace, task, repair)
-            return executeChapterWriting(agent, workspace, task, {
-              ...repair,
-              maxConcurrency: this.config.chapterWritingMaxConcurrency,
-              maxCompletionRepairRounds: this.config.chapterWritingCompletionRepairRounds,
-              webSearchEnabled: this.config.webSearchEnabled,
-              control: operation.writingControl,
-            })
-          },
-        },
-        {
-          validate: (stage, artifacts) => stage === 'docx_export'
-            ? validateDocxExport(workspace, stage, artifacts)
-            : stage === 'file_intake'
-              ? validateFileIntake(workspace, imported, stage, artifacts, incoming)
-              : stage === 'tender_analysis'
-                ? validateTenderAnalysis(workspace, stage, artifacts)
-                : stage === 'evidence_mapping'
-                  ? validateEvidenceMapping(workspace, stage, artifacts)
-                  : stage === 'outline_generation'
-                    ? validateOutlineGeneration(workspace, stage, artifacts)
-                    : validateChapterWriting(workspace, stage, artifacts),
-        },
-        operation.controller.signal,
-        undefined,
-        operation.runs,
-        async (stage) => {
-          if (stage === 'file_intake') return intakeWork
-          return persistHostWork(workspace, 'stage_execution', stage, { stage })
-        },
-      )
+      const orchestrator = this.automaticOrchestrator(agent, workspace, operation.controller.signal, operation, {
+        incoming,
+        failures,
+        work: intakeWork,
+        onImported: (files) => { imported = files },
+      })
       await orchestrator.runCurrentProgramStage()
       const next = await orchestrator.drive()
       await this.ctx.sessions.flush(session)
@@ -5029,20 +5267,263 @@ export class BidHostRuntime extends TypertRemoteService {
   }
 
   /**
+   * 公开工具在运行期保存排队请求；空闲时执行并返回实际发布身份。
+   * @param agent 当前公开主 Agent。
+   * @param task 已解析的能力计划。
+   * @returns 接纳、排队或正式发布状态。
+   */
+  private async runCapabilityTaskFromTool(agent: Agent, task: BidCapabilityTask): Promise<unknown> {
+    validateCapabilityTaskWorkItems(task)
+    validateCapabilityTaskContentFollowup(task)
+    const session = agent.session
+    assertBidMainSession(session)
+    const authorization = resolveBidToolAuthorization(agent)
+    if (authorization === undefined) throw new Error('BID_CAPABILITY_USER_MESSAGE_REQUIRED')
+    const first = task.steps[0]
+    if (first === undefined) throw new Error('BID_CAPABILITY_EMPTY_TASK')
+    const exportStep = this.capabilityExportStep(task)
+    const key = projectKey(session)
+    const active = this.inFlight.get(key)
+    const currentRun = active?.runs.current
+    if (active !== undefined && currentRun !== undefined) {
+      const queued = await enqueueCapabilityRequest(active.workspace, currentRun, task, authorization)
+      return { accepted: true, queued: true, ...queued,
+        message: '能力任务已在当前 Work 命令日志登记；当前 Run 收敛后按顺序执行。' }
+    }
+    if (active !== undefined) await active.done
+    const executionTask = exportStep === null ? task : { ...task, steps: task.steps.slice(0, -1) }
+    const inputs = BID_CAPABILITIES[first.call.capability].requires
+    const state = executionTask.steps.length === 0 ? bidSessionTaskState(session)
+      : await this.runCapabilityTask(agent, executionTask, authorization, inputs)
+    if (state.status === 'failed' || state.status === 'suspended') {
+      return { accepted: true, queued: false, state }
+    }
+    const exported = exportStep === null ? null : await this.exportDocxWithIdentity(session,
+      exportStep.input.template_id as DocxTemplateId | null,
+      this.capabilityExportIdentity(authorization, exportStep.input.template_id))
+    if (exported !== null && !exported.ok) throw new Error(exported.error.message)
+    const canonical = new BidWorkspace(key, workspaceConfig(this.config))
+    if (executionTask.steps.length === 0) return { accepted: true, queued: false, state,
+      export_path: exported?.ok ? exported.value.path : null }
+    const work = await findCapabilityTaskRequest(canonical, authorization)
+    if (work === null) throw new Error('BID_CAPABILITY_TASK_REQUEST_MISSING')
+    const receipt = await readCapabilityPublicationReceipt(canonical, work.workId, work.requestSha256)
+    return { accepted: true, queued: false, work_id: work.workId, state,
+      result_ref: receipt === null ? null : `requests/${work.workId}/result.json`,
+      changed_artifacts: receipt?.files.map(file => file.path) ?? [],
+      removed_artifacts: receipt?.removed_paths ?? [],
+      export_path: exported?.ok ? exported.value.path : null }
+  }
+
+  /** 导出只能作为任务的最后一步，由独立导出操作读取已提交正文。 */
+  private capabilityExportStep(task: BidCapabilityTask): Extract<BidCapabilityTask['steps'][number]['call'],
+    { capability: 'docx.export' }> | null {
+    const positions = task.steps.flatMap((step, index) => step.call.capability === 'docx.export' ? [index] : [])
+    if (positions.length === 0) return null
+    if (positions.length !== 1 || positions[0] !== task.steps.length - 1) {
+      throw new Error('BID_CAPABILITY_EXPORT_MUST_BE_LAST_STEP')
+    }
+    const call = task.steps.at(-1)?.call
+    if (call?.capability !== 'docx.export') throw new Error('BID_CAPABILITY_EXPORT_MISSING')
+    return call
+  }
+
+  private capabilityExportIdentity(
+    authorization: CapabilityTaskRequest['authorization'], templateId: string | null,
+  ): string {
+    return createHash('sha256').update(`${authorization.session_id}\0${authorization.message_id}\0docx.export\0${templateId ?? 'default'}`)
+      .digest('hex').slice(0, 32)
+  }
+
+  /** 当前 Work 收敛后只消费登记过的请求，后续步骤取得独立 Run。 */
+  private async drainQueuedCapabilityRequests(session: Session, originWorkId: string): Promise<void> {
+    if (!isBidMainSession(session)) return
+    const key = projectKey(session)
+    const workspace = new BidWorkspace(key, workspaceConfig(this.config))
+    for (const pending of await readPendingCapabilityRequests(workspace, originWorkId)) {
+      if (this.inFlight.has(key)) return
+      const state = await readBidProjectState(workspace)
+      if (state === undefined || state.status === 'running' || state.status === 'suspended'
+        || state.status === 'failed') return
+      const agent = this.ctx.agents.get(session.id)
+      if (agent?.session !== session || pending.request.authorization.session_id !== String(session.id)) return
+      const first = pending.request.task.steps[0]
+      if (first === undefined) throw new Error('BID_CAPABILITY_QUEUE_EMPTY_TASK')
+      const exportStep = this.capabilityExportStep(pending.request.task)
+      const executionTask = exportStep === null ? pending.request.task
+        : { ...pending.request.task, steps: pending.request.task.steps.slice(0, -1) }
+      const inputs = BID_CAPABILITIES[first.call.capability].requires
+      const existing = executionTask.steps.length === 0 ? null
+        : await findCapabilityTaskRequest(workspace, pending.request.authorization)
+      if (existing !== null) {
+        const started = session.events.some(event => event.type === 'bid.run.started'
+          && event.data.run.work.workId === existing.workId)
+        if (started) {
+          const completed = session.events.some(event => event.type === 'bid.run.completed'
+            && event.data.run.work.workId === existing.workId)
+          if (!completed) return
+          if (exportStep === null) {
+            await this.acknowledgeQueuedCapability(session, workspace, originWorkId, pending.recordId)
+            continue
+          }
+        }
+      }
+      if (executionTask.steps.length > 0 && (existing === null || !session.events.some(event =>
+        event.type === 'bid.run.completed' && event.data.run.work.workId === existing.workId))) {
+        const outcome = await this.runCapabilityTask(agent, executionTask, pending.request.authorization, inputs,
+          exportStep === null ? run => markCapabilityRequestApplied(workspace, originWorkId, pending.recordId, run)
+            : undefined)
+        if (outcome.status === 'suspended' || outcome.status === 'failed') return
+      }
+      if (exportStep !== null) {
+        const exported = await this.exportDocxWithIdentity(session,
+          exportStep.input.template_id as DocxTemplateId | null,
+          this.capabilityExportIdentity(pending.request.authorization, exportStep.input.template_id))
+        if (!exported.ok) throw new Error(exported.error.message)
+        await this.acknowledgeQueuedCapability(session, workspace, originWorkId, pending.recordId)
+      }
+    }
+  }
+
+  private async acknowledgeQueuedCapability(
+    session: Session, workspace: BidWorkspace, originWorkId: string, recordId: string,
+  ): Promise<void> {
+    const operation = this.beginOperation(session)
+    try {
+      const current = await this.prepareOperation(operation)
+      await this.mutateProject(operation, lease => withBidCommandJournalLock(workspace, originWorkId,
+        () => markCapabilityRequestAppliedWithLease(workspace, originWorkId, recordId, lease)), current)
+    } finally {
+      await this.finishOperation(session, operation)
+    }
+  }
+
+  /** 在项目空闲边界按持久命令日志恢复队列；同一项目只运行一个调度器。 */
+  private async drainPersistedCapabilityRequests(session: Session): Promise<void> {
+    if (!isBidMainSession(session)) return
+    const key = projectKey(session)
+    if (this.queuedDrains.has(key)) {
+      this.queuedDrainRequested.add(key)
+      return
+    }
+    this.queuedDrains.add(key)
+    try {
+      do {
+        this.queuedDrainRequested.delete(key)
+        if (this.inFlight.has(key)) return
+        const workspace = new BidWorkspace(key, workspaceConfig(this.config))
+        for (const workId of await pendingCapabilityWorkIds(workspace)) {
+          await this.drainQueuedCapabilityRequests(session, workId)
+          if (this.inFlight.has(key)) return
+        }
+      } while (this.queuedDrainRequested.has(key))
+    } finally {
+      this.queuedDrains.delete(key)
+    }
+  }
+
+  /**
+   * 接纳一个由真实用户消息授权的能力序列。
+   * @param agent 公开主会话的 Agent。
+   * @param task 有序能力步骤与任务范围。
+   * @param authorization 用户消息身份。
+   * @param inputPaths 本次任务读取的正式输入文件。
+   * @param onAdmitted Run 落盘后调用的可选接纳回调。
+   * @returns Run 结算后的项目状态。
+   */
+  async runCapabilityTask(
+    agent: Agent, task: BidCapabilityTask,
+    authorization: CapabilityTaskRequest['authorization'], inputPaths: readonly string[],
+    onAdmitted?: (run: BidRunContext) => Promise<void>,
+  ): Promise<BidTaskState> {
+    const session = agent.session
+    assertBidMainSession(session)
+    if (this.ctx.agents.get(session.id) !== agent) {
+      throw new Error('BID_CAPABILITY_DISPATCHER_UNAVAILABLE')
+    }
+    const operation = this.beginOperation(session)
+    let admitted = false
+    try {
+      const current = await this.prepareOperation(operation)
+      if (current.status !== 'ready' && current.status !== 'waiting_user' && current.status !== 'completed') {
+        throw new Error('BID_CAPABILITY_TASK_STATE_NOT_READY')
+      }
+      const selected = bidCapabilityTaskSchema.parse(task)
+      const work = await persistCapabilityTaskRequest(operation.workspace, session, current.stage, selected,
+        authorization, inputPaths, current, agent)
+      const request = capabilityTaskRequestSchema.parse(await readBidWorkRequest(operation.workspace, work))
+      if (session.events.some(event => event.type === 'bid.run.completed'
+        && event.data.run.work.workId === work.workId)) {
+        if (await readCapabilityPublicationReceipt(operation.workspace, work.workId, work.requestSha256) === null) {
+          throw new Error('BID_CAPABILITY_COMPLETED_RECEIPT_MISSING')
+        }
+        return current
+      }
+      const execution = await this.executionAgent(operation, current.stage)
+      const run = await operation.runs.start(work)
+      admitted = true
+      if (onAdmitted !== undefined) await onAdmitted(run)
+      return await this.executeAdmittedCapabilityTask(execution, operation, run, request)
+    } finally {
+      await this.finishOperation(session, operation, admitted)
+    }
+  }
+
+  private async executeAdmittedCapabilityTask(
+    agent: Agent, operation: ActiveBidOperation, run: BidRunContext, request: CapabilityTaskRequest,
+  ): Promise<BidTaskState> {
+    try {
+      const dispatcher = this.capabilityTaskDispatcher ?? this.builtInCapabilityDispatcher
+      const outcome = await run.activities.track(() => executeCapabilityTask(
+        operation.workspace, run, dispatcher, agent, operation.session,
+      ))
+      if (outcome.status === 'awaiting_input') {
+        await operation.runs.suspend('awaiting_input')
+        return bidSessionTaskState(operation.session)
+      }
+      await operation.runs.complete(run, () => {
+        this.appendCapabilityCompletionNotice(operation.session, run)
+        operation.session.append('bid.task.changed', { state: request.return_state })
+      })
+      return bidSessionTaskState(operation.session)
+    } catch (error: unknown) {
+      if (operation.runs.current === run) {
+        const failure = safeRecoverableBidFailure(run.work, error)
+        await operation.runs.suspend(run.signal.aborted ? 'user_stop'
+          : failure.recovery?.kind === 'repair' ? 'retry_exhausted' : 'executor_error', failure)
+      }
+      return bidSessionTaskState(operation.session)
+    }
+  }
+
+  private appendCapabilityCompletionNotice(session: Session, run: Pick<BidRunData, 'runId' | 'work'>): void {
+    const workId = run.work.workId
+    const noticeId = `work:${workId}:completed`
+    if (session.events.some(event => event.type === 'bid.run.notice' && event.data.noticeId === noticeId)) return
+    const resultRef = `requests/${workId}/result.json`
+    session.append('bid.run.notice', {
+      noticeId, supersedesTurn: null, runId: run.runId, stage: run.work.stage,
+      kind: 'completed', severity: 'info', workId, resultRef,
+      message: `能力任务已完成；结果凭据：${resultRef}`,
+    })
+  }
+
+  /**
    * Resume one exact suspended Run after checking its project revision and durable checkpoints.
    * @param session - Bid Session that owns the suspended Run.
    * @param suspendedRunId - Exact suspended attempt selected by the client.
    * @param expectedProjectRevision - Project revision observed by the client.
    * @param onAccepted - Callback invoked after the replacement Run is durable.
-   * @param recovery - Bound Goal request revalidated and recorded inside the project lock.
+   * @param recovery - 主 Agent 修复指令，在项目锁内重验并记录。
    * @returns State reached when the resumed work next settles.
    */
+
   async resumeCurrentRun(
     session: Session,
     suspendedRunId: string,
     expectedProjectRevision: number,
     onAccepted?: (run: BidRunContext) => void,
-    recovery?: { goalId: string; instruction: string },
+    recovery?: { instruction: string },
   ): Promise<BidTaskState> {
     if (!isBidMainSession(session)) {
       throw new BidOrchestratorError('BID_ACTION_NOT_ALLOWED', 'Resume requires a Bid Session with a Host workspace.')
@@ -5050,6 +5531,7 @@ export class BidHostRuntime extends TypertRemoteService {
     if (this.inFlight.has(projectKey(session))) {
       throw new BidOrchestratorError('BID_OPERATION_IN_PROGRESS', 'A Bid operation is already running for this Session.')
     }
+    const expectedRecovery = recovery === undefined ? undefined : bidRunRecoveryEligibility(session)
     const operation = this.beginOperation(session)
     let admitted = false
     try {
@@ -5061,19 +5543,20 @@ export class BidHostRuntime extends TypertRemoteService {
       else await readHostWork(operation.workspace, suspended.work)
       if (recovery !== undefined) {
         const main = this.ctx.agents.get(session.id)
-        const bound = bidGoalBinding(session)
-        const goal = main === undefined ? undefined : this.ctx.get('goals')?.get(main)
-        const eligibility = bidRunRecoveryEligibility(session, recovery.goalId)
-        if (main?.session !== session || bound?.data.goalId !== recovery.goalId
-          || goal?.id !== recovery.goalId || goal.phase !== 'active' || goal.activation !== 'armed'
+        const eligibility = bidRunRecoveryEligibility(session)
+        if (main?.session !== session
           || !eligibility.eligible || eligibility.target?.runId !== suspendedRunId
+          || eligibility.target.workId !== expectedRecovery?.target?.workId
+          || eligibility.fingerprint !== expectedRecovery.fingerprint
           || suspended.work.kind === 'file_intake' || suspended.work.stage === 'file_intake'
           || suspended.work.stage === 'docx_export' || suspended.error?.recovery === undefined
           || eligibility.fingerprint === undefined) {
           throw new BidOrchestratorError('BID_RESUME_NOT_ALLOWED', '当前 Run 已失去自动恢复授权。')
         }
-        session.append('bid.goal.recovery.requested', {
-          goalId: recovery.goalId,
+        if (bidRecoveryInstructionRepeated(session, eligibility.fingerprint, recovery.instruction)) {
+          throw new BidOrchestratorError('BID_RECOVERY_DUPLICATE_INSTRUCTION', '同一问题不能重复提交相同修复指令。')
+        }
+        session.append('bid.recovery.requested', {
           ownerSessionId: String(session.id),
           target: { kind: 'run', workId: suspended.work.workId, runId: suspendedRunId },
           unit: suspended.error.recovery.unit,
@@ -5110,6 +5593,11 @@ export class BidHostRuntime extends TypertRemoteService {
     onAccepted?: (run: BidRunContext) => void,
   ): Promise<BidTaskState> {
     const payload = await readHostWork(operation.workspace, suspended.work)
+    if (suspended.work.kind === 'capability_task') {
+      const run = await operation.runs.start(suspended.work, { runId: suspended.runId, cause: suspended.cause })
+      onAccepted?.(run)
+      return this.executeAdmittedCapabilityTask(agent, operation, run, capabilityTaskRequestSchema.parse(payload))
+    }
     const run = await operation.runs.start(suspended.work, {
       runId: suspended.runId,
       cause: suspended.cause,
@@ -5221,7 +5709,11 @@ export class BidHostRuntime extends TypertRemoteService {
               within(operation.workspace.projectRoot, 'outline/confirmed-outline.json'), 'utf8',
             )))
             const worklistForSettle = buildChapterWorklist(outlineForSettle)
-            const serialsForSettle = new Map(worklistForSettle.map((section, index) => [section.id, String(index + 1).padStart(4, '0')]))
+            const settledLocations = await readChapterLocations(operation.workspace)
+            const serialsForSettle = new Map(worklistForSettle.flatMap((section) => {
+              const assigned = settledLocations.get(section.id)
+              return assigned === undefined ? [] : [[section.id, String(assigned.storageSerial).padStart(4, '0')] as const]
+            }))
             const settled = await this.settleBatchRevisionIssues(operation.workspace, runningBatch, queue, serialsForSettle)
             const completedBatch = completeRevisionBatchExecution(settled.batch, Date.now())
             await commitRevisionBatchExecutionSettlement(operation.workspace, settled.queue, completedBatch)
@@ -5230,6 +5722,8 @@ export class BidHostRuntime extends TypertRemoteService {
           case 'stage_execution':
           case 'file_intake':
             throw new Error('BID_DEDICATED_WORK_KIND_REQUIRED')
+          case 'capability_task':
+            throw new Error('BID_CAPABILITY_DISPATCH_ALREADY_SELECTED')
         }
       })
       if (confirmedArtifacts !== undefined) {
@@ -5250,10 +5744,10 @@ export class BidHostRuntime extends TypertRemoteService {
       return bidSessionTaskState(operation.session)
     } catch (error: unknown) {
       if (operation.runs.current === run) {
+        const failure = safeRecoverableBidFailure(run.work, error)
         await operation.runs.suspend(
-          run.signal.aborted ? 'user_stop' : error instanceof BidStageExecutionError ? 'retry_exhausted' : 'executor_error',
-          safeRecoverableBidFailure(run.work, error,
-            error instanceof BidStageExecutionError ? error.issues : undefined),
+          run.signal.aborted ? 'user_stop' : failure.recovery?.kind === 'repair' ? 'retry_exhausted' : 'executor_error',
+          failure,
         )
       }
       if (run.work.kind === 'chapter_revision_batch') {
@@ -5318,7 +5812,12 @@ export class BidHostRuntime extends TypertRemoteService {
     return this.withDocxOperation(session, workspace => saveDocxFormat(workspace, templateId, request))
   }
 
-  /** 修改 S5 页数基准，不改变 S6 当前选择或任一模板格式。 */
+  /** 修改 S5 页数基准，不改变 S6 当前选择或任一模板格式。
+   * @param session - 当前标书会话。
+   * @param templateId - 页数测算模板；null 表示默认格式。
+   * @param revision - 要修改的配置版本。
+   * @returns 保存后的模板库视图。
+   */
   @Remote('setEstimateDocxTemplate')
   async setEstimateDocxTemplate(
     session: Session,
@@ -5384,8 +5883,31 @@ export class BidHostRuntime extends TypertRemoteService {
    */
   @Remote('exportDocx')
   async exportDocx(session: Session, templateId: DocxTemplateId | null): Promise<BidDocxExportResult> {
+    return this.exportDocxWithIdentity(session, templateId)
+  }
+
+  /** 用户能力任务复用独立导出生命周期，稳定身份用于重启去重。 */
+  private async exportDocxWithIdentity(
+    session: Session, templateId: DocxTemplateId | null, operationId?: string,
+  ): Promise<BidDocxExportResult> {
     if (!isBidMainSession(session)) {
       return docxExportRejected('BID_SESSION_REQUIRED', 'Word 导出需要标书项目会话。')
+    }
+    if (operationId !== undefined) {
+      const prior = session.events.findLast(event => event.type === 'bid.docx_export.changed'
+        && event.data.operation.operationId === operationId)
+      if (prior?.type === 'bid.docx_export.changed' && prior.data.operation.status === 'completed') {
+        const workspace = new BidWorkspace(session.header.cwd, workspaceConfig(this.config))
+        const previousPath = within(workspace.projectRoot, prior.data.operation.path)
+        await assertNoLinkedPath(workspace.root, previousPath)
+        try {
+          await readFile(previousPath)
+          return { ok: true, value: { path: prior.data.operation.path,
+            warnings: prior.data.operation.warnings } }
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+        }
+      }
     }
     const existing = this.docxExports.get(session.id)
     if (existing !== undefined) return existing
@@ -5449,7 +5971,7 @@ export class BidHostRuntime extends TypertRemoteService {
       }] : []
       const warnings = [{
         code: 'DOCX_EXPORT_CONTENT_SNAPSHOT',
-        message: 'Word 已生成，已按完整目录收录现有正文；缺失正文的章节已标注。',
+        message: `Word 已按已保存正文快照 ${createHash('sha256').update(snapshot.markdown).digest('hex').slice(0, 12)} 生成；缺失正文的章节已标注。`,
       }, ...technicalDeviationWarnings, ...exportReportWarnings, ...tocWarnings, ...await assessDocxExportPageTarget(workspace, templateId)]
       return { ok: true, value: { path: destination, warnings } }
     }
@@ -5466,7 +5988,7 @@ export class BidHostRuntime extends TypertRemoteService {
         return docxExportRejected('BID_DOCX_EXPORT_NOT_ALLOWED', '当前阶段没有可导出的章节正文。')
       }
       const startedAt = Date.now()
-      const base = { operationId: randomBytes(16).toString('hex'), templateId, startedAt }
+      const base = { operationId: operationId ?? randomBytes(16).toString('hex'), templateId, startedAt }
       let current: DocxExportOperation = {
         ...base, updatedAt: startedAt, status: 'running', phase: 'collecting', message: '正在收集目录和已保存正文',
       }
@@ -5486,6 +6008,7 @@ export class BidHostRuntime extends TypertRemoteService {
         } else {
           await publishOperation({ ...base, updatedAt: Date.now(), status: 'completed', phase: 'finalizing',
             message: 'Word 导出完成', path: result.value.path,
+            filePath: within(workspace.projectRoot, result.value.path),
             warnings: (result.value.warnings ?? []).slice(0, 20).map(warning => ({
               code: warning.code.slice(0, 100), message: warning.message.slice(0, 500),
             })) })
@@ -5504,7 +6027,11 @@ export class BidHostRuntime extends TypertRemoteService {
     try { return await pending } catch (error: unknown) { return failure(error) } finally { this.docxExports.delete(session.id) }
   }
 
-  /** 使用正式 Renderer 尝试核验指定模板的当前导出页数。 */
+  /** 使用正式 Renderer 尝试核验指定模板的当前导出页数。
+   * @param session - 当前标书会话。
+   * @param templateId - 待测算模板；null 表示默认格式。
+   * @returns 页数估算及其配置基准。
+   */
   @Remote('estimateDocxPages')
   async estimateDocxPages(session: Session, templateId: DocxTemplateId | null): Promise<import('./control-plane-contract.ts').BidPageEstimate> {
     if (!isBidMainSession(session)) throw new Error('Word 页数测算需要标书项目会话。')
@@ -5570,6 +6097,7 @@ export class BidHostRuntime extends TypertRemoteService {
     const operation = this.beginOperation(session)
     let run: BidRunContext | undefined
     let workSettled = false
+    let suspensionError: unknown
     try {
       const runtime = await this.prepareOperation(operation)
       if (!getBidClientProjection(runtime).allowedActions.includes('revise_chapter')) {
@@ -5593,6 +6121,7 @@ export class BidHostRuntime extends TypertRemoteService {
       })
       return { ok: true, value: await this.getReviewChapter(session, parsed.data.reference.section_id) }
     } catch (error: unknown) {
+      suspensionError = error
       const reason = error instanceof Error ? error.message : ''
       if (reason.includes('BID_CHAPTER_REVISION_CONFLICT')) return reject('BID_CHAPTER_REVISION_CONFLICT', '章节正文已变化，请重新选择章节或段落。')
       if (reason.includes('BID_CHAPTER_REVISION_SELECTION_INVALID')) return reject('BID_CHAPTER_REVISION_SELECTION_INVALID', '请选择同一章节中的一个或相邻多个完整段落。')
@@ -5601,10 +6130,16 @@ export class BidHostRuntime extends TypertRemoteService {
       return reject('BID_CHAPTER_REVISION_FAILED', '原章节 Writer 未完成修订，正文已保留，请重试。')
     } finally {
       if (run !== undefined && operation.runs.current === run) {
-        await operation.runs.suspend(run.signal.aborted ? 'user_stop' : 'executor_error', {
-          code: 'BID_CHAPTER_REVISION_FAILED',
-          message: workSettled ? '章节修订未完成状态提交。' : '章节修订未完成，已保存可恢复进度。',
-        })
+        const reason = suspensionError instanceof Error ? suspensionError.message : ''
+        const blockedCode = ['BID_CHAPTER_REVISION_CONFLICT', 'BID_CHAPTER_REVISION_SELECTION_INVALID',
+          'BID_CHAPTER_REVISION_NOT_WRITABLE', 'BID_CHAPTER_REVISION_CONTEXT_UNAVAILABLE']
+          .find(code => reason.includes(code))
+        const failure = safeRecoverableBidFailure(run.work, blockedCode === undefined
+          ? suspensionError ?? { code: 'BID_CHAPTER_REVISION_FAILED',
+            message: workSettled ? '章节修订未完成状态提交。' : '章节修订未完成，已保存可恢复进度。' }
+          : { code: blockedCode, message: reason })
+        await operation.runs.suspend(run.signal.aborted ? 'user_stop'
+          : failure.recovery?.kind === 'repair' ? 'retry_exhausted' : 'executor_error', failure)
       }
       await this.finishOperation(session, operation)
     }
@@ -5756,12 +6291,14 @@ export class BidHostRuntime extends TypertRemoteService {
           .then(value => parseWritingPlan(JSON.parse(value))),
       ])
       const worklist = buildChapterWorklist(outline)
+      const locations = await readChapterLocations(candidate.workspace)
       const scheduled = batchExecutionInput.tasks.map((task) => {
         const index = worklist.findIndex(section => section.id === task.section_id)
         const section = worklist[index]
         const writerId = writerIds.get(task.section_id)
-        if (section === undefined || writerId === undefined) throw new Error('BID_CHAPTER_REVISION_NOT_WRITABLE')
-        return { task, value: { serial: String(index + 1).padStart(4, '0'), title: section.title, writerId } }
+        const assigned = locations.get(task.section_id)
+        if (section === undefined || writerId === undefined || assigned === undefined) throw new Error('BID_CHAPTER_REVISION_NOT_WRITABLE')
+        return { task, value: { location: assigned, title: section.title, writerId } }
       })
       const customerTextContext = {
         outline,
@@ -5797,7 +6334,7 @@ export class BidHostRuntime extends TypertRemoteService {
             workspace: candidate.workspace,
             batchId: batchExecutionInput.batchId,
             task: item.task,
-            serial: item.value.serial,
+            location: item.value.location,
             title: item.value.title,
             writerId: item.value.writerId,
             signal: candidate.run.signal,
@@ -5959,23 +6496,25 @@ export class BidHostRuntime extends TypertRemoteService {
       log = parseOrMigrateChapterExecutionLog(logValue)
     } catch { log = undefined }
     const worklist = buildChapterWorklist(outline)
+    const locations = await readChapterLocations(workspace)
     const rowContents = await Promise.all(outline.sections.map(async (section) => {
       const index = worklist.findIndex(item => item.id === section.id)
-      const serial = String(index + 1).padStart(4, '0')
+      const assigned = locations.get(section.id)
+      const serial = assigned === undefined ? null : String(assigned.storageSerial).padStart(4, '0')
       const execution = log?.sections.find(item => item.section_id === section.id)
       let contentAvailable = !section.writable && section.summary !== undefined
       let markdown = !section.writable ? section.summary ?? '' : ''
       let review: BidReviewChapterView['review'] = { status: 'not_started', issues: [] }
-      if (section.writable && index >= 0) {
+      if (section.writable && index >= 0 && assigned !== undefined && serial !== null) {
         try {
-          markdown = await readFile(within(workspace.projectRoot, `chapters/sections/${serial}.md`), 'utf8')
+          markdown = await readFile(within(workspace.projectRoot, assigned.contentPath), 'utf8')
           contentAvailable = markdown.trim().length > 0
         } catch { markdown = ''; contentAvailable = false }
         let artifact: ChapterReviewArtifact | undefined
         try {
-          const reviewValue: unknown = JSON.parse(await readFile(within(workspace.projectRoot, `chapters/reviews/${serial}.json`), 'utf8'))
+          const reviewValue: unknown = JSON.parse(await readFile(within(workspace.projectRoot, assigned.reviewPath), 'utf8'))
           schemaWarningAppended = appendBidSchemaWarning(session, createBidSchemaWarning(
-            `chapters/reviews/${serial}.json`, CHAPTER_REVIEW_SCHEMA_VERSION,
+            assigned.reviewPath, CHAPTER_REVIEW_SCHEMA_VERSION,
             typeof reviewValue === 'object' && reviewValue !== null ? (reviewValue as { schema_version?: unknown }).schema_version : undefined,
             task.stage,
           )) || schemaWarningAppended
@@ -6158,7 +6697,9 @@ export class BidHostRuntime extends TypertRemoteService {
           }
           const index = worklist.findIndex(section => section.id === chapter.section_id)
           if (index < 0) throw new Error('stale-global-compliance-review')
-          const serial = String(index + 1).padStart(4, '0')
+          const assigned = locations.get(chapter.section_id)
+          if (assigned === undefined) throw new Error('stale-global-compliance-review')
+          const serial = String(assigned.storageSerial).padStart(4, '0')
           const semantic = await resolveSemanticRevisionPath(
             workspace, serial, chapter.section_id, expected, chapter.candidate_sha256,
           )
@@ -6225,12 +6766,15 @@ export class BidHostRuntime extends TypertRemoteService {
     if (!section.writable) return { section_id: section.id, title: section.title, number: chain.numbers.join('.'), heading_path: chain.titles, writable: false, markdown: section.summary ?? null, flowcharts: [], content_sha256: null, requirement_ids: [], scoring_response_point_ids: [], evidence_status: 'not_applicable', review: { status: 'not_started', issues: [] } }
     const index = buildChapterWorklist(outline).findIndex(item => item.id === section.id)
     if (index < 0) throw new Error('BID_REVIEW_SECTION_UNKNOWN')
-    const serial = String(index + 1).padStart(4, '0')
+    const assigned = await readChapterLocation(workspace, section.id)
+    const serial = assigned === null ? null : String(assigned.storageSerial).padStart(4, '0')
     let markdown: string | null = null
-    try { markdown = await readFile(within(workspace.projectRoot, `chapters/sections/${serial}.md`), 'utf8') } catch { markdown = null }
+    if (assigned !== null) {
+      try { markdown = await readFile(within(workspace.projectRoot, assigned.contentPath), 'utf8') } catch { markdown = null }
+    }
     let flowcharts: import('./flowchart.ts').FlowchartSpec[] = []
-    try {
-      const metadata = parseChapterMetadata(JSON.parse(await readFile(within(workspace.projectRoot, `chapters/meta/${serial}.json`), 'utf8')))
+    if (assigned !== null) try {
+      const metadata = parseChapterMetadata(JSON.parse(await readFile(within(workspace.projectRoot, assigned.metadataPath), 'utf8')))
       flowcharts = metadata.flowcharts.filter(flowchart => validateFlowchartSpec(flowchart).length === 0)
     } catch { /* 旧章节没有流程图 metadata，或章节仍在写作。 */ }
     const logPath = within(workspace.projectRoot, 'chapters/execution-log.json')
@@ -6240,10 +6784,11 @@ export class BidHostRuntime extends TypertRemoteService {
       execution = parseOrMigrateChapterExecutionLog(JSON.parse(await readFile(logPath, 'utf8'))).sections.find(item => item.section_id === section.id)
     } catch { /* S5 初始化时执行日志可能尚不可用。 */ }
     let artifact: ChapterReviewArtifact | undefined
-    try {
-      artifact = parseChapterReviewArtifact(JSON.parse(await readFile(within(workspace.projectRoot, `chapters/reviews/${serial}.json`), 'utf8')))
+    if (assigned !== null) try {
+      artifact = parseChapterReviewArtifact(JSON.parse(await readFile(within(workspace.projectRoot, assigned.reviewPath), 'utf8')))
     } catch { /* 章节可能仍在写作，或已保存报告暂不可用。 */ }
-    if (artifact !== undefined && (markdown === null || !await chapterReviewMatches(workspace, serial, section.id, markdown, artifact))) {
+    if (artifact !== undefined && (markdown === null || serial === null
+      || !await chapterReviewMatches(workspace, serial, section.id, markdown, artifact))) {
       artifact = undefined
     }
     const review = projectChapterReview(section.id, artifact, execution)
@@ -6278,8 +6823,6 @@ export class BidHostRuntime extends TypertRemoteService {
   /** Admit the S5 workbench while writing is running or after its last result. */
   private requireReviewWorkspace(session: Session): BidWorkspace {
     if (!isBidMainSession(session)) throw new Error('BID_SESSION_REQUIRED')
-    const runtime = bidSessionTaskState(session)
-    if (runtime.stage !== 'chapter_writing' && runtime.stage !== 'docx_export') throw new Error('BID_REVIEW_NOT_ALLOWED')
     return new BidWorkspace(session.header.cwd, workspaceConfig(this.config))
   }
 
@@ -6294,8 +6837,10 @@ export class BidHostRuntime extends TypertRemoteService {
     if (!section.writable) throw new Error('BID_CHAPTER_REVISION_NOT_WRITABLE')
     const index = buildChapterWorklist(outline).findIndex(item => item.id === sectionId)
     if (index < 0) throw new Error('BID_REVIEW_SECTION_UNKNOWN')
-    const serial = String(index + 1).padStart(4, '0')
-    const markdown = await readFile(within(workspace.projectRoot, `chapters/sections/${serial}.md`), 'utf8')
+    const assigned = await readChapterLocation(workspace, sectionId)
+    if (assigned === null) throw new Error(`BID_CHAPTER_STORAGE_LOCATION_MISSING: ${sectionId}`)
+    const serial = String(assigned.storageSerial).padStart(4, '0')
+    const markdown = await readFile(within(workspace.projectRoot, assigned.contentPath), 'utf8')
     return { section, markdown, serial }
   }
 
@@ -6505,8 +7050,79 @@ export class BidHostRuntime extends TypertRemoteService {
   }
 
   /**
+   * 读取当前能力 Work 或已登记请求的计划；只返回检查点中的步骤状态。
+   * @param session 项目公开主会话。
+   * @returns 最近任务的只读摘要；尚无能力任务时为 null。
+   */
+  @Remote('getCapabilityTaskPlan')
+  async getCapabilityTaskPlan(session: Session): Promise<BidCapabilityPlanView | null> {
+    if (!isBidMainSession(session)) throw new Error('BID_SESSION_REQUIRED')
+    const workspace = new BidWorkspace(session.header.cwd, workspaceConfig(this.config))
+    const task = bidSessionTaskState(session)
+    const current = task.status === 'running' || task.status === 'suspended' ? task.run : null
+    if (current?.work.kind !== 'capability_task') {
+      for (const workId of await pendingCapabilityWorkIds(workspace)) {
+        const pending = (await readPendingCapabilityRequests(workspace, workId))[0]
+        if (pending === undefined || pending.request.authorization.session_id !== String(session.id)) continue
+        return { workId: pending.request.queue_id, title: pending.request.task.goal,
+          workItems: pending.request.task.work_items ?? [],
+          scope: pending.request.task.scope.kind === 'project' ? 'project'
+            : pending.request.task.scope.kind === 'sections' ? pending.request.task.scope.section_ids.join(', ')
+              : pending.request.task.scope.reference.section_id,
+          status: 'queued', steps: pending.request.task.steps.map((step, index) => ({
+            id: `${pending.request.queue_id}:${index}`, capability: step.call.capability,
+            status: 'pending', detail: null,
+          })) }
+      }
+    }
+    const lastStarted = session.events.findLast(event => event.type === 'bid.run.started')
+    const run = current?.work.kind === 'capability_task' ? current
+      : lastStarted?.type === 'bid.run.started' && lastStarted.data.run.work.kind === 'capability_task'
+        ? lastStarted.data.run : null
+    if (run !== null) {
+      const request = capabilityTaskRequestSchema.parse(await readBidWorkRequest(workspace, run.work))
+      const path = within(workspace.projectRoot, `runs/${run.work.workId}/task-checkpoint.json`)
+      await assertNoLinkedPath(workspace.root, path)
+      let checkpoint: ReturnType<typeof capabilityTaskCheckpointSchema.parse> | null = null
+      try { checkpoint = capabilityTaskCheckpointSchema.parse(JSON.parse(await readFile(path, 'utf8'))) }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
+      if (checkpoint !== null && (checkpoint.work_id !== run.work.workId
+        || checkpoint.request_sha256 !== run.work.requestSha256)) {
+        throw new Error('BID_CAPABILITY_CHECKPOINT_IDENTITY_MISMATCH')
+      }
+      const completed = session.events.some(event => event.type === 'bid.run.completed'
+        && event.data.run.work.workId === run.work.workId)
+      const status: BidCapabilityPlanView['status'] = completed ? 'completed'
+        : current?.work.workId === run.work.workId
+          ? task.status === 'suspended'
+            ? task.run.cause === 'awaiting_input' ? 'awaiting_input' : 'suspended'
+            : 'running'
+          : 'failed'
+      return {
+        workId: run.work.workId, title: request.task.goal,
+        workItems: request.task.work_items ?? [],
+        scope: request.task.scope.kind === 'project' ? 'project'
+          : request.task.scope.kind === 'sections' ? request.task.scope.section_ids.join(', ')
+            : request.task.scope.reference.section_id,
+        status,
+        steps: (checkpoint?.steps ?? request.task.steps.map((step, index) => ({
+          step_id: `${run.work.workId}:${index}`, step, status: 'pending' as const,
+        }))).map((record, index) => ({
+          id: record.step_id, capability: record.step.call.capability,
+          status: status === 'failed' && index === checkpoint?.steps.findIndex(step => step.status === 'running')
+            ? 'failed' as const : record.status,
+          detail: 'result' in record ? [...record.result.missing_topics,
+            ...record.result.warnings].join('；') || null : null,
+        })),
+      }
+    }
+    return null
+  }
+
+  /**
    * Read the current S4 Mapping Task counts while evidence mapping is active or reviewable.
    * @param session - Bid Session that owns the S4 execution log.
+   * @param observed - caller projection used to reject stale observations.
    * @returns task counts, or null when S4 has not reached an observable state or has not produced its log.
    */
   @Remote('getEvidenceMappingProgress')
@@ -6519,6 +7135,11 @@ export class BidHostRuntime extends TypertRemoteService {
     const { task, observedMatches } = await this.syncEvidenceMappingProjection(session, workspace, observed)
     if (!observedMatches) return null
     if (task.stage !== 'evidence_mapping' || task.status === 'ready') return null
+    if ((task.status === 'running' || task.status === 'suspended')
+      && task.run.work.kind === 'capability_task') {
+      const candidate = await activeCapabilityMappingWorkspace(workspace, task.run.work)
+      return candidate === null ? null : readEvidenceMappingProgress(candidate)
+    }
     return readEvidenceMappingProgress(workspace)
   }
 
@@ -6533,8 +7154,14 @@ export class BidHostRuntime extends TypertRemoteService {
     await this.reconcileDocxExport(session)
     const task = bidSessionTaskState(session)
     const workspace = new BidWorkspace(session.header.cwd, workspaceConfig(this.config))
-    const body = task.stage === 'chapter_writing' || task.stage === 'docx_export'
-    const finalOutline = body || (task.stage === 'evidence_mapping' && task.status === 'completed')
+    const body = (await readChapterLocations(workspace)).size > 0
+    const confirmedPath = within(workspace.projectRoot, 'outline/confirmed-outline.json')
+    await assertNoLinkedPath(workspace.root, confirmedPath)
+    let confirmedExists = false
+    try { await readFile(confirmedPath); confirmedExists = true } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+    }
+    const finalOutline = confirmedExists || (task.stage === 'evidence_mapping' && task.status === 'completed')
     const reviewingOutline = task.stage === 'evidence_mapping' && task.status === 'waiting_user'
     const initialOutline = task.stage === 'evidence_mapping' || (task.stage === 'outline_generation' && task.status === 'completed')
     const tenderReady = task.stage !== 'file_intake' && (task.stage !== 'tender_analysis' || task.status === 'waiting_user' || task.status === 'completed')
@@ -6783,6 +7410,7 @@ export class BidHostRuntime extends TypertRemoteService {
     const operation = this.beginOperation(session)
     let run: BidRunContext | undefined
     let workSettled = false
+    let suspensionError: unknown
     try {
       const runtime = await this.prepareOperation(operation)
       if (!getBidClientProjection(runtime).allowedActions.includes('confirm_outline')) return { ok: false, error: { code: 'BID_CONFIRM_NOT_ALLOWED', message: 'Outline confirmation is not allowed in the current Bid stage state.' } }
@@ -6818,13 +7446,15 @@ export class BidHostRuntime extends TypertRemoteService {
       await this.ctx.sessions.flush(session)
       return { ok: true, value: next }
     } catch (error) {
+      suspensionError = error
       return { ok: false, error: { code: 'BID_CONFIRM_FAILED', message: error instanceof Error ? error.message : String(error), ...(error instanceof BidStageExecutionError ? { issues: error.issues } : {}) } }
     } finally {
       if (run !== undefined && operation.runs.current === run) {
-        await operation.runs.suspend(run.signal.aborted ? 'user_stop' : 'executor_error', {
-          code: 'BID_CONFIRM_FAILED',
-          message: workSettled ? '目录确认未完成状态提交。' : '目录确认候选未完成，已保留供恢复。',
+        const failure = safeRecoverableBidFailure(run.work, suspensionError ?? {
+          code: 'BID_CONFIRM_FAILED', message: workSettled ? '目录确认未完成状态提交。' : '目录确认候选未完成，已保留供恢复。',
         })
+        await operation.runs.suspend(run.signal.aborted ? 'user_stop'
+          : failure.recovery?.kind === 'repair' ? 'retry_exhausted' : 'executor_error', failure)
       }
       await this.finishOperation(session, operation)
     }
@@ -6848,6 +7478,8 @@ export class BidHostRuntime extends TypertRemoteService {
     const operation = this.beginOperation(session)
     let run: BidRunContext | undefined
     let workSettled = false
+    let suspensionError: unknown
+    let suspensionIssues: readonly StageValidationIssue[] | undefined
     let task = BID_INITIAL_TASK_STATE
     try {
       task = await this.prepareOperation(operation)
@@ -6867,9 +7499,14 @@ export class BidHostRuntime extends TypertRemoteService {
         admittedRun,
         this.config,
       ))
-      workSettled = true
+      workSettled = result.ok
+      if (!result.ok) {
+        suspensionError = result.error
+        suspensionIssues = result.error.issues
+      }
       return result
     } catch (error: unknown) {
+      suspensionError = error
       if (error instanceof BidOrchestratorError && error.code === 'BID_OUTLINE_FEEDBACK_REQUIRED') return { ok: false, error: { code: 'BID_OUTLINE_FEEDBACK_REQUIRED', message: '请输入目录修改意见。' } }
       return { ok: false, error: { code: 'BID_REGENERATE_FAILED', message: 'The Bid Host could not regenerate the outline.' } }
     } finally {
@@ -6881,10 +7518,11 @@ export class BidHostRuntime extends TypertRemoteService {
             })
           })
         } else {
-          await operation.runs.suspend(run.signal.aborted ? 'user_stop' : 'executor_error', {
-            code: 'BID_REGENERATE_FAILED',
-            message: '目录重生成未完成，已保留工作候选供恢复。',
-          })
+          const failure = safeRecoverableBidFailure(run.work, suspensionError ?? {
+            code: 'BID_REGENERATE_FAILED', message: '目录重生成未完成，已保留工作候选供恢复。',
+          }, suspensionIssues)
+          await operation.runs.suspend(run.signal.aborted ? 'user_stop'
+            : failure.recovery?.kind === 'repair' ? 'retry_exhausted' : 'executor_error', failure)
         }
       }
       try { await this.ctx.sessions.flush(session) } finally { await this.finishOperation(session, operation) }
@@ -7491,7 +8129,7 @@ export class BidWorkspace {
    */
   async exportDocx(
     source: string,
-    destination = `${this.config.outputDirectory}/技术标.docx`,
+    destination: string = `${this.config.outputDirectory}/技术标.docx`,
     templateId?: DocxTemplateId | null,
     commits?: BidCommitScope,
     nativeExport?: NativeVisioExport,
@@ -7518,7 +8156,7 @@ export class BidWorkspace {
    */
   async exportDocxMarkdown(
     markdown: string,
-    destination = `${this.config.outputDirectory}/技术标.docx`,
+    destination: string = `${this.config.outputDirectory}/技术标.docx`,
     templateId?: DocxTemplateId | null,
     commits?: BidCommitScope,
     sourceSnapshot?: string,
@@ -7600,7 +8238,7 @@ export class BidWorkspace {
         if (embeddedCount !== flowcharts.length) throw new Error(`DOCX_VISIO_OBJECT_COUNT_MISMATCH: 预期 ${String(flowcharts.length)} 个 Visio 对象，实际检测到 ${String(embeddedCount)} 个。`)
         bytes = await readFile(temporaryDocx)
       }
-      if (canFinalize && finalizer !== undefined) {
+      if (canFinalize) {
         const temporaryRoot = await mkdtemp(resolve(this.root, '.dsh-word-finalize-'))
         try {
           const temporaryDocx = resolve(temporaryRoot, 'final.docx')

@@ -31,7 +31,10 @@ const projectFields = z.object({
   key_technical_points: textList.optional(),
 }).strict().refine(value => Object.keys(value).length > 0, { message: 'update_project requires at least one field' })
 
-const operationSchema = z.discriminatedUnion('type', [
+/**
+ * 招标分析编辑操作的输入结构。
+ */
+export const tenderAnalysisEditOperationSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('update_project'), fields: projectFields }).strict(),
   z.object({ type: z.literal('update_requirement'), requirement_id: text, fields: z.object({
     category: text.optional(), normalized_requirement: text.optional(), mandatory: z.boolean().optional(),
@@ -96,7 +99,7 @@ export type TenderAnalysisEditOperation =
  * @returns Validated tender-analysis edit operations.
  */
 export function parseTenderAnalysisEditOperations(value: unknown): TenderAnalysisEditOperation[] {
-  return z.array(operationSchema).parse(value) as TenderAnalysisEditOperation[]
+  return z.array(tenderAnalysisEditOperationSchema).parse(value) as TenderAnalysisEditOperation[]
 }
 
 /**

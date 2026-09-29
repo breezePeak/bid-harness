@@ -2,6 +2,9 @@ import { fromMarkdown } from 'mdast-util-from-markdown'
 import { gfmFromMarkdown } from 'mdast-util-gfm'
 import { gfm } from 'micromark-extension-gfm'
 
+/**
+ * 章节修订差异的分类。
+ */
 export type RevisionDiffKind = 'equal' | 'insert' | 'delete' | 'modify'
 
 /** 一行左右严格对应的 Markdown 顶层块。 */
@@ -40,12 +43,14 @@ export function buildRevisionDiffRows(beforeMarkdown: string, afterMarkdown: str
   const beforeSignatures = before.map(signature)
   const afterSignatures = after.map(signature)
   // ponytail: O(n²) is bounded by top-level chapter blocks; replace only if real chapters make this measurable.
-  const lengths = Array.from({ length: before.length + 1 }, () => new Uint32Array(after.length + 1))
+  const width = after.length + 1
+  const lengths = new Uint32Array((before.length + 1) * width)
+  const lengthAt = (left: number, right: number): number => lengths[left * width + right] ?? 0
   for (let left = before.length - 1; left >= 0; left--) {
     for (let right = after.length - 1; right >= 0; right--) {
-      lengths[left]![right] = beforeSignatures[left] === afterSignatures[right]
-        ? 1 + lengths[left + 1]![right + 1]!
-        : Math.max(lengths[left + 1]![right]!, lengths[left]![right + 1]!)
+      lengths[left * width + right] = beforeSignatures[left] === afterSignatures[right]
+        ? 1 + lengthAt(left + 1, right + 1)
+        : Math.max(lengthAt(left + 1, right), lengthAt(left, right + 1))
     }
   }
   const anchors: Array<readonly [number, number]> = []
@@ -54,7 +59,7 @@ export function buildRevisionDiffRows(beforeMarkdown: string, afterMarkdown: str
   while (left < before.length && right < after.length) {
     if (beforeSignatures[left] === afterSignatures[right]) {
       anchors.push([left++, right++])
-    } else if (lengths[left + 1]![right]! >= lengths[left]![right + 1]!) left++
+    } else if (lengthAt(left + 1, right) >= lengthAt(left, right + 1)) left++
     else right++
   }
 
@@ -66,8 +71,8 @@ export function buildRevisionDiffRows(beforeMarkdown: string, afterMarkdown: str
     const afterSize = afterEnd - afterCursor
     const size = Math.max(beforeSize, afterSize)
     for (let index = 0; index < size; index++) {
-      const beforeBlock = index < beforeSize ? before[beforeCursor + index]! : null
-      const afterBlock = index < afterSize ? after[afterCursor + index]! : null
+      const beforeBlock = index < beforeSize ? before[beforeCursor + index] ?? null : null
+      const afterBlock = index < afterSize ? after[afterCursor + index] ?? null : null
       rows.push({
         id: `row-${String(rows.length)}`,
         kind: beforeBlock === null ? 'insert' : afterBlock === null ? 'delete' : 'modify',
@@ -80,7 +85,8 @@ export function buildRevisionDiffRows(beforeMarkdown: string, afterMarkdown: str
   }
   for (const [beforeIndex, afterIndex] of anchors) {
     appendGap(beforeIndex, afterIndex)
-    rows.push({ id: `row-${String(rows.length)}`, kind: 'equal', after: after[afterIndex]!, before: before[beforeIndex]! })
+    rows.push({ id: `row-${String(rows.length)}`, kind: 'equal',
+      after: after[afterIndex] ?? null, before: before[beforeIndex] ?? null })
     beforeCursor = beforeIndex + 1
     afterCursor = afterIndex + 1
   }

@@ -118,6 +118,9 @@ describe('BidRunCoordinator', () => {
     expect(notices[0]?.data.message).not.toContain('hidden-token')
     expect(notices[0]?.data.message).not.toContain('ISSUE_4')
     expect(run.signal.aborted).toBe(true)
+    expect(session.events.some(event => event.type === 'bid.run.suspended')).toBe(false)
+    expect(session.events.findLast(event => event.type === 'bid.task.changed')?.data.state)
+      .toMatchObject({ stage: 'tender_analysis', status: 'failed', failure: { code: 'PROVIDER_ERROR' } })
   })
 
   it('retires commit authority before abort and rejects late completion', async () => {

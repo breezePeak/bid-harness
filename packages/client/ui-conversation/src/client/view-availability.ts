@@ -7,17 +7,31 @@ export class ViewAvailabilityRegistry {
   private readonly listeners = new Map<SessionId, Set<() => void>>()
   private readonly revisions = new Map<SessionId, number>()
 
-  /** Whether a registered view may be selected for one Session. */
+  /**
+   * Whether a registered view may be selected for one Session.
+   * @param sessionId 会话身份。
+   * @param viewId 视图身份。
+   * @returns 当前视图是否可选。
+   */
   available(sessionId: SessionId, viewId: string): boolean {
     return !this.unavailable.get(sessionId)?.has(viewId)
   }
 
-  /** Revision for external-store subscribers of one Session's availability. */
+  /**
+   * Revision for external-store subscribers of one Session's availability.
+   * @param sessionId 会话身份。
+   * @returns 可用性状态的修订号。
+   */
   version(sessionId: SessionId): number {
     return this.revisions.get(sessionId) ?? 0
   }
 
-  /** Subscribe to availability changes for one Session. */
+  /**
+   * Subscribe to availability changes for one Session.
+   * @param sessionId 会话身份。
+   * @param listener 状态变更监听器。
+   * @returns 取消订阅的函数。
+   */
   subscribe(sessionId: SessionId, listener: () => void): () => void {
     const listeners = this.listeners.get(sessionId) ?? new Set<() => void>()
     listeners.add(listener)
@@ -28,7 +42,12 @@ export class ViewAvailabilityRegistry {
     }
   }
 
-  /** Make a registered view selectable or unavailable for one Session. */
+  /**
+   * Make a registered view selectable or unavailable for one Session.
+   * @param sessionId 会话身份。
+   * @param viewId 视图身份。
+   * @param available 视图是否可选。
+   */
   set(sessionId: SessionId, viewId: string, available: boolean): void {
     const current = this.unavailable.get(sessionId)
     if (available) {

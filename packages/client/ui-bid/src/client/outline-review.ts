@@ -123,15 +123,17 @@ export function outlineDropOperation(outline: OutlineArtifact, sourceId: string,
   return operation
 }
 
+/** 基线与当前目录中可并排展示的一行。 */
 export interface AlignedOutlineRow<T> {
   left?: T | undefined
   right?: T | undefined
   key: string
 }
 
-/**
- * Align S3 baseline sections with S4 current sections using Longest Common Subsequence (LCS).
- * Preserves horizontal alignment for identical sections and inserts spacers for added/deleted items.
+/** 用最长公共子序列对齐基线和当前目录，增删处保留空位。
+ * @param leftList 基线目录条目。
+ * @param rightList 当前目录条目。
+ * @returns 按目录顺序对齐的行。
  */
 export function alignOutlineRows<T extends { section: { id: string } }>(
   leftList: T[],

@@ -19,12 +19,22 @@ it('S4 waiting_user 通过源码 Loader 执行受控对话修改', async () => {
       const parent = logs.find(log => (JSON.parse(log.split('\n')[0]!) as SessionHeader).id === 's3-real-loop')!
       const events = parent.trimEnd().split('\n').slice(1).map(line => JSON.parse(line) as SessionEvent)
       expect(events.filter(event => event.type === 'bid.stage.started' || event.type === 'bid.user_confirmation.required').slice(-6).map(event => [event.type, event.data.stage])).toEqual([
-        ['bid.stage.started', 'evidence_mapping'], ['bid.user_confirmation.required', 'evidence_mapping'],
-        ['bid.stage.started', 'evidence_mapping'], ['bid.user_confirmation.required', 'evidence_mapping'],
-        ['bid.stage.started', 'evidence_mapping'], ['bid.user_confirmation.required', 'evidence_mapping'],
+        ['bid.stage.started', 'file_intake'], ['bid.stage.started', 'tender_analysis'],
+        ['bid.stage.started', 'outline_generation'],
+        ['bid.user_confirmation.required', 'evidence_mapping'],
+        ['bid.user_confirmation.required', 'evidence_mapping'],
+        ['bid.user_confirmation.required', 'evidence_mapping'],
       ])
       expect(parent).toContain('编号不是 Section ID')
       expect(parent).not.toContain('bid.user_confirmation.received')
+      const starts = events.filter(event => event.type === 'bid.run.started'
+        && event.data.run.work.kind === 'capability_task')
+      expect(starts).toHaveLength(2)
+      const workId = starts[0]?.type === 'bid.run.started' ? starts[0].data.run.work.workId : undefined
+      expect(events.filter(event => event.type === 'bid.run.notice'
+        && event.data.workId === workId && event.data.kind === 'completed')).toHaveLength(1)
+      expect(await readFile(join(cwd, `.bid-harness/requests/${workId}/result.json`), 'utf8'))
+        .toContain('analysis/requirements.json')
     },
   })
   expect(JSON.parse(result.stdout)).toMatchInlineSnapshot(`
@@ -37,8 +47,25 @@ it('S4 waiting_user 通过源码 Loader 执行受控对话修改', async () => {
         "write",
         "bid_outline_apply_operations",
         "bid_outline_regenerate_scope",
-        "bid_evidence_remap",
+        "bid_project_inspect",
+        "bid_project_inspect",
+        "bid_run_task",
+        "bid_run_task",
+        "bid_run_task",
       ],
+      "capabilitySplit": [
+        {
+          "responsePoints": [
+            "RP-000001",
+          ],
+          "title": "人员准备",
+        },
+        {
+          "responsePoints": [],
+          "title": "资源核查",
+        },
+      ],
+      "capabilityUpdates": 1,
       "concurrent": [
         "BID_OPERATION_IN_PROGRESS",
         "BID_OPERATION_IN_PROGRESS",
@@ -46,37 +73,16 @@ it('S4 waiting_user 通过源码 Loader 执行受控对话修改', async () => {
       ],
       "confirmations": 0,
       "disposed": null,
-      "failures": 1,
+      "failures": 2,
+      "incompletePlanRejected": true,
+      "planOnlyNoWork": true,
       "rawWriteBlocked": true,
-      "review": {
-        "baselineTitles": [
-          "访问控制与安全审计",
-        ],
-        "evidenceSectionIds": [
-          "SEC-001",
-        ],
-        "requirementIds": [
-          "REQ-1",
-        ],
-        "scoringIds": [
-          "SCORE-1",
-        ],
-      },
-      "revision": 4,
+      "readOnlyNoWork": true,
+      "revision": 3,
       "state": {
+        "run": null,
         "stage": "evidence_mapping",
         "status": "waiting_user",
-      },
-      "target": {
-        "local_materials": [],
-        "missing_topics": [
-          "缺少当前章节专用资料",
-        ],
-        "section_id": "SEC-001",
-        "web_materials": [],
-        "writing_dimensions": [
-          "资源核查",
-        ],
       },
       "titles": [
         "访问控制与安全审计",
@@ -115,15 +121,33 @@ it('S4 waiting_user 通过源码 Loader 执行受控对话修改', async () => {
         },
         {
           "admitted": true,
-          "input": "这一节资料不对，重新找",
+          "input": "先讨论第一条要求，暂不修改",
+        },
+        {
+          "admitted": true,
+          "input": "先讨论把实施流程拆成小节的方案，暂不修改",
+        },
+        {
+          "admitted": true,
+          "input": "把第一条要求的理解改为明确实施边界",
+        },
+        {
+          "admitted": true,
+          "input": "将实施准备拆为人员准备和资源核查两个小节，只调整目录",
         },
       ],
       "untouchedEvidencePreserved": true,
+      "updatedRequirement": "明确实施边界",
       "visibleTools": [
         "bid_stage_inspect",
         "bid_outline_apply_operations",
         "bid_outline_regenerate_scope",
         "bid_evidence_remap",
+        "bid_project_inspect",
+        "bid_run_task",
+        "bid_plan_task",
+        "bid_confirm_writing_plan",
+        "bid_revise_chapter",
       ],
     }
   `)

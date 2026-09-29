@@ -33,7 +33,7 @@ const generatedRoot = resolve(root, 'website/.generated')
  * @param environment Build environment containing an optional explicit public ref.
  * @returns The configured public ref, or `master`.
  */
-export function resolveRepositoryRef(environment: NodeJS.ProcessEnv): string {
+function resolveRepositoryRef(environment: NodeJS.ProcessEnv): string {
   return environment.DOCS_REPOSITORY_REF ?? 'master'
 }
 
@@ -87,25 +87,15 @@ function routeTarget(fromRoute: string, toRoute: string, suffix: string): string
   return `${target.startsWith('.') ? target : `./${target}`}${suffix}`
 }
 
-function sourceMap(pages: DocsPage[]): Map<string, Map<DocsLocale, DocsPage>> {
-  const map = new Map<string, Map<DocsLocale, DocsPage>>()
+function sourceMap(pages: DocsPage[]): Map<string, DocsPage> {
+  const map = new Map<string, DocsPage>()
   for (const page of pages) {
     for (const source of [page.source, ...(page.sourceAliases ?? [])]) {
-      const localized = map.get(source) ?? new Map<DocsLocale, DocsPage>()
-      if (localized.has(page.locale)) {
-        throw new Error(`project-doc-site: duplicate source or alias ${JSON.stringify(source)} for locale ${JSON.stringify(page.locale)}.`)
-      }
-      localized.set(page.locale, page)
-      map.set(source, localized)
+      if (map.has(source)) throw new Error(`project-doc-site: duplicate source or alias ${JSON.stringify(source)}.`)
+      map.set(source, page)
     }
   }
   return map
-}
-
-function counterpartSource(source: string): string {
-  return source.endsWith('.zh.md')
-    ? source.replace(/\.zh\.md$/, '.md')
-    : source.replace(/\.md$/, '.zh.md')
 }
 
 function resolveRepositoryTarget(sourceAbs: string, rawPath: string, repoRoot: string): { absPath: string; line?: number } {
@@ -165,11 +155,7 @@ export function rewriteMarkdown(source: string, options: RewriteMarkdownOptions)
     if (path === '') return
     const { absPath, line } = resolveRepositoryTarget(sourceAbs, path, options.repoRoot)
     const targetPath = repoPath(absPath, options.repoRoot)
-    const isLanguageSwitcher = targetPath === counterpartSource(options.sourcePath)
-    const targetLocale: DocsLocale = isLanguageSwitcher
-      ? options.locale === 'root' ? 'en' : 'root'
-      : options.locale
-    const page = published.get(targetPath)?.get(targetLocale)
+    const page = published.get(targetPath)
     const nextUrl = page !== undefined
       ? routeTarget(options.route, page.route, suffix)
       : node.type === 'image' && options.placeImage !== undefined
@@ -208,7 +194,7 @@ export function rewriteMarkdown(source: string, options: RewriteMarkdownOptions)
  * @param page Publication manifest entry for the content.
  * @returns Markdown with projection-owned frontmatter fields.
  */
-export function addProjectionFrontmatter(markdown: string, page: Pick<DocsPage, 'source' | 'outline'>): string {
+function addProjectionFrontmatter(markdown: string, page: Pick<DocsPage, 'source' | 'outline'>): string {
   const fields = [
     `editSource: ${JSON.stringify(page.source)}`,
     ...(page.outline === undefined ? [] : [`outline: ${JSON.stringify(page.outline)}`]),
@@ -226,9 +212,8 @@ const REPOSITORY_BADGE = /^\[!\[[^\]]*\]\(https:\/\/img\.shields\.io\/[^)]*\)\]\
 /**
  * Drop the lines that address a canonical page's GitHub reader.
  *
- * The site carries a locale switcher in its navigation bar and links the
- * repository from every page, so projecting these lines would repeat both — the
- * switcher as the first element under each heading.
+ * The website publishes Chinese pages and links the repository from every
+ * page, so inherited language switchers and badges are omitted.
  *
  * @param markdown Rewritten canonical Markdown content.
  * @returns The content without the switcher line or the repository badge.
@@ -281,7 +266,7 @@ export function projectedPageContent(markdown: string, page: DocsPage): string {
  * would put a build-machine file on the site; `existsSync` alone, which is all
  * link resolution needs, does not answer that.
  */
-export function publishableImage(absPath: string, repoRoot: string): string | undefined {
+function publishableImage(absPath: string, repoRoot: string): string | undefined {
   const real = realpathSync(absPath)
   const inside = real === repoRoot || real.startsWith(`${repoRoot}${sep}`)
   return inside && statSync(real).isFile() ? real : undefined
@@ -451,7 +436,7 @@ function withoutFrontmatter(markdown: string, source: string): string {
  * @param source Repository-relative page source, named by frontmatter failures.
  * @returns Plain Markdown without frontmatter or repository chrome.
  */
-export function rawMarkdownPageContent(markdown: string, source: string): string {
+function rawMarkdownPageContent(markdown: string, source: string): string {
   return withoutRepositoryChrome(withoutFrontmatter(markdown, source))
 }
 
@@ -539,12 +524,6 @@ export interface LlmsTxtSite {
   description: string
 }
 
-/** Locale groups llms.txt lists, in the order the site's navigation presents them. */
-const llmsTxtLocales: readonly { heading: string; locale: DocsLocale }[] = [
-  { heading: '简体中文', locale: 'root' },
-  { heading: 'English', locale: 'en' },
-]
-
 /**
  * The llms.txt index of every published page's raw-Markdown twin.
  *
@@ -553,7 +532,7 @@ const llmsTxtLocales: readonly { heading: string; locale: DocsLocale }[] = [
  * agent-facing entry point itself.
  *
  * @param site Site identity and base path.
- * @returns llms.txt content listing both locale trees.
+ * @returns llms.txt content listing Chinese pages.
  */
 export function llmsTxt(site: LlmsTxtSite): string {
   const lines = [
@@ -561,14 +540,11 @@ export function llmsTxt(site: LlmsTxtSite): string {
     '',
     `> ${site.description}`,
     '',
-    '页面 URL 去掉末尾斜杠再加 `.md` 即为该页原始 Markdown(根路径用 `/index.md`);下方列表是各页精确地址。Drop any trailing slash and append `.md` to a page URL for its raw Markdown (the site root is `/index.md`); the list below carries the exact addresses.',
+    '页面 URL 去掉末尾斜杠再加 `.md` 即为该页原始 Markdown（根路径用 `/index.md`）；下方列出各页的精确地址。',
   ]
-  for (const { heading, locale } of llmsTxtLocales) {
-    lines.push('', `## ${heading}`, '')
-    for (const collection of localeCollections[locale]) {
-      for (const page of orderedPages(locale, collection)) {
-        lines.push(`- [${page.label}](${site.base}${page.route}): ${page.section}`)
-      }
+  for (const collection of localeCollections.root) {
+    for (const page of orderedPages('root', collection)) {
+      lines.push(`- [${page.label}](${site.base}${page.route}): ${page.section}`)
     }
   }
   return `${lines.join('\n')}\n`

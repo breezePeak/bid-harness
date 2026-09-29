@@ -11,6 +11,7 @@ import { existsSync, globSync, mkdirSync, mkdtempSync, readFileSync, rmSync, sym
 import { dirname, resolve } from 'node:path'
 
 const root = resolve(import.meta.dirname, '..')
+const directoryLinkType = process.platform === 'win32' ? 'junction' : 'dir'
 
 interface ExportTarget {
   types?: string
@@ -84,7 +85,7 @@ function linkPackage(pkg: WorkspacePackage, nodeModules: string): void {
   const parts = pkg.name.split('/')
   const link = resolve(nodeModules, ...parts)
   mkdirSync(dirname(link), { recursive: true })
-  symlinkSync(pkg.dir, link, 'dir')
+  symlinkSync(pkg.dir, link, directoryLinkType)
 }
 
 const packages = workspacePackages()
@@ -117,7 +118,7 @@ try {
   if (existsSync(rootTypes)) {
     const typesDir = resolve(nodeModules, '@types')
     mkdirSync(typesDir, { recursive: true })
-    symlinkSync(rootTypes, resolve(typesDir, 'node'), 'dir')
+    symlinkSync(rootTypes, resolve(typesDir, 'node'), directoryLinkType)
   }
 
   writeFileSync(resolve(tmp, 'package.json'), `${JSON.stringify({ type: 'module', private: true }, null, 2)}\n`)
@@ -156,6 +157,7 @@ try {
   failed = true
   const output = error as { stdout?: Buffer; stderr?: Buffer }
   console.error('verify-node-next-types: NodeNext consumer typecheck failed.\n')
+  console.error(error instanceof Error ? error.message : String(error))
   console.error(`${output.stdout?.toString() ?? ''}${output.stderr?.toString() ?? ''}`)
 } finally {
   rmSync(tmp, { recursive: true, force: true })

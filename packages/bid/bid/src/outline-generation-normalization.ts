@@ -6,7 +6,11 @@ import { outlineCandidateSchema, parseOutlineArtifact, TECHNICAL_DEVIATION_SECTI
 
 const deviationTitle = (value: string): boolean => value.normalize('NFKC').replace(/\s+/gu, '') === '技术偏离表'
 
-/** @returns 保留原章节身份并把技术偏离表规范为固定第一章的目录。 */
+/**
+ * 保留现有章节身份，并确保技术偏离表使用固定位置。
+ * @returns 保留原章节身份并把技术偏离表规范为固定第一章的目录。
+ * @param sections 当前目录章节。
+ */
 export function ensureTechnicalDeviationSection(sections: OutlineSection[]): OutlineSection[] {
   if (sections.some(section => section.title.normalize('NFKC').replace(/\s+/gu, '') === '目录')) {
     throw new Error('S3 不得创建目录章节；目录由 Word 导出程序生成。')
@@ -96,5 +100,17 @@ export function normalizeOutlineCandidate(
     }
   })
   if (issues.length > 0) throw new z.ZodError(issues)
-  return parseOutlineArtifact({ ...candidate, sections })
+  const byId = new Map(sections.map(section => [section.id, section]))
+  const level = (id: string, visited: Set<string>): number | undefined => {
+    if (visited.has(id)) return undefined
+    const section = byId.get(id)
+    if (section === undefined) return undefined
+    if (section.parent_id === null) return 1
+    visited.add(id)
+    const parentLevel = level(section.parent_id, visited)
+    return parentLevel === undefined ? undefined : parentLevel + 1
+  }
+  return parseOutlineArtifact({ ...candidate, sections: byId.size !== sections.length ? sections : sections.map(section => ({
+    ...section, level: level(section.id, new Set()) ?? section.level,
+  })) })
 }

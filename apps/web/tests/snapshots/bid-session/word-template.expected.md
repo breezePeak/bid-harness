@@ -1,15 +1,25 @@
 - region "导出 Word":
   - strong: 导出 Word
   - button "导出 Word" [disabled]
-  - strong: 上传 Word 模板
-  - text: 选择 .docx 文件（最多 300 MiB）
-  - button "上传 Word 模板"
-  - text: 公司 模板.docx
-  - status
-  - table "模板主要格式":
-    - caption: 模板主要格式
+  - region "Word 模板":
+    - heading "Word 模板" [level=2]
+    - img
+    - strong: 上传新模板
+    - button "上传 Word 模板"
+    - text: 选择 .docx 文件（最多 300 MiB）
+    - radio "系统默认模板 页数暂不可用"
+    - strong: 系统默认模板
+    - text: 页数暂不可用
+    - radio "公司 模板.docx 页数基准 页数暂不可用 · 无模板内格式差异" [checked]
+    - strong: 公司 模板.docx
+    - text: 页数基准 页数暂不可用 · 无模板内格式差异
+  - strong: 当前模板主要格式
+  - button "修改全部参数"
+  - paragraph: 所有参数在确认前后均可修改；模板值和系统默认值只提供初始结果。
+  - table "当前模板主要格式":
+    - caption: 当前模板主要格式
     - rowgroup:
-      - row "类型 字体 字号 对齐 行距 缩进 状态":
+      - row "类型 字体 字号 对齐 行距 缩进 状态 操作":
         - columnheader "类型"
         - columnheader "字体"
         - columnheader "字号"
@@ -17,45 +27,81 @@
         - columnheader "行距"
         - columnheader "缩进"
         - columnheader "状态"
+        - columnheader "操作"
     - rowgroup:
-      - row "一级标题 Microsoft YaHei / Times New Roman 三号（16pt） 左对齐 1.5 0 正常":
+      - row "一级标题 修改Microsoft YaHei / Times New Roman 修改三号（16pt） 修改左对齐 修改1.5 修改0 正常 修改":
         - rowheader "一级标题"
-        - cell "Microsoft YaHei / Times New Roman"
-        - cell "三号（16pt）"
-        - cell "左对齐"
-        - cell "1.5"
-        - cell "0"
+        - cell "修改Microsoft YaHei / Times New Roman":
+          - button "修改Microsoft YaHei / Times New Roman": Microsoft YaHei / Times New Roman
+        - cell "修改三号（16pt）":
+          - button "修改三号（16pt）": 三号（16pt）
+        - cell "修改左对齐":
+          - button "修改左对齐": 左对齐
+        - cell "修改1.5":
+          - button "修改1.5": "1.5"
+        - cell "修改0":
+          - button "修改0": "0"
         - cell "正常"
-      - row "二级标题 Microsoft YaHei / Times New Roman 三号（16pt） 左对齐 1.5 0 正常":
+        - cell "修改":
+          - button "修改"
+      - row "二级标题 修改Microsoft YaHei / Times New Roman 修改三号（16pt） 修改左对齐 修改1.5 修改0 正常 修改":
         - rowheader "二级标题"
-        - cell "Microsoft YaHei / Times New Roman"
-        - cell "三号（16pt）"
-        - cell "左对齐"
-        - cell "1.5"
-        - cell "0"
+        - cell "修改Microsoft YaHei / Times New Roman":
+          - button "修改Microsoft YaHei / Times New Roman": Microsoft YaHei / Times New Roman
+        - cell "修改三号（16pt）":
+          - button "修改三号（16pt）": 三号（16pt）
+        - cell "修改左对齐":
+          - button "修改左对齐": 左对齐
+        - cell "修改1.5":
+          - button "修改1.5": "1.5"
+        - cell "修改0":
+          - button "修改0": "0"
         - cell "正常"
-      - row "正文 Microsoft YaHei / Times New Roman 11pt 左对齐 1.5 2字符 正常":
+        - cell "修改":
+          - button "修改"
+      - row "正文 修改Microsoft YaHei / Times New Roman 修改11pt 修改左对齐 修改1.5 修改2字符 正常 修改":
         - rowheader "正文"
-        - cell "Microsoft YaHei / Times New Roman"
-        - cell "11pt"
-        - cell "左对齐"
-        - cell "1.5"
-        - cell "2字符"
+        - cell "修改Microsoft YaHei / Times New Roman":
+          - button "修改Microsoft YaHei / Times New Roman": Microsoft YaHei / Times New Roman
+        - cell "修改11pt":
+          - button "修改11pt": 11pt
+        - cell "修改左对齐":
+          - button "修改左对齐": 左对齐
+        - cell "修改1.5":
+          - button "修改1.5": "1.5"
+        - cell "修改2字符":
+          - button "修改2字符": 2字符
         - cell "正常"
-      - row "图题 Microsoft YaHei / Times New Roman 11pt 左对齐 1.5 0 正常":
+        - cell "修改":
+          - button "修改"
+      - row "图题 修改Microsoft YaHei / Times New Roman 修改11pt 修改左对齐 修改1.5 修改0 正常 修改":
         - rowheader "图题"
-        - cell "Microsoft YaHei / Times New Roman"
-        - cell "11pt"
-        - cell "左对齐"
-        - cell "1.5"
-        - cell "0"
+        - cell "修改Microsoft YaHei / Times New Roman":
+          - button "修改Microsoft YaHei / Times New Roman": Microsoft YaHei / Times New Roman
+        - cell "修改11pt":
+          - button "修改11pt": 11pt
+        - cell "修改左对齐":
+          - button "修改左对齐": 左对齐
+        - cell "修改1.5":
+          - button "修改1.5": "1.5"
+        - cell "修改0":
+          - button "修改0": "0"
         - cell "正常"
-      - row "表题 Microsoft YaHei / Times New Roman 11pt 左对齐 1.5 0 正常":
+        - cell "修改":
+          - button "修改"
+      - row "表题 修改Microsoft YaHei / Times New Roman 修改11pt 修改左对齐 修改1.5 修改0 正常 修改":
         - rowheader "表题"
-        - cell "Microsoft YaHei / Times New Roman"
-        - cell "11pt"
-        - cell "左对齐"
-        - cell "1.5"
-        - cell "0"
+        - cell "修改Microsoft YaHei / Times New Roman":
+          - button "修改Microsoft YaHei / Times New Roman": Microsoft YaHei / Times New Roman
+        - cell "修改11pt":
+          - button "修改11pt": 11pt
+        - cell "修改左对齐":
+          - button "修改左对齐": 左对齐
+        - cell "修改1.5":
+          - button "修改1.5": "1.5"
+        - cell "修改0":
+          - button "修改0": "0"
         - cell "正常"
+        - cell "修改":
+          - button "修改"
   - iframe

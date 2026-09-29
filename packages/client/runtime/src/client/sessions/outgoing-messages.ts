@@ -39,7 +39,10 @@ function textOf(content: readonly PromptContentPart[]): string | null {
 export class OutgoingMessages {
   private readonly records = new Map<string, OutgoingMessage>()
 
-  /** Read current local rows in submission order. @returns the current local rows. */
+  /**
+   * Read current local rows in submission order. @returns the current local rows.
+   * @returns 当前待发送消息的只读快照。
+   */
   snapshot(): readonly OutgoingMessage[] {
     return [...this.records.values()]
   }
@@ -48,6 +51,7 @@ export class OutgoingMessages {
    * @param localId - stable UI row identity.
    * @param clientSubmissionId - identity shared with the Host user message.
    * @param content - prompt content captured before asynchronous preparation.
+   * @param mode 消息发送模式。
    */
   begin(
     localId: string,
@@ -85,7 +89,11 @@ export class OutgoingMessages {
     return true
   }
 
-  /** Explicitly discard one local outgoing row without synthesizing a failure. */
+  /**
+   * Explicitly discard one local outgoing row without synthesizing a failure.
+   * @param clientSubmissionId 客户端提交身份。
+   * @returns 是否移除指定消息。
+   */
   discard(clientSubmissionId: string): boolean {
     return this.records.delete(clientSubmissionId)
   }

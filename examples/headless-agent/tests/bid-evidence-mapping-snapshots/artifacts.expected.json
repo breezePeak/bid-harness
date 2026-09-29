@@ -68,6 +68,60 @@
           }
         ],
         "missing_topics": [],
+        "answer_plan": [
+          {
+            "targets": [
+              {
+                "kind": "must_answer",
+                "position": 0,
+                "text": "说明访问控制与安全审计措施。"
+              }
+            ],
+            "mode": "proposal",
+            "content": "拟采用身份鉴别、分级授权和可追溯审计方法。",
+            "basis": [
+              {
+                "kind": "section_responsibility",
+                "section_id": "SEC-SECURITY"
+              }
+            ],
+            "boundary": "具体既有能力与指标须以本项目核实资料为准。"
+          },
+          {
+            "targets": [
+              {
+                "kind": "requirement",
+                "id": "REQ-1"
+              }
+            ],
+            "mode": "proposal",
+            "content": "拟采用身份鉴别、分级授权和可追溯审计方法。",
+            "basis": [
+              {
+                "kind": "section_responsibility",
+                "section_id": "SEC-SECURITY"
+              }
+            ],
+            "boundary": "具体既有能力与指标须以本项目核实资料为准。"
+          },
+          {
+            "targets": [
+              {
+                "kind": "response_point",
+                "id": "RP-000001"
+              }
+            ],
+            "mode": "proposal",
+            "content": "拟采用身份鉴别、分级授权和可追溯审计方法。",
+            "basis": [
+              {
+                "kind": "section_responsibility",
+                "section_id": "SEC-SECURITY"
+              }
+            ],
+            "boundary": "具体既有能力与指标须以本项目核实资料为准。"
+          }
+        ],
         "section_id": "SEC-SECURITY",
         "writing_dimensions": [
           "身份鉴别与访问控制",

@@ -324,7 +324,7 @@ type Branded<B extends string> = string & { readonly [BRAND]: B }
 
 ## Cordis API
 
-Generated from source by `scripts/gen-cordis-catalog.ts` (verified fresh by `pnpm run verify-cordis-catalog` in doc-sync; regenerate with `pnpm run gen-cordis-catalog`) — the language sides differ only in locale-specific paired document paths. Signature blocks use a `ts cordis-catalog` fence and keep the original source JSDoc; dispatch modes are defined in the [primer](../cordis-primer.zh.md#dispatch-modes), and the framework-inherited `ctx` API lives in [cordis-api/inherited.md](../cordis-api/inherited.md).
+本区由 `scripts/gen-cordis-catalog.ts` 根据源码生成，`pnpm run verify-cordis-catalog` 检查内容是否最新。签名代码块保留源码 JSDoc；事件派发模式见 [Cordis 入门](../cordis-primer.zh.md#dispatch-modes)，框架继承的 `ctx` API 见 [Cordis API](../cordis-api/inherited.md)。
 
 <a id="ctxagentdefaultmodel--agentdefaultmodelconfig"></a>
 
@@ -383,6 +383,12 @@ async createAgent(ownerCtx: Context, options: CreateAgentOptions): Promise<Agent
  * @returns the published handle.
  */
 async resume(ownerCtx: Context, options: ResumeAgentOptions): Promise<AgentHandle>
+
+/** Stop one factory-owned live Agent by its shared Session identity.
+ * @param id - Session identity of the live Agent.
+ * @returns Whether a live Agent was found and disposed.
+ */
+async disposeAgent(id: SessionId): Promise<boolean>
 ```
 
 Types: [SessionHeader](persistence.zh.md)
@@ -653,6 +659,13 @@ async create(options: CreateAgentOptions): Promise<AgentHandle>
 async resume(options: ResumeAgentOptions): Promise<AgentHandle>
 
 /**
+ * Stop and remove a live Agent together with its Session.
+ * @param id - Shared Agent and Session identity.
+ * @returns whether a live lifecycle was removed.
+ */
+async dispose(id: SessionId): Promise<boolean>
+
+/**
  * Register a live agent. Throws if an agent with the same id is already
  * registered. Emits `agent/created` on registration and `agent/disposed`
  * when the calling fiber is disposed — both with the agent's scope carrier
@@ -735,6 +748,28 @@ Source: [`packages/core/agent/src/index.ts`](../../packages/core/agent/src/index
 <a id="agent-events"></a>
 
 ### `agent/*` events
+
+<a id="agentcancel-requested--emit"></a>
+
+#### `agent/cancel-requested` — emit
+
+An owner requested cancellation before the Agent mutates its inbox or aborts active work.
+
+```ts cordis-catalog
+/**
+ * An owner requested cancellation before the Agent mutates its inbox or aborts active work.
+ * @param payload.agent Agent receiving the request.
+ * @param payload.cause Typed cancellation reason supplied by the caller.
+ * @param payload.keepInbox Whether queued and steering input survives the request.
+ * Scope-filtered dispatch (`@deepseek-ai/dsh-scope`): agent-scoped listeners receive only that agent.
+ * @mode emit
+ */
+'agent/cancel-requested'(this: Scoped<Agent>, payload: { agent: Agent; cause: AgentCancelCause; keepInbox: boolean }): void
+```
+
+Types: [Scoped](scope.zh.md)
+
+Source: [`packages/core/agent/src/runtime-types.ts`](../../packages/core/agent/src/runtime-types.ts)
 
 <a id="agentcreated--emit"></a>
 

@@ -1,7 +1,6 @@
 /**
  * Separate byte-identical Chinese Markdown code blocks from the primary checks
- * performed on their unsuffixed English siblings. The bilingual pairing gate
- * owns cross-language identity; source-oriented gates consume one copy.
+ * performed on their unsuffixed siblings. Source-oriented gates consume one copy.
  */
 
 /** The result of separating canonical blocks from paired Chinese derivatives. */
@@ -20,7 +19,7 @@ function unsuffixedSibling(doc: string): string | null {
 /**
  * Partition complete byte-identical `.zh.md` block sequences from primary
  * blocks. A partial or reordered match stays primary so the caller fails
- * closed; the translation-pairing gate reports the cross-language mismatch.
+ * closed and both blocks are checked independently.
  *
  * @param blocks - Blocks in repository scan order.
  * @param docOf - Repository-relative Markdown path owning a block.

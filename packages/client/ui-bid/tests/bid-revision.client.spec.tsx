@@ -29,7 +29,7 @@ function composer() {
   const props = {
     sessionId: 'bid', disabled: false,
     useSessions: (select: (state: unknown) => unknown) => select({ byId: { bid: { agentPreset: 'bid' } } }),
-    useProjection: () => ({ runtime: { stage: 'chapter_writing', status: 'completed' } }),
+    useProjection: () => ({ task: { stage: 'chapter_writing', status: 'completed', run: null } }),
     useStore: (select: (state: ReturnType<typeof store.getSnapshot>) => unknown) => (
       select(useSyncExternalStore(listener => store.subscribe(listener), () => store.getSnapshot()))
     ),

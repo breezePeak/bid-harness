@@ -98,6 +98,49 @@ export function createScoringResponsePointCatalog(
 }
 
 /**
+ * 只替换评分语义变化的响应点；其他评分项沿用原编号与文本。
+ * @param previous 旧评分的稳定清单。
+ * @param scoring 修改后的下游评分集合。
+ * @param changedIds 需要重新分析的评分 ID。
+ * @param candidate 仅包含 changedIds 的语义分析结果。
+ * @returns 绑定新评分版本且编号单调递增的清单。
+ */
+export function reconcileScoringResponsePointCatalog(
+  previous: ScoringResponsePointCatalog,
+  scoring: TenderScoringArtifact,
+  changedIds: ReadonlySet<string>,
+  candidate: ScoringResponsePointCandidate,
+): ScoringResponsePointCatalog {
+  const selected = new Set(scoring.scoring_items.map(item => item.id))
+  if ([...changedIds].some(id => !selected.has(id))) throw new Error('scoring-response-point-changed-id-unknown')
+  if (candidate.points.some(point => !changedIds.has(point.scoring_id))) {
+    throw new Error('scoring-response-point-candidate-out-of-scope')
+  }
+  let next = previous.next_sequence
+  const points: ScoringResponsePoint[] = []
+  for (const item of scoring.scoring_items) {
+    if (changedIds.has(item.id)) {
+      const replacements = candidate.points.filter(point => point.scoring_id === item.id)
+      if (replacements.length === 0 || replacements.some((point, index) => point.order !== index + 1)) {
+        throw new Error('scoring-response-point-candidate-order-invalid')
+      }
+      points.push(...replacements.map(point => ({ ...point, id: `RP-${String(next++).padStart(6, '0')}` })))
+    } else {
+      const preserved = previous.points.filter(point => point.scoring_id === item.id)
+      if (preserved.length === 0 || preserved.some((point, index) => point.order !== index + 1)) {
+        throw new Error('scoring-response-point-existing-item-missing')
+      }
+      points.push(...preserved)
+    }
+  }
+  const catalog = parseScoringResponsePointCatalog({
+    ...previous, scoring_sha256: scoringArtifactSha256(scoring), next_sequence: next, points,
+  })
+  if (!catalogMatchesScoring(catalog, scoring)) throw new Error('scoring-response-point-reconciliation-invalid')
+  return catalog
+}
+
+/**
  * 验证清单归属、稳定编号及每个评分项的非空连续响应点。
  * @param catalog Stable response-point catalog.
  * @param scoring Canonical scoring Artifact.

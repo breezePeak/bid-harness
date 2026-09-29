@@ -75,7 +75,12 @@ describe('bid control-plane public contract', () => {
       'bid.user_confirmation.required',
       'bid.user_confirmation.received',
       'bid.writing_entry.changed',
+      'bid.docx_export.changed',
       'bid.schema.warning',
+      'bid.goal.bound',
+      'bid.goal.recovery.requested',
+      'bid.capability.input.required',
+      'bid.capability.input.received',
     ])
   })
 
@@ -229,9 +234,11 @@ describe('bid control-plane public contract', () => {
       readonly supersedesTurn: number | null
       readonly runId: string
       readonly stage: typeof BID_STAGES[number]
-      readonly kind: 'stopped' | 'interrupted'
+      readonly kind: 'stopped' | 'interrupted' | 'completed'
       readonly severity: 'info' | 'error'
       readonly message: string
+      readonly workId?: string
+      readonly resultRef?: string
     }>()
   })
 

@@ -112,7 +112,10 @@ export function parseRevisionQueueArtifact(value: unknown): RevisionQueueArtifac
   return revisionQueueArtifactSchema.parse(value)
 }
 
-/** 空队列的初始结构。 */
+/**
+ * 空队列的初始结构。
+ * @returns 修订号为零且无意见的初始队列。
+ */
 export function emptyRevisionQueue(): RevisionQueueArtifact {
   return { schema_version: REVISION_QUEUE_SCHEMA_VERSION, revision: 0, issues: [] }
 }
@@ -185,7 +188,10 @@ export function validateRevisionIssueReference(reference: RevisionIssueReference
   }, markdown)
 }
 
-/** 生成新的 issue_id。 */
+/**
+ * 生成新的 issue_id。
+ * @returns 新审批意见的唯一身份。
+ */
 export function createRevisionIssueId(): string {
   return `REV-${randomUUID()}`
 }

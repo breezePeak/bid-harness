@@ -61,7 +61,13 @@ export async function seedProjectArtifacts(workspace: BidWorkspace): Promise<Out
     'analysis/tender-analysis-selection.json': { schema_version: 1, selected_scoring_ids: ['SCORE-1'] },
     'analysis/scoring-response-points.json': createScoringResponsePointCatalog(scoring, { schema_version: 1, points: [{ scoring_id: 'SCORE-1', order: 1, text: '说明技术方案' }] }),
     'analysis/compliance.json': { schema_version: 1, compliance_items: [] },
-    'analysis/evidence-map.json': { section_mappings: [{ section_id: 'SEC-1', local_materials: [], web_materials: [], missing_topics: ['待补充实施材料'], writing_dimensions: ['技术方案'] }] },
+    'analysis/evidence-map.json': { section_mappings: [{ section_id: 'SEC-1', local_materials: [], web_materials: [], missing_topics: ['待补充实施材料'], writing_dimensions: ['技术方案'],
+      answer_plan: [{ targets: [{ kind: 'must_answer', position: 0, text: '按期交付' },
+        { kind: 'requirement', id: 'REQ-1' }, { kind: 'response_point', id: 'RP-000001' }],
+      mode: 'proposal', content: '安排交付里程碑并说明技术实施方法。',
+      basis: [{ kind: 'section_responsibility', section_id: 'SEC-1' }],
+      boundary: '交付时间与人员投入仍需项目资料核实。' }],
+    }] },
     'outline/outline.json': outline,
     'outline/confirmed-outline.json': outline,
     'chapters/writing-plan.json': {
@@ -78,6 +84,13 @@ export async function seedProjectArtifacts(workspace: BidWorkspace): Promise<Out
       revision: null,
     },
     'chapters/execution-log.json': { schema_version: 4, scope: 'technical_bid', confirmed_outline_sha256: outlineArtifactSha256(outline), writing_plan_version: 1, max_concurrency: 1, observed_max_concurrency: 1, sections: [{ section_id: 'SEC-1', depends_on: [], related_sections: [], epoch: 0, status: 'completed', phase: null, failure_phase: null, attempts: [], final_writer_child_session_id: 'writer-a', final_reviewer_child_session_id: 'reviewer-a' }] },
+    'chapters/meta/0001.json': {
+      section_id: 'SEC-1', covered_must_answer: ['按期交付'], covered_scoring_response_point_ids: ['RP-000001'],
+      covered_scoring_response_points: [{ scoring_id: 'SCORE-1', response_point: '说明技术方案' }],
+      local_materials_used: [], web_materials_used: [], unresolved_topics: [],
+      handoff: { section_id: 'SEC-1', decisions: [], terminology: [], numbers_and_parameters: [], interfaces: [],
+        deployment_constraints: [], cross_reference_targets: [], unresolved_topics: [] },
+    },
     'chapters/manifest.json': { schema_version: 6, scope: 'technical_bid', confirmed_outline_sha256: outlineArtifactSha256(outline), chapters: [{
       section_id: 'SEC-1', content_path: 'chapters/sections/0001.md', requirement_ids: ['REQ-1'], scoring_ids: ['SCORE-1'], compliance_ids: [],
       covered_must_answer: ['按期交付'], covered_scoring_response_point_ids: ['RP-000001'], covered_scoring_response_points: [{ scoring_id: 'SCORE-1', response_point: '说明技术方案' }],

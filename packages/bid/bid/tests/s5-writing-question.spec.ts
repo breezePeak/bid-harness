@@ -94,6 +94,7 @@ async function setupS5Fixture() {
     })
     await vi.waitFor(() => {
       expect(host.inFlight.size).toBe(0)
+      expect(ctx.tools.get('bid_stage_inspect', handle.agent)).toBeDefined()
     })
     return handle.agent
   }

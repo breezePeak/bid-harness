@@ -150,7 +150,32 @@ interface GoalChanged {
 
 ## Cordis API
 
-Generated from source by `scripts/gen-cordis-catalog.ts` (verified fresh by `pnpm run verify-cordis-catalog` in doc-sync; regenerate with `pnpm run gen-cordis-catalog`) — the language sides differ only in locale-specific paired document paths. Signature blocks use a `ts cordis-catalog` fence and keep the original source JSDoc; dispatch modes are defined in the [primer](../cordis-primer.zh.md#dispatch-modes), and the framework-inherited `ctx` API lives in [cordis-api/inherited.md](../cordis-api/inherited.md).
+本区由 `scripts/gen-cordis-catalog.ts` 根据源码生成，`pnpm run verify-cordis-catalog` 检查内容是否最新。签名代码块保留源码 JSDoc；事件派发模式见 [Cordis 入门](../cordis-primer.zh.md#dispatch-modes)，框架继承的 `ctx` API 见 [Cordis API](../cordis-api/inherited.md)。
+
+<a id="ctxgoalrounddriver--goalrounddrivercontrol"></a>
+
+### `ctx.goalRoundDriver` — `GoalRoundDriverControl`
+
+Host control of automatic goal admission for an exact live agent.
+
+```ts cordis-catalog
+/**
+ * Register a synchronous, read-only admission gate.
+ * @param gate - Returns wait while Host work prevents another round.
+ * @returns Registration disposer.
+ */
+registerGate(gate: (agent: Agent, goal: GoalView) => 'wait' | undefined): () => void
+
+/**
+ * Recheck the existing serial driver after external state changes.
+ * @param agent - Exact live Agent whose goal may advance.
+ */
+request(agent: Agent): void
+```
+
+Types: [Agent](core.zh.md)
+
+Source: [`packages/goal/goal-round-driver/src/index.ts`](../../packages/goal/goal-round-driver/src/index.ts)
 
 <a id="ctxgoals--goalservice"></a>
 

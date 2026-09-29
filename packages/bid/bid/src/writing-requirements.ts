@@ -147,6 +147,9 @@ const writingRequestAnswerSchema = z.object({
   }
 })
 
+/**
+ * 写作计划处理进度的磁盘结构。
+ */
 export const writingPlanProcessingSchema = z.object({
   message_id: z.string().min(1),
   state: z.enum(['queued', 'running', 'failed']),
@@ -157,6 +160,9 @@ export const writingPlanProcessingSchema = z.object({
   }
 })
 
+/**
+ * 已校验的写作计划处理进度。
+ */
 export type WritingPlanProcessing = z.infer<typeof writingPlanProcessingSchema>
 
 /** 已发出 S5 原生询问的项目记录；在线 Promise 不写入此文件。 */
@@ -242,6 +248,38 @@ export interface ResolvedWritingRequirementMessage {
   readonly text: string
 }
 
+/** 只读用户事件数组；能力契约不把 Host Session 类型带入 Client face。 */
+export interface WritingMessageSession {
+  readonly id: string
+  readonly events: readonly unknown[]
+}
+
+/**
+ * 从授权用户会话日志解析写作要求原文，模型不能替换引用的文字。
+ * @param session 当前任务的 Interaction Session。
+ * @param refs 模型提交的稳定用户消息引用。
+ * @returns 与引用绑定的原始用户文本。
+ */
+export function resolveWritingRequirementMessages(
+  session: WritingMessageSession, refs: readonly WritingRequirementMessageRef[],
+): ResolvedWritingRequirementMessage[] {
+  return refs.map((ref) => {
+    if (ref.session_id !== session.id) throw new Error(`用户消息引用不属于当前 Session：${ref.session_id}/${ref.seq}`)
+    const event = z.object({ type: z.literal('user/message'), data: z.object({
+      source: z.object({ kind: z.literal('user') }).loose(),
+      id: z.string(),
+      content: z.array(z.object({ type: z.string(), text: z.string().optional() }).loose()),
+    }).loose() }).loose().safeParse(session.events[ref.seq])
+    if (!event.success || event.data.data.id !== ref.message_id) {
+      throw new Error(`用户消息引用不存在或身份不匹配：${ref.session_id}/${ref.seq}/${ref.message_id}`)
+    }
+    const text = event.data.data.content.flatMap(block => block.type === 'text' && block.text !== undefined
+      ? [block.text] : []).join('\n').trim()
+    if (text.length === 0) throw new Error(`用户消息引用没有可持久化的文本：${ref.session_id}/${ref.seq}`)
+    return { ref, text }
+  })
+}
+
 /**
  * 按确认目录构造无用户原话的自动写作计划。
  * @param outline 当前最终确认目录。
@@ -291,7 +329,12 @@ function criterionKey(criterion: AcceptanceCriterionInput): string {
   })
 }
 
-function nextCriterionId(previous?: WritingPlan): () => string {
+/**
+ * 从全部既有条件分配下一组 AC 身份，退役章节身份不会被新章节复用。
+ * @param previous 当前 Writing Plan。
+ * @returns 每次调用产生一个新的章节或文档条件 ID。
+ */
+export function nextCriterionId(previous?: WritingPlan): () => string {
   const prior = previous === undefined ? [] : [
     ...previous.document_acceptance,
     ...previous.sections.flatMap(section => section.acceptance_criteria),
@@ -374,6 +417,7 @@ export function applyWritingPlanInput(
   if (previous === undefined) throw new Error('首次写作计划必须提交 initial。')
   if (input.base_plan_version !== previous.plan_version) throw new Error('写作计划版本已变化，请重新读取后提交 patch。')
   const newRefs = uniqueRefs(input.user_message_refs)
+  const sectionRefKeys = new Set(input.sections.flatMap(section => section.add_user_message_refs ?? []).map(refKey))
   const patches = new Map(input.sections.map(section => [section.section_id, section]))
   const sections = previous.sections.map((section) => {
     const patch = patches.get(section.section_id)
@@ -393,7 +437,8 @@ export function applyWritingPlanInput(
   })
   return {
     user_message_refs: uniqueRefs([...previous.user_message_refs, ...newRefs]),
-    user_requirements: [...previous.user_requirements, ...newRefs.map(textFor)],
+    user_requirements: [...previous.user_requirements,
+      ...newRefs.filter(ref => !sectionRefKeys.has(refKey(ref))).map(textFor)],
     global_instructions: input.global_instructions ?? previous.global_instructions,
     document_acceptance: applyCriterionDelta(
       previous.document_acceptance, input.document_acceptance, { kind: 'document' }, allocateId,

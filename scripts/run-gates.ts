@@ -241,7 +241,8 @@ export function gatesForMode(selected: Mode): Gate[] {
         pnpmScript('issue-management', 'test:issue-management', { label: 'Issue management policy' }),
         pnpmScript('duplication', 'duplication'),
         snapshotGate(),
-        pnpmScript('build', 'build'),
+        // Test fixtures create short-lived TypeScript files inside source trees.
+        pnpmScript('build', 'build', { after: ['test'] }),
         pnpmScript('build:web', 'build:web'),
         ...hygieneLeafGates({ artifactNeeds: ['build'] }),
         ...docSyncLeafGates({

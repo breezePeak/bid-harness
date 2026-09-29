@@ -63,6 +63,8 @@ subagent seam 允许一个 agent（智能体）通过具名提供方把工作委
 
 两条进程内委派路径都会通过共享的子 agent 辅助函数，在委派边界固定子 agent 的权限范围。`captureDelegatedPolicyOverrides(parent)` 会为父会话的显式沙箱覆盖项（`sandboxPolicy.overrideOf()`）创建快照，并在审批能力已组合时将子 agent 的审批策略固定为 `'never'`，无论父级自身采用何种策略。这样，被委派的子 agent 只能在继承的沙箱范围内行动，每次审批请求（例如 `sandbox_permissions` 升权）都会被确定性拒绝，而不会等待无人处理的提示（这两个服务都是可选的 `ctx.get` 消费方）。`appendDelegatedPolicyOverrides()` 则在未发布的设置阶段、在任何 fork 种子之后，把每个值作为一条 `source: 'delegation'` 的 `sandbox/mode` 或 `approval/policy` 事件写入子 agent 自己的日志。因此，新捕获的策略会覆盖种子中的陈旧状态，而子 agent 的生效策略始终可以仅凭其日志重建。沙箱的部署默认值绝不复制：未切换的父级不会记录 `sandbox/mode`，其子 agent 会动态跟随部署默认值。可继续启动会在第一次 await 前捕获策略，并且只为全新物化写入这些委派事件；冷恢复只会重放已持久化的委派事件，不会重新捕获父级策略，因此创建之后的父级切换绝不会追溯性地改变持久化子 agent。每个进程内子 agent 还会收到一条作用域内的运行时上下文声明（`subagent:delegation`），告知其权限范围已固定，需要更宽访问的任务应以上报限制收尾，而不是重试。参见[一次性](../../../.agents/notes/implemented/feature/2026-07-25-subagent-policy-inheritance.zh.md)与[可继续](../../../.agents/notes/implemented/feature/2026-08-10-continuable-subagent-policy-inheritance.zh.md)两篇委派策略 Agent Note。
 
+`subagent:delegation` 还要求子 agent 在需要用户输入、确认或用户负责的决策时，把未解决的问题交给委派它的 Agent，而不直接向用户提问或等待回答。可继续子级使用 `report`，一次性子级在最终结果中说明；在线子级的直接提问由 `UserQuestionService` 依据 runtime ownership 拒绝。
+
 ## 一次性所有权与生命周期
 
 `provider.start(request): Promise<SubagentRun>` 是所有权转移边界；委派工具也会在其由 Task 支撑的一次性后台路径中使用它。兑现前，提供方拥有设置过程，并且在任何失败路径上都必须取消、回滚并使尚未发布的资源完全停稳。兑现后，run 的所有权转移给调用方；调用方必须在每条路径上调用 `dispose()`。剩余提示词和轮次工作属于 `SubagentRun.result`。
@@ -77,7 +79,7 @@ subagent seam 允许一个 agent（智能体）通过具名提供方把工作委
 
 管理器根据 Agent 的完全停稳状态和所拥有的子级集合推导三种内部驻留状态，而不维护第二套状态机：running 表示存在正在进行的准入、尚未结束的轮次，或会唤醒 Agent 的 inbox 工作；waiting 表示 Agent 已完全停稳，但仍拥有至少一个尚未 dispose 的子级；settled 表示 Agent 已完全停稳且所有拥有的子级均已 dispose，此时管理器会 dispose `AgentHandle` 并移除 Activation。每条后续消息都使用 `Agent.followup()` 并成为一个 FIFO 轮次，且不会对当前轮次进行 steering（中途引导）。路由只取决于驻留状态：running 入队、waiting 唤醒同一 Agent，无 Activation 时则冷恢复一个新的。
 
-管理器预留子 agent 身份、解析持久化描述符，通过私有的 activation-owner 作用域调用 `ctx.agents.create()`（冷恢复时为 `ctx.agents.resume()`），把返回的 `AgentHandle` 安装到 Activation 中，建立任何可继续父级所有权，然后提交提示词。冷恢复绝不通过提供方分发，因为持久化会话已持有初始前缀，折叠后的描述符即是全部重建输入。
+管理器预留子 agent 身份、解析持久化描述符，通过私有的 activation-owner 作用域调用 `ctx.agents.create()`（冷恢复时为 `ctx.agents.resume()`），并在调用 Context 中标记确切的在线直接 parent。该作用域继续管理 handle 生命周期，`AgentRegistry` 则把 child 登记为 parent 的 runtime child；两种所有权不改变持久化的 `parentSession`。管理器把返回的 `AgentHandle` 安装到 Activation 中，建立任何可继续父级所有权，然后提交提示词。冷恢复绝不通过提供方分发，因为持久化会话已持有初始前缀，折叠后的描述符即是全部重建输入。
 
 ### 结算投递
 

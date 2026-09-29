@@ -116,7 +116,7 @@ async function setupS5Fixture(adapter = new ControllableMockLlmAdapter()) {
 /** 从真实 SessionProjection 注册表中读取 WritingEntryView。 */
 function getWritingEntryProjection(ctx: Context, agent: Agent): WritingEntryView | null {
   const snapshot = ctx.sessionProjections.snapshot(agent.session)
-  return (snapshot.values[BID_WRITING_ENTRY_PROJECTION_KEY] as WritingEntryView | null | undefined) ?? null
+  return (snapshot.values[BID_WRITING_ENTRY_PROJECTION_KEY]) ?? null
 }
 
 /** 等待直到真实投影 WritingEntryView 满足 predicate。 */
@@ -293,11 +293,13 @@ describe('S5 写作入口运行时与完整工具链测试', () => {
         expect(planRaw).toContain('严格响应招标文件技术规范')
       }, { timeout: 15_000 })
 
-      // 断言 writing-request 状态变为 consumed
-      const reqRecord = JSON.parse(await readFile(
-        join(workspace.projectRoot, 'chapters/writing-request.json'), 'utf8',
-      )) as WritingRequest
-      expect(reqRecord.state).toBe('consumed')
+      // 计划文件先于请求标记写入；等待同一次提交完成后再检查状态。
+      await vi.waitFor(async () => {
+        const reqRecord = JSON.parse(await readFile(
+          join(workspace.projectRoot, 'chapters/writing-request.json'), 'utf8',
+        )) as WritingRequest
+        expect(reqRecord.state).toBe('consumed')
+      }, { timeout: 15_000 })
 
       // 验证工具清单中包含 inspect 与 confirm
       expect(toolsReceived).toContain('bid_stage_inspect')
@@ -352,7 +354,7 @@ describe('S5 写作入口运行时与完整工具链测试', () => {
   })
 
   it('R03: CAS 冲突 — 旧 expected 被拒绝，新 expected 被接受', async () => {
-    const { ctx, createMainAgent } = await setupS5Fixture()
+    const { ctx, createMainAgent, host } = await setupS5Fixture()
     const questionDeferred = Promise.withResolvers<AskUserQuestionAnswer>()
     let receivedQuestion: AskUserQuestionItem | undefined
 
@@ -383,6 +385,7 @@ describe('S5 写作入口运行时与完整工具链测试', () => {
       })
 
       const dismissedView = await waitForView(ctx, agent, v => v.phase === 'dismissed')
+      await vi.waitFor(() => { expect(host.inFlight.size).toBe(0) })
       const acceptedResult = await ctx.bid.requestWritingRequirements(agent.session, {
         mode: 'reopen',
         expected: dismissedView.expected,
@@ -490,7 +493,7 @@ describe('S5 写作入口运行时与完整工具链测试', () => {
   })
 
   it('R07: 答案保存失败移到锁外恢复 — 无 BID_OPERATION_IN_PROGRESS，真实投影显示 failed 且 can_retry_answer 为真，重试成功', async () => {
-    const { ctx, workspace, createMainAgent } = await setupS5Fixture()
+    const { ctx, workspace, createMainAgent, host } = await setupS5Fixture()
     const questionDeferred = Promise.withResolvers<AskUserQuestionAnswer>()
     let receivedQuestion: AskUserQuestionItem | undefined
 
@@ -525,7 +528,8 @@ describe('S5 写作入口运行时与完整工具链测试', () => {
       })
 
       // 验证未抛死锁，且真实投影展示 failed，允许重试
-      const failedView = await waitForView(ctx, agent, v => v.phase === 'failed' && v.can_retry_answer === true)
+      const failedView = await waitForView(ctx, agent, v => v.phase === 'failed' &&  v.can_retry_answer)
+      await vi.waitFor(() => { expect(host.inFlight.size).toBe(0) })
       expect(failedView.answer_save_status).toBe('unconfirmed')
       expect(failedView.error?.code).toBe('BID_WRITING_ANSWER_SAVE_FAILED')
 
@@ -635,3 +639,68 @@ describe('S5 写作入口运行时与完整工具链测试', () => {
     expect(v1.expected).toEqual(v2.expected)
   })
 })
+
+it.each(['BID_WRITING_PLAN_NOT_COMMITTED', 'BID_WRITING_PLAN_DISPATCH_FAILED'] as const)(
+  '%s 在无 Goal 时唤醒 Main Agent，恢复已保存答案且不再次提问', async (failureCode) => {
+    const { ctx, workspace, createMainAgent, adapter } = await setupS5Fixture()
+    const agent = await createMainAgent(`recover-${failureCode}`)
+    const steer = vi.spyOn(agent, 'steer')
+    if (failureCode === 'BID_WRITING_PLAN_DISPATCH_FAILED') {
+      vi.spyOn(agent, 'followup').mockImplementationOnce(() => { throw new Error('派发测试故障') })
+    }
+    let inspected = false
+    let recovered = false
+    let firstPlan = true
+    adapter.handler = async function* (options) {
+      const recovery = options.tools?.some(tool => tool.name === 'bid_recover_task') ?? false
+      if (!recovery && firstPlan) {
+        firstPlan = false
+        yield { type: 'finish', reason: { kind: 'stop' } }
+        return
+      }
+      if (recovery && !inspected) {
+        inspected = true
+        yield { type: 'tool-call-delta', index: 0, id: CallId('plan-inspect'), name: 'bid_stage_inspect',
+          argumentsDelta: JSON.stringify({ view: 'recovery' }) }
+        yield { type: 'finish', reason: { kind: 'tool-calls' } }
+        return
+      }
+      if (recovery && !recovered) {
+        recovered = true
+        const request = JSON.parse(await readFile(join(workspace.projectRoot, 'chapters/writing-request.json'), 'utf8')) as WritingRequest
+        yield { type: 'tool-call-delta', index: 0, id: CallId('plan-recover'), name: 'bid_recover_task',
+          argumentsDelta: JSON.stringify({ target: 'writing_plan', writing_request_id: request.request_id,
+            attempt_id: request.attempt_id, instruction: '逐项核对已保存回答与可写章节，按章节提交首次计划。' }) }
+        yield { type: 'finish', reason: { kind: 'tool-calls' } }
+        return
+      }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    }
+    const ask = vi.fn(async ({ questions }: { questions: AskUserQuestionItem[] }) => ({
+      answers: [{ id: questions[0]!.id, selected: [], custom: '重点说明实施步骤。' }],
+    }))
+    const dispose = ctx.userQuestions.registerProvider({ ask })
+    try {
+      await ctx.bid.requestWritingRequirements(agent.session, { mode: 'ensure' })
+      await vi.waitFor(() => {
+        expect(agent.session.events.filter(event => event.type === 'bid.recovery.requested')).toHaveLength(1)
+      }, { timeout: 10_000 })
+      await vi.waitFor(() => {
+        expect(agent.session.events.some(event => event.type === 'tool/result'
+          && event.data.message.source.callId === 'plan-recover')).toBe(true)
+      })
+      await agent.whenIdle()
+      expect(inspected && recovered).toBe(true)
+      expect(steer).toHaveBeenCalled()
+      expect(ask).toHaveBeenCalledOnce()
+      expect(ctx.get('goals')).toBeUndefined()
+      const request = JSON.parse(await readFile(join(workspace.projectRoot, 'chapters/writing-request.json'), 'utf8')) as WritingRequest
+      expect(request.state).toBe('answered')
+      expect(JSON.stringify(request)).toContain('重点说明实施步骤。')
+      const audit = agent.session.events.find(event => event.type === 'bid.recovery.requested')
+      expect(audit).toMatchObject({ data: { target: { kind: 'writing_plan', requestId: request.request_id } } })
+      expect(agent.session.events.some(event => event.type === 'bid.writing_entry.changed'
+        && event.data.view.error?.code === failureCode)).toBe(true)
+    } finally { dispose() }
+  },
+)

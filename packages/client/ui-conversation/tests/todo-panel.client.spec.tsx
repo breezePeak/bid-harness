@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
 /**
- * Todo display acceptance: the TodoPanel plan strip (empty-hidden, status rows
- * including several `in_progress` at once, collapse), and its TodoDock
- * adapter (selects the plan off the session snapshot and follows changes).
+ * Todo display acceptance: the running TodoPanel plan strip (empty-hidden,
+ * status rows including several `in_progress` at once, collapse), and its
+ * TodoDock adapter (selects the plan and follows session changes).
  */
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -38,6 +38,11 @@ const PARALLEL: TodoItem[] = [
 describe('TodoPanel', () => {
   it('renders nothing while the list is empty', () => {
     const { container } = render(<TodoPanel todos={[]} running={false} t={t} />)
+    expect(container.innerHTML).toBe('')
+  })
+
+  it('hides a single task even while the agent is running', () => {
+    const { container } = render(<TodoPanel todos={[{ content: '修改目录', status: 'in_progress' }]} running t={t} />)
     expect(container.innerHTML).toBe('')
   })
 
@@ -92,21 +97,14 @@ describe('TodoPanel', () => {
     expect(screen.getByText('1 已完成 · 3 进行中 · 1 待处理')).toBeTruthy()
   })
 
-  it('an all-completed list collapses the summary to the done count alone', () => {
-    render(<TodoPanel todos={[{ content: '都完了', status: 'completed' }]} running={false} t={t} />)
-    expect(screen.getByRole('button', { expanded: true })).toBeTruthy()
-    expect(screen.getByText('都完了')).toBeTruthy()
-    expect(screen.getByText('1 已完成')).toBeTruthy()
-    expect(screen.queryByText(/进行中|待处理/)).toBeNull()
+  it('hides a completed plan while the agent settles its answer', () => {
+    const { container } = render(<TodoPanel todos={[{ content: '都完了', status: 'completed' }]} running t={t} />)
+    expect(container.innerHTML).toBe('')
   })
 
-  it('shows stale in-progress declarations as unfinished without an active glyph', () => {
-    render(<TodoPanel todos={LIST} running={false} t={t} />)
-    expect(screen.getByText('1 已完成 · 1 未收尾 · 1 待处理')).toBeTruthy()
-    expect(screen.queryByText(/进行中/)).toBeNull()
-    const unfinished = screen.getAllByRole('listitem').find(item => item.getAttribute('data-status') === 'in_progress')
-    expect(unfinished?.getAttribute('data-active')).toBe('false')
-    expect(unfinished?.querySelector('svg')?.getAttribute('class')).toContain('glyphUnfinished')
+  it('hides stale in-progress declarations after the agent stops', () => {
+    const { container } = render(<TodoPanel todos={LIST} running={false} t={t} />)
+    expect(container.innerHTML).toBe('')
   })
 })
 
@@ -133,7 +131,7 @@ describe('TodoDock', () => {
     act(() => { store.set({ value: LIST, running: true }) })
     expect(screen.getByText('1 已完成 · 1 进行中 · 1 待处理')).toBeTruthy()
     act(() => { store.set({ value: LIST, running: false }) })
-    expect(screen.getByText('1 已完成 · 1 未收尾 · 1 待处理')).toBeTruthy()
+    expect(screen.queryByTestId('todo-panel')).toBeNull()
     // The pre-first-write whole value (null) retires the strip (the panel owns no data).
     act(() => { store.set({ value: null, running: false }) })
     expect(screen.queryByTestId('todo-panel')).toBeNull()

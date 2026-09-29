@@ -10,17 +10,50 @@ import {
   checkpointBidProjectState,
   createScoringResponsePointCatalog,
   outlineArtifactSha256,
+  TECHNICAL_DEVIATION_SECTION_ID,
   type BidStage,
   type BidTaskState,
   type OutlineArtifact,
 } from '@deepseek-ai/dsh-bid'
-import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import { CallId, createUserMessage, LlmAdapter, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import { resolveSessionPreset } from '@deepseek-ai/dsh-agent-presets'
 import { launchWebScaffold } from './scaffold.ts'
 import { connectFreshWorkspaceZh, saveFailureShot, ZH_BROWSER_LOCALE } from './support.ts'
 import { seedProjectArtifacts } from '../../../packages/bid/bid/tests/fixtures/project-session.ts'
 
 type PublishedTask = { readonly stage: BidStage; readonly status: 'running' | 'waiting_user' | 'completed' }
+
+class OutlineFinalCheckAdapter extends LlmAdapter {
+  private step = 0
+
+  override async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+    const step = this.step++
+    let name = 'finish_final_check'
+    let args: object = {}
+    if (step === 0) name = 'list_review_items'
+    if (step === 1) {
+      const pending = [...options.messages].reverse().flatMap(message => message.content).flatMap((block) => {
+        if (block.type !== 'tool-result') return []
+        return block.content.flatMap((content) => {
+          if (content.type !== 'text') return []
+          const value = JSON.parse(content.text) as { pending_items?: Array<{ review_ref: string }> }
+          return value.pending_items ?? []
+        })
+      })
+      name = 'review_items'
+      args = { items: pending.map(item => ({ review_ref: item.review_ref, decision: 'keep', reason: '当前章节要求与已确认目录一致。' })) }
+    }
+    if (step > 2) {
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text: '目录复核完成。' } }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+      return
+    }
+    yield { type: 'block-start', index: 0, blockType: 'tool-call' }
+    yield { type: 'block-end', index: 0, block: { type: 'tool-call', id: CallId(`outline-final-${step}`), name, arguments: JSON.stringify(args) } }
+    yield { type: 'finish', reason: { kind: 'tool-calls' } }
+  }
+}
 
 function publishedTask({ stage, status }: PublishedTask): BidTaskState {
   if (status !== 'running') return { stage, status, run: null }
@@ -76,6 +109,7 @@ it('S3/S4 真实目录拖拽保存、基线对比和刷新恢复', async () => {
     agent.session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
     const workspace = new BidWorkspace(agent.session.header.cwd)
     await seedProjectArtifacts(workspace)
+    await rm(join(workspace.projectRoot, 'outline/confirmed-outline.json'))
     const publish = async (task: PublishedTask) => {
       const state = await checkpointBidProjectState(workspace, publishedTask(task))
       agent.session.append('bid.project.resumed', {
@@ -117,6 +151,7 @@ it('S3/S4 真实目录拖拽保存、基线对比和刷新恢复', async () => {
     }
     await publish({ stage: 'outline_generation', status: 'waiting_user' })
     await scaffold.ctx.bid.getOutlineDraft(agent.session)
+    await page.getByRole('tab', { name: '审核项', exact: true }).click()
     await page.getByText('S3 · 初步技术标目录审核', { exact: true }).waitFor()
     expect(await page.getByRole('tab', { name: '招标书分析', exact: true }).count()).toBe(1)
     expect(await page.getByRole('tab', { name: '目录详情', exact: true }).count()).toBe(0)
@@ -222,14 +257,23 @@ it('S3/S4 真实目录拖拽保存、基线对比和刷新恢复', async () => {
     for (const path of ['chapters/writing-plan.json', 'chapters/execution-log.json', 'chapters/manifest.json']) {
       const artifact = JSON.parse(await readFile(join(workspace.projectRoot, path), 'utf8')) as Record<string, unknown>
       artifact.confirmed_outline_sha256 = outlineArtifactSha256(finalOutline)
+      if (path === 'chapters/manifest.json') (artifact.chapters as Array<{ section_id: string }>)[0]!.section_id = 'B'
+      if (path === 'chapters/execution-log.json') (artifact.sections as Array<{ section_id: string }>)[0]!.section_id = 'B'
+      if (path === 'chapters/writing-plan.json') (artifact.sections as Array<{ section_id: string }>)[0]!.section_id = 'B'
       await writeFile(join(workspace.projectRoot, path), JSON.stringify(artifact))
     }
-    await publish({ stage: 'chapter_writing', status: 'running' })
+    const chapterMeta = JSON.parse(await readFile(join(workspace.projectRoot, 'chapters/meta/0001.json'), 'utf8')) as { section_id: string }
+    chapterMeta.section_id = 'B'
+    await writeFile(join(workspace.projectRoot, 'chapters/meta/0001.json'), JSON.stringify(chapterMeta))
+    await publish({ stage: 'chapter_writing', status: 'completed' })
     await scaffold.ctx.sessions.flush(agent.session)
     await page.reload()
     await page.getByRole('tab', { name: '正文详情', exact: true }).waitFor()
+    await page.getByRole('tab', { name: '正文详情', exact: true }).click()
+    await page.getByRole('navigation', { name: '章节目录' }).getByRole('button', { name: '1.1 交付验收', exact: true }).click()
     await page.getByText('已有正文。', { exact: true }).waitFor()
     await writeFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), '# 章节更新\n\n实时更新的正文。\n')
+    await page.getByRole('button', { name: '刷新', exact: true }).click()
     await page.getByText('实时更新的正文。', { exact: true }).waitFor()
     await publish({ stage: 'docx_export', status: 'completed' })
     await page.reload()
@@ -297,6 +341,7 @@ it('S5 运行中可打开 Word 导出并提示仅导出已保存章节', async (
 
 it('S4 经真实确认进入 S5 后，BidDetails 从持久化最终版本恢复三列及关联内容', async () => {
   const scaffold = await launchWebScaffold({
+    modelAdapter: new OutlineFinalCheckAdapter(),
     agentPresets: { roots: [{ path: fileURLToPath(new URL('../../cli/config/agent-presets', import.meta.url)), trust: 'system' }], default: 'bid' },
   })
   const browser = await chromium.launch()
@@ -328,6 +373,18 @@ it('S4 经真实确认进入 S5 后，BidDetails 从持久化最终版本恢复�
       'outline/quality-report.json': { schema_version: 3, scope: 'technical_bid', checked_requirement_ids: ['REQ-1'], checked_scoring_ids: ['SCORE-1'], checked_scoring_response_point_ids: ['RP-000001'], reviewed_section_ids: ['SEC-1'], issues: [] },
       'analysis/web-evidence-sources.json': { stage: 'evidence_mapping', sources: [] },
     })) await writeFile(join(workspace.projectRoot, path), JSON.stringify(value))
+    const evidenceMap = JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/evidence-map.json'), 'utf8')) as {
+      section_mappings: Array<{
+        section_id: string
+        local_materials: unknown[]
+        web_materials: unknown[]
+        missing_topics: string[]
+        writing_dimensions: string[]
+      }>
+    }
+    evidenceMap.section_mappings.unshift({ section_id: TECHNICAL_DEVIATION_SECTION_ID,
+      local_materials: [], web_materials: [], missing_topics: [], writing_dimensions: ['逐项说明技术响应与偏离'] })
+    await writeFile(join(workspace.projectRoot, 'analysis/evidence-map.json'), JSON.stringify(evidenceMap))
     for (const path of ['chapters/writing-plan.json', 'chapters/execution-log.json', 'chapters/manifest.json']) {
       const artifact = JSON.parse(await readFile(join(workspace.projectRoot, path), 'utf8')) as Record<string, unknown>
       artifact.confirmed_outline_sha256 = outlineArtifactSha256(finalOutline)
@@ -345,7 +402,14 @@ it('S4 经真实确认进入 S5 后，BidDetails 从持久化最终版本恢复�
     })
     expect(confirmation, JSON.stringify(confirmation)).toMatchObject({ ok: true })
     expect(agent.session.events.some(event => event.type === 'bid.user_confirmation.received' && event.data.stage === 'evidence_mapping')).toBe(true)
-    await expect.poll(async () => JSON.parse(await readFile(join(workspace.projectRoot, 'outline/confirmed-outline.json'), 'utf8')) as unknown).toEqual(finalOutline)
+    await expect.poll(async () => JSON.parse(await readFile(join(workspace.projectRoot, 'outline/confirmed-outline.json'), 'utf8')) as unknown)
+      .toMatchObject({ sections: [{ id: TECHNICAL_DEVIATION_SECTION_ID }, { id: 'SEC-1', title: 'S4 技术方案' }] })
+    const confirmedOutline = JSON.parse(await readFile(join(workspace.projectRoot, 'outline/confirmed-outline.json'), 'utf8')) as OutlineArtifact
+    for (const path of ['chapters/writing-plan.json', 'chapters/execution-log.json', 'chapters/manifest.json']) {
+      const artifact = JSON.parse(await readFile(join(workspace.projectRoot, path), 'utf8')) as Record<string, unknown>
+      artifact.confirmed_outline_sha256 = outlineArtifactSha256(confirmedOutline)
+      await writeFile(join(workspace.projectRoot, path), JSON.stringify(artifact))
+    }
     await expect.poll(async () => (await scaffold.ctx.bid.getDetails(agent.session)).outlinePresentation?.source).toBe('final_confirmed')
     await page.getByRole('tab', { name: '正文详情', exact: true }).waitFor()
     await page.getByRole('tab', { name: '目录详情', exact: true }).click()
@@ -355,6 +419,7 @@ it('S4 经真实确认进入 S5 后，BidDetails 从持久化最终版本恢复�
       const left = page.getByLabel('S3 已确认目录', { exact: true })
       const right = page.getByLabel('技术标目录', { exact: true })
       await left.getByRole('button', { name: 'S3 技术方案', exact: true }).waitFor()
+      await left.getByRole('button', { name: 'S3 技术方案', exact: true }).click()
       expect(await right.getByLabel('SEC-1 标题', { exact: true }).inputValue()).toBe('S4 技术方案')
       await page.getByRole('heading', { name: 'S4 最终确认目录', exact: true }).waitFor()
       await page.getByText('最终目录已确认 / 只读', { exact: true }).waitFor()

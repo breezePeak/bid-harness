@@ -1,7 +1,4 @@
-// Web e2e scenario: S5 native writing question composer.
-// Verifies that entering S5 (chapter_writing/waiting_user) mounts the Host-owned
-// resident question composer with the canonical writing requirements prompt and options,
-// saves user decisions reliably, and handles refresh / dismiss correctly.
+/** S5 空入口在默认手动确认模式下直接启动，不出现写作意见问答。 */
 import { readFile, rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -13,8 +10,7 @@ import {
   BidWorkspace,
   bidProjectTaskState,
   checkpointBidProjectState,
-  BID_WRITING_ENTRY_PROJECTION_KEY,
-  type WritingRequest,
+  type WritingPlan,
 } from '@deepseek-ai/dsh-bid'
 import { resolveSessionPreset } from '@deepseek-ai/dsh-agent-presets'
 import type { Agent } from '@deepseek-ai/dsh-agent'
@@ -32,7 +28,7 @@ import { seedProjectArtifacts } from '../../../packages/bid/bid/tests/fixtures/p
 
 const SHIPPED_PRESETS = fileURLToPath(new URL('../../cli/config/agent-presets', import.meta.url))
 
-describe('web e2e: S5 native writing requirements question', () => {
+describe('web e2e: S5 直接开始写作', () => {
   let scaffold: WebScaffold
   let browser: Browser
   let page: Page
@@ -65,7 +61,7 @@ describe('web e2e: S5 native writing requirements question', () => {
     agent = foundAgent
     workspace = new BidWorkspace(workspaceCwd)
     await seedProjectArtifacts(workspace)
-    // 移除 S5 生成产物，使项目处于刚刚完成 S4 待进入 S5 提问的状态
+    // 空入口覆盖重置后由浏览器启动 S5 的路径。
     await rm(join(workspace.projectRoot, 'chapters/writing-plan.json'), { force: true })
     await rm(join(workspace.projectRoot, 'chapters/writing-request.json'), { force: true })
     await rm(join(workspace.projectRoot, 'chapters/execution-log.json'), { force: true })
@@ -90,10 +86,9 @@ describe('web e2e: S5 native writing requirements question', () => {
     await scaffold?.close()
   })
 
-  it('S5 waiting_user 状态拉起原生提问组件并呈现正确的题干与选项', async () => {
-    onTestFailed(() => saveFailureShot(page, 's5-writing-question'))
+  it('默认手动确认模式直接保存计划并启动 S5，不询问用户意见', async () => {
+    onTestFailed(() => saveFailureShot(page, 's5-direct-writing'))
 
-    // 发布进入 S5 waiting_user 状态
     const state = await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'waiting_user', run: null })
     agent.session.append('bid.project.resumed', {
       state: bidProjectTaskState(state),
@@ -103,105 +98,13 @@ describe('web e2e: S5 native writing requirements question', () => {
       publishWritingEntryView(session: Agent['session']): Promise<void>
     }).publishWritingEntryView(agent.session)
 
-    // 提问卡片应由 BidStagePanel 自动向 Host 请求并在页面中浮现
-    const composer = page.locator('[data-question-key]')
-    await composer.waitFor({ timeout: 20_000 })
-
-    // 验证题干与选项文本真实渲染
-    await expect.poll(() => composer.getByText('开始正文编写前，是否还有其他整体写作要求？').count(), { timeout: 10_000 }).toBeGreaterThan(0)
-    await expect.poll(() => composer.getByText('没有，开始编写').count(), { timeout: 10_000 }).toBeGreaterThan(0)
-
-    // 输入区 textarea 存在
-    const customInput = composer.getByRole('textbox')
-    await expect.poll(async () => customInput.isVisible(), { timeout: 5000 }).toBe(true)
-    const ordinaryInput = page.locator('[data-composer-card] textarea')
-    await expect.poll(async () => ordinaryInput.isVisible(), { timeout: 5000 }).toBe(true)
-    await expect.poll(async () => ordinaryInput.isEnabled(), { timeout: 5000 }).toBe(true)
-    await ordinaryInput.fill('原生问题还没回答，我仍然可以输入普通聊天')
-    expect(await ordinaryInput.inputValue()).toBe('原生问题还没回答，我仍然可以输入普通聊天')
-    await ordinaryInput.fill('')
-  })
-
-  it('用户提交多行自定义要求后，界面与后台均可靠持久化', async () => {
-    onTestFailed(() => saveFailureShot(page, 's5-writing-question-custom'))
-
-    const composer = page.locator('[data-question-key]')
-    await composer.waitFor({ timeout: 10_000 })
-    const customInput = composer.getByRole('textbox')
-
-    const customRequirements = '正文按行业规范撰写\n重点展开质量控制措施'
-    await customInput.fill(customRequirements)
-    expect(await customInput.inputValue()).toBe(customRequirements)
-
-    // 点击提交按钮
-    const submitBtn = composer.locator('footer button').last()
-    await submitBtn.click()
-
-    // 提交后提问卡片应关闭
-    await composer.waitFor({ state: 'detached', timeout: 15_000 })
-
-    // 轮询验证文件持久化落盘
-    await expect.poll(async () => {
-      try {
-        const record = JSON.parse(await readFile(join(workspace.projectRoot, 'chapters/writing-request.json'), 'utf8')) as WritingRequest
-        return record.state
-      } catch {
-        return null
-      }
-    }, { timeout: 10_000 }).toBe('answered')
-
-    const record = JSON.parse(await readFile(join(workspace.projectRoot, 'chapters/writing-request.json'), 'utf8')) as WritingRequest
-    expect(record.answer?.kind).toBe('custom')
-    expect(record.answer?.custom).toBe(customRequirements)
-    expect(record.continuation).toBe('allowed')
-  })
-
-  it('用户点击“没有，开始编写”后组件关闭并推进', async () => {
-    onTestFailed(() => saveFailureShot(page, 's5-writing-question-none'))
-
-    // 清理旧回答记录以重新触发提问
-    await rm(join(workspace.projectRoot, 'chapters/writing-request.json'), { force: true })
-    const host = scaffold.ctx.bid as unknown as { inFlight: Map<unknown, unknown> }
-    for (let i = 0; i < 150 && host.inFlight.size > 0; i++) {
-      await new Promise(r => setTimeout(r, 100))
-    }
-    const currentEntry = scaffold.ctx.sessionProjections.snapshot(agent.session).values[BID_WRITING_ENTRY_PROJECTION_KEY]
-    if (currentEntry === null || currentEntry === undefined) throw new Error('Missing writing entry projection')
-    const reopenRes = await scaffold.ctx.bid.requestWritingRequirements(agent.session, {
-      mode: 'reopen',
-      expected: currentEntry.expected,
-    })
-    expect(reopenRes).toMatchObject({ ok: true })
-
-    const composer = page.locator('[data-question-key]')
-    await composer.waitFor({ timeout: 20_000 })
-
-    // 选择“没有，开始编写”选项
-    const option = composer.getByRole('radio', { name: '没有，开始编写' })
-    await option.click()
-
-    // 提交选择
-    const submitBtn = composer.locator('footer button').last()
-    if (await submitBtn.isVisible() && await submitBtn.isEnabled()) {
-      await submitBtn.click()
-    }
-
-    // 提问卡片关闭
-    await composer.waitFor({ state: 'detached', timeout: 15_000 })
-
-    // 轮询验证后台持久化落盘
-    await expect.poll(async () => {
-      try {
-        const record = JSON.parse(await readFile(join(workspace.projectRoot, 'chapters/writing-request.json'), 'utf8')) as WritingRequest
-        return record.state
-      } catch {
-        return null
-      }
-    }, { timeout: 10_000 }).toBe('answered')
-
-    const record = JSON.parse(await readFile(join(workspace.projectRoot, 'chapters/writing-request.json'), 'utf8')) as WritingRequest
-    expect(record.answer?.kind).toBe('no_additional_requirements')
-    expect(record.answer?.selected).toContain('没有，开始编写')
-    expect(record.continuation).toBe('allowed')
+    await expect.poll(() => agent.session.events.some(event =>
+      event.type === 'bid.run.started' && event.data.run.work.stage === 'chapter_writing'),
+    { timeout: 20_000 }).toBe(true)
+    const plan = JSON.parse(await readFile(join(workspace.projectRoot, 'chapters/writing-plan.json'), 'utf8')) as WritingPlan
+    expect(plan).toMatchObject({ confirmed: true, user_requirements: [], user_message_refs: [] })
+    await expect(readFile(join(workspace.projectRoot, 'chapters/writing-request.json'), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(await page.getByText('开始正文编写前，是否还有其他整体写作要求？').count()).toBe(0)
+    expect(await page.getByRole('button', { name: '填写写作要求', exact: true }).count()).toBe(0)
   })
 })

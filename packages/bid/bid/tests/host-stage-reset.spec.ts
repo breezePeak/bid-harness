@@ -122,6 +122,7 @@ describe('Bid Host stage reset', () => {
       inFlight: new Map([[key, operation]]),
       docxInFlight: new Set(),
       pendingRunDecisions: new Map(),
+      pendingRunDecisionControllers: new Map(),
       pendingWritingQuestions: new Map(),
       processingWritingPlans: new Map(),
       writingEntryStops: new Map(),
@@ -140,6 +141,7 @@ describe('Bid Host stage reset', () => {
     await vi.waitFor(() => { expect(executionCancel).toHaveBeenCalledWith({ kind: 'hook', reason: 'bid-stage-reset' }) })
     expect(operation.controller.signal.aborted).toBe(true)
     expect(cancel).not.toHaveBeenCalled()
+    // oxlint-disable-next-line typescript/unbound-method -- Vitest only compares the spy identity.
     expect(agent.whenIdle).not.toHaveBeenCalled()
     expect(drive).not.toHaveBeenCalled()
     await expect(BidHostRuntime.prototype.resetStage.call(
@@ -212,6 +214,7 @@ describe('Bid Host stage reset', () => {
       inFlight: new Map(),
       docxInFlight: new Set(),
       pendingRunDecisions: new Map(),
+      pendingRunDecisionControllers: new Map(),
       pendingWritingQuestions: new Map(),
       processingWritingPlans: new Map(),
       writingEntryStops: new Map(),
@@ -300,6 +303,7 @@ describe('Bid Host stage reset', () => {
       inFlight: new Map([[key, prior]]),
       docxInFlight: new Set(),
       pendingRunDecisions: new Map(),
+      pendingRunDecisionControllers: new Map(),
       pendingWritingQuestions: new Map(),
       processingWritingPlans: new Map(),
       writingEntryStops: new Map(),
@@ -369,6 +373,7 @@ describe('Bid Host stage reset', () => {
       inFlight: new Map(),
       docxInFlight: new Set(),
       pendingRunDecisions: new Map(),
+      pendingRunDecisionControllers: new Map(),
       pendingWritingQuestions: new Map(),
       processingWritingPlans: new Map(),
       writingEntryStops: new Map(),

@@ -118,7 +118,14 @@ describe('Word page estimate', () => {
     clearPageEstimateCache()
     const project = await workspace()
     await mkdir(join(project.projectRoot, 'chapters/sections'), { recursive: true })
+    await mkdir(join(project.projectRoot, 'chapters/meta'), { recursive: true })
     await writeFile(join(project.projectRoot, 'chapters/sections/0001.md'), '# 工作安排\n\n已生成正文。\n')
+    await writeFile(join(project.projectRoot, 'chapters/meta/0001.json'), JSON.stringify({
+      section_id: 'LEAF', covered_must_answer: [], covered_scoring_response_point_ids: [], covered_scoring_response_points: [],
+      local_materials_used: [], web_materials_used: [], unresolved_topics: [],
+      handoff: { section_id: 'LEAF', decisions: [], terminology: [], numbers_and_parameters: [], interfaces: [],
+        deployment_constraints: [], cross_reference_targets: [], unresolved_topics: [] },
+    }))
     const uploaded = await saveDocxTemplate(project, { revision: 0, name: '模板 A.docx', bytes: await wordTemplate('A', 18) })
 
     const document = await estimateChapterWritingPages(project, outline)

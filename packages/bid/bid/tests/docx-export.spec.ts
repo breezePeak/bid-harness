@@ -105,6 +105,7 @@ async function exportFixture() {
   await mkdir(join(workspace.projectRoot, 'outline'), { recursive: true })
   await mkdir(join(workspace.projectRoot, 'analysis'), { recursive: true })
   await mkdir(join(workspace.projectRoot, 'chapters/sections'), { recursive: true })
+  await mkdir(join(workspace.projectRoot, 'chapters/meta'), { recursive: true })
   await writeFile(join(workspace.projectRoot, 'outline/confirmed-outline.json'), JSON.stringify(outline))
   await writeFile(join(workspace.projectRoot, 'chapters/manifest.json'), JSON.stringify(manifest))
   await writeFile(join(workspace.projectRoot, 'analysis/requirements.json'), JSON.stringify({ schema_version: 1, requirements: [] }))
@@ -123,6 +124,14 @@ async function exportFixture() {
   }))
   await writeFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), '# 资源配置\n\n资源配置正文。\n\n## 内部措施\n\n保留正文。\n\n```txt\n# 原样井号\n```\n')
   await writeFile(join(workspace.projectRoot, 'chapters/sections/0002.md'), '交付正文。')
+  for (const [index, id] of ['resource', 'delivery'].entries()) {
+    await writeFile(join(workspace.projectRoot, `chapters/meta/000${index + 1}.json`), JSON.stringify({
+      section_id: id, covered_must_answer: [], covered_scoring_response_point_ids: [], covered_scoring_response_points: [],
+      local_materials_used: [], web_materials_used: [], unresolved_topics: [],
+      handoff: { section_id: id, decisions: [], terminology: [], numbers_and_parameters: [], interfaces: [],
+        deployment_constraints: [], cross_reference_targets: [], unresolved_topics: [] },
+    }))
+  }
   return { workspace, manifest, outline }
 }
 
@@ -411,7 +420,7 @@ describe('Bid DOCX export', () => {
       issues: [{
         code: 'DOCX_EXPORT_TECHNICAL_DEVIATION_INVALID',
         message: '第一章“技术偏离表”正文缺失或结构不完整，请先修复该章节后重新导出 Word。',
-        artifact: 'chapters/sections/0001.md',
+        artifact: 'chapters/sections',
       }],
     })
     expect(compose).not.toHaveBeenCalled()
@@ -419,7 +428,6 @@ describe('Bid DOCX export', () => {
 
   it('技术偏离表审核失败时仍导出表格及后续章节，保留确认目录编号', async () => {
     const { workspace, outline } = await exportFixture()
-    const resource = await readFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), 'utf8')
     const nextOutline = { ...outline, sections: [
       { ...outline.sections[0]!, id: TECHNICAL_DEVIATION_SECTION_ID, parent_id: null, order: 1, level: 1, title: '技术偏离表' },
       ...outline.sections.map(section => section.id === 'root' ? { ...section, order: 2 } : section),
@@ -437,9 +445,13 @@ describe('Bid DOCX export', () => {
         final_writer_child_session_id: null, final_reviewer_child_session_id: null,
       })),
     }))
-    await writeFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), '# 1 技术偏离表\n\n| 序号 | 标的名称 | 招标技术要求 | 投标响应内容 | 偏离程度 | 备注 |\n| --- | --- | --- | --- | --- | --- |\n| 1 | 智慧平台 | 服务范围 | 我方将提供完整服务范围并完成逐项验收。 | 无偏离 | |\n')
-    await writeFile(join(workspace.projectRoot, 'chapters/sections/0002.md'), resource)
-    await writeFile(join(workspace.projectRoot, 'chapters/sections/0003.md'), '交付正文。')
+    await writeFile(join(workspace.projectRoot, 'chapters/sections/0003.md'), '# 1 技术偏离表\n\n| 序号 | 标的名称 | 招标技术要求 | 投标响应内容 | 偏离程度 | 备注 |\n| --- | --- | --- | --- | --- | --- |\n| 1 | 智慧平台 | 服务范围 | 我方将提供完整服务范围并完成逐项验收。 | 无偏离 | |\n')
+    await writeFile(join(workspace.projectRoot, 'chapters/meta/0003.json'), JSON.stringify({
+      section_id: TECHNICAL_DEVIATION_SECTION_ID, covered_must_answer: [], covered_scoring_response_point_ids: [],
+      covered_scoring_response_points: [], local_materials_used: [], web_materials_used: [], unresolved_topics: [],
+      handoff: { section_id: TECHNICAL_DEVIATION_SECTION_ID, decisions: [], terminology: [], numbers_and_parameters: [],
+        interfaces: [], deployment_constraints: [], cross_reference_targets: [], unresolved_topics: [] },
+    }))
 
     await executeDocxExport(workspace, undefined, 'deliverables/deviation.docx')
 

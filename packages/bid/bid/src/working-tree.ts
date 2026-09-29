@@ -39,11 +39,13 @@ async function copyRegularTree(workspaceRoot: string, source: string, target: st
  * Prepare or reopen the durable private project used by one exact work item.
  * @param workspace - Canonical workspace used as the initial snapshot.
  * @param descriptor - Work identity bound to the private project.
+ * @param options - Reset a candidate whose previous attempt did not publish a receipt.
  * @returns Private workspace paths for execution and resume.
  */
 export async function prepareBidWorkingTree(
   workspace: WorkspacePaths,
   descriptor: BidWorkDescriptor,
+  options: { readonly reset?: boolean } = {},
 ): Promise<WorkspacePaths> {
   const root = bidWorkRoot(workspace, descriptor)
   const markerPath = within(root, 'work-identity.json')
@@ -52,8 +54,10 @@ export async function prepareBidWorkingTree(
   try {
     const saved = JSON.parse(await readFile(markerPath, 'utf8')) as unknown
     if (JSON.stringify(saved) !== JSON.stringify(descriptor)) throw new Error('BID_WORKING_TREE_IDENTITY_MISMATCH')
-    await reconcileBidPublications(root, projectRoot)
-    return { root, projectRoot }
+    if (!options.reset) {
+      await reconcileBidPublications(root, projectRoot)
+      return { root, projectRoot }
+    }
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
   }

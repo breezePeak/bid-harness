@@ -10,7 +10,7 @@ Status: implemented
 
 `bid.docx_export.changed` 在主会话日志中记录当前导出的有界里程碑，`bid.docx_export` 投影恢复最近一次操作。记录以 `running`、`completed`、`failed` 判别结果，`phase` 只表示收集正文、生成 Word、校验输出的步骤。Host 在取得项目 Word 锁并确认允许导出后发布首条事件；完成和失败分别在校验结果确定后发布，执行异常也结算为失败。记录保存本次模板 ID，完成态保存文件路径与警告。宿主失去执行句柄后，详情读取把遗留运行态结算为中断失败。
 
-同会话重复导出复用当前 Promise，项目级 Word 互斥及与阶段重置的双向拒绝遵循[Word 操作与 S5 并行](2026-09-12-word-export-parallel-stage-operations.md)。持续存在的聊天 dock 从独立投影显示 S6 计划，导出页从同一投影恢复进度、结果和重试入口；页面卸载不取消 Host 执行，也不触发迟到下载。S5 完成后不显示旧阶段状态行，修订、聊天和审核能力仍保持挂载。正文收录继续遵循[已保存正文快照](2026-09-12-word-export-saved-content.md)。
+同会话重复导出复用当前 Promise，项目级 Word 互斥及与阶段重置的双向拒绝遵循[Word 操作与 S5 并行](2026-09-12-word-export-parallel-stage-operations.md)。聊天 dock 在导出运行时从独立投影显示 S6 计划，导出页从同一投影恢复进度、结果和重试入口；终态由[聊天结果消息](2026-09-26-bid-word-export-chat-outcome.md)呈现。页面卸载不取消 Host 执行，也不触发迟到下载。S5 完成后不显示旧阶段状态行，修订、聊天和审核能力仍保持挂载。正文收录继续遵循[已保存正文快照](2026-09-12-word-export-saved-content.md)。
 
 ## Alternatives considered
 

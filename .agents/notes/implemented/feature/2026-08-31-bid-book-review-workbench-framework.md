@@ -16,7 +16,7 @@ S6 已生成确认目录和章节正文，但在 DOCX 导出前缺少可浏览�
 
 `ConversationController.selectView()` 通过当前 Session 的视图状态切换已注册视图。ui-bid 在投影进入 `book_review` 时调用该通用接口，自动打开审核工作台，而 ui-conversation 不依赖 Bid Stage。
 
-正文 Remote 仅接受 `section_id`，由 Host 在确认目录和章节 manifest 中解析正文路径，并拒绝链接路径。浏览器不会收到 Session 工作区绝对路径。
+正文 Remote 仅接受 `section_id`，由 Host 在确认目录中确认可写身份，再根据章节固定存储位置解析正文路径，并拒绝链接路径。浏览器不会收到 Session 工作区绝对路径。
 
 ## Alternatives considered
 

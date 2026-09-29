@@ -8,7 +8,7 @@ Status: implemented
 
 ## Decision
 
-`assets/templates/default-technical-bid.docx` 同时拥有系统默认模板的 OOXML 骨架和可解析格式。每次读取 `templateId === null` 时，Host 重新解析该文件，以 `defaultDocxFormatState()` 仅补齐字段集合，再通过 `resolveFormat()` 叠加持久化的 `userConfirmed`。`default.config.json` 只延续 revision、opened、用户覆盖和最近导出记录；其中旧的 extracted、模型解释、冲突及 resolved baseline 不进入读取结果。
+`assets/templates/default-technical-bid.docx` 同时拥有系统默认模板的 OOXML 骨架和可解析格式。`@deepseek-ai/dsh-bid` 将它列为发布文件，工作区清单检查允许这一精确路径。每次读取 `templateId === null` 时，Host 重新解析该文件，以 `defaultDocxFormatState()` 仅补齐字段集合，再通过 `resolveFormat()` 叠加持久化的 `userConfirmed`。`default.config.json` 只延续 revision、opened、用户覆盖和最近导出记录；其中旧的 extracted、模型解释、冲突及 resolved baseline 不进入读取结果。
 
 格式表和浏览器预览读取这份 resolved。LibreOffice 真实分页与正式导出共用模板合成入口：系统默认选择读取内置 DOCX，上传模板读取其内容摘要命名的原始文件。真实分页缓存除正文、图片、格式版本和 resolved 外还包含原始模板内容摘要，内置文件更新会自然失效旧结果。快速页数仍是固定 A4 的交互近似。
 

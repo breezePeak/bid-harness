@@ -148,8 +148,8 @@ export function BidReviewWorkbench({
   const [reviewInstruction, setReviewInstruction] = useState('')
   const [reviewSaving, setReviewSaving] = useState(false)
   const [reviewError, setReviewError] = useState<string | null>(null)
-  const ready = projection?.task.stage === 'chapter_writing' || projection?.task.stage === 'docx_export'
-  const exportReady = ready && projection.allowedActions.includes('export_docx')
+  const ready = isBid
+  const exportReady = ready && (projection?.allowedActions.includes('export_docx') ?? false)
 
   useEffect(() => { setContextMenu(null) }, [chapter, sessionId])
   useEffect(() => {
@@ -211,7 +211,7 @@ export function BidReviewWorkbench({
         const currentWorkbench = latestWorkbenchRef.current
         const revisionBatchActive = currentWorkbench?.revision_batch?.status === 'planning'
           || currentWorkbench?.revision_batch?.status === 'running'
-        const shouldPoll = ready && (projection.task.status === 'running' || revisionBatchActive)
+        const shouldPoll = ready && (projection?.task.status === 'running' || revisionBatchActive)
         if (!disposed && shouldPoll) timer = window.setTimeout(poll, 1000)
       })
     }

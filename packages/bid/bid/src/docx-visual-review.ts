@@ -244,7 +244,11 @@ function pageHeightMm(values: FormatValues): number {
   return values['page.orientation'] === 'landscape' ? paper[0] : paper[1]
 }
 
-async function imageIdentity(workspace: BidWorkspace, node: VisualMarkdownNode, definitions: ReadonlyMap<string | undefined, string | undefined>) {
+async function imageIdentity(
+  workspace: BidWorkspace,
+  node: VisualMarkdownNode,
+  definitions: ReadonlyMap<string | undefined, string | undefined>,
+) {
   const url = node.url ?? definitions.get(node.identifier) ?? ''
   if (/^[a-z][a-z\d+.-]*:|^\/\//iu.test(url)) throw new Error('正文图片必须保存到项目内，不自动访问外部资源。')
   const path = within(workspace.projectRoot, decodeURIComponent(url))

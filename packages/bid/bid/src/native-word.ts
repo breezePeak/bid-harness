@@ -79,7 +79,10 @@ try {
   }
 }
 
-/** @returns 当前 Windows 宿主上的 Microsoft Word COM finalizer。 */
+/**
+ * 创建当前 Windows 宿主的 Word 最终化服务。
+ * @returns 当前 Windows 宿主上的 Microsoft Word COM finalizer。
+ */
 export function createNativeWordFinalizer(): WordDocumentFinalizer {
   return new NativeWordDocumentFinalizer()
 }

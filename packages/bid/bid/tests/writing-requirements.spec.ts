@@ -168,7 +168,7 @@ describe('S5 通用写作任务契约', () => {
     expect(updated.sections[0]?.acceptance_criteria[0]?.id).toBe('AC-000002')
     expect(updated.sections[1]?.acceptance_criteria[0]?.id).toBe('AC-000003')
     expect(updated.affected_section_ids).toEqual(['SEC-2'])
-    expect(updated.user_requirements).toEqual(['没有特殊要求，直接开始', '第二章写详细一点，其他章节不用动。'])
+    expect(updated.user_requirements).toEqual(['没有特殊要求，直接开始'])
   })
 
   it('拒绝错误范围、错误作用域和全局重复 AC ID', () => {

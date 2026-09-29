@@ -295,7 +295,7 @@ describe('S5 真实 DSH Child 接入', () => {
         expect(request.steps).toBe(request === requests.find(item => item.role === 'writer') ? 3 : 2)
       }
       for (const request of requests.filter(item => item.role === 'review')) {
-        expect(request.tools).toEqual([...CHAPTER_REVIEW_TOOLS].sort())
+        expect(request.tools).toEqual(CHAPTER_REVIEW_TOOLS.filter(tool => tool !== 'review_revision_issues').sort())
         expect(request.steps).toBe(8)
       }
       const review = parseChapterReviewArtifact(JSON.parse(await readFile(join(workspace.projectRoot, 'chapters/reviews/0001.json'), 'utf8')))
@@ -317,7 +317,7 @@ describe('S5 真实 DSH Child 接入', () => {
         }),
       })
       expect([...adapter.requests.values()].filter(request => request.role === 'writer')
-        .every(request => request.tools.includes('web_search') === false && request.tools.includes('web_fetch') === false)).toBe(true)
+        .every(request => ! request.tools.includes('web_search') && ! request.tools.includes('web_fetch'))).toBe(true)
     } finally { await ctx.fiber.dispose() }
   }, 30_000)
 
