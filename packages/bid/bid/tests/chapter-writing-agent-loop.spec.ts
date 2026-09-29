@@ -317,7 +317,7 @@ describe('S5 真实 DSH Child 接入', () => {
         }),
       })
       expect([...adapter.requests.values()].filter(request => request.role === 'writer')
-        .every(request => request.tools.includes('web_search') === false && request.tools.includes('web_fetch') === false)).toBe(true)
+        .every(request => ! request.tools.includes('web_search') && ! request.tools.includes('web_fetch'))).toBe(true)
     } finally { await ctx.fiber.dispose() }
   }, 30_000)
 

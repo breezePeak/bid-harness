@@ -116,7 +116,7 @@ async function setupS5Fixture(adapter = new ControllableMockLlmAdapter()) {
 /** 从真实 SessionProjection 注册表中读取 WritingEntryView。 */
 function getWritingEntryProjection(ctx: Context, agent: Agent): WritingEntryView | null {
   const snapshot = ctx.sessionProjections.snapshot(agent.session)
-  return (snapshot.values[BID_WRITING_ENTRY_PROJECTION_KEY] as WritingEntryView | null | undefined) ?? null
+  return (snapshot.values[BID_WRITING_ENTRY_PROJECTION_KEY]) ?? null
 }
 
 /** 等待直到真实投影 WritingEntryView 满足 predicate。 */
@@ -528,7 +528,7 @@ describe('S5 写作入口运行时与完整工具链测试', () => {
       })
 
       // 验证未抛死锁，且真实投影展示 failed，允许重试
-      const failedView = await waitForView(ctx, agent, v => v.phase === 'failed' && v.can_retry_answer === true)
+      const failedView = await waitForView(ctx, agent, v => v.phase === 'failed' &&  v.can_retry_answer)
       await vi.waitFor(() => { expect(host.inFlight.size).toBe(0) })
       expect(failedView.answer_save_status).toBe('unconfirmed')
       expect(failedView.error?.code).toBe('BID_WRITING_ANSWER_SAVE_FAILED')

@@ -41,6 +41,7 @@ describe('web e2e: Bid 后台 Run 进度', () => {
   let browser: Browser
   let page: Page
   let agent: Agent
+  let workspaceCwd: string
   let run: BidRunData
   let tripwire: ReturnType<typeof watchConsole>
   let dropDownlink = false
@@ -49,7 +50,7 @@ describe('web e2e: Bid 后台 Run 进度', () => {
   const adapter = new PendingReplyAdapter()
 
   async function startEvidenceMapping(): Promise<BidWorkspace> {
-    const workspace = new BidWorkspace(agent.session.header.cwd!)
+    const workspace = new BidWorkspace(workspaceCwd)
     await seedProjectArtifacts(workspace)
     await writeFile(join(workspace.projectRoot, 'analysis/evidence-mapping-log.json'), JSON.stringify({
       schema_version: 5, max_concurrency: 2, observed_max_concurrency: 2,
@@ -92,6 +93,7 @@ describe('web e2e: Bid 后台 Run 进度', () => {
     const found = scaffold.ctx.agents.list().find(candidate => resolveSessionPreset(candidate.session) === 'bid')
     if (found === undefined || found.session.header.cwd === undefined) throw new Error('Missing Bid agent workspace')
     agent = found
+    workspaceCwd = found.session.header.cwd
     const workspace = new BidWorkspace(found.session.header.cwd)
     run = {
       runId: 'web-progress', interactionSessionId: String(agent.session.id), executionSessionId: 'execution',
@@ -145,7 +147,7 @@ describe('web e2e: Bid 后台 Run 进度', () => {
       work: { ...run.work, stage: 'outline_generation', workId: 'web-s3-work' },
       progress: { phase: 'reviewing', summary: '目录质量复核', updatedAt: 3 },
     }
-    const workspace = new BidWorkspace(agent.session.header.cwd!)
+    const workspace = new BidWorkspace(workspaceCwd)
     const state = await checkpointBidProjectState(workspace, { stage: 'outline_generation', status: 'running', run })
     agent.session.append('bid.project.resumed', { revision: state.revision, state: bidProjectTaskState(state) })
 
@@ -169,7 +171,7 @@ describe('web e2e: Bid 后台 Run 进度', () => {
 
   it('后台阶段显示停止按钮时，点击也中断正在进行的聊天回复', async () => {
     onTestFailed(() => saveFailureShot(page, 'web-e2e-bid-stop-reply'))
-    await seedProjectArtifacts(new BidWorkspace(agent.session.header.cwd!))
+    await seedProjectArtifacts(new BidWorkspace(workspaceCwd))
     await page.locator('[data-composer-card] textarea').fill('')
     agent.followup(createUserMessage({ content: [{ type: 'text', text: '说明当前进度' }], source: { kind: 'user' } }))
     await adapter.started.promise

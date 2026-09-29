@@ -36,13 +36,13 @@ it('waits without spending rounds and resumes exactly once after a fresh request
   ctx.goalRoundDriver.registerGate(() => waiting ? 'wait' : undefined)
   ctx.goals.create(agent, { objective: 'resume only when ready', maxGoalRounds: 1 })
   for (let i = 0; i < 100; i++) ctx.goalRoundDriver.request(agent)
-  await vi.waitFor(() => expect(ctx.goals.get(agent)?.activation).toBe('armed'))
+  await vi.waitFor(() => { expect(ctx.goals.get(agent)?.activation).toBe('armed') })
   expect(adapter.requests).toHaveLength(0)
   expect(ctx.goals.get(agent)?.roundsStarted).toBe(0)
 
   waiting = false
   ctx.goalRoundDriver.request(agent)
-  await vi.waitFor(() => expect(ctx.goals.get(agent)?.roundsStarted).toBe(1))
+  await vi.waitFor(() => { expect(ctx.goals.get(agent)?.roundsStarted).toBe(1) })
   expect(adapter.requests).toHaveLength(1)
 })
 
@@ -67,7 +67,7 @@ it('defers a queued round without blocking its goal or losing another message', 
   })
   ctx.goals.create(agent, { objective: 'defer queued round', maxGoalRounds: 1 })
   await inserted.promise
-  await vi.waitFor(() => expect(agent.status).toBe('idle'))
+  await vi.waitFor(() => { expect(agent.status).toBe('idle') })
   expect(ctx.goals.get(agent)).toMatchObject({ phase: 'active', activation: 'armed', roundsStarted: 0 })
   expect(adapter.requests).toHaveLength(0)
 })
@@ -95,7 +95,7 @@ it('rechecks a gate after downstream pre-step work settles', async () => {
   await entered.promise
   waiting = true
   release.resolve(undefined)
-  await vi.waitFor(() => expect(agent.status).toBe('idle'))
+  await vi.waitFor(() => { expect(agent.status).toBe('idle') })
   expect(ctx.goals.get(agent)).toMatchObject({ phase: 'active', activation: 'armed', roundsStarted: 0 })
   expect(adapter.requests).toHaveLength(0)
 })

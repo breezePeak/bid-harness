@@ -58,7 +58,9 @@ const content = (node: Node): string => node.value ?? (node.children ?? []).map(
 const mm = (value: number): number => Math.round(value * 1440 / 25.4)
 
 function textWidth(value: string): number {
-  return [...value].reduce((total, character) => total + (/^[\x00-\x7F]$/u.test(character) ? 0.52 : 1), 0)
+  let width = 0
+  for (const character of value) width += /^[\x00-\x7F]$/u.test(character) ? 0.52 : 1
+  return width
 }
 
 function inferTableColumnWidths(table: Node): number[] {
@@ -210,7 +212,7 @@ export async function renderDocx(
   assetHash: string
 }> {
   const root = fromMarkdown(markdown, { extensions: [gfm()], mdastExtensions: [gfmFromMarkdown()] })
-  const visualBlocks = identifyVisualBlocks(root as unknown as Node).byNode
+  const visualBlocks = identifyVisualBlocks(root).byNode
   const assets = await readAssets(workspace, root)
   const numberHeading = createHeadingNumberer(values)
   const numberCaption = createCaptionNumberer(values)

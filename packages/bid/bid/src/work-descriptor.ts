@@ -33,7 +33,7 @@ type WorkWorkspace = { readonly root: string; readonly projectRoot: string }
 
 const resetRequestMetaSchema = z.object({
   schema_version: recordOnlySchemaVersion(1), kind: z.enum(BID_WORK_KINDS), work_id: workIdSchema, stage: z.enum(BID_STAGES),
-}).passthrough()
+}).loose()
 
 /**
  * Find only request and private-run roots owned by the selected stage or a later stage.

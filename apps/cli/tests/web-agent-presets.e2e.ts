@@ -278,9 +278,9 @@ describe('the shipped Web composition', () => {
     const child = await parent.agent.ctx.agents.create({
       sessionId: SessionId('preset-bid-mapping-child'),
       meta: childSessionMeta(parent.agent, 1, 0),
-      setup: agentCtx => applyChildComposition(agentCtx, parent.agent, {
+      setup: (agentCtx) => { applyChildComposition(agentCtx, parent.agent, {
         toolFilter: { allow: ['web_search', 'web_fetch'] },
-      }),
+      }) },
     })
     try {
       expect(toolNames(ctx, parent.agent)).toEqual(expect.arrayContaining(['web_search', 'web_fetch']))

@@ -152,6 +152,7 @@ describe('flowchart contract', () => {
           && point.y + origin.y > box.y && point.y + origin.y < box.y + box.height).toBe(false)
       }
     }
+    // oxlint-disable-next-line @stylistic/max-len -- this exact SVG tag pattern is clearest as one literal
     const labels = [...rendered.svg.matchAll(/<text x="([^"]+)" y="([^"]+)" text-anchor="[^"]+" font-family="Microsoft YaHei,Arial,sans-serif" font-size="12"[^>]*>([^<]+)<\/text>/gu)]
     expect(labels.map(match => match[3])).toEqual(expect.arrayContaining(['不符合', '再次提交', '符合']))
     for (const label of labels) {

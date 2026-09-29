@@ -126,8 +126,10 @@ export const legacyBidControlStateSchema = z.object({
 }).strict()
 
 /** 旧版 Session 投影中的阶段运行态，仅供兼容读取。 */
+// oxlint-disable-next-line typescript/no-deprecated -- 此类型描述旧版持久化结构。
 export type LegacyBidRuntimeState = z.infer<typeof legacyBidRuntimeSchema>
 /** 旧版项目控制记录，仅供兼容读取。 */
+// oxlint-disable-next-line typescript/no-deprecated -- 此类型描述旧版持久化结构。
 export type LegacyBidControlState = z.infer<typeof legacyBidControlStateSchema>
 
 const POLICIES: { readonly [K in BidStage]: Readonly<BidStagePolicy> } = {
@@ -574,9 +576,9 @@ export function getBidClientProjection(
     ...fileView,
   }
   if (task.stage === 'file_intake') return { ...base, allowedActions: ['upload_files', 'send_message'], composer: { enabled: true }, ...fileView }
-  if (task.stage === 'tender_analysis' && task.status === 'waiting_user') return { ...base, allowedActions: ['confirm_tender_analysis', 'send_message'], composer: { enabled: true }, ...fileView }
-  if ((task.stage === 'outline_generation' || task.stage === 'evidence_mapping') && task.status === 'waiting_user') return { ...base, allowedActions: ['confirm_outline', 'regenerate_outline', 'send_message'], composer: { enabled: true }, ...fileView }
-  if (task.stage === 'chapter_writing' && task.status === 'waiting_user') return {
+  if (task.stage === 'tender_analysis') return { ...base, allowedActions: ['confirm_tender_analysis', 'send_message'], composer: { enabled: true }, ...fileView }
+  if (task.stage === 'outline_generation' || task.stage === 'evidence_mapping') return { ...base, allowedActions: ['confirm_outline', 'regenerate_outline', 'send_message'], composer: { enabled: true }, ...fileView }
+  if (task.stage === 'chapter_writing') return {
     ...base,
     allowedActions: ['request_writing_requirements', 'auto_start_chapter_writing', 'send_message'],
     composer: { enabled: true },

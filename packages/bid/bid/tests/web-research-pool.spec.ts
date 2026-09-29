@@ -1,3 +1,4 @@
+/* oxlint-disable typescript/no-unsafe-assignment -- Vitest asymmetric matchers return any. */
 import { mkdir, mkdtemp, readFile, unlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'

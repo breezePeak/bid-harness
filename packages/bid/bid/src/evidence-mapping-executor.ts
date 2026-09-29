@@ -3617,7 +3617,7 @@ async function executeEvidenceMappingRun(
     const registered = new Set(tools.schemas(agent).map(schema => schema.name))
     const missingTools = MAPPING_AGENT_TOOLS.filter(name => !registered.has(name))
     if (missingTools.length > 0) throw new Error('Bid Web Search 已开启，但 web_search/web_fetch 工具未正确注册')
-    const web = agent.ctx.get('web')
+    const web = agent.ctx.get('web') as { diagnose(): Promise<WebPreflightDiagnostics> } | undefined
     if (web === undefined) throw new BidStageExecutionError([{
       code: 'EVIDENCE_MAPPING_WEB_UNAVAILABLE', message: '联网已开启，但当前 Execution Context 没有 Web 服务。',
     }])
@@ -4081,7 +4081,7 @@ async function executeEvidenceMappingRun(
       const abort = (): void => {
         const index = mappingAttemptWaiters.indexOf(waiter)
         if (index >= 0) mappingAttemptWaiters.splice(index, 1)
-        reject(signal.reason)
+        reject(signal.reason instanceof Error ? signal.reason : new Error(String(signal.reason)))
       }
       signal.addEventListener('abort', abort, { once: true })
       mappingAttemptWaiters.push(waiter)
@@ -4137,7 +4137,7 @@ async function executeEvidenceMappingRun(
       const provider = providerFor(exec.name as typeof MAPPING_AGENT_TOOLS[number])
       const delay = Math.max(webFailure.retryAfterMs, MAPPING_INFRASTRUCTURE_RETRY_BASE_DELAY_MS)
       providerCooldownUntil.set(provider, Math.max(providerCooldownUntil.get(provider) ?? 0, Date.now() + delay))
-      if (typeof exec.agent?.cancel === 'function') exec.agent.cancel({ kind: 'hook', reason: 'evidence-mapping-web-provider-backoff' })
+      if (typeof exec.agent.cancel === 'function') exec.agent.cancel({ kind: 'hook', reason: 'evidence-mapping-web-provider-backoff' })
     }
     if (webFailure !== undefined && !webFailure.retryable && fatalWebFailure === undefined) {
       fatalWebFailure = webFailure
@@ -4462,7 +4462,7 @@ async function executeEvidenceMappingRun(
         await persistLog()
         reportMappingProgress()
         if (webSearchEnabled) {
-          const childWeb = child.ctx.get('web')
+          const childWeb = child.ctx.get('web') as { diagnose(): Promise<WebPreflightDiagnostics> } | undefined
           const childTools = new Set(child.ctx.get('tools')?.schemas(child).map(schema => schema.name) ?? [])
           const childDiagnosis: WebPreflightDiagnostics | undefined = childWeb === undefined ? undefined : await childWeb.diagnose()
           if (childDiagnosis === undefined || !childTools.has('web_search') || !childTools.has('web_fetch')

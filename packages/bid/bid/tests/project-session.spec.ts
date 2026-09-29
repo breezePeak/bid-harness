@@ -1,3 +1,4 @@
+/* oxlint-disable typescript/no-unsafe-assignment -- Vitest asymmetric matchers return any. */
 import { mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 import type { IncomingMessage, ServerResponse } from 'node:http'
@@ -1550,6 +1551,7 @@ describe('Workspace 项目与独立 Session', () => {
     const agent = await fresh('concurrent-export')
     const entered = Promise.withResolvers<undefined>()
     const release = Promise.withResolvers<undefined>()
+    // oxlint-disable-next-line typescript/unbound-method -- The original method is later applied to a workspace.
     const original = BidWorkspace.prototype.exportDocxMarkdown
     const render = vi.spyOn(BidWorkspace.prototype, 'exportDocxMarkdown').mockImplementation(async function (this: BidWorkspace, ...args) {
       entered.resolve(undefined)
@@ -2824,7 +2826,7 @@ describe('Workspace 项目与独立 Session', () => {
     const gate = Promise.withResolvers<Awaited<ReturnType<BidStageExecutorPort['execute']>>>()
     executor.execute.mockImplementation(async () => gate.promise)
     const admitted = Promise.withResolvers<BidRunContext>()
-    const resumed = ctx.bid.resumeCurrentRun(agent.session, before.run.runId, saved!.revision, run => admitted.resolve(run))
+    const resumed = ctx.bid.resumeCurrentRun(agent.session, before.run.runId, saved!.revision, (run) => { admitted.resolve(run) })
     try {
       const run = await admitted.promise
       expect(run.work.workId).toBe(before.run.work.workId)

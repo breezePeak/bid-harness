@@ -180,7 +180,7 @@ export class BidOrchestrator {
     return this.begin(async () => {
       const resumeOf: BidRunResumeIdentity = {
         runId: suspended.runId,
-        cause: suspended.cause ?? 'host_restart',
+        cause: suspended.cause,
       }
       const settlement = await this.executeStage(state.stage, resumeOf, suspended.work, onAccepted)
       return settlement === 'completed' ? this.driveLoop() : this.state

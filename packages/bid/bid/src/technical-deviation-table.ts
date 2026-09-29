@@ -76,8 +76,10 @@ export function parseTechnicalDeviationTable(markdown: string): TechnicalDeviati
       && new Set(keys).size === TECHNICAL_DEVIATION_HEADERS.length
       ? [{ rows, keys }] : []
   })
-  if (tables.length !== 1 || matches.length !== 1) throw new TechnicalDeviationTableError('TECHNICAL_DEVIATION_HEADERS_INVALID')
-  const match = matches[0]!
+  const match = matches[0]
+  if (tables.length !== 1 || matches.length !== 1 || match === undefined) {
+    throw new TechnicalDeviationTableError('TECHNICAL_DEVIATION_HEADERS_INVALID')
+  }
   return {
     rows: match.rows.slice(1).map((row) => {
       const values = Object.fromEntries(match.keys.map((key, index) => [key, text(row.children?.[index] ?? { type: 'text' }).trim()]))
@@ -122,7 +124,7 @@ export function validateTechnicalDeviationTable(
       issues.push(`第 ${number} 行“投标响应内容”缺少具体响应。`)
     }
     if (row.deviation.trim() === '') issues.push(`第 ${number} 行“偏离程度”为空。`)
-    if (Object.values(row).some(value => /\b(?:REQ|SC|RP|SEC)-[A-Za-z0-9_-]+\b/iu.test(value))) {
+    if (semanticKeys.some(key => /\b(?:REQ|SC|RP|SEC)-[A-Z0-9_-]+\b/iu.test(row[key]))) {
       issues.push(`第 ${number} 行包含系统内部编号。`)
     }
   }

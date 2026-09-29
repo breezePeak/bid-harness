@@ -240,7 +240,7 @@ export function TenderAnalysisReview({
               type="search"
               placeholder="搜索条款、评分或要素..."
               value={searchQuery}
-              onChange={e => setSearchQuery(e.target.value)}
+              onChange={(e) => { setSearchQuery(e.target.value) }}
             />
             <div className={css.filterTabs} aria-label="模块筛选">
               {(
@@ -269,7 +269,7 @@ export function TenderAnalysisReview({
               <input
                 type="checkbox"
                 checked={onlyMandatory}
-                onChange={e => setOnlyMandatory(e.target.checked)}
+                onChange={(e) => { setOnlyMandatory(e.target.checked) }}
               />
               <span>仅看强制/必答项</span>
             </label>
@@ -313,7 +313,7 @@ export function TenderAnalysisReview({
                         disabled={pending || readOnly}
                         aria-label={t(`analysis.project.${key}`)}
                         value={draft.project[key] ?? ''}
-                        onChange={e => updateProjectField(key, e.target.value)}
+                        onChange={(e) => { updateProjectField(key, e.target.value) }}
                         placeholder={`请输入${t(`analysis.project.${key}`)}...`}
                       />
                     )}
@@ -343,7 +343,7 @@ export function TenderAnalysisReview({
                         disabled={pending || readOnly}
                         aria-label={t(`analysis.project.${key}`)}
                         value={draft.project[key].join('\n')}
-                        onChange={e => updateProjectArrayField(key, e.target.value)}
+                        onChange={(e) => { updateProjectArrayField(key, e.target.value) }}
                         placeholder={`请输入${t(`analysis.project.${key}`)}，每行一条...`}
                       />
                     )}
@@ -385,7 +385,7 @@ export function TenderAnalysisReview({
                           className={css.tableInput}
                           disabled={pending || readOnly}
                           value={req.category}
-                          onChange={e => updateRequirement(req.id, { category: e.target.value })}
+                          onChange={(e) => { updateRequirement(req.id, { category: e.target.value }) }}
                         />
                       )}
                     </td>
@@ -395,7 +395,7 @@ export function TenderAnalysisReview({
                           type="checkbox"
                           disabled={pending || readOnly}
                           checked={req.mandatory}
-                          onChange={e => updateRequirement(req.id, { mandatory: e.target.checked })}
+                          onChange={(e) => { updateRequirement(req.id, { mandatory: e.target.checked }) }}
                         />
                         <span className={req.mandatory ? css.badgeMandatory : css.badgeNormal}>
                           {req.mandatory ? '强制' : '一般'}
@@ -411,7 +411,7 @@ export function TenderAnalysisReview({
                           rows={3}
                           disabled={pending || readOnly}
                           value={req.normalized_requirement}
-                          onChange={e => updateRequirement(req.id, { normalized_requirement: e.target.value })}
+                          onChange={(e) => { updateRequirement(req.id, { normalized_requirement: e.target.value }) }}
                         />
                       )}
                     </td>
@@ -458,12 +458,12 @@ export function TenderAnalysisReview({
                           disabled={pending || readOnly}
                           aria-label="评分项名称"
                           value={sc.title}
-                          onChange={e => updateScoring(sc.id, { title: e.target.value })}
+                          onChange={(e) => { updateScoring(sc.id, { title: e.target.value }) }}
                         />
                       )}
                     </td>
                     <td className={css.cellCenter}>
-                      {sc.score !== null && sc.score !== undefined ? (
+                      {sc.score !== null ? (
                         <span className={css.badgeScore}>{sc.score}分</span>
                       ) : '—'}
                     </td>
@@ -473,7 +473,7 @@ export function TenderAnalysisReview({
                           type="checkbox"
                           disabled={pending || selectionPending !== null || readOnly || onScoringSelectionChange === undefined}
                           checked={selectedScoringIds.has(sc.id)}
-                          onChange={e => updateScoringSelection(sc.id, e.target.checked)}
+                          onChange={(e) => { updateScoringSelection(sc.id, e.target.checked) }}
                         />
                         <span className={selectedScoringIds.has(sc.id) ? css.badgeScore : css.badgeNormal}>
                           {selectedScoringIds.has(sc.id) ? '已纳入后续响应' : '未纳入后续响应'}
@@ -486,7 +486,7 @@ export function TenderAnalysisReview({
                           type="checkbox"
                           disabled={pending || readOnly}
                           checked={sc.must_answer}
-                          onChange={e => updateScoring(sc.id, { must_answer: e.target.checked })}
+                          onChange={(e) => { updateScoring(sc.id, { must_answer: e.target.checked }) }}
                         />
                         <span className={sc.must_answer ? css.badgeMandatory : css.badgeNormal}>
                           {sc.must_answer ? '必答评分点' : '选答'}
@@ -502,7 +502,7 @@ export function TenderAnalysisReview({
                           rows={3}
                           disabled={pending || readOnly}
                           value={sc.criterion}
-                          onChange={e => updateScoring(sc.id, { criterion: e.target.value })}
+                          onChange={(e) => { updateScoring(sc.id, { criterion: e.target.value }) }}
                         />
                       )}
                     </td>
@@ -547,7 +547,7 @@ export function TenderAnalysisReview({
                           className={css.tableInput}
                           disabled={pending || readOnly}
                           value={comp.type}
-                          onChange={e => updateCompliance(comp.id, { type: e.target.value })}
+                          onChange={(e) => { updateCompliance(comp.id, { type: e.target.value }) }}
                         />
                       )}
                     </td>
@@ -565,7 +565,7 @@ export function TenderAnalysisReview({
                           rows={3}
                           disabled={pending || readOnly}
                           value={comp.normalized_rule}
-                          onChange={e => updateCompliance(comp.id, { normalized_rule: e.target.value })}
+                          onChange={(e) => { updateCompliance(comp.id, { normalized_rule: e.target.value }) }}
                         />
                       )}
                     </td>
