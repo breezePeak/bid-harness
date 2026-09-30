@@ -26,6 +26,24 @@ it('主 Agent 在原授权内换用目录编辑能力并接续后续步骤', asy
   })
 }, LOADER_SMOKE_TEST_TIMEOUT_MS)
 
+it('主 Agent 用新用户任务接管挂起 Work 并发布评分目录', async () => {
+  const configPath = fileURLToPath(new URL('../bid-stage-interaction.cordis.snapshot.yml', import.meta.url))
+  const result = await runLoaderSmoke({
+    label: '挂起能力任务接管源码装配', tempDirPrefix: 'dsh-bid-supersede-snapshot-',
+    binScript: fileURLToPath(new URL('./fixtures/bid-stage-interaction-driver.ts', import.meta.url)),
+    configPath, binArgs: [configPath, 'supersede'], mode: 'src',
+    processTimeoutMs: 60_000,
+    tsconfigPath: fileURLToPath(new URL('../../../tsconfig.json', import.meta.url)),
+  })
+  expect(JSON.parse(result.stdout)).toEqual({
+    status: 'completed', wrongTitleGone: true,
+    leaf: { title: '总体实施方案', parent_id: 'GROUP-A', responsePoints: ['RP-000001'],
+      mustAnswer: ['回答评分1，说明实施方案的范围和方法'] },
+    distinctWork: true, resumedOldWork: false,
+    calls: ['bid_run_task', 'bid_project_inspect', 'bid_run_task'], supersededNotice: true,
+  })
+}, LOADER_SMOKE_TEST_TIMEOUT_MS)
+
 it('S4 waiting_user 通过源码 Loader 执行受控对话修改', async () => {
   const result = await runLoaderSmoke({
     label: 'S4 阶段交互源码装配', tempDirPrefix: 'dsh-bid-interaction-snapshot-',
@@ -165,7 +183,6 @@ it('S4 waiting_user 通过源码 Loader 执行受控对话修改', async () => {
         "bid_evidence_remap",
         "bid_project_inspect",
         "bid_run_task",
-        "bid_plan_task",
         "bid_confirm_writing_plan",
         "bid_revise_chapter",
       ],

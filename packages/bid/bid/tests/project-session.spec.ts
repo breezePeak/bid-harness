@@ -15,14 +15,14 @@ import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import SubagentRuntime from '@deepseek-ai/dsh-subagent'
 import * as spawn from '@deepseek-ai/dsh-subagent-spawn-in-process'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
-import ToolRuntime, { type ToolDefinition } from '@deepseek-ai/dsh-tools'
+import ToolRuntime, { validateJsonSchemaValue, type JsonSchemaNode, type ToolDefinition } from '@deepseek-ai/dsh-tools'
 import UserQuestionService from '@deepseek-ai/dsh-user-questions'
 import type { AskUserQuestionAnswer, AskUserQuestionItem } from '@deepseek-ai/dsh-user-questions/types'
 import {
   BID_INITIAL_TASK_STATE, BidHostRuntime, BidOrchestrator, BidWorkspace,
   BidRunCoordinator,
   bidProjectTaskState, buildBidStageTask, checkpointBidProjectState as checkpointStoredBidProjectState,
-  getBidClientProjection, parseEvidenceMapArtifact,
+  getBidClientProjection, parseEvidenceMapArtifact, parseOutlineArtifact,
   outlineArtifactSha256, parseChapterReviewArtifact,
   parseGlobalComplianceReviewArtifact, validateGlobalComplianceReview,
   parseScoringResponsePointCatalog, parseTenderComplianceArtifact, parseTenderProjectArtifact,
@@ -48,10 +48,12 @@ import {
   DOCX_TEMPLATE_REVISION_HEADER,
   DOCX_TEMPLATE_SIZE_HEADER,
 } from '../src/docx-format-contract.ts'
-import { persistBidWorkRequest } from '../src/work-descriptor.ts'
+import { persistBidWorkRequest, readBidWorkRequest } from '../src/work-descriptor.ts'
 import type { CapabilityTaskDispatcher } from '../src/bid-capability-task.ts'
-import { executeCapabilityTask, persistCapabilityTaskRequest } from '../src/bid-capability-task.ts'
+import { capabilityTaskRequestSchema, executeCapabilityTask, persistCapabilityTaskRequest } from '../src/bid-capability-task.ts'
 import { createTestBidRunContext } from '../src/run-coordinator.ts'
+import { validateOutlineDraftForConfirmation } from '../src/outline-confirmation-validator.ts'
+import { validateOutlineSharedCoverage, validateOutlineSharedStructure } from '../src/outline-shared-validator.ts'
 import { seedConversation, seedProjectArtifacts } from './fixtures/project-session.ts'
 import { seedCapabilityProject } from './capability-fixture.ts'
 import { readPendingCapabilityRequests } from '../src/bid-capability-queue.ts'
@@ -372,6 +374,18 @@ describe('Workspace 项目与独立 Session', () => {
       }, { session_id: String(agent.session.id), message_id: String(message.id) }, ['chapters/execution-log.json']))
         .resolves.toMatchObject({ status: 'suspended', run: { cause: 'awaiting_input' } })
       await vi.waitFor(() => { expect(question?.id).toContain('capability:') })
+      const awaiting = await readBidProjectState(workspace)
+      if (awaiting?.status !== 'suspended') throw new Error('缺少等待输入的 Run')
+      const replacement = createUserMessage({ content: [{ type: 'text', text: '换一个审核任务' }], source: { kind: 'user' } })
+      agent.session.append('turn/start', { turn: 2 })
+      agent.session.append('user/message', replacement, { surfaceOp: 'append' })
+      await expect(ctx.bid.runCapabilityTask(agent, {
+        goal: '换一个审核任务', scope: { kind: 'project' }, steps: [{ description: '核对新任务', scope: { source: 'task' },
+          call: { capability: 'chapter.review', input: { reason: '核对新任务' } } }],
+      }, { session_id: String(agent.session.id), message_id: String(replacement.id) }, ['chapters/execution-log.json'],
+      undefined, { run_id: awaiting.run.runId, expected_project_revision: awaiting.revision }))
+        .rejects.toThrow('BID_CAPABILITY_SUPERSEDE_NOT_ALLOWED')
+      expect((await readBidProjectState(workspace))?.status).toBe('suspended')
       reply.resolve({ answers: [{ id: question?.id ?? '', selected: [], custom: '重点核对质量控制' }] })
       await vi.waitFor(() => {
         expect(agent.session.events.filter(event => event.type === 'bid.capability.input.received')).toHaveLength(1)
@@ -745,10 +759,11 @@ describe('Workspace 项目与独立 Session', () => {
       })).resolves.toBeUndefined()
 
       expect(ctx.tools.schemas(agent).filter(tool => tool.name.startsWith('bid_')).map(tool => tool.name))
-        .toEqual(['bid_stage_inspect', 'bid_project_inspect', 'bid_run_task', 'bid_plan_task',
-          'bid_outline_apply_operations', 'bid_outline_regenerate_scope', 'bid_evidence_remap',
-          'bid_confirm_writing_plan', 'bid_revise_chapter',
-          ...(expectedStatus === 'suspended' ? ['bid_resume_current_run'] : [])])
+        .toEqual(expectedStatus === 'suspended'
+          ? ['bid_stage_inspect', 'bid_project_inspect', 'bid_resume_current_run']
+          : ['bid_stage_inspect', 'bid_project_inspect', 'bid_run_task',
+            'bid_outline_apply_operations', 'bid_outline_regenerate_scope', 'bid_evidence_remap',
+            'bid_confirm_writing_plan', 'bid_revise_chapter'])
       const project = await ctx.tools.execute({
         agent, name: 'bid_project_inspect', arguments: { query: { object: 'outline', page_size: 1 } },
         callId: CallId(`project-${stage}-${seedStatus}`), signal: new AbortController().signal,
@@ -767,6 +782,122 @@ describe('Workspace 项目与独立 Session', () => {
       expect(agent.session.events.some(event => event.type === 'bid.stage.started')).toBe(false)
       expect(agent.session.events.some(event => event.type === 'bid.run.started')).toBe(false)
     }
+  })
+
+  it('安装后的项目检查工具按对象暴露真实严格参数约束', async () => {
+    const { ctx, workspace, fresh } = await fixture()
+    await seedProjectArtifacts(workspace)
+    const agent = await fresh('inspect-tool-schema')
+    const schema = ctx.tools.schemas(agent).find(tool => tool.name === 'bid_project_inspect')?.parameters
+    if (schema === undefined) throw new Error('缺少项目检查工具')
+    const errors = (query: object) => validateJsonSchemaValue(schema as JsonSchemaNode, { query })
+    expect(errors({ object: 'task' }), JSON.stringify(schema)).toEqual([])
+    expect(errors({ object: 'task', page: 1 })).not.toEqual([])
+    expect(errors({ object: 'tender', part: 'scoring' })).toEqual([])
+    expect(errors({ object: 'tender' })).not.toEqual([])
+    expect(errors({ object: 'chapters' })).not.toEqual([])
+    expect(errors({ object: 'outline', page: 1, page_size: 5, source: 'committed' })).toEqual([])
+  })
+
+  it('挂起能力 Work 由新用户目录目标接管，发布新目录并保留旧候选', async () => {
+    const { ctx, workspace, fresh } = await fixture()
+    const seeded = await seedCapabilityProject(workspace, 'complete')
+    const misplacedTitle = '提供完整的建设方案，包括首个细粒度评分响应点'
+    const misplaced = { ...seeded.outline, sections: seeded.outline.sections.map(section =>
+      section.id === 'SEC-1' ? { ...section, parent_id: null, order: 3, level: 1, title: misplacedTitle } : section) }
+    for (const path of ['outline/outline.json', 'outline/confirmed-outline.json']) {
+      await writeFile(join(workspace.projectRoot, path), `${JSON.stringify(misplaced)}\n`)
+    }
+    await checkpointStoredBidProjectState(workspace, { stage: 'evidence_mapping', status: 'completed', run: null })
+    const agent = await fresh('capability-supersede-main')
+    const oldMessage = createUserMessage({ content: [{ type: 'text', text: '完成 S4 资料映射' }], source: { kind: 'user' } })
+    agent.session.append('turn/start', { turn: 1 })
+    agent.session.append('user/message', oldMessage, { surfaceOp: 'append' })
+    const oldAuthorization = { session_id: String(agent.session.id), message_id: String(oldMessage.id) }
+    const oldWork = await persistCapabilityTaskRequest(workspace, agent.session, 'evidence_mapping', {
+      goal: '完成 S4 资料映射', scope: { kind: 'project' }, steps: [{
+        description: '核对旧资料映射', scope: { source: 'task' },
+        call: { capability: 'outline.update', input: { operations: [{ type: 'update_section', section_id: 'SEC-2',
+          purpose: '旧任务候选' }] } },
+      }],
+    }, oldAuthorization, ['outline/outline.json', 'analysis/requirements.json', 'analysis/scoring.json',
+      'analysis/compliance.json', 'analysis/scoring-response-points.json'],
+    { stage: 'evidence_mapping', status: 'completed', run: null }, agent)
+    const oldRequest = await readBidWorkRequest(workspace, oldWork)
+    const oldRun: BidRunData = { runId: 'old-capability-run', epoch: 1, baseProjectRevision: 1,
+      work: oldWork, startedAt: Date.now(), updatedAt: Date.now() }
+    const suspended = { ...oldRun, cause: 'retry_exhausted' as const,
+      error: { code: 'EVIDENCE_MAPPING_OUTLINE_SCOPE_STALE', message: '旧目录范围过期' } }
+    const state = await checkpointStoredBidProjectState(workspace,
+      { stage: 'evidence_mapping', status: 'suspended', run: suspended })
+    agent.session.append('bid.run.started', { run: oldRun })
+    agent.session.append('bid.run.suspended', { run: suspended })
+    const oldDirectory = join(workspace.projectRoot, 'runs', oldWork.workId)
+    await mkdir(join(oldDirectory, 'candidate'), { recursive: true })
+    await writeFile(join(oldDirectory, 'task-checkpoint.json'), '旧检查点\n')
+    await writeFile(join(oldDirectory, 'candidate', 'outline.json'), '旧候选\n')
+    await writeFile(join(oldDirectory, 'step-receipt.json'), '旧步骤凭据\n')
+    const newTask = { goal: '修正评分点目录层级，首个细粒度评分点不作大标题',
+      scope: { kind: 'project' as const }, allow_pending_content: true,
+      steps: [{ description: '把误提的评分点移回设计方案叶节并恢复自然章节标题',
+        scope: { source: 'task' as const }, call: { capability: 'outline.update' as const, input: {
+          operations: [{ type: 'move_section' as const, section_id: 'SEC-1', parent_id: 'GROUP-A', order: 1 },
+            { type: 'update_section' as const, section_id: 'SEC-1', title: '总体实施方案',
+              must_answer: ['回答评分1，说明实施方案的范围和方法'] }],
+        } } }],
+    }
+    const call = (run_id: string, expected_project_revision: number) => ctx.tools.execute({ agent,
+      name: 'bid_run_task', arguments: { task: newTask, supersede: { run_id, expected_project_revision } },
+      callId: CallId(`supersede-${run_id}-${expected_project_revision}`), signal: new AbortController().signal })
+    const staleRun = await call('wrong-run', state.revision)
+    expect(staleRun.isError).toBe(true)
+    const staleRevision = await call(oldRun.runId, state.revision - 1)
+    expect(staleRevision.isError).toBe(true)
+    const noNewMessage = await call(oldRun.runId, state.revision)
+    expect(noNewMessage.isError).toBe(true)
+    expect(await readBidProjectState(workspace)).toMatchObject({ status: 'suspended', run: { runId: oldRun.runId } })
+    const newMessage = createUserMessage({ content: [{ type: 'text', text: newTask.goal }], source: { kind: 'user' } })
+    agent.session.append('turn/start', { turn: 2 })
+    agent.session.append('user/message', newMessage, { surfaceOp: 'append' })
+    const result = await call(oldRun.runId, state.revision)
+    expect(result, JSON.stringify(result)).toMatchObject({ isError: false, value: {
+      accepted: true, execution_status: 'completed', completed: true,
+      changed_artifacts: expect.arrayContaining(['outline/confirmed-outline.json']),
+    } })
+    const runs = agent.session.events.filter(event => event.type === 'bid.run.started')
+    expect(runs).toHaveLength(2)
+    const newRun = runs[1]?.data.run
+    if (newRun === undefined) throw new Error('缺少新 Run')
+    expect(newRun?.work.workId).not.toBe(oldWork.workId)
+    expect(newRun?.resumeOf).toBeUndefined()
+    expect(capabilityTaskRequestSchema.parse(await readBidWorkRequest(workspace, newRun.work)).authorization.message_id)
+      .toBe(String(newMessage.id))
+    expect(await readBidWorkRequest(workspace, oldWork)).toEqual(oldRequest)
+    expect(await readFile(join(oldDirectory, 'task-checkpoint.json'), 'utf8')).toBe('旧检查点\n')
+    expect(await readFile(join(oldDirectory, 'candidate', 'outline.json'), 'utf8')).toBe('旧候选\n')
+    expect(await readFile(join(oldDirectory, 'step-receipt.json'), 'utf8')).toBe('旧步骤凭据\n')
+    const published = parseOutlineArtifact(JSON.parse(await readFile(
+      join(workspace.projectRoot, 'outline/confirmed-outline.json'), 'utf8')))
+    const leaf = published.sections.find(section => section.id === 'SEC-1')
+    expect(leaf).toMatchObject({ parent_id: 'GROUP-A', title: '总体实施方案', writable: true,
+      scoring_ids: ['SCORE-1'], scoring_response_point_ids: ['RP-000001'] })
+    expect(leaf?.must_answer).toContain('回答评分1，说明实施方案的范围和方法')
+    expect(published.sections.some(section => section.title === misplacedTitle)).toBe(false)
+    const read = async (path: string): Promise<unknown> => JSON.parse(await readFile(join(workspace.projectRoot, path), 'utf8')) as unknown
+    const requirements = await read('analysis/requirements.json')
+    const scoring = await read('analysis/scoring.json')
+    const compliance = await read('analysis/compliance.json')
+    const catalog = await read('analysis/scoring-response-points.json')
+    expect(validateOutlineDraftForConfirmation(published, requirements, scoring, compliance, catalog)).toEqual({ ok: true })
+    const issues: Parameters<typeof validateOutlineSharedStructure>[1] = []
+    validateOutlineSharedStructure(published.sections, issues)
+    validateOutlineSharedCoverage(published, parseTenderRequirementsArtifact(requirements),
+      parseTenderScoringArtifact(scoring), parseTenderComplianceArtifact(compliance),
+      parseScoringResponsePointCatalog(catalog), issues)
+    expect(issues).toEqual([])
+    expect((await readBidProjectState(workspace))?.status).toBe('completed')
+    expect(agent.session.events.some(event => event.type === 'bid.run.notice'
+      && event.data.noticeId === `run:${oldRun.runId}:superseded`)).toBe(true)
   })
 
   it('主 Agent 工具以真实用户消息执行跨阶段能力任务并返回发布文件', async () => {
@@ -804,6 +935,28 @@ describe('Workspace 项目与独立 Session', () => {
     const restarted = await fixture({ root: workspace.root, withPersistence: true })
     const restored = await restarted.fresh('capability-main-tool')
     expect(await restarted.ctx.bid.getCapabilityTaskPlan(restored.session)).toEqual(plan)
+  })
+
+  it('能力执行再次挂起时工具只报告 suspended，不报告完成', async () => {
+    const { ctx, workspace, fresh } = await fixture()
+    await seedCapabilityProject(workspace, 'complete')
+    await checkpointStoredBidProjectState(workspace, { stage: 'chapter_writing', status: 'completed', run: null })
+    const agent = await fresh('capability-status-suspended')
+    const message = createUserMessage({ content: [{ type: 'text', text: '审核章节' }], source: { kind: 'user' } })
+    agent.session.append('turn/start', { turn: 1 })
+    agent.session.append('user/message', message, { surfaceOp: 'append' })
+    const unregister = ctx.bid.registerCapabilityTaskDispatcher({
+      allowedWrites: async () => new Set(), execute: async () => { throw new Error('审核执行中断') },
+      validate: async () => {},
+    })
+    try {
+      const result = await ctx.tools.execute({ agent, name: 'bid_run_task', arguments: { task: {
+        goal: '审核章节', scope: { kind: 'project' }, steps: [{ description: '核对章节并报告问题',
+          scope: { source: 'task' }, call: { capability: 'chapter.review', input: { reason: '核对章节' } } }],
+      } }, callId: CallId('capability-status-suspended'), signal: new AbortController().signal })
+      expect(result).toMatchObject({ isError: false, value: { accepted: true,
+        execution_status: 'suspended', completed: false, state: { status: 'suspended' } } })
+    } finally { unregister() }
   })
 
   it('检查点尚未创建时，能力计划仍显示等待输入原因', async () => {
@@ -2707,7 +2860,7 @@ describe('Workspace 项目与独立 Session', () => {
       && event.data.message.source.kind === 'tool'
       && event.data.message.source.callId === CallId('bid_resume_current_run'))
     expect(result).toMatchObject({ type: 'tool/result', data: { message: { content: [{
-      isError: false, content: [{ type: 'text', text: expect.stringContaining('"accepted":true') }],
+      isError: false, content: [{ type: 'text', text: expect.stringMatching(/"accepted":true,"execution_status":"started","completed":false/u) }],
     }] } } })
     expect(agent.session.events.some(event => event.type === 'bid.run.started'
       && event.data.run.resumeOf?.runId === suspended.run.runId

@@ -12,6 +12,8 @@ Status: implemented
 
 `bid_project_inspect` 的任务视图提供不可变目标、根范围和检查点步骤。当前 live Main Agent 可对同一可恢复挂起 Work 沿用原授权，替换尚无提交凭据的失败步骤及未开始后缀；已完成步骤、原请求与范围不可修改。计划补丁保存后仍由 `bid_recover_task` 恢复。用户停止、等待输入、不可恢复故障及其他会话不能使用该自动授权。
 
+新的用户目标通过[挂起能力任务接管](2026-09-30-bid-suspended-capability-takeover.md)创建独立 Work；计划补丁只继续本段所述的原目标。
+
 本决策部分替代[主会话能力工具](../feature/2026-09-24-bid-main-capability-tools.md)和[能力步骤与发布](../architecture/2026-09-24-bid-capability-task-work.md)中仅由后续用户消息替换未开始步骤的限制，并补充[独立恢复授权](../architecture/2026-09-29-bid-goal-decoupling.md)。原 Work 身份、输入校验、项目锁和正式发布约束继续有效。
 
 ## Alternatives considered

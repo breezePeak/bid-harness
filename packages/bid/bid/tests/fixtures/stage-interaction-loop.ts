@@ -1,11 +1,12 @@
 /** 阶段交互的真实 Main Agent 工具循环；只脚本化外部模型回复。 */
-import { readFile, readdir } from 'node:fs/promises'
+import { readFile, readdir, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { CallId, createUserMessage, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import UserQuestionService from '@deepseek-ai/dsh-user-questions'
-import { BidHostRuntime, BidOrchestratorError, checkpointBidProjectState, getOrCreateOutlineDraft, parseEvidenceMapArtifact, BID_INITIAL_TASK_STATE, reduceBidTaskState } from '@deepseek-ai/dsh-bid'
+import { BidHostRuntime, BidOrchestratorError, checkpointBidProjectState, getOrCreateOutlineDraft,
+  parseEvidenceMapArtifact, readBidProjectState, BID_INITIAL_TASK_STATE, reduceBidTaskState } from '@deepseek-ai/dsh-bid'
 import { runEvidenceMappingLoop } from './evidence-mapping-loop.ts'
 import { outlineRegenerationChanges } from '../../src/outline-regeneration-artifacts.ts'
 import { seedCapabilityProject } from '../capability-fixture.ts'
@@ -98,6 +99,66 @@ export async function runCapabilityReplanLoop(ctx: Context, root: string) {
       calls: events.filter(event => event.type === 'tool/call').map(event => event.data.name),
       completed: events.filter(event => event.type === 'bid.run.notice' && event.data.kind === 'completed').length }
   } finally { release() }
+}
+
+/** @param ctx 源码 Loader 装配。 @param root 临时项目。 @returns 新用户任务接管挂起 Work 后的正式目录身份。 */
+export async function runCapabilitySupersedeLoop(ctx: Context, root: string) {
+  const { agent, workspace, parentScript } = await runEvidenceMappingLoop(ctx, root, false, true)
+  const seeded = await seedCapabilityProject(workspace, 'complete')
+  const wrongTitle = '提供完整的建设方案，包括首个细粒度评分响应点'
+  const wrong = { ...seeded.outline, sections: seeded.outline.sections.map(section =>
+    section.id === 'SEC-1' ? { ...section, parent_id: null, order: 3, level: 1, title: wrongTitle } : section) }
+  for (const path of ['outline/outline.json', 'outline/confirmed-outline.json']) {
+    await writeFile(join(workspace.projectRoot, path), `${JSON.stringify(wrong)}\n`)
+  }
+  const stable = { stage: 'evidence_mapping' as const, status: 'completed' as const, run: null }
+  agent.session.append('bid.task.changed', { state: stable })
+  await checkpointBidProjectState(workspace, stable)
+  if (ctx.get('bid') === undefined) await ctx.plugin(BidHostRuntime)
+  const before = agent.session.events.length
+  parentScript.push(
+    call('bid_run_task', { task: { goal: '完成 S4 资料映射', scope: { kind: 'project' }, steps: [{
+      description: '重新生成已有目录', scope: { source: 'task' }, call: { capability: 'outline.generate', input: {} },
+    }] } }),
+    answer('旧任务已挂起。'),
+  )
+  agent.followup(createUserMessage({ content: [{ type: 'text', text: '完成 S4 资料映射' }], source: { kind: 'user' } }))
+  await agent.whenIdle()
+  const old = await readBidProjectState(workspace)
+  if (old?.status !== 'suspended' || old.run.work.kind !== 'capability_task') throw new Error('旧能力任务未挂起')
+  const oldWorkId = old.run.work.workId
+  parentScript.push(
+    call('bid_project_inspect', { query: { object: 'task' } }),
+    call('bid_run_task', { task: { goal: '修正评分点目录层级，首个细粒度评分点不作大标题',
+      scope: { kind: 'project' }, allow_pending_content: true, steps: [{
+        description: '把误提的评分点移回设计方案叶节并恢复自然章节标题', scope: { source: 'task' },
+        call: { capability: 'outline.update', input: { operations: [
+          { type: 'move_section', section_id: 'SEC-1', parent_id: 'GROUP-A', order: 1 },
+          { type: 'update_section', section_id: 'SEC-1', title: '总体实施方案',
+            must_answer: ['回答评分1，说明实施方案的范围和方法'] },
+        ] } },
+      }] }, supersede: { run_id: old.run.runId, expected_project_revision: old.revision } }),
+    answer('正式目录已修改。'),
+  )
+  agent.followup(createUserMessage({ content: [{ type: 'text', text: '修正评分点目录层级，首个细粒度评分点不作大标题' }],
+    source: { kind: 'user' } }))
+  await agent.whenIdle()
+  const current = await readBidProjectState(workspace)
+  const outline = JSON.parse(await readFile(join(workspace.projectRoot, 'outline/confirmed-outline.json'), 'utf8')) as typeof wrong
+  const leaf = outline.sections.find(section => section.id === 'SEC-1')
+  const events = agent.session.events.slice(before)
+  const runs = events.filter(event => event.type === 'bid.run.started')
+  await ctx.sessions.flush(agent.session)
+  return { status: current?.status, wrongTitleGone: !outline.sections.some(section => section.title === wrongTitle),
+    leaf: leaf === undefined ? null : { title: leaf.title, parent_id: leaf.parent_id,
+      responsePoints: leaf.scoring_response_point_ids, mustAnswer: leaf.must_answer },
+    distinctWork: runs.length === 2 && runs[0]?.data.run.work.workId !== runs[1]?.data.run.work.workId
+      && runs[0]?.data.run.work.workId === oldWorkId,
+    resumedOldWork: runs[1]?.data.run.resumeOf !== undefined,
+    calls: events.filter(event => event.type === 'tool/call').map(event => event.data.name),
+    supersededNotice: events.some(event => event.type === 'bid.run.notice'
+      && event.data.noticeId === `run:${old.run.runId}:superseded`),
+  }
 }
 
 /** @param ctx 测试装配。 @param root 临时工作区。 @returns 整本重生成后的 Draft 与阶段状态。 */

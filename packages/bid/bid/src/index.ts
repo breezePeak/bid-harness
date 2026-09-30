@@ -1297,6 +1297,7 @@ async function prepareWorkingWorkspace(
 }
 
 type StageInteractionRequest = zod.infer<typeof stageInteractionSchema>
+type CapabilitySupersede = NonNullable<Extract<StageInteractionRequest, { action: 'bid_run_task' }>['supersede']>
 type OutlineLongInteraction = Extract<StageInteractionRequest, {
   readonly action: 'bid_outline_regenerate_scope' | 'bid_evidence_remap'
 }>
@@ -3297,7 +3298,7 @@ export class BidHostRuntime extends TypertRemoteService {
       return inspectBidProject(canonical, request.query, this.inFlight.get(key)?.workspace)
     }
     if (request.action === 'bid_run_task') {
-      return this.runCapabilityTaskFromTool(agent, request.task)
+      return this.runCapabilityTaskFromTool(agent, request.task, request.supersede)
     }
     if (request.action === 'bid_plan_task') {
       if (this.ctx.agents.get(session.id) !== agent) throw new Error('BID_CAPABILITY_DISPATCHER_UNAVAILABLE')
@@ -3391,10 +3392,10 @@ export class BidHostRuntime extends TypertRemoteService {
         throw new BidOrchestratorError('BID_RESUME_NOT_ALLOWED', '当前任务不在可由聊天继续的挂起状态。')
       }
       this.cancelRunDecisions(session)
-      const accepted = Promise.withResolvers<{ accepted: true; run_id: string }>()
+      const accepted = Promise.withResolvers<{ accepted: true; execution_status: 'started'; completed: false; run_id: string }>()
       const task = this.ctx.agents.withoutInitiator(() => this.resumeCurrentRun(
         session, request.run_id, request.expected_project_revision,
-        (run) => { accepted.resolve({ accepted: true, run_id: run.runId }) },
+        (run) => { accepted.resolve({ accepted: true, execution_status: 'started', completed: false, run_id: run.runId }) },
       ))
       this.recoveryTasks.add(task)
       void task.then(() => {
@@ -3415,7 +3416,7 @@ export class BidHostRuntime extends TypertRemoteService {
         const processing = this.processingWritingPlans.get(key)
         if (processing?.requestId === request.writing_request_id
           && processing.attemptId === request.attempt_id && processing.ownerSessionId === String(session.id)) {
-          return { accepted: true, already_processing: true,
+          return { accepted: true, execution_status: 'started', completed: false, already_processing: true,
             writing_request_id: processing.requestId, attempt_id: processing.attemptId }
         }
         const decision = bidWritingPlanRecoveryEligibility(session)
@@ -3436,7 +3437,8 @@ export class BidHostRuntime extends TypertRemoteService {
         const accepted = await this.ctx.agents.withoutInitiator(() => this.scheduleWritingPlanProcessing(
           agent, saved, { instruction: request.instruction },
         ))
-        return { accepted, writing_request_id: saved.request_id, attempt_id: saved.attempt_id }
+        return { accepted, execution_status: accepted ? 'started' : 'failed', completed: false,
+          writing_request_id: saved.request_id, attempt_id: saved.attempt_id }
       }
       const recoveryKey = `${String(session.id)}:${request.run_id}`
       const existing = this.recoveryAcceptances.get(recoveryKey)
@@ -3451,11 +3453,11 @@ export class BidHostRuntime extends TypertRemoteService {
       this.cancelRunDecisions(session)
       const resumed = session.events.findLast(event => event.type === 'bid.project.resumed')
       if (resumed?.type !== 'bid.project.resumed') throw new Error('BID_RUN_RESUME_REVISION_MISSING')
-      const accepted = Promise.withResolvers<{ accepted: true; run_id: string }>()
+      const accepted = Promise.withResolvers<{ accepted: true; execution_status: 'started'; completed: false; run_id: string }>()
       this.recoveryAcceptances.set(recoveryKey, accepted.promise)
       const task = this.ctx.agents.withoutInitiator(() => this.resumeCurrentRun(
         session, request.run_id, resumed.data.revision,
-        (run) => { accepted.resolve({ accepted: true, run_id: run.runId }) },
+        (run) => { accepted.resolve({ accepted: true, execution_status: 'started', completed: false, run_id: run.runId }) },
         { instruction: request.instruction },
       ))
       this.recoveryTasks.add(task)
@@ -5310,7 +5312,9 @@ export class BidHostRuntime extends TypertRemoteService {
    * @param task 已解析的能力计划。
    * @returns 接纳、排队或正式发布状态。
    */
-  private async runCapabilityTaskFromTool(agent: Agent, task: BidCapabilityTask): Promise<unknown> {
+  private async runCapabilityTaskFromTool(
+    agent: Agent, task: BidCapabilityTask, supersede?: CapabilitySupersede,
+  ): Promise<unknown> {
     validateCapabilityTaskContentFollowup(task)
     const session = agent.session
     assertBidMainSession(session)
@@ -5323,32 +5327,38 @@ export class BidHostRuntime extends TypertRemoteService {
     const active = this.inFlight.get(key)
     const currentRun = active?.runs.current
     if (active !== undefined && currentRun !== undefined) {
+      if (supersede !== undefined) throw new Error('BID_CAPABILITY_SUPERSEDE_NOT_SUSPENDED')
       const queued = await enqueueCapabilityRequest(active.workspace, currentRun, task, authorization)
-      return { accepted: true, queued: true, ...queued,
+      return { accepted: true, queued: true, execution_status: 'queued', completed: false, ...queued,
         message: '能力任务已在当前 Work 命令日志登记；当前 Run 收敛后按顺序执行。' }
     }
     if (active !== undefined) await active.done
     const executionTask = exportStep === null ? task : { ...task, steps: task.steps.slice(0, -1) }
+    if (supersede !== undefined && executionTask.steps.length === 0) {
+      throw new Error('BID_CAPABILITY_SUPERSEDE_REQUIRES_WORK')
+    }
     const inputs = BID_CAPABILITIES[first.call.capability].requires
     const state = executionTask.steps.length === 0 ? bidSessionTaskState(session)
-      : await this.runCapabilityTask(agent, executionTask, authorization, inputs)
+      : await this.runCapabilityTask(agent, executionTask, authorization, inputs, undefined, supersede)
     if (state.status === 'failed' || state.status === 'suspended') {
-      return { accepted: true, queued: false, state }
+      return { accepted: true, queued: false, execution_status: state.status, completed: false, state }
     }
     const exported = exportStep === null ? null : await this.exportDocxWithIdentity(session,
       exportStep.input.template_id as DocxTemplateId | null,
       this.capabilityExportIdentity(authorization, exportStep.input.template_id))
     if (exported !== null && !exported.ok) throw new Error(exported.error.message)
     const canonical = new BidWorkspace(key, workspaceConfig(this.config))
-    if (executionTask.steps.length === 0) return { accepted: true, queued: false, state,
+    if (executionTask.steps.length === 0) return { accepted: true, queued: false,
+      execution_status: 'completed', completed: true, state,
       export_path: exported?.ok ? exported.value.path : null }
     const work = await findCapabilityTaskRequest(canonical, authorization)
     if (work === null) throw new Error('BID_CAPABILITY_TASK_REQUEST_MISSING')
     const receipt = await readCapabilityPublicationReceipt(canonical, work.workId, work.requestSha256)
-    return { accepted: true, queued: false, work_id: work.workId, state,
-      result_ref: receipt === null ? null : `requests/${work.workId}/result.json`,
-      changed_artifacts: receipt?.files.map(file => file.path) ?? [],
-      removed_artifacts: receipt?.removed_paths ?? [],
+    if (receipt === null) throw new Error('BID_CAPABILITY_COMPLETED_RECEIPT_MISSING')
+    return { accepted: true, queued: false, execution_status: 'completed', completed: true,
+      work_id: work.workId, state, result_ref: `requests/${work.workId}/result.json`,
+      changed_artifacts: receipt.files.map(file => file.path),
+      removed_artifacts: receipt.removed_paths,
       export_path: exported?.ok ? exported.value.path : null }
   }
 
@@ -5466,12 +5476,14 @@ export class BidHostRuntime extends TypertRemoteService {
    * @param authorization 用户消息身份。
    * @param inputPaths 本次任务读取的正式输入文件。
    * @param onAdmitted Run 落盘后调用的可选接纳回调。
+   * @param supersede 精确接管当前挂起能力任务的 Run 身份与项目修订号。
    * @returns Run 结算后的项目状态。
    */
   async runCapabilityTask(
     agent: Agent, task: BidCapabilityTask,
     authorization: CapabilityTaskRequest['authorization'], inputPaths: readonly string[],
     onAdmitted?: (run: BidRunContext) => Promise<void>,
+    supersede?: CapabilitySupersede,
   ): Promise<BidTaskState> {
     const session = agent.session
     assertBidMainSession(session)
@@ -5482,12 +5494,36 @@ export class BidHostRuntime extends TypertRemoteService {
     let admitted = false
     try {
       const current = await this.prepareOperation(operation)
-      if (current.status !== 'ready' && current.status !== 'waiting_user' && current.status !== 'completed') {
-        throw new Error('BID_CAPABILITY_TASK_STATE_NOT_READY')
+      let returnState: CapabilityTaskRequest['return_state']
+      if (supersede === undefined) {
+        if (current.status !== 'ready' && current.status !== 'waiting_user' && current.status !== 'completed') {
+          throw new Error('BID_CAPABILITY_TASK_STATE_NOT_READY')
+        }
+        returnState = current
+      } else {
+        if (current.status !== 'suspended' || current.run.work.kind !== 'capability_task'
+          || current.run.cause === 'awaiting_input') throw new Error('BID_CAPABILITY_SUPERSEDE_NOT_ALLOWED')
+        if (current.run.runId !== supersede.run_id
+          || operation.projectRevision !== supersede.expected_project_revision) {
+          throw new Error('BID_CAPABILITY_SUPERSEDE_STALE')
+        }
+        const authorized = resolveBidToolAuthorization(agent)
+        const message = session.events.findLast(event => event.type === 'user/message'
+          && String(event.data.id) === authorization.message_id)
+        if (authorized?.session_id !== authorization.session_id
+          || authorized.message_id !== authorization.message_id
+          || message?.type !== 'user/message' || message.data.source.kind !== 'user') {
+          throw new Error('BID_CAPABILITY_USER_MESSAGE_REQUIRED')
+        }
+        const previous = capabilityTaskRequestSchema.parse(await readBidWorkRequest(operation.workspace, current.run.work))
+        if (authorization.message_id === previous.authorization.message_id) {
+          throw new Error('BID_CAPABILITY_USER_MESSAGE_REQUIRED')
+        }
+        returnState = previous.return_state
       }
       const selected = bidCapabilityTaskSchema.parse(task)
       const work = await persistCapabilityTaskRequest(operation.workspace, session, current.stage, selected,
-        authorization, inputPaths, current, agent)
+        authorization, inputPaths, returnState, agent)
       const request = capabilityTaskRequestSchema.parse(await readBidWorkRequest(operation.workspace, work))
       if (session.events.some(event => event.type === 'bid.run.completed'
         && event.data.run.work.workId === work.workId)) {
@@ -5497,8 +5533,24 @@ export class BidHostRuntime extends TypertRemoteService {
         return current
       }
       const execution = await this.executionAgent(operation, current.stage)
-      const run = await operation.runs.start(work)
+      let run: BidRunContext
+      try { run = await operation.runs.start(work) } catch (error) {
+        if (supersede !== undefined && bidSessionTaskState(session).status !== 'suspended') {
+          session.append('bid.task.changed', { state: current })
+          await this.ctx.sessions.flush(session)
+        }
+        throw error
+      }
       admitted = true
+      if (supersede !== undefined && current.status === 'suspended') {
+        this.cancelRunDecisions(session)
+        session.append('bid.run.notice', {
+          noticeId: `run:${current.run.runId}:superseded`, supersedesTurn: null,
+          runId: current.run.runId, stage: current.stage, kind: 'stopped', severity: 'info',
+          message: '旧能力任务已由新的用户任务替代；旧候选和 checkpoint 已保留，不再自动恢复。',
+        })
+        await this.ctx.sessions.flush(session)
+      }
       if (onAdmitted !== undefined) await onAdmitted(run)
       return await this.executeAdmittedCapabilityTask(execution, operation, run, request)
     } finally {

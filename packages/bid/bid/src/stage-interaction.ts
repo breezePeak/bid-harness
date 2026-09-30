@@ -47,6 +47,19 @@ const identity = { expected_revision: z.number().int().positive(), expected_draf
 const scope = z.array(z.string().min(1)).min(1)
 const recoveryInstruction = z.string().trim().min(1).max(4000)
 const recoveryTool = 'bid_recover_task'
+const projectInspectParams = z.object({ query: bidProjectInspectSchema }).strict()
+const supersedeSchema = z.object({
+  run_id: z.string().min(1), expected_project_revision: z.number().int().nonnegative(),
+}).strict()
+const runTaskParams = z.object({ task: bidCapabilityTaskSchema, supersede: supersedeSchema.optional() }).strict()
+const planTaskParams = z.object({ work_id: z.string().min(1), from_index: z.number().int().nonnegative(),
+  steps: z.array(bidCapabilityStepSchema) }).strict()
+const resumeRunParams = z.object({ run_id: z.string().min(1),
+  expected_project_revision: z.number().int().nonnegative() }).strict()
+const recoverRunParams = z.object({ target: z.literal('run'), run_id: z.string().min(1), instruction: recoveryInstruction }).strict()
+const recoverWritingPlanParams = z.object({ target: z.literal('writing_plan'), writing_request_id: z.string().min(1),
+  attempt_id: z.string().min(1), instruction: recoveryInstruction }).strict()
+const recoverTaskParams = z.union([recoverRunParams, recoverWritingPlanParams])
 const recoveryArtifactPaths = new Set([
   'analysis/project.json', 'analysis/scoring.json', 'analysis/scoring-origin.json',
   'analysis/tender-analysis-selection.json', 'analysis/scoring-response-points.candidate.json',
@@ -57,18 +70,17 @@ const recoveryArtifactPaths = new Set([
 
 /** 在工具执行入口重新验证阶段操作参数，CAS 必须来自最近一次 inspect。 */
 export const stageInteractionSchema = z.union([
-  z.object({ action: z.literal('bid_project_inspect'), query: bidProjectInspectSchema }).strict(),
-  z.object({ action: z.literal('bid_run_task'), task: bidCapabilityTaskSchema }).strict(),
-  z.object({ action: z.literal('bid_plan_task'), work_id: z.string().min(1),
-    from_index: z.number().int().nonnegative(), steps: z.array(bidCapabilityStepSchema) }).strict(),
+  projectInspectParams.extend({ action: z.literal('bid_project_inspect') }),
+  runTaskParams.extend({ action: z.literal('bid_run_task') }),
+  planTaskParams.extend({ action: z.literal('bid_plan_task') }),
   z.object({
     action: z.literal('bid_stage_inspect'),
     view: z.enum(['summary', 'task_contract_context', 'recovery']).optional(),
     reference: chapterRevisionReferenceSchema.optional(),
   }).strict(),
-  z.object({ action: z.literal('bid_recover_task'), target: z.literal('run'), run_id: z.string().min(1), instruction: recoveryInstruction }).strict(),
-  z.object({ action: z.literal('bid_recover_task'), target: z.literal('writing_plan'), writing_request_id: z.string().min(1), attempt_id: z.string().min(1), instruction: recoveryInstruction }).strict(),
-  z.object({ action: z.literal('bid_resume_current_run'), run_id: z.string().min(1), expected_project_revision: z.number().int().nonnegative() }).strict(),
+  recoverRunParams.extend({ action: z.literal('bid_recover_task') }),
+  recoverWritingPlanParams.extend({ action: z.literal('bid_recover_task') }),
+  resumeRunParams.extend({ action: z.literal('bid_resume_current_run') }),
   z.object({ action: z.literal('bid_pause_stage') }).strict(),
   z.object({ action: z.literal('bid_resume_stage') }).strict(),
   z.object({ action: z.literal('bid_set_flowchart_visual_review'), policy: z.enum(['required', 'skip']) }).strict(),
@@ -587,7 +599,8 @@ function renderIdleStageInteractionPrompt(
   return [
     `当前 Bid 阶段：${stage}；当前状态：${status}。`,
     '先调用 bid_stage_inspect(view=summary) 获取权威状态。普通聊天只负责查询、解释和理解用户意图，不得直接 read/write Artifact。',
-    '普通问答不启动写操作；用户明确授权的局部修改可调用 bid_run_task，不能把该任务当作原生阶段确认。',
+    status === 'ready' ? '普通问答不启动写操作；用户明确授权的局部修改可调用 bid_run_task，不能把该任务当作原生阶段确认。'
+      : '当前失败状态不接纳新的 bid_run_task；读取诊断并使用当前可用的恢复入口。',
     '若用户询问为什么没开始或现在能不能继续，应解释当前 Host 状态和正式入口。',
     status === 'ready'
       ? '阶段已经准备好；Host 将自动驱动，不把普通聊天当作启动命令。'
@@ -603,9 +616,15 @@ function renderSuspendedRunPrompt(
     `当前 Bid 阶段：${stage}；Run 已挂起；suspended_run_id=${runId}；expected_project_revision=${String(revision)}。`,
     reason === undefined ? undefined : `中断原因：${reason}`,
     '先按用户完整语义判断：继续未完成任务、带新约束继续、修改当前阶段，或只进行问答。不得通过“继续”等关键词硬编码意图。',
-    interrupted
-      ? '用户明确要求继续时调用 bid_resume_current_run，传入当前 Run ID 和项目 revision；内部可修复失败由主 Agent inspect 后调用 bid_recover_task，普通询问保持只读。'
-      : '挂起 Run 的继续、当前阶段重跑或停止由 Host 通过 DSH 原生用户提问处理；普通消息不视为这些决策的答案。',
+    cause === 'awaiting_input'
+      ? '等待输入须通过原生用户问题回答；普通聊天消息不能接管或放弃该问题。'
+      : workKind === 'capability_task'
+        ? cause === 'user_stop'
+          ? '原 Work 的继续、重跑或停止仍由原生用户问题处理。用户明确提出新目标时，先用 bid_project_inspect(object=task) 核对旧目标和步骤，再用带旧 Run ID 与项目 revision 的 bid_run_task.supersede 创建新 Work；不要先恢复旧 Work 来解锁项目。'
+          : '继续同一目标时先用 bid_project_inspect(object=task) 核对原目标和步骤，必要时 bid_plan_task 重规划，再 bid_recover_task；只继续被打断的原 Work 时用 bid_resume_current_run。用户明确提出新目标时，读取旧 Run ID 和项目 revision，用带 supersede 的 bid_run_task 创建新 Work；不要先恢复旧 Work 来解锁项目。'
+        : interrupted
+          ? '用户明确要求继续时调用 bid_resume_current_run，传入当前 Run ID 和项目 revision；内部可修复失败由主 Agent inspect 后调用 bid_recover_task，普通询问保持只读。'
+          : '挂起 Run 的继续、当前阶段重跑或停止由 Host 通过 DSH 原生用户提问处理；普通消息不视为这些决策的答案。',
     stage === 'chapter_writing' && workKind === 'stage_execution'
       ? interrupted
         ? '用户同时提出执行策略变化（如“继续，不用视觉检查”）时，先调用 bid_set_flowchart_visual_review 保存策略，再调用 bid_resume_current_run。不得只口头回复“已记录”。'
@@ -631,7 +650,7 @@ function renderCurrentRunProgress(run: BidRunData | null): string | undefined {
 }
 
 const CAPABILITY_TASK_GUIDANCE = [
-  '项目阶段只表示默认整本路线的进度。明确修改时可先用 bid_project_inspect 读取当前事实，再用 bid_run_task 提交目标、根范围和有序能力步骤；普通讨论与解释只读。每个步骤必须填写 description，明确本次处理的对象、动作和预期结果，不只写“优化目录”等能力名称；步骤按真实依赖选择，不为凑步骤重复研究。',
+  '项目阶段只表示默认整本路线的进度。当前状态允许新任务且用户明确修改时，先用 bid_project_inspect 读取事实，再用 bid_run_task 提交目标、根范围和有序能力步骤；普通讨论与解释只读。每个步骤必须填写 description，明确本次处理的对象、动作和预期结果，不只写“优化目录”等能力名称；步骤按真实依赖选择，不为凑步骤重复研究。',
   '根据用户目标、当前成果和能力的实际修改范围选择步骤，不按当前阶段或用户用词固定选路。tender.update 更正招标理解；outline.generate 首次生成目录；outline.update 编辑已有目录的层级、职责及跨分支结构；outline.refine 研究并深化各章节子树，不能调整顶层或跨分支移动；evidence.research 补充或替换资料映射；chapter.reorganize 分配旧正文；writing.plan 更新写作要求；chapter.write/revise/review 处理正文。',
   '规划前确认每项修改都由有权执行的能力承担，再按产物依赖安排后续步骤。已有资料或正文可复用时不重复生成。能力任务完成后读取实际结果，逐项核对用户目标；工具成功、资料覆盖或工作项完成不等于用户要求全部实现。',
   'bid_plan_task 替换未完成步骤时，同步给出每个新步骤的 description，使说明与实际能力、业务输入和范围一致。保留已完成步骤的说明与结果，不用执行状态或承诺完成的空话代替具体计划。',
@@ -641,9 +660,10 @@ const CAPABILITY_TASK_GUIDANCE = [
   'outline.update.defer_content_migration=true 只把原文迁移延后到同一任务的 chapter.reorganize，之后必须安排 chapter.write 或 chapter.review；仅用户明确只改目录或暂缓正文时才设置 task.allow_pending_content=true。不得自行把正文留给用户下一次催促。',
   'outline.update 新增或拆分章节的 ID 由工具生成；未提供 business_bindings 时，工具按新章节职责分配真实业务引用。不要猜新 ID。拆分后 chapter.reorganize 使用 task 范围并提供原 source_section_ids，后续复核可使用 previous_targets；保留原文不等于重新写作。',
   '目录研究已经完成且资料映射可用时，不要再追加重复的 evidence.research。深化后需继续处理旧正文时，在同一授权任务安排原文迁移及写作或审核。只修改选中的一句仍用段落级 chapter.revise，不扩成目录研究或整章重写。',
+  '评分响应点是章节必须回答的要求，不等于目录标题。不得机械地把每个响应点、评分项第一条或 must_answer 文本提升为章节标题；按技术方案结构、用户框架和评分覆盖组织目录，把响应点绑定到合适的可写叶节。只有响应点确实构成独立方案主题时才作为标题。',
   '资料结果区分已核验的招标、本地或 Web 依据，本次拟采用且保留条件的方案设计，以及待补的企业事实或承诺。研究有 gap 时说明“已完成研究并标明缺口”；正文候选未完整通过时说明“候选已保留，仍需补充或修复”。不要把资料条数、计划或 metadata 当成正文已经通过的证明。',
   '任务根范围用 project、实际 section_ids 或带原文哈希的 paragraphs；步骤可继承根范围，也可引用前一步真实 target_section_ids。不要从“全部”“流程”等字词机械扩大范围。',
-  '初次整本确认仍由原生确认入口完成；局部任务只凭本次真实用户消息授权。工具返回的接受、执行和发布状态以 Host 结果为准。',
+  '初次整本确认仍由原生确认入口完成；局部任务只凭本次真实用户消息授权。同一 Work 的恢复保留原目标与根范围，新用户目标必须创建新 Work。accepted 只表示 Host 接纳；queued、started、suspended、failed 不表示完成。只有 execution_status=completed 且需发布的结果已有正式凭据时，才可向用户说已完成、已修改或已修复。',
 ].join('\n')
 
 /**
@@ -689,9 +709,16 @@ export function installStageInteractionTools(
             : stage === 'tender_analysis' ? BID_INTERACTION_TOOL_NAMES.slice(0, 1)
               : stage === 'outline_generation' ? BID_INTERACTION_TOOL_NAMES.slice(0, 3)
                 : stage === 'evidence_mapping' ? BID_INTERACTION_TOOL_NAMES.slice(0, 4) : [BID_INTERACTION_TOOL_NAMES[0], BID_INTERACTION_TOOL_NAMES[4]]
-      const installed = [...new Set([...available, 'bid_project_inspect', 'bid_run_task', 'bid_plan_task',
-        'bid_outline_apply_operations', 'bid_outline_regenerate_scope', 'bid_evidence_remap',
-        'bid_confirm_writing_plan', 'bid_revise_chapter', ...(chatResume ? ['bid_resume_current_run'] : []),
+      const installed = [...new Set([...available, 'bid_project_inspect',
+        ...task.status === 'failed' || task.status === 'suspended'
+          && (suspended?.work.kind !== 'capability_task' || suspended.cause === 'awaiting_input')
+          ? [] : ['bid_run_task'],
+        ...task.status === 'suspended' && suspended?.work.kind === 'capability_task'
+          && suspended.cause !== 'awaiting_input' ? ['bid_plan_task'] : [],
+        ...task.status === 'failed' || task.status === 'suspended' ? [] : [
+          'bid_outline_apply_operations', 'bid_outline_regenerate_scope', 'bid_evidence_remap',
+          'bid_confirm_writing_plan', 'bid_revise_chapter',
+        ], ...(chatResume ? ['bid_resume_current_run'] : []),
         ...(recoveryAvailable ? [recoveryTool] : [])])]
       const disposers: Array<() => void> = []
       const text: JsonSchemaNode = { type: 'string' }
@@ -704,7 +731,13 @@ export function installStageInteractionTools(
             || name === 'bid_revise_chapter' || name === 'bid_plan_revision_batch' || name === 'bid_execute_revision_batch' || name === 'bid_pause_stage' || name === 'bid_resume_stage' || name === 'bid_set_flowchart_visual_review' || name === recoveryTool
             ? {} : { ...cas }
           const required = Object.keys(properties)
-          let parameters: JsonSchemaNode | undefined
+          const inputSchema = { io: 'input' } as const
+          let parameters: JsonSchemaNode | undefined = name === 'bid_project_inspect'
+            ? zodJsonSchema(projectInspectParams, inputSchema) as JsonSchemaNode
+            : name === 'bid_run_task' ? zodJsonSchema(runTaskParams, inputSchema) as JsonSchemaNode
+              : name === 'bid_plan_task' ? zodJsonSchema(planTaskParams, inputSchema) as JsonSchemaNode
+                : name === 'bid_resume_current_run' ? zodJsonSchema(resumeRunParams, inputSchema) as JsonSchemaNode
+                  : name === recoveryTool ? zodJsonSchema(recoverTaskParams, inputSchema) as JsonSchemaNode : undefined
           const chapterReference: JsonSchemaNode = { oneOf: [{
             type: 'object', properties: { section_id: text, content_sha256: text, scope: { type: 'string', enum: ['chapter'] } },
             required: ['section_id', 'content_sha256', 'scope'], additionalProperties: false,
@@ -716,41 +749,6 @@ export function installStageInteractionTools(
           if (name === 'bid_stage_inspect') {
             properties.view = { type: 'string', enum: ['summary', 'task_contract_context', 'recovery'] }
             properties.reference = chapterReference
-          }
-          if (name === 'bid_project_inspect') {
-            properties.query = { type: 'object', properties: {
-              object: { type: 'string', enum: ['tender', 'outline', 'evidence', 'writing_plan', 'chapters', 'execution', 'task', 'recovery'] },
-              part: { type: 'string', enum: ['project', 'requirements', 'scoring', 'scoring_origin', 'selection', 'compliance', 'impact'] },
-              source: { type: 'string', enum: ['committed', 'candidate'] },
-              section_ids: strings, page: { type: 'integer' }, page_size: { type: 'integer' },
-              offset: { type: 'integer' }, max_chars: { type: 'integer' },
-            }, required: ['object'], additionalProperties: false }
-            required.push('query')
-          }
-          if (name === 'bid_run_task') {
-            properties.task = zodJsonSchema(bidCapabilityTaskSchema)
-            required.push('task')
-          }
-          if (name === 'bid_plan_task') {
-            properties.work_id = text
-            properties.from_index = { type: 'integer' }
-            properties.steps = { type: 'array', items: zodJsonSchema(bidCapabilityStepSchema) }
-            required.push('work_id', 'from_index', 'steps')
-          }
-          if (name === 'bid_resume_current_run') {
-            properties.run_id = text
-            properties.expected_project_revision = { type: 'integer' }
-            required.push('run_id', 'expected_project_revision')
-          }
-          if (name === recoveryTool) {
-            parameters = { oneOf: [{ type: 'object', properties: {
-              target: { type: 'string', enum: ['run'] }, run_id: text, instruction: { type: 'string', description: '非空，最多 4000 字符。' },
-            }, required: ['target', 'run_id', 'instruction'], additionalProperties: false }, {
-              type: 'object', properties: {
-                target: { type: 'string', enum: ['writing_plan'] }, writing_request_id: text, attempt_id: text,
-                instruction: { type: 'string', description: '非空，最多 4000 字符。' },
-              }, required: ['target', 'writing_request_id', 'attempt_id', 'instruction'], additionalProperties: false,
-            }] }
           }
           if (name === 'bid_set_flowchart_visual_review') {
             properties.policy = { type: 'string', enum: ['required', 'skip'] }
