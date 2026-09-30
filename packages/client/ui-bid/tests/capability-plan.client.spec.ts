@@ -7,11 +7,11 @@ it('按能力 Work 检查点显示真实步骤，不把等待输入和失败显�
   const plan: BidCapabilityPlanView = {
     workId: 'work', title: '拆分第三章并补写', scope: 'chapter-3', status: 'awaiting_input',
     steps: [
-      { id: '1', capability: 'outline.update', status: 'completed', detail: null },
-      { id: '2', capability: 'chapter.reorganize', status: 'completed', detail: null },
-      { id: '3', capability: 'evidence.research', status: 'awaiting_input', detail: '缺少来源' },
-      { id: '4', capability: 'chapter.write', status: 'pending', detail: null },
-      { id: '5', capability: 'chapter.review', status: 'pending', detail: null },
+      { id: '1', capability: 'outline.update', description: '修改目录', status: 'completed', detail: null },
+      { id: '2', capability: 'chapter.reorganize', description: '迁移章节原文', status: 'completed', detail: null },
+      { id: '3', capability: 'evidence.research', description: '补充资料研究', status: 'awaiting_input', detail: '缺少来源' },
+      { id: '4', capability: 'chapter.write', description: '编写章节', status: 'pending', detail: null },
+      { id: '5', capability: 'chapter.review', description: '审核章节', status: 'pending', detail: null },
     ],
   }
   const items = buildCapabilityTaskPlan(plan, key => zh[key])
