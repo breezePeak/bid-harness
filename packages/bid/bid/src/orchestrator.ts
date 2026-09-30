@@ -459,6 +459,10 @@ export class BidOrchestrator {
         ? safeBidRunError(error) : safeRecoverableBidFailure(work, error))
       return 'failed'
     }
+    if (this.runs.suspending) {
+      const settled = await this.runs.suspend('executor_error')
+      return settled?.cause === 'user_stop' ? 'aborted' : 'failed'
+    }
     if (signalAborted(run.signal)) { await this.runs.suspend('user_stop'); return 'aborted' }
     const validation = await this.validate(stage, artifacts, run)
     if (signalAborted(run.signal)) { await this.runs.suspend('user_stop'); return 'aborted' }
