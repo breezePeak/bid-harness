@@ -59,7 +59,8 @@ try {
   })
   await main.whenIdle()
   const notices = main.session.events.filter(event => event.type === 'user/message'
-    && event.data.source.kind === 'plugin' && event.data.source.summary === 'Bid 后台提问交由主 Agent 处理')
+    && event.data.source.kind === 'plugin' && event.data.source.form === 'notice'
+    && event.data.source.summary === 'Bid 后台提问交由主 Agent 处理')
   process.stdout.write(`${JSON.stringify({
     denied: result.isError && JSON.stringify(result).includes('BID_EXECUTION_QUESTION_REQUIRES_MAIN_AGENT'),
     providerCalls,

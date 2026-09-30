@@ -733,11 +733,11 @@ export function installStageInteractionTools(
           const required = Object.keys(properties)
           const inputSchema = { io: 'input' } as const
           let parameters: JsonSchemaNode | undefined = name === 'bid_project_inspect'
-            ? zodJsonSchema(projectInspectParams, inputSchema) as JsonSchemaNode
-            : name === 'bid_run_task' ? zodJsonSchema(runTaskParams, inputSchema) as JsonSchemaNode
-              : name === 'bid_plan_task' ? zodJsonSchema(planTaskParams, inputSchema) as JsonSchemaNode
-                : name === 'bid_resume_current_run' ? zodJsonSchema(resumeRunParams, inputSchema) as JsonSchemaNode
-                  : name === recoveryTool ? zodJsonSchema(recoverTaskParams, inputSchema) as JsonSchemaNode : undefined
+            ? zodJsonSchema(projectInspectParams, inputSchema)
+            : name === 'bid_run_task' ? zodJsonSchema(runTaskParams, inputSchema)
+              : name === 'bid_plan_task' ? zodJsonSchema(planTaskParams, inputSchema)
+                : name === 'bid_resume_current_run' ? zodJsonSchema(resumeRunParams, inputSchema)
+                  : name === recoveryTool ? zodJsonSchema(recoverTaskParams, inputSchema) : undefined
           const chapterReference: JsonSchemaNode = { oneOf: [{
             type: 'object', properties: { section_id: text, content_sha256: text, scope: { type: 'string', enum: ['chapter'] } },
             required: ['section_id', 'content_sha256', 'scope'], additionalProperties: false,

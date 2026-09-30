@@ -15,7 +15,7 @@ import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import SubagentRuntime from '@deepseek-ai/dsh-subagent'
 import * as spawn from '@deepseek-ai/dsh-subagent-spawn-in-process'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
-import ToolRuntime, { validateJsonSchemaValue, type JsonSchemaNode, type ToolDefinition } from '@deepseek-ai/dsh-tools'
+import ToolRuntime, { validateJsonSchemaValue, type ToolDefinition } from '@deepseek-ai/dsh-tools'
 import UserQuestionService from '@deepseek-ai/dsh-user-questions'
 import type { AskUserQuestionAnswer, AskUserQuestionItem } from '@deepseek-ai/dsh-user-questions/types'
 import {
@@ -51,6 +51,7 @@ import {
 import { persistBidWorkRequest, readBidWorkRequest } from '../src/work-descriptor.ts'
 import type { CapabilityTaskDispatcher } from '../src/bid-capability-task.ts'
 import { capabilityTaskRequestSchema, executeCapabilityTask, persistCapabilityTaskRequest } from '../src/bid-capability-task.ts'
+import { bidCapabilityTaskSchema } from '../src/bid-capability-contract.ts'
 import { createTestBidRunContext } from '../src/run-coordinator.ts'
 import { validateOutlineDraftForConfirmation } from '../src/outline-confirmation-validator.ts'
 import { validateOutlineSharedCoverage, validateOutlineSharedStructure } from '../src/outline-shared-validator.ts'
@@ -790,7 +791,7 @@ describe('Workspace 项目与独立 Session', () => {
     const agent = await fresh('inspect-tool-schema')
     const schema = ctx.tools.schemas(agent).find(tool => tool.name === 'bid_project_inspect')?.parameters
     if (schema === undefined) throw new Error('缺少项目检查工具')
-    const errors = (query: object) => validateJsonSchemaValue(schema as JsonSchemaNode, { query })
+    const errors = (query: object) => validateJsonSchemaValue(schema, { query })
     expect(errors({ object: 'task' }), JSON.stringify(schema)).toEqual([])
     expect(errors({ object: 'task', page: 1 })).not.toEqual([])
     expect(errors({ object: 'tender', part: 'scoring' })).toEqual([])
@@ -814,13 +815,13 @@ describe('Workspace 项目与独立 Session', () => {
     agent.session.append('turn/start', { turn: 1 })
     agent.session.append('user/message', oldMessage, { surfaceOp: 'append' })
     const oldAuthorization = { session_id: String(agent.session.id), message_id: String(oldMessage.id) }
-    const oldWork = await persistCapabilityTaskRequest(workspace, agent.session, 'evidence_mapping', {
+    const oldWork = await persistCapabilityTaskRequest(workspace, agent.session, 'evidence_mapping', bidCapabilityTaskSchema.parse({
       goal: '完成 S4 资料映射', scope: { kind: 'project' }, steps: [{
         description: '核对旧资料映射', scope: { source: 'task' },
-        call: { capability: 'outline.update', input: { operations: [{ type: 'update_section', section_id: 'SEC-2',
+        call: { capability: 'outline.update' as const, input: { operations: [{ type: 'update_section', section_id: 'SEC-2',
           purpose: '旧任务候选' }] } },
       }],
-    }, oldAuthorization, ['outline/outline.json', 'analysis/requirements.json', 'analysis/scoring.json',
+    }), oldAuthorization, ['outline/outline.json', 'analysis/requirements.json', 'analysis/scoring.json',
       'analysis/compliance.json', 'analysis/scoring-response-points.json'],
     { stage: 'evidence_mapping', status: 'completed', run: null }, agent)
     const oldRequest = await readBidWorkRequest(workspace, oldWork)
@@ -1011,6 +1012,9 @@ describe('Workspace 项目与独立 Session', () => {
       work, startedAt: Date.now(), updatedAt: Date.now() }
     await checkpointStoredBidProjectState(workspace, { stage: 'chapter_writing', status: 'suspended',
       run: { ...suspended, cause: 'executor_error', error: { message: '等待后续计划' } } })
+    agent.session.append('bid.run.started', { run: suspended })
+    agent.session.append('bid.run.suspended', { run: { ...suspended, cause: 'executor_error',
+      error: { message: '等待后续计划' } } })
     const correction = createUserMessage({ content: [{ type: 'text', text: '整书审核只检查一致性' }], source: { kind: 'user' } })
     agent.session.append('turn/start', { turn: 1 })
     agent.session.append('user/message', correction, { surfaceOp: 'append' })
@@ -1018,7 +1022,7 @@ describe('Workspace 项目与独立 Session', () => {
       work_id: work.workId, from_index: 1, steps: [{ description: '只检查一致性', scope: { source: 'task' },
         call: { capability: 'document.review', input: { reason: '只检查一致性' } } }],
     }, callId: CallId('patch-capability-plan'), signal: new AbortController().signal })
-    expect(patched).toMatchObject({ isError: false, value: { accepted: true, steps: 2 } })
+    expect(patched, JSON.stringify(patched)).toMatchObject({ isError: false, value: { accepted: true, steps: 2 } })
     const checkpoint = JSON.parse(await readFile(join(workspace.projectRoot, 'runs', work.workId,
       'task-checkpoint.json'), 'utf8')) as { steps: Array<{ status: string; step: { call: { input: { reason: string } } } }> }
     expect(checkpoint.steps.map(step => step.status)).toEqual(['completed', 'pending'])
@@ -2424,7 +2428,8 @@ describe('Workspace 项目与独立 Session', () => {
       expect(ask).not.toHaveBeenCalled()
       await vi.waitFor(() => {
         expect(agent.session.events.filter(event => event.type === 'user/message'
-          && event.data.source.kind === 'plugin' && event.data.source.summary === 'Bid 后台提问交由主 Agent 处理')).toHaveLength(1)
+          && event.data.source.kind === 'plugin' && event.data.source.form === 'notice'
+          && event.data.source.summary === 'Bid 后台提问交由主 Agent 处理')).toHaveLength(1)
       })
       await agent.whenIdle()
       expect(adapter.requests.filter(request => String(request.sessionId) === String(agent.id)).at(-1)?.messages)

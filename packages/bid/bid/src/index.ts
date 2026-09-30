@@ -2859,7 +2859,7 @@ export class BidHostRuntime extends TypertRemoteService {
   /** 在稳定失败落盘并释放项目锁后唤醒主 Agent，不选择业务修复方案。 */
   private steerMainAgentForFailure(session: Session, diagnostic?: string): void {
     if (!this.isContextActive() || !isBidMainSession(session) || this.inFlight.has(projectKey(session))) return
-    const agent = this.ctx.agents.get(session.id)
+    const agent = this.ctx.get('agents')?.get(session.id)
     if (agent?.session !== session) return
     const task = bidSessionTaskState(session)
     const writing = session.events.findLast(event => event.type === 'bid.writing_entry.changed')
@@ -3022,7 +3022,7 @@ export class BidHostRuntime extends TypertRemoteService {
                   'Bid 后台执行 Agent 尝试直接等待用户回答，调用已被拒绝。请由你判断是否需要向用户说明或提问；后台任务仍按原执行链收敛。',
                   `stage: ${operation.executionStage ?? 'unknown'}`,
                   `execution_session_id: ${String(execution.agent.session.id)}`,
-                  `question: ${sanitizeBidErrorText(JSON.stringify(execution.arguments) ?? 'null', 1600)}`,
+                  `question: ${sanitizeBidErrorText(JSON.stringify(execution.arguments), 1600)}`,
                 ].join('\n') }],
                 source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'notice', summary: 'Bid 后台提问交由主 Agent 处理' },
               })
