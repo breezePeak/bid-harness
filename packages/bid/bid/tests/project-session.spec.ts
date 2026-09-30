@@ -2393,6 +2393,50 @@ describe('Workspace 项目与独立 Session', () => {
     }
   })
 
+  it('后台 Execution 提问由 Main Agent 接管，不在子会话等待用户', async () => {
+    const { ctx, workspace, fresh, host, executor, executeStage, adapter } = await fixture()
+    await seedProjectArtifacts(workspace)
+    await checkpointBidProjectState(workspace, { stage: 'evidence_mapping', status: 'failed' })
+    const agent = await fresh('execution-question-main')
+    await agent.whenIdle()
+    const ask = vi.fn(async () => ({ answers: [] }))
+    ctx.tools.register({
+      name: 'ask_user_question', description: 'Ask the user',
+      parameters: { type: 'object', properties: { questions: { type: 'array', items: { type: 'object' } } }, required: ['questions'] },
+      output: { schema: {}, render: () => [{ type: 'text', text: '{}' }] },
+      execute: ask,
+    })
+    const stageGate = Promise.withResolvers<never[]>()
+    executor.canExecute = stage => stage === 'evidence_mapping'
+    executeStage.mockImplementationOnce(() => stageGate.promise)
+    const retry = resumeRun(ctx, agent.session)
+    try {
+      await vi.waitFor(() => { expect(runtime(agent.session)).toMatchObject({ stage: 'evidence_mapping', status: 'running' }) })
+      const operation = host.inFlight.values().next().value as { executionHandle?: { agent: Agent } }
+      const execution = operation.executionHandle?.agent
+      if (execution === undefined) throw new Error('测试未找到 Execution Agent')
+      adapter.script.push(answer('我会判断是否需要用户确认。'))
+      const request = { questions: [{ id: 'directory_restructure', question: '是否现在启动目录编辑任务？' }] }
+      const result = await ctx.tools.execute({ agent: execution, name: 'ask_user_question', arguments: request,
+        callId: CallId('execution-question'), signal: new AbortController().signal })
+      expect(result).toMatchObject({ isError: true })
+      expect(JSON.stringify(result)).toContain('BID_EXECUTION_QUESTION_REQUIRES_MAIN_AGENT')
+      expect(ask).not.toHaveBeenCalled()
+      await vi.waitFor(() => {
+        expect(agent.session.events.filter(event => event.type === 'user/message'
+          && event.data.source.kind === 'plugin' && event.data.source.summary === 'Bid 后台提问交由主 Agent 处理')).toHaveLength(1)
+      })
+      await agent.whenIdle()
+      expect(adapter.requests.filter(request => String(request.sessionId) === String(agent.id)).at(-1)?.messages)
+        .toEqual(expect.arrayContaining([expect.objectContaining({ content: expect.arrayContaining([
+          expect.objectContaining({ type: 'text', text: expect.stringContaining('是否现在启动目录编辑任务？') }),
+        ]) })]))
+    } finally {
+      stageGate.resolve([])
+      await retry
+    }
+  })
+
   it('S2 Execution 接收 Child 报告，挂起后 Main Agent 读取 Host 错误摘要', async () => {
     const { ctx, workspace, fresh, host, executor, executeStage, adapter } = await fixture()
     await seedProjectArtifacts(workspace)

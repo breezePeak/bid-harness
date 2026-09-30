@@ -3022,7 +3022,7 @@ export class BidHostRuntime extends TypertRemoteService {
                   'Bid 后台执行 Agent 尝试直接等待用户回答，调用已被拒绝。请由你判断是否需要向用户说明或提问；后台任务仍按原执行链收敛。',
                   `stage: ${operation.executionStage ?? 'unknown'}`,
                   `execution_session_id: ${String(execution.agent.session.id)}`,
-                  `question: ${sanitizeBidErrorText(JSON.stringify(execution.arguments), 1600)}`,
+                  `question: ${sanitizeBidErrorText(JSON.stringify(execution.arguments) ?? 'null', 1600)}`,
                 ].join('\n') }],
                 source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'notice', summary: 'Bid 后台提问交由主 Agent 处理' },
               })

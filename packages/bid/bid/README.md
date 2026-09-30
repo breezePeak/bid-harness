@@ -47,6 +47,8 @@ S6 只对流程图、表格和图片执行最终页面视觉审核；标题、�
 
 默认 S1～S6 流程不创建或绑定 Goal，模型工具目录隐藏 `create_goal`。执行器局部修复耗尽后保留挂起 Run、结构化错误及已完成检查点，主动唤醒主 Agent 分析原因；Provider、额度和凭证阻断也通知主 Agent，但不开放自动恢复。Host 在失败落盘并释放项目锁后以有界 plugin notice 调用 `steer()` 唤醒主 Agent。主 Agent 用 `bid_stage_inspect(view="recovery")` 读取真实错误、检查点和历史指令，再用 `bid_recover_task(instruction=...)` 提交具体方案；能力步骤从原检查点接收该指令，不改变原任务输入身份。S5 已保存回答的计划失败也复用该入口，不重复询问用户。Host 重启自动续行失败时保存当前 Run 诊断并通知主 Agent。Host 只负责接纳、输入与权限校验、检查点续行和正式发布；主 Agent 不能代替用户确认。用户停止仍使用原生 Run 决策，等待输入仍使用原问题。
 
+后台 Execution Agent 直接调用 `ask_user_question` 会在工具执行前被拒绝；Host 将有界的问题原文投递给主 Agent 并唤醒其判断，问题不会只挂在 Execution 子会话等待用户。主 Agent 可以根据当前阶段与 Run 状态解释、追问或等待后台任务结算；Host 不替它选择业务处理方式。
+
 只有用户显式 `/goal` 才创建 Goal。Goal Round 与普通主 Agent 使用相同的当前阶段公开工具；已有 Goal 可读取、更新或提前完成。项目有后台操作时 Busy Gate 只等待，不消耗轮数；后台释放项目后重新请求 Driver。Bid 停止、重置和 S5 完成不改变 Goal，Goal 暂停、清除或完成也不取消 Bid。Host 重启按 Bid 自身的 Run ID、project revision、输入指纹、检查点和停止状态续行，不检查或重新激活 Goal。
 
 新能力请求只接受当前用户回合或原生 Driver 已接纳的当前 live Main Agent Goal 轮次；持久化授权仍只保存 Session ID 和消息 ID。旧消息不能授权新调用，已接纳队列保留原授权继续执行。`bid.recovery.requested` 记录主 Agent 的目标、失败单元、指令和进度指纹；同一问题不接受已经用过的相同指令，Host 不生成替代方案。旧 `bid.goal.bound` 与 `bid.goal.recovery.requested` 仅保留会话读取定义，不参与运行时调度。
