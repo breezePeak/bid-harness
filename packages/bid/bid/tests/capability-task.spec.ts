@@ -7,7 +7,8 @@ import SessionStore from '@deepseek-ai/dsh-session'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { BidWorkspace, checkpointBidProjectState } from '../src/index.ts'
 import { inspectBidProject } from '../src/bid-project-inspect.ts'
-import { activeCapabilityMappingWorkspace, askCapabilityTaskInput, capabilityTaskRequestSchema, executeCapabilityTask,
+import { activeCapabilityMappingWorkspace, askCapabilityTaskInput, capabilityTaskCheckpointSchema,
+  capabilityTaskRequestSchema, executeCapabilityTask,
   findCapabilityTaskRequest, patchCapabilityTaskSteps, persistCapabilityTaskRequest,
   type CapabilityTaskDispatcher } from '../src/bid-capability-task.ts'
 import { bidCapabilityTaskSchema, type BidCapabilityCall } from '../src/bid-capability-contract.ts'
@@ -68,6 +69,21 @@ function dispatcher(failSecond = false) {
 }
 
 describe('同一 Work 的能力序列', () => {
+  it('已接纳步骤缺少展示说明时仍可读取，新的任务输入仍须提供说明', async () => {
+    const { ctx, workspace, descriptor, task } = await fixture()
+    try {
+      const request = await readBidWorkRequest(workspace, descriptor) as { task: typeof task }
+      const steps = task.steps.map(({ description: _description, ...step }) => step)
+      expect(bidCapabilityTaskSchema.safeParse({ ...task, steps }).success).toBe(false)
+      const restored = capabilityTaskRequestSchema.parse({ ...request, task: { ...task, steps } })
+      const checkpoint = capabilityTaskCheckpointSchema.parse({ schema_version: 1, work_id: descriptor.workId,
+        request_sha256: descriptor.requestSha256, plan_patches: [],
+        steps: steps.map((step, index) => ({ step_id: `step-${index}`, step, status: 'pending',
+          authorization: restored.authorization })) })
+      expect(checkpoint.steps.map(record => record.step)).toEqual(restored.task.steps)
+    } finally { await ctx.fiber.dispose() }
+  })
+
   it('主 Agent 沿用原授权替换可恢复失败步骤，保留已完成结果并继续后续能力', async () => {
     const { ctx, workspace, session, descriptor, run, agent, authorization } = await fixture()
     try {

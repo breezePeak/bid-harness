@@ -1227,7 +1227,7 @@ function splitFinalReviewTask(outline: OutlineArtifact, task: EvidenceMappingTas
   const half = weights.reduce((sum, value) => sum + value, 0) / 2
   let running = 0
   let split = 1
-  for (; split < weights.length; split++) {
+  for (; split < weights.length - 1; split++) {
     const currentWeight = weights[split - 1]
     if (currentWeight === undefined) throw new Error('evidence-mapping-final-review-weight-missing')
     running += currentWeight

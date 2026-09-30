@@ -415,6 +415,28 @@ describe('BidReviewWorkbench', () => {
     } finally { vi.useRealTimers() }
   })
 
+  it('轮询开始后仍显示用户刚选择的章节', async () => {
+    vi.useFakeTimers()
+    const second = { ...workbench.outline[1]!, section_id: 'SEC-2', order: 2, title: '质量保障' }
+    const view = { ...workbench, outline: [...workbench.outline, second] }
+    const pendingRefresh = Promise.withResolvers<typeof view>()
+    const pendingChapter = Promise.withResolvers<typeof chapter>()
+    const getWorkbench = vi.fn().mockResolvedValueOnce(view).mockReturnValueOnce(pendingRefresh.promise)
+    const getChapter = vi.fn((sectionId: string) => sectionId === 'SEC-2' ? pendingChapter.promise : Promise.resolve(chapter))
+    try {
+      render(<BidReviewWorkbench {...props({ getWorkbench, getChapter })} />)
+      await act(async () => { await Promise.resolve(); await Promise.resolve() })
+      fireEvent.click(screen.getByRole('button', { name: '1.2 质量保障' }))
+      await act(async () => { await vi.advanceTimersByTimeAsync(1000) })
+      expect(getWorkbench).toHaveBeenCalledTimes(2)
+      await act(async () => {
+        pendingChapter.resolve({ ...chapter, section_id: 'SEC-2', title: '质量保障', number: '1.2' })
+        await pendingChapter.promise
+      })
+      expect(screen.getByRole('heading', { name: '质量保障' })).toBeTruthy()
+    } finally { vi.useRealTimers() }
+  })
+
   it('默认优先叶节正文，父节点和嵌套父节点可阅读概述且刷新保留选择', async () => {
     const root = workbench.outline[0]!
     const branch = { ...root, section_id: 'BRANCH', parent_id: 'ROOT', title: '工作安排', summary: '介绍进场准备与现场实施的工作安排。' }

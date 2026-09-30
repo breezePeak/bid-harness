@@ -1125,8 +1125,8 @@ describe('BidStagePanel', () => {
     expect(screen.getByTestId('bid-capability-plan').textContent).toContain('研究各章节资料并复核评分点覆盖')
   })
 
-  it('重规划更新具体步骤并保留完成后的说明和结果', async () => {
-    const main = projection({ runtime: { stage: 'chapter_writing', status: 'completed' } })
+  it('重规划更新具体步骤，完成后从当前面板收起', async () => {
+    const main = projection({ runtime: { stage: 'chapter_writing', status: 'running' } })
     const plan: BidCapabilityPlanView = {
       workId: 'capability-work', title: '拆分目录', scope: 'project', status: 'running',
       steps: [{ id: 'update-outline', capability: 'outline.refine', description: '研究现有子树的章节安排', status: 'running', detail: null }],
@@ -1145,9 +1145,8 @@ describe('BidStagePanel', () => {
     view.rerender(<BidStagePanel {...props(main, { getCapabilityTaskPlan: async () => ({
       ...plan, status: 'completed', steps: [{ ...replacement, status: 'completed', detail: '已移动评分章节，正文及引用均保留。' }],
     }) })} />)
-    await waitFor(() => { expect(screen.getByTestId('bid-capability-plan').textContent).toContain('已移动评分章节，正文及引用均保留。') })
-    expect(screen.getByTestId('bid-capability-plan').textContent).toContain(replacement.description)
-    expect(screen.getByTestId('bid-capability-plan').querySelector('[data-active="true"]')).toBeNull()
+    await waitFor(() => { expect(screen.queryByTestId('bid-capability-plan')).toBeNull() })
+    expect(screen.getByTestId('bid-stage-plan')).toBeTruthy()
   })
 
   it.each(['queued', 'suspended', 'awaiting_input', 'failed'] as const)('%s 保留具体计划与原因，不显示运行动画', async (status) => {
@@ -1186,8 +1185,8 @@ describe('BidStagePanel', () => {
     await screen.findByText('任务计划暂时无法读取，请查看任务轨迹。')
     view.rerender(<BidStagePanel {...props(main, { getCapabilityTaskPlan: async () => ({ ...plan, status: 'completed',
       steps: [{ ...plan.steps[0]!, status: 'completed', detail: '层级已核验' }] }) })} />)
-    await screen.findByText(/层级已核验/)
-    expect(screen.queryByText('任务计划暂时无法读取，请查看任务轨迹。')).toBeNull()
+    await waitFor(() => { expect(screen.queryByText('任务计划暂时无法读取，请查看任务轨迹。')).toBeNull() })
+    expect(screen.queryByTestId('bid-capability-plan')).toBeNull()
   })
 
   it('S5 完成后只显示独立 S6 任务，S5 修改时保留两个真实计划', async () => {

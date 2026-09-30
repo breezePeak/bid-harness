@@ -35,10 +35,16 @@ import { readPendingChapterReorganization } from './outline-capability-update.ts
 const sha256Schema = z.string().regex(/^[a-f0-9]{64}$/u)
 const messageReferenceSchema = z.object({ session_id: z.string().min(1), message_id: z.string().min(1) }).strict()
 const outputFileSchema = z.object({ path: z.string().min(1), sha256: sha256Schema }).strict()
+// 步骤说明只供展示；已接纳请求缺少说明时仍须按原授权和输入摘要续行。
+const storedStepSchema = bidCapabilityStepSchema.extend({
+  description: bidCapabilityStepSchema.shape.description.default('继续执行已接纳的任务步骤'),
+})
+const storedTaskSchema = z.object({ ...bidCapabilityTaskSchema.shape, steps: z.array(storedStepSchema).min(1) })
+  .strict().transform(task => bidCapabilityTaskSchema.parse(task))
 
 /** 不可变 Work 请求，用户消息身份用于精确去重和授权。 */
 export const capabilityTaskRequestSchema = z.object({
-  task: bidCapabilityTaskSchema,
+  task: storedTaskSchema,
   authorization: messageReferenceSchema,
   input_sources: z.array(outputFileSchema),
   return_state: bidTaskStateSchema.refine(state =>
@@ -48,7 +54,7 @@ export const capabilityTaskRequestSchema = z.object({
 export type CapabilityTaskRequest = z.infer<typeof capabilityTaskRequestSchema>
 
 const pendingStepSchema = z.object({
-  step_id: z.string().min(1), step: bidCapabilityStepSchema, status: z.literal('pending'),
+  step_id: z.string().min(1), step: storedStepSchema, status: z.literal('pending'),
   authorization: messageReferenceSchema,
   answer_question_id: z.string().min(1).optional(),
 }).strict()
@@ -69,7 +75,7 @@ const stepRecordSchema = z.discriminatedUnion('status', [pendingStepSchema, runn
   completedStepSchema, awaitingStepSchema])
 const planPatchSchema = z.object({
   from_index: z.number().int().nonnegative(), authorization: messageReferenceSchema,
-  steps: z.array(bidCapabilityStepSchema),
+  steps: z.array(storedStepSchema),
 }).strict()
 
 /** 同一 Work 的步骤记录；项目总状态仍只由 BidTaskState 表达。 */
@@ -298,6 +304,7 @@ export async function persistCapabilityTaskRequest(
   authorization: CapabilityTaskRequest['authorization'], inputPaths: readonly string[],
   returnState: CapabilityTaskRequest['return_state'], agent?: Agent,
 ): Promise<BidWorkDescriptor> {
+  bidCapabilityTaskSchema.parse(task)
   const current = resolveBidToolAuthorization(agent ?? session) ?? resolveBidToolAuthorization(session)
   const matches = current?.session_id === authorization.session_id && current.message_id === authorization.message_id
   let queued = false
@@ -448,7 +455,7 @@ export async function readCapabilityTaskCheckpoint(
     expected = [...expected.slice(0, patch.from_index),
       ...patch.steps.map(step => ({ step, authorization: patch.authorization }))]
   }
-  bidCapabilityTaskSchema.parse({ ...request.task, steps: expected.map(item => item.step) })
+  storedTaskSchema.parse({ ...request.task, steps: expected.map(item => item.step) })
   if (checkpoint.steps.length !== expected.length) throw new Error('BID_CAPABILITY_CHECKPOINT_PLAN_MISMATCH')
   for (const [index, { step, authorization }] of expected.entries()) {
     const saved = checkpoint.steps[index]

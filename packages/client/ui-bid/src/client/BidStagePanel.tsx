@@ -1129,7 +1129,7 @@ export function BidStagePanel({
       } : undefined}
     />
   ) : null
-  const capabilityRunPlan = capabilityPlan !== null ? (
+  const capabilityRunPlan = capabilityPlan !== null && capabilityPlan.status !== 'completed' ? (
     <PlanListPanel
       key={capabilityPlan.workId}
       items={buildCapabilityTaskPlan(capabilityPlan, t)}
@@ -1138,7 +1138,7 @@ export function BidStagePanel({
       summary={{ label: t(`capability.status.${capabilityPlan.status}`), items: [{
         key: 'state', text: capabilitySnapshot?.stale ? t('capability.status.stale') : t(`capability.status.${capabilityPlan.status}`),
         status: capabilitySnapshot?.stale || capabilityPlan.status === 'failed' ? 'failed'
-          : capabilityPlan.status === 'completed' ? 'completed' : capabilityPlan.status === 'running' ? 'running' : 'neutral',
+          : capabilityPlan.status === 'running' ? 'running' : 'neutral',
       }] }}
       testId="bid-capability-plan"
     />

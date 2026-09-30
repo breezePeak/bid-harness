@@ -6,13 +6,13 @@ Bid Session 浏览器 UI。插件向 Conversation 声明的 `conversation.input.
 
 S4 进度读取暂不可用时保留同一工作已读到的统计；首次读取由计划表头显示同步状态，后续轮询继续重试。阶段面板不另行显示进度同步提示。
 
-能力任务计划从 Host 的 `getCapabilityTaskPlan` 读取实际步骤：主 Agent 的具体说明为主行，能力、状态及结果或阻断原因为详情，长文本自动换行。重规划同步替换未完成后缀；排队、挂起、等待输入、失败和完成后仍保留计划。读取失败时保留同会话上次结果并标明未同步、停止运行动画；首次读取失败显示不可用，切换会话不会显示原会话计划。阶段计划仍用于默认生成路线，不按阶段标签推断局部步骤，也不另存工作项清单。
+能力任务计划从 Host 的 `getCapabilityTaskPlan` 读取实际步骤：主 Agent 的具体说明为主行，能力、状态及结果或阻断原因为详情，长文本自动换行。重规划同步替换未完成后缀；排队、挂起、等待输入和失败时保留计划，完成后从当前面板收起。读取失败时保留同会话上次结果并标明未同步、停止运行动画；首次读取失败显示不可用，切换会话不会显示原会话计划。阶段计划仍用于默认生成路线，不按阶段标签推断局部步骤，也不另存工作项清单。
 
 正文与目录入口依据正式产物显示，拆章后按 `section_id` 重新定位正文。独立 Word 导出运行时显示专用计划；完成或失败事件在发起导出的会话聊天时间线生成可重放的结果，成功时显示文件绝对路径，失败时显示原因。既有事件缺少绝对路径时，显示相对项目数据目录的路径并提供导出页入口。
 
 `projection.allowedActions` controls upload, retry, outline-confirmation, and Word-export controls, while the Host-projected file limits configure the picker and its rule text. File selection keeps browser `File` objects locally until the user explicitly uploads the batch. These actions use dedicated Bid Host entry points and never call `session.prompt()`.
 
-面板把 `projection.composer.enabled` 及稳定原因码投影到同一 Session 的 `ctx.conversation.blocks`。正文工作台在 S5 运行、失败和完成后都保留章节与 Reviewer 状态；缺少企业资质、证书等项目资料的章节显示黄色状态灯且标为“待补项目资料”，正文修复问题及其他审核结果按高、中、低风险展示，不把审核未通过呈现为导出阻断。Word 按完整目录导出当前已保存正文，执行和审核状态不影响收录；缺失正文保留标题并标注，页面显示后端返回的内容范围。既有 `docx_export/completed` 项目仍保留审核、修订和导出能力。非 Bid preset 或缺失投影会清除 block 并隐藏面板，不影响普通会话的输入框和附件路径。
+面板把 `projection.composer.enabled` 及稳定原因码投影到同一 Session 的 `ctx.conversation.blocks`。正文工作台在 S5 运行、失败和完成后都保留章节与 Reviewer 状态；手动切换章节的读取不受目录状态轮询的迟到结果影响。缺少企业资质、证书等项目资料的章节显示黄色状态灯且标为“待补项目资料”，正文修复问题及其他审核结果按高、中、低风险展示，不把审核未通过呈现为导出阻断。Word 按完整目录导出当前已保存正文，执行和审核状态不影响收录；缺失正文保留标题并标注，页面显示后端返回的内容范围。既有 `docx_export/completed` 项目仍保留审核、修订和导出能力。非 Bid preset 或缺失投影会清除 block 并隐藏面板，不影响普通会话的输入框和附件路径。
 
 批量审核历史中的已完成意见可打开对应 task 的 Markdown 前后快照，固定左侧显示修改后、右侧显示修改前。顶层 Markdown block 组成共享双列行，新增或删除的缺失侧保留自然等高空单元格；两列共用正文阅读区的单一垂直滚动位置。旧记录缺少快照时只提示无法还原，章节标题仍提供普通正文定位。
 

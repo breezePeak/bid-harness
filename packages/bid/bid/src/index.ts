@@ -5632,9 +5632,10 @@ export class BidHostRuntime extends TypertRemoteService {
   ): Promise<BidTaskState> {
     const payload = await readHostWork(operation.workspace, suspended.work)
     if (suspended.work.kind === 'capability_task') {
+      const request = capabilityTaskRequestSchema.parse(payload)
       const run = await operation.runs.start(suspended.work, { runId: suspended.runId, cause: suspended.cause })
       onAccepted?.(run)
-      return this.executeAdmittedCapabilityTask(agent, operation, run, capabilityTaskRequestSchema.parse(payload))
+      return this.executeAdmittedCapabilityTask(agent, operation, run, request)
     }
     const run = await operation.runs.start(suspended.work, {
       runId: suspended.runId,

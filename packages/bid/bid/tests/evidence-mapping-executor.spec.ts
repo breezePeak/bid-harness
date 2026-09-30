@@ -1490,9 +1490,9 @@ describe('evidence-mapping Agent executor', () => {
     const material = await writeInputs(workspace)
     const outlinePath = join(workspace.projectRoot, 'outline/initial-confirmed-outline.json')
     const outline = parseOutlineArtifact(JSON.parse(await readFile(outlinePath, 'utf8')))
-    outline.sections = outline.sections.map(section => ({
+    outline.sections = outline.sections.map((section, index) => ({
       ...section,
-      purpose: `${section.purpose}${'扩大 Final Review 上下文。'.repeat(1_000)}`,
+      purpose: index === 1 ? `${section.purpose}${'扩大 Final Review 上下文。'.repeat(2_000)}` : section.purpose,
     }))
     await writeFile(outlinePath, JSON.stringify(outline))
     const fixture = mappingFixture(workspace, material, false, {}, false)

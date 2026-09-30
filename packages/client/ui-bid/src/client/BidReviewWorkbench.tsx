@@ -141,6 +141,7 @@ export function BidReviewWorkbench({
   const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(() => new Set())
   const selectedSectionId = useRef<string | null>(null)
   const requestVersion = useRef(0)
+  const chapterRequestVersion = useRef(0)
   const articleBody = useRef<HTMLDivElement>(null)
   const menuRef = useRef<HTMLDivElement>(null)
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null)
@@ -151,6 +152,7 @@ export function BidReviewWorkbench({
   const ready = isBid
   const exportReady = ready && (projection?.allowedActions.includes('export_docx') ?? false)
 
+  useEffect(() => () => { chapterRequestVersion.current++ }, [sessionId])
   useEffect(() => { setContextMenu(null) }, [chapter, sessionId])
   useEffect(() => {
     if (contextMenu === null) return
@@ -180,16 +182,18 @@ export function BidReviewWorkbench({
       setReaderMode({ kind: 'normal' })
     }
     const version = ++requestVersion.current
+    const chapterVersion = chapterRequestVersion.current
     return getWorkbench().then(async (value) => {
       if (version !== requestVersion.current) return
       latestWorkbenchRef.current = value
       setWorkbench(value)
+      if (chapterVersion !== chapterRequestVersion.current) return
       const selected = value.outline.find(item => item.section_id === selectedSectionId.current && isChapterSelectable(item))
         ?? value.outline.find(item => item.writable && isChapterSelectable(item))
         ?? value.outline.find(isChapterSelectable)
       if (selected !== undefined) {
         const next = await getChapter(selected.section_id)
-        if (version !== requestVersion.current) return
+        if (version !== requestVersion.current || chapterVersion !== chapterRequestVersion.current) return
         selectedSectionId.current = next.section_id
         setChapter(next)
       } else {
@@ -198,7 +202,7 @@ export function BidReviewWorkbench({
       }
       setError(null)
     }, (reason: unknown) => {
-      if (version !== requestVersion.current) return
+      if (version !== requestVersion.current || chapterVersion !== chapterRequestVersion.current) return
       setError(reason instanceof Error ? reason.message : String(reason))
     })
   }, [getChapter, getWorkbench, ready])
@@ -247,23 +251,24 @@ export function BidReviewWorkbench({
   const select = (sectionId: string): void => {
     compareRequestVersion.current++
     setReaderMode({ kind: 'normal' })
-    const version = ++requestVersion.current
+    const version = ++chapterRequestVersion.current
     selectedSectionId.current = sectionId
     setError(null)
     void getChapter(sectionId).then(
       (value) => {
-        if (version !== requestVersion.current) return
+        if (version !== chapterRequestVersion.current) return
         setChapter(value)
         if (articleBody.current !== null) articleBody.current.scrollTop = 0
       },
       (reason: unknown) => {
-        if (version === requestVersion.current) setError(reason instanceof Error ? reason.message : String(reason))
+        if (version === chapterRequestVersion.current) setError(reason instanceof Error ? reason.message : String(reason))
       },
     )
   }
 
   const openRevisionCompare = (issueId: string, sectionId: string): void => {
     const version = ++compareRequestVersion.current
+    chapterRequestVersion.current++
     selectedSectionId.current = sectionId
     setError(null)
     setReaderMode({ kind: 'compare-loading', issueId, sectionId })
