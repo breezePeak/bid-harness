@@ -1,3 +1,4 @@
+import { capabilityTaskCheckpointSchema } from '../src/bid-capability-task.ts'
 import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -5,7 +6,8 @@ import { Context } from '@deepseek-ai/cordis'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import SessionStore from '@deepseek-ai/dsh-session'
 import { afterEach, expect, it, vi } from 'vitest'
-import { executeCapabilityTask, persistCapabilityTaskRequest } from '../src/bid-capability-task.ts'
+import { persistCapabilityTaskRequest } from '../src/bid-capability-task.ts'
+import { executeTestCapabilityTask as executeCapabilityTask } from './fixtures/task-verifier.ts'
 import { readCapabilityPublicationReceipt, readCapabilityStepReceipt } from '../src/bid-capability-changes.ts'
 import { bidCapabilityTaskSchema } from '../src/bid-capability-contract.ts'
 import { createBidCapabilityDispatcher } from '../src/bid-capability-dispatcher.ts'
@@ -146,9 +148,11 @@ it('步骤候选已发布但顶层检查点未更新时，恢复凭据且不重�
   const adapter = recoveryDispatcher(async (call) => { calls.push(call.capability) })
   const run = fixture.run()
   const writeJson = run.commits.writeJson.bind(run.commits)
-  let checkpointWrites = 0
+  let interrupted = false
   vi.spyOn(run.commits, 'writeJson').mockImplementation(async (path, value) => {
-    if (path.endsWith('task-checkpoint.json') && ++checkpointWrites === 3) {
+    if (path.endsWith('task-checkpoint.json') && !interrupted
+          && capabilityTaskCheckpointSchema.parse(value).steps[0]?.status === 'completed'
+          && (interrupted = true)) {
       throw new Error('候选已发布，检查点未更新')
     }
     await writeJson(path, value)

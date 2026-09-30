@@ -10,7 +10,7 @@ import { zodJsonSchema } from './zod-json-schema.ts'
 import { applyOutlineEdits, outlineBusinessBindingSchema, outlineEditOperationSchema,
   parseOutlineEditOperations, type OutlineBusinessBinding, type OutlineEditOperation } from './outline-confirmation-edits.ts'
 import { outlineArtifactSha256, parseOutlineDraft, type OutlineDraftView } from './outline-confirmation-artifacts.ts'
-import { outlineSectionScope } from './section-evidence-context.ts'
+import { buildWritableSectionWorklist, outlineSectionScope } from './section-evidence-context.ts'
 import { outlineRegenerationChanges, parseOutlineRegenerationChangeSet } from './outline-regeneration-artifacts.ts'
 import type { BidWorkspace } from './index.ts'
 import { BidStageExecutionError, type BidStageTask, type StageArtifact, type StageValidationIssue } from './control-plane-contract.ts'
@@ -203,16 +203,42 @@ export async function generateScopedOutlineOperations(
  * @param agent 当前执行 Agent。
  * @param candidate 已分配新 ID 的候选目录。
  * @param sectionIds 本次可修改的章节范围。
+ * @param before 结构修改前的正式目录；保留父章原业务归属。
  * @param facts 当前招标事实和响应点的有界摘要。
  * @param feedback 用户本次局部深化目标。
  * @param signal 当前 Run 的取消信号。
  * @returns 供 Host 校验的章节业务归属候选。
  */
 export async function generateScopedOutlineBusinessBindings(
-  agent: Agent, candidate: OutlineArtifact, sectionIds: readonly string[], facts: unknown,
+  agent: Agent, candidate: OutlineArtifact, sectionIds: readonly string[], before: OutlineArtifact, facts: {
+    requirements: readonly { id: string; text: string }[]
+    scoring: readonly { id: string; text: string }[]
+    compliance: readonly { id: string; text: string }[]
+    response_points: readonly { id: string; scoring_id: string; text: string }[]
+  },
   feedback: string, signal: AbortSignal,
 ): Promise<OutlineBusinessBinding[]> {
   const selected = outlineSectionScope(candidate, sectionIds)
+  const targets = buildWritableSectionWorklist(candidate).filter(section => selected.has(section.id))
+  const choices = z.array(z.number().int().nonnegative())
+  const outputSchema = z.array(z.object({ requirement_positions: choices, scoring_positions: choices,
+    response_point_positions: choices, compliance_positions: choices }).strict())
+  const pick = (items: readonly { id: string }[], positions: readonly number[]): string[] => positions.map((position) => {
+    const item = items[position]
+    if (item === undefined) throw new Error('BID_OUTLINE_BINDING_OBJECT_UNKNOWN')
+    return item.id
+  })
+  const positions = (items: readonly { id: string }[], ids: readonly string[]): number[] => ids.map((id) => {
+    const position = items.findIndex(item => item.id === id)
+    if (position < 0) throw new Error('BID_OUTLINE_BINDING_OBJECT_UNKNOWN')
+    return position
+  })
+  const sectionView = (section: OutlineArtifact['sections'][number]) => ({ title: section.title,
+    purpose: section.purpose, must_answer: section.must_answer,
+    requirement_positions: positions(facts.requirements, section.requirement_ids),
+    scoring_positions: positions(facts.scoring, section.scoring_ids),
+    response_point_positions: positions(facts.response_points, section.scoring_response_point_ids ?? []),
+    compliance_positions: positions(facts.compliance, section.compliance_ids) })
   const subagents = agent.ctx.get('subagents')
   if (subagents === undefined || subagents.getProvider('spawn')?.inheritsParentContext !== false) {
     throw new Error('局部目录业务归属需要独立上下文的 spawn provider。')
@@ -221,24 +247,39 @@ export async function generateScopedOutlineBusinessBindings(
     parent: agent, signal, label: '局部目录业务归属', maxDepth: 1, toolFilter: { allow: [] },
     prompt: [{ type: 'text', text: [
       `用户目标：${feedback}`,
-      `当前候选目录：${JSON.stringify(candidate)}`,
-      `本次可修改章节：${JSON.stringify([...selected])}`,
-      `真实招标要求、评分、合规与响应点：${JSON.stringify(facts)}`,
-      '只为业务归属需要改变的可写叶节返回完整 requirement_ids、scoring_ids、scoring_response_point_ids、compliance_ids。',
-      '拆分时按章节真实职责分配父章要求；不得给每个子章机械复制全部父章 ID。不得创造不存在的 ID。',
+      `当前候选目录：${JSON.stringify(candidate.sections.map((section, position) => ({ ...sectionView(section), position,
+        writable: section.writable, parent_position: section.parent_id === null ? null
+          : candidate.sections.findIndex(parent => parent.id === section.parent_id) })))}`,
+      `修改前的范围内业务归属：${JSON.stringify(before.sections.filter(section => selected.has(section.id)).map(sectionView))}`,
+      `本次可修改章节：${JSON.stringify(targets.map(sectionView))}`,
+      `真实招标要求、评分、合规与响应点：${JSON.stringify({
+        requirements: facts.requirements.map(({ text }, position) => ({ position, text })),
+        scoring: facts.scoring.map(({ text }, position) => ({ position, text })),
+        compliance: facts.compliance.map(({ text }, position) => ({ position, text })),
+        response_points: facts.response_points.map(({ scoring_id, text }, position) => ({ position, text,
+          scoring_position: positions(facts.scoring, [scoring_id])[0] })),
+      })}`,
+      '按本次可修改章节的输入顺序逐项返回完整业务选择；输出条数必须相同。只选择位置，真实章节和业务 ID 由 Host 绑定。',
+      '拆分时按章节职责分配父章要求；不得给每个子章机械复制全部父章关联。',
+      '修改前的范围内业务归属列出父章原要求、评分及响应点。每项原归属都必须至少分配到一个职责相符的新可写叶节，不得因候选父节点不再可写、响应点已清空或更换标题而漏掉。',
+      '父章变为不可写目录节点后，其业务要求必须按职责分配到实际承接的可写叶节；不能仅因子章节采用不同标题或这些要求较概括而丢弃父章覆盖。若一项要求由多个阶段共同回答，可分别绑定对应阶段。其他分支已有归属保持不变。',
       '不得写文件。最终只返回原始 JSON 数组，格式为：',
-      JSON.stringify(zodJsonSchema(z.array(outlineBusinessBindingSchema))),
+      JSON.stringify(zodJsonSchema(outputSchema)),
     ].join('\n') }],
   })
   try {
     const result = await run.result
     signal.throwIfAborted()
     if (result.stopReason !== 'completed') throw new Error(`BID_OUTLINE_BINDING_FAILED: ${result.stopReason}`)
-    const output = z.array(outlineBusinessBindingSchema).parse(JSON.parse(
+    const output = outputSchema.parse(JSON.parse(
       result.output.flatMap(block => block.type === 'text' ? [block.text] : []).join(''),
     ) as unknown)
-    if (output.some(binding => !selected.has(binding.section_id))) throw new Error('BID_OUTLINE_BINDING_SCOPE_INVALID')
-    return output
+    if (output.length !== targets.length) throw new Error('BID_OUTLINE_BINDING_TARGET_COUNT_INVALID')
+    return output.map((binding, index) => outlineBusinessBindingSchema.parse({ section_id: targets[index]?.id,
+      requirement_ids: pick(facts.requirements, binding.requirement_positions),
+      scoring_ids: pick(facts.scoring, binding.scoring_positions),
+      scoring_response_point_ids: pick(facts.response_points, binding.response_point_positions),
+      compliance_ids: pick(facts.compliance, binding.compliance_positions) }))
   } finally { await run.dispose() }
 }
 

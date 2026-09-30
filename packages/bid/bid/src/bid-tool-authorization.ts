@@ -3,9 +3,27 @@ import { resolveSessionPreset } from '@deepseek-ai/dsh-agent-presets'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-goal'
 import type { Session } from '@deepseek-ai/dsh-session'
+import type { UserMessage } from '@deepseek-ai/dsh-session'
+import { AsyncLocalStorage } from 'node:async_hooks'
 
 /** 消息引用保持与持久 Work 和队列相同的结构。 */
 type Authorization = { session_id: string; message_id: string }
+const nativeTask = new AsyncLocalStorage<{ session: Session; message: UserMessage }>()
+
+/**
+ * 将原生正文修订入口刚记录的用户请求限定在本次 Host 接纳操作中。
+ * @param session 接收原生用户请求的 Main 会话。
+ * @param message Host 创建并已追加的精确用户消息。
+ * @param accept 接纳并执行同一任务的操作。
+ * @returns 原任务操作结果；作用域结束即撤销此次接纳身份。
+ */
+export function withBidNativeTaskAuthorization<T>(session: Session, message: UserMessage, accept: () => Promise<T>): Promise<T> {
+  if (message.source.kind !== 'user' || !session.events.some(event => event.type === 'user/message'
+    && JSON.stringify(event.data) === JSON.stringify(message))) {
+    throw new Error('BID_CAPABILITY_USER_MESSAGE_REQUIRED')
+  }
+  return nativeTask.run({ session, message }, accept)
+}
 /**
  * 从当前未结束 turn 解析授权，Goal 必须属于精确 live Main Agent。
  * @param subject 工具调用者；Host 内部接纳直接用户消息时可传其 Session。
@@ -19,6 +37,8 @@ export function resolveBidToolAuthorization(subject: Agent | Session): Authoriza
     if (registry?.get(agent.id) !== agent || session.header.origin === 'subagent'
       || resolveSessionPreset(session) !== 'bid' || session.header.cwd === undefined) return
   }
+  const native = nativeTask.getStore()
+  if (native?.session === session) return { session_id: String(session.id), message_id: String(native.message.id) }
   const goal = agent?.status === 'running' && agent.ctx.get('agents')?.currentInitiator() === agent
     ? agent.ctx.get('goals')?.get(agent) : undefined
   const boundary = session.events.findLastIndex(event => event.type === 'turn/start' || event.type === 'turn/end')

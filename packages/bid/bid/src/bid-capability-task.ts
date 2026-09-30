@@ -30,6 +30,10 @@ import { prepareBidWorkingTree } from './working-tree.ts'
 import { reconcileBidPublications } from './publication-batch.ts'
 import { assertNoLinkedPath, within } from './workspace-path.ts'
 import { recordOnlySchemaVersion } from './schema-version.ts'
+import { bidTaskSourceSnapshotSchema, freezeBidTaskSource } from './bid-task-source.ts'
+import { bidTaskVerificationSchema, collectBidTaskEvidence, collectBidTaskScopeEvidence, collectBidTaskPreservationEvidence,
+  modelBidTaskVerifier, validateBidTaskVerification,
+  type BidTaskVerifier, type BidTaskVerification } from './bid-task-verification.ts'
 import { readPendingChapterReorganization } from './outline-capability-update.ts'
 
 const sha256Schema = z.string().regex(/^[a-f0-9]{64}$/u)
@@ -45,6 +49,8 @@ const storedTaskSchema = z.object({ ...bidCapabilityTaskSchema.shape, steps: z.a
 /** 不可变 Work 请求，用户消息身份用于精确去重和授权。 */
 export const capabilityTaskRequestSchema = z.object({
   task: storedTaskSchema,
+  source_snapshot: bidTaskSourceSnapshotSchema.optional(),
+  complete_task: storedTaskSchema.optional(),
   authorization: messageReferenceSchema,
   input_sources: z.array(outputFileSchema),
   return_state: bidTaskStateSchema.refine(state =>
@@ -85,12 +91,15 @@ export const capabilityTaskCheckpointSchema = z.object({
   request_sha256: sha256Schema,
   steps: z.array(stepRecordSchema).min(1),
   plan_patches: z.array(planPatchSchema),
+  verifications: z.array(bidTaskVerificationSchema).optional(),
 }).strict()
 /** 同一 Work 的步骤执行记录及后续授权补丁。 */
 export type CapabilityTaskCheckpoint = z.infer<typeof capabilityTaskCheckpointSchema>
 
 /** 能力适配器只能在 Host 授权的候选文件中写入。 */
 export interface CapabilityTaskDispatcher {
+  /** 测试可显式替换语义核验；Host 的身份与产物检查始终执行。 */
+  readonly verifyTask?: BidTaskVerifier
   /** 返回当前能力可写的精确项目相对路径。 */
   allowedWrites(call: BidCapabilityCall, sectionIds: ReadonlySet<string> | null, working: BidWorkspace,
     stepId: string): Promise<ReadonlySet<string>>
@@ -297,23 +306,27 @@ async function fileHash(workspace: BidWorkspace, path: string): Promise<string |
  * @param inputPaths 本任务读取的正式文件路径。
  * @param returnState 完成后恢复的任务前状态。
  * @param agent 工具调用的 live Agent；延迟队列须已有匹配的持久请求。
+ * @param completeTask 保留独立导出尾步骤的完整用户计划。
  * @returns 可由 Run 恢复的 Work 描述符。
  */
 export async function persistCapabilityTaskRequest(
   workspace: BidWorkspace, session: Session, stage: BidStage, task: BidCapabilityTask,
   authorization: CapabilityTaskRequest['authorization'], inputPaths: readonly string[],
-  returnState: CapabilityTaskRequest['return_state'], agent?: Agent,
+  returnState: CapabilityTaskRequest['return_state'], agent?: Agent, completeTask?: BidCapabilityTask,
 ): Promise<BidWorkDescriptor> {
   bidCapabilityTaskSchema.parse(task)
   const current = resolveBidToolAuthorization(agent ?? session) ?? resolveBidToolAuthorization(session)
   const matches = current?.session_id === authorization.session_id && current.message_id === authorization.message_id
   let queued = false
+  let queuedSource: CapabilityTaskRequest['source_snapshot']
+  let queuedCompleteTask: BidCapabilityTask | undefined
   if (!matches) {
     for (const workId of await pendingCapabilityWorkIds(workspace)) {
       queued ||= (await readPendingCapabilityRequests(workspace, workId)).some(({ request }) =>
         request.authorization.session_id === authorization.session_id
         && request.authorization.message_id === authorization.message_id
-        && JSON.stringify({ ...request.task, steps: request.task.steps.filter(step => step.call.capability !== 'docx.export') }) === JSON.stringify(task))
+        && JSON.stringify({ ...request.task, steps: request.task.steps.filter(step => step.call.capability !== 'docx.export') }) === JSON.stringify(task)
+        && (queuedSource = request.source_snapshot, queuedCompleteTask = request.task, true))
     }
   }
   if (!hasBidTaskAuthorization(session, authorization) || (!matches && !queued)) {
@@ -325,9 +338,11 @@ export async function persistCapabilityTaskRequest(
     await verifyCapabilityTaskScope(workspace, task.scope, outline)
   }
   const existing = await findCapabilityTaskRequest(workspace, authorization)
+  completeTask ??= queuedCompleteTask
   if (existing !== null) {
     const saved = capabilityTaskRequestSchema.parse(await readBidWorkRequest(workspace, existing))
-    if (JSON.stringify(saved.task) !== JSON.stringify(bidCapabilityTaskSchema.parse(task))) {
+    if (JSON.stringify(saved.task) !== JSON.stringify(bidCapabilityTaskSchema.parse(task))
+      || JSON.stringify(saved.complete_task ?? saved.task) !== JSON.stringify(completeTask ?? task)) {
       throw new Error('BID_CAPABILITY_USER_MESSAGE_TASK_CONFLICT')
     }
     return existing
@@ -339,7 +354,9 @@ export async function persistCapabilityTaskRequest(
     return { path, sha256: digest }
   }))
   if (returnState.stage !== stage) throw new Error('BID_CAPABILITY_RETURN_STATE_INVALID')
+  const sourceSnapshot = queuedSource ?? await freezeBidTaskSource(workspace, session, task, authorization)
   const request = capabilityTaskRequestSchema.parse({ task, authorization, input_sources: inputSources,
+    source_snapshot: sourceSnapshot, ...(completeTask === undefined ? {} : { complete_task: completeTask }),
     return_state: returnState })
   return persistBidWorkRequest(workspace, 'capability_task', stage, request, inputSources)
 }
@@ -599,6 +616,43 @@ export async function executeCapabilityTask(
   await saveCheckpoint(run, canonical, checkpoint)
   const changed = new Set<string>()
   const removed = new Set<string>()
+  const source = request.source_snapshot ?? await freezeBidTaskSource(canonical, session, request.task, request.authorization)
+  const verify = async (phase: 'plan' | 'result'): Promise<BidTaskVerification> => {
+    const tail = request.complete_task?.steps.filter(step => step.call.capability === 'docx.export') ?? []
+    const task = { ...request.task, steps: [...checkpoint.steps.map(record => record.step), ...tail] }
+    const requirements = checkpoint.verifications?.find(record => record.scope_authorized && record.unmet.length === 0)?.requirements
+    const input = { phase, source, task,
+      execution_history: {
+        prior_plan_rejections: (checkpoint.verifications ?? []).filter(record => record.phase === 'plan' && record.unmet.length > 0)
+          .map(record => ({ scope_authorized: record.scope_authorized, unmet: record.unmet })),
+        plan_patch_count: checkpoint.plan_patches.length,
+        completed_steps: checkpoint.steps.filter(record => record.status === 'completed')
+          .map(record => ({ description: record.step.description, capability: record.step.call.capability })),
+      },
+      ...(requirements === undefined ? {} : { requirements }),
+      ...(phase === 'result' && requirements?.some(requirement => requirement.preserve_migrated_content) === true
+        ? { preservation_evidence: await collectBidTaskPreservationEvidence(canonical, working, task) } : {}),
+      evidence: await collectBidTaskEvidence(working, task, [...changed]),
+      scope_evidence: await collectBidTaskScopeEvidence(canonical, working, task) }
+    const identity = bidInputFingerprint(input)
+    let verification = checkpoint.verifications?.find(record => record.phase === phase && record.input_sha256 === identity)
+    if (verification === undefined) {
+      const decision = await (dispatcher.verifyTask ?? modelBidTaskVerifier)(input, agent, run.signal)
+      verification = await validateBidTaskVerification(input, decision, canonical, working)
+      checkpoint = { ...checkpoint, verifications: [...checkpoint.verifications ?? [], verification] }
+      await saveCheckpoint(run, canonical, checkpoint)
+    }
+    if (!verification.scope_authorized) {
+      throw Object.assign(new Error('BID_TASK_SCOPE_AUTHORIZATION_REQUIRED: 原始要求与保存范围冲突或未授权执行；请澄清真实目录子章还是选区内分项。'),
+        { code: 'BID_TASK_SCOPE_AUTHORIZATION_REQUIRED' })
+    }
+    if (verification.unmet.length > 0) {
+      const code = phase === 'plan' ? 'BID_TASK_PLAN_MISMATCH' : 'BID_TASK_RESULT_UNMET'
+      throw Object.assign(new Error(code + ': ' + verification.unmet.join('；')), { code })
+    }
+    return verification
+  }
+  await verify('plan')
   let previous: { status: 'completed' | 'pending' | 'failed'; result?: BidCapabilityResult } | undefined
   for (const [index, record] of checkpoint.steps.entries()) {
     run.signal.throwIfAborted()
@@ -757,7 +811,9 @@ export async function executeCapabilityTask(
     }
     const authorizedNewDescendants = new Set<string>()
     const context: BidCapabilityExecutionContext = {
-      canonical, working: stepWorking, agent, sourceSession: session,
+      canonical, working: stepWorking, agent, sourceSession: session, sourceSnapshot: source,
+      ...(checkpoint.verifications?.find(record => record.scope_authorized && record.unmet.length === 0)
+        ?.requirements.some(requirement => requirement.preserve_migrated_content) === true ? { preserveMigratedContent: true } : {}),
       run: candidateRun, sectionIds: scope.sectionIds,
       ...(recovery === undefined ? {} : { recovery }),
       ...(sectionScopeRoots === undefined ? {} : { sectionScopeRoots }),
@@ -850,7 +906,14 @@ export async function executeCapabilityTask(
       throw new Error(`BID_CAPABILITY_CONTENT_FOLLOWUP_REQUIRED: ${pending.join(', ')} 的正文尚未迁移，请补齐同一任务的迁移和复核步骤。`)
     }
   }
-  const receipt = await publishCapabilityChanges(run, canonical, working, [...changed], [...removed])
+  const verification = await verify('result')
+  const boundSource = { ...source, issues: verification.relevant_issue_ids.map((id) => {
+    const issue = [...source.issues, ...source.observed_issues].find(item => item.issue_id === id)
+    if (issue === undefined) throw new Error('BID_TASK_VERIFICATION_SOURCE_INVALID')
+    return issue
+  }) }
+  const receipt = await publishCapabilityChanges(run, canonical, working, [...changed], [...removed],
+    { verification, source: boundSource })
   return { status: 'completed', receipt,
     results: checkpoint.steps.flatMap(step => step.status === 'completed' ? [step.result] : []) }
 }

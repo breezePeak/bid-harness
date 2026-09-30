@@ -10,7 +10,7 @@ import { capabilityOutlineAllowedWrites, executeCapabilityChapterReorganize,
 import { readCapabilityOutlineBaseline } from './outline-draft-store.ts'
 import { zodJsonSchema } from './zod-json-schema.ts'
 import { readChapterLocation } from './chapter-storage.ts'
-import { chapterBlockAssignmentSchema, indexChapterContentBlocks } from './chapter-content-reuse.ts'
+import { indexChapterContentBlocks } from './chapter-content-reuse.ts'
 import { outlineArtifactSha256, parseOutlineConfirmationArtifact, parseOutlineDraft } from './outline-confirmation-artifacts.ts'
 import { parseOutlineArtifact } from './outline-generation-artifacts.ts'
 import { parseChapterMetadata, parseChapterWritingManifest } from './chapter-writing-artifacts.ts'
@@ -24,6 +24,8 @@ import { parseEvidenceMapArtifact } from './evidence-mapping-artifacts.ts'
 import { assertNoLinkedPath, within } from './workspace-path.ts'
 
 type OutlineCall = Extract<BidCapabilityCall, { capability: 'outline.update' | 'chapter.reorganize' }>
+const blockDestinationSchema = z.object({ disposition: z.enum(['move', 'share', 'delete']),
+  target_positions: z.array(z.number().int().nonnegative()) }).strict()
 
 async function optionalJson(workspace: BidWorkspace, path: string): Promise<unknown> {
   const absolute = within(workspace.projectRoot, path)
@@ -72,22 +74,35 @@ async function generateChapterAssignments(
     parent: context.agent, signal: context.run.signal, label: '章节原文分配', maxDepth: 1,
     toolFilter: { allow: [] }, prompt: [{ type: 'text', text: [
       `用户目标：${call.input.instruction}`,
-      `源正文完整 Markdown 块：${JSON.stringify(blocks)}`,
-      `当前可写目标章节：${JSON.stringify(targets.map(section => ({ id: section.id,
+      `源正文完整 Markdown 块：${JSON.stringify(blocks.map(block => ({ type: block.type, markdown: block.markdown })))}`,
+      `当前可写目标章节：${JSON.stringify(targets.map((section, position) => ({ position,
         title: section.title, purpose: section.purpose, must_answer: section.must_answer })))} `,
       '每个源块必须恰好有一个决定。move 指向一个目标；需要共享时显式用 share；只有用户明确允许删减时才可用 delete。',
+      '按源块输入顺序返回同样数量的决定，只选择目标列表中的 position；块身份、来源、偏移、摘要和目标章节身份由 Host 绑定，不抄写 ID 或 SHA。',
       '保留表格、代码块、图片及流程图 anchor 的整块内容；流程图引用须与 anchor 同章。不得重写原文或猜测章节 ID。',
       '不得写文件。最终只返回原始 JSON 数组，格式为：',
-      JSON.stringify(zodJsonSchema(z.array(chapterBlockAssignmentSchema))),
+      JSON.stringify(zodJsonSchema(z.array(blockDestinationSchema))),
     ].join('\n') }],
   })
   try {
     const result = await run.result
     context.run.signal.throwIfAborted()
     if (result.stopReason !== 'completed') throw new Error(`BID_CHAPTER_REUSE_ASSIGNMENT_FAILED: ${result.stopReason}`)
-    return z.array(chapterBlockAssignmentSchema).parse(JSON.parse(
+    const decisions = z.array(blockDestinationSchema).parse(JSON.parse(
       result.output.flatMap(block => block.type === 'text' ? [block.text] : []).join(''),
     ) as unknown)
+    if (decisions.length !== blocks.length) throw new Error('BID_CHAPTER_REUSE_BLOCK_COVERAGE_INVALID')
+    return blocks.map((block, index) => {
+      const decision = decisions[index]
+      if (decision === undefined) throw new Error('BID_CHAPTER_REUSE_BLOCK_COVERAGE_INVALID')
+      return { block_id: block.block_id, source_section_id: block.source_section_id,
+        source_sha256: block.source_sha256, block_sha256: block.sha256, disposition: decision.disposition,
+        target_section_ids: decision.target_positions.map((position) => {
+          const target = targets[position]
+          if (target === undefined) throw new Error('BID_CHAPTER_REUSE_TARGET_INVALID')
+          return target.id
+        }) }
+    })
   } finally { await run.dispose() }
 }
 

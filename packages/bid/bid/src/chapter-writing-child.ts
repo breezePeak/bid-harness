@@ -1,11 +1,82 @@
 /** 同一章节 Writer 的可续写会话、逐轮提交与取消清理。 */
 import { randomUUID } from 'node:crypto'
-import type { Agent } from '@deepseek-ai/dsh-agent'
+import { resolve } from 'node:path'
+import type { Agent, AgentHandle } from '@deepseek-ai/dsh-agent'
+import { resolveSessionPreset } from '@deepseek-ai/dsh-agent-presets'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import type { SubagentResult } from '@deepseek-ai/dsh-subagent'
 import { createChapterProtocol, type ChapterProtocol } from './chapter-writing-protocol.ts'
 import { chapterWriterOutputSchema } from './chapter-writing-writer.ts'
+
+/** 原 Writer 的父会话按持久关系恢复，同一父会话只恢复一次。 */
+export interface ChapterWriterParentResolver {
+  /**
+   * 查验原 Writer 所属项目并返回其原父 Agent。
+   * @param writerId 已被章节日志接受的 Writer 身份。
+   * @returns 当前可续写的原父 Agent。
+   */
+  resolve(writerId: string): Promise<Agent>
+  /** 释放本次恢复的父 Agent；调用者原有的 Agent 保持存活。 */
+  dispose(): Promise<void>
+}
+
+/**
+ * 为一个章节执行操作共享原 Writer 父会话的恢复与清理。
+ * @param current 当前执行 Agent。
+ * @param projectRoot 规范项目根路径；持久化父子关系须属于该项目。
+ * @param signal 当前 Run 的取消信号。
+ * @returns 延迟读取身份的恢复器，执行完成后必须释放。
+ */
+export function createChapterWriterParentResolver(current: Agent, projectRoot: string, signal: AbortSignal): ChapterWriterParentResolver {
+  const parents = new Map<SessionId, Promise<Agent>>()
+  const handles: AgentHandle[] = []
+  const sameProject = (cwd: string | undefined): boolean => cwd !== undefined
+    && (process.platform === 'win32' ? resolve(cwd).toLowerCase() === resolve(projectRoot).toLowerCase()
+      : resolve(cwd) === resolve(projectRoot))
+  return {
+    async resolve(writerId) {
+      signal.throwIfAborted()
+      const persistence = current.ctx.get('sessionPersistence')
+      const residentWriter = current.ctx.agents.get(SessionId(writerId))
+      const writer = residentWriter?.session.header ?? (await persistence?.inspect(SessionId(writerId), signal))?.meta
+      if (writer?.origin !== 'subagent' || writer.parentSession === undefined || !sameProject(writer.cwd)) {
+        throw new Error('BID_CHAPTER_REVISION_CONTEXT_UNAVAILABLE')
+      }
+      const parentId = writer.parentSession
+      let pending = parents.get(parentId)
+      if (pending === undefined) {
+        pending = (async () => {
+          const resident = parentId === current.id ? current : current.ctx.agents.get(parentId)
+          if (resident !== undefined) {
+            if (!sameProject(resident.session.header.cwd)) throw new Error('BID_CHAPTER_REVISION_CONTEXT_UNAVAILABLE')
+            return resident
+          }
+          if (persistence === undefined) throw new Error('BID_CHAPTER_REVISION_CONTEXT_UNAVAILABLE')
+          const saved = await persistence.inspect(parentId, signal)
+          if (!sameProject(saved.meta.cwd)) throw new Error('BID_CHAPTER_REVISION_CONTEXT_UNAVAILABLE')
+          const presets = current.ctx.get('agentPresets')
+          const handle = await current.ctx.agents.resume({ resumeSessionId: parentId, signal,
+            async setup(parentContext) {
+              parentContext.on('agent/pre-step', () => Promise.resolve({ kind: 'reject' }))
+              if (presets !== undefined) await presets.mount(parentContext, resolveSessionPreset({
+                header: saved.meta, events: saved.events,
+              }))
+            },
+          })
+          handles.push(handle)
+          return handle.agent
+        })()
+        parents.set(parentId, pending)
+      }
+      return pending
+    },
+    async dispose() {
+      await Promise.allSettled(parents.values())
+      for (const handle of handles.reverse()) await handle.dispose()
+    },
+  }
+}
 
 /** 一个章节独占的 Writer；修复保留会话，提交状态每轮重建。 */
 export interface ChapterWriterChild {

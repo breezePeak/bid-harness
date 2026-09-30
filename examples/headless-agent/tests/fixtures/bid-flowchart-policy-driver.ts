@@ -15,7 +15,6 @@ const configPath = process.argv[2]
 if (configPath === undefined) throw new Error('缺少 S5 策略回放配置')
 class PolicyAdapter extends LlmAdapter {
   readonly requests: GenerateOptions[] = []
-  resumeRevision = 0
 
   override resolveModel(provider: string, model: string): Promise<{ provider: string; id: string; name: string }> {
     return Promise.resolve({ provider, id: model, name: model })
@@ -35,7 +34,7 @@ class PolicyAdapter extends LlmAdapter {
       yield {
         type: 'tool-call-delta', index: 0, id: CallId('snapshot-s5-resume'),
         name: 'bid_resume_current_run',
-        argumentsDelta: JSON.stringify({ run_id: 'snapshot-s5-run', expected_project_revision: this.resumeRevision }),
+        argumentsDelta: '{}',
       }
       yield { type: 'finish', reason: { kind: 'tool-calls' } }
       return
@@ -90,7 +89,6 @@ try {
   const journal = await readBidChapterCommandJournal(workspace, work.workId)
   const saved = await readBidProjectState(workspace)
   if (saved === undefined) throw new Error('恢复前项目状态缺失')
-  adapter.resumeRevision = saved.revision
   const resumeSettled = Promise.withResolvers<undefined>()
   const offResume = ctx.on('session/event', (session, event) => {
     if (session === agent.session && event.type === 'tool/result'

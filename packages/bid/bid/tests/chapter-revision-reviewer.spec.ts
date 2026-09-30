@@ -83,8 +83,8 @@ describe('任务 01: Reviewer 真正审核 RevisionIssue', () => {
     await call('review_coverage_items', { items: buildChapterReviewChecklist(context).map(item => covered(item.item_ref)) })
     const revResult = await call('review_revision_issues', {
       items: [
-        { issue_id: 'REV-001', status: 'satisfied', reason: '架构图说明已补充完整' },
-        { issue_id: 'REV-002', status: 'satisfied', reason: '已更新为 v2.0 接口' },
+        { issue_position: 0, status: 'satisfied', reason: '架构图说明已补充完整' },
+        { issue_position: 1, status: 'satisfied', reason: '已更新为 v2.0 接口' },
       ],
     })
     expect(revResult.isError).toBeFalsy()
@@ -109,8 +109,8 @@ describe('任务 01: Reviewer 真正审核 RevisionIssue', () => {
     await call('review_coverage_items', { items: buildChapterReviewChecklist(context).map(item => covered(item.item_ref)) })
     await call('review_revision_issues', {
       items: [
-        { issue_id: 'REV-001', status: 'satisfied', reason: '架构图说明已补充完整' },
-        { issue_id: 'REV-002', status: 'unsatisfied', reason: '正文仍然残留 v1.0 描述' },
+        { issue_position: 0, status: 'satisfied', reason: '架构图说明已补充完整' },
+        { issue_position: 1, status: 'unsatisfied', reason: '正文仍然残留 v1.0 描述' },
       ],
     })
     await call('set_review_summary', { quality_checks: quality, blocking_issues: [], assignment_conflicts: [], external_input_gaps: [], external_input_only: false })
@@ -131,7 +131,7 @@ describe('任务 01: Reviewer 真正审核 RevisionIssue', () => {
     await call('review_coverage_items', { items: checklist.map((item, index) => index === 0
       ? { item_ref: item.item_ref, status: 'missing', evidence_quote_refs: [], issue: '选区外原文已有缺失' }
       : covered(item.item_ref)) })
-    await call('review_revision_issues', { items: issues.map(issue => ({ issue_id: issue.issue_id, status: 'satisfied', reason: '选区内意见已完成' })) })
+    await call('review_revision_issues', { items: issues.map((_issue, issue_position) => ({ issue_position, status: 'satisfied', reason: '选区内意见已完成' })) })
     await call('set_review_summary', {
       quality_checks: { ...quality, obvious_repetition_free: false },
       blocking_issues: ['选区外正文整体风格仍需调整'], assignment_conflicts: [], external_input_gaps: [], external_input_only: false,
@@ -189,8 +189,8 @@ describe('任务 01: Reviewer 真正审核 RevisionIssue', () => {
     await call('review_coverage_items', { items: buildChapterReviewChecklist(context).map(item => covered(item.item_ref)) })
     await call('review_revision_issues', {
       items: [
-        { issue_id: 'REV-001', status: 'satisfied', reason: '已完成' },
-        { issue_id: 'REV-002', status: 'unsatisfied', reason: '接口描述未修改' },
+        { issue_position: 0, status: 'satisfied', reason: '已完成' },
+        { issue_position: 1, status: 'unsatisfied', reason: '接口描述未修改' },
       ],
     })
     await call('set_review_summary', { quality_checks: quality, blocking_issues: [], assignment_conflicts: [], external_input_gaps: [], external_input_only: false })
@@ -211,8 +211,8 @@ describe('任务 01: Reviewer 真正审核 RevisionIssue', () => {
     await call('review_coverage_items', { items: buildChapterReviewChecklist(context).map(item => covered(item.item_ref)) })
     await call('review_revision_issues', {
       items: [
-        { issue_id: 'REV-001', status: 'satisfied', reason: '已完成' },
-        { issue_id: 'REV-002', status: 'unsatisfied', reason: '未完成' },
+        { issue_position: 0, status: 'satisfied', reason: '已完成' },
+        { issue_position: 1, status: 'unsatisfied', reason: '未完成' },
       ],
     })
     await call('set_review_summary', { quality_checks: quality, blocking_issues: [], assignment_conflicts: [], external_input_gaps: [], external_input_only: false })
@@ -224,8 +224,8 @@ describe('任务 01: Reviewer 真正审核 RevisionIssue', () => {
     await call('review_coverage_items', { items: buildChapterReviewChecklist(context).map(item => covered(item.item_ref)) })
     await call('review_revision_issues', {
       items: [
-        { issue_id: 'REV-001', status: 'satisfied', reason: '已完成' },
-        { issue_id: 'REV-002', status: 'satisfied', reason: '修复后已完成' },
+        { issue_position: 0, status: 'satisfied', reason: '已完成' },
+        { issue_position: 1, status: 'satisfied', reason: '修复后已完成' },
       ],
     })
     await call('set_review_summary', { quality_checks: quality, blocking_issues: [], assignment_conflicts: [], external_input_gaps: [], external_input_only: false })
@@ -241,8 +241,8 @@ describe('任务 01: Reviewer 真正审核 RevisionIssue', () => {
     await call('review_coverage_items', { items: buildChapterReviewChecklist(context).map(item => covered(item.item_ref)) })
     await call('review_revision_issues', {
       items: [
-        { issue_id: 'REV-001', status: 'satisfied', reason: '完成' },
-        { issue_id: 'REV-002', status: 'needs_input', reason: '需要用户提供第三方系统的最新接口文档' },
+        { issue_position: 0, status: 'satisfied', reason: '完成' },
+        { issue_position: 1, status: 'needs_input', reason: '需要用户提供第三方系统的最新接口文档' },
       ],
     })
     await call('set_review_summary', { quality_checks: quality, blocking_issues: [], assignment_conflicts: [], external_input_gaps: [], external_input_only: false })
@@ -253,16 +253,16 @@ describe('任务 01: Reviewer 真正审核 RevisionIssue', () => {
     expect(review?.blocking_issues).toEqual([])
   })
 
-  it('6. 未知 issue_id 被 review_revision_issues 拒绝', async () => {
+  it('6. 未知意见位置被 review_revision_issues 拒绝', async () => {
     const { agent, call } = await harness()
     const context = makeContext()
     attachChapterReview(agent, context, new Map([['Q1', '正文内容']]), evidence, 0, [], issues)
 
     const res = await call('review_revision_issues', {
-      items: [{ issue_id: 'REV-UNKNOWN', status: 'satisfied', reason: '不存在' }],
+      items: [{ issue_position: 999, status: 'satisfied', reason: '不存在' }],
     })
     const output = (res as { content?: Array<{ text?: string }> }).content?.[0]?.text ?? ''
-    expect(output).toContain('未知审批意见 REV-UNKNOWN')
+    expect(output).toContain('未知审批意见位置 999')
   })
 
   it('7. 漏 issue 时 finish 失败并返回 missing_revision_issue_ids', async () => {
@@ -273,7 +273,7 @@ describe('任务 01: Reviewer 真正审核 RevisionIssue', () => {
     await call('review_coverage_items', { items: buildChapterReviewChecklist(context).map(item => covered(item.item_ref)) })
     // 只记录 REV-001，漏了 REV-002
     await call('review_revision_issues', {
-      items: [{ issue_id: 'REV-001', status: 'satisfied', reason: '完成' }],
+      items: [{ issue_position: 0, status: 'satisfied', reason: '完成' }],
     })
     await call('set_review_summary', { quality_checks: quality, blocking_issues: [], assignment_conflicts: [], external_input_gaps: [], external_input_only: false })
     const finishRes = await call('finish_chapter_review', {})
@@ -308,8 +308,8 @@ describe('任务 01: Reviewer 真正审核 RevisionIssue', () => {
     await call('review_coverage_items', { items: buildChapterReviewChecklist(context).map(item => covered(item.item_ref)) })
     await call('review_revision_issues', {
       items: [
-        { issue_id: 'REV-001', status: 'satisfied', reason: '原因1' },
-        { issue_id: 'REV-002', status: 'satisfied', reason: '原因2' },
+        { issue_position: 0, status: 'satisfied', reason: '原因1' },
+        { issue_position: 1, status: 'satisfied', reason: '原因2' },
       ],
     })
     await call('set_review_summary', { quality_checks: quality, blocking_issues: [], assignment_conflicts: [], external_input_gaps: [], external_input_only: false })

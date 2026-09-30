@@ -15,6 +15,7 @@ import type { BidManifest, BidWorkspace } from './index.ts'
 import { attachChapterPlan, CHAPTER_PLAN_TOOLS } from './chapter-writing-planning.ts'
 import { appendChapterWebReferences, bindChapterWriterInput, createChapterWriterReferences, mergeChapterWebMaterials, projectChapterWriterCandidate, renderChapterWriterReferences, type ChapterWriterReferences } from './chapter-writing-writer.ts'
 import { normalizeChapterHeadings, validateChapterHeadings } from './chapter-headings.ts'
+import { indexChapterContentBlocks } from './chapter-content-reuse.ts'
 import { ensureChapterLocations, planChapterLocations, readChapterLocations, type ChapterLocation } from './chapter-storage.ts'
 import { buildOutlineView } from './outline-confirmation-browser.ts'
 import { ChapterWriterImageInputError, createChapterWriterChild, type ChapterWriterChild } from './chapter-writing-child.ts'
@@ -190,6 +191,8 @@ interface ChapterWritingBaseOptions extends ModelStageExecutionOptions {
   maxConcurrency: number
   /** Maximum Main-Agent-selected whole-document repair rounds. */
   maxCompletionRepairRounds?: number
+  /** 局部能力的整书审查另由独立步骤执行，避免更新范围外报告。 */
+  documentReview?: 'defer'
 }
 
 /** 仅对指定叶节运行 Writer/Reviewer，范围外强依赖只返回影响。 */
@@ -198,6 +201,12 @@ export interface ScopedChapterWritingInput {
   readonly mode: 'write' | 'review'
   readonly instruction: string
   readonly seedBySectionId?: ReadonlyMap<string, string>
+  /** 迁移原文附带的真实流程图定义；锚点不能由 Writer 猜测重建。 */
+  readonly seedFlowchartsBySectionId?: ReadonlyMap<string, ReturnType<typeof parseChapterMetadata>['flowcharts']>
+  /** 原图须保留时，Host 绑定 seed 定义，Writer 只保留正文锚点。 */
+  readonly preserveSeedFlowcharts?: boolean
+  /** 既有 Writer 保持原父会话；由当前操作共享恢复器并负责释放。 */
+  readonly writerParentFor?: (writerId: string) => Promise<Agent>
   readonly affectedDependentIds?: Set<string>
 }
 
@@ -498,13 +507,14 @@ export function renderChapterExecutionPlanTask(
     '从现有项目资料即可独立写作的节点，不应按目录顺序串成依赖链。项目工作的先后顺序不自动构成正文写作依赖。需要引用另一章最终正文位置，或使用另一章首次确定的接口、成果结构等方案决策时，应保留相应依赖。不要为凑满并发而删除真实依赖。',
     `Confirmed Outline SHA-256：${outlineHash}`,
     `Confirmed Outline：${JSON.stringify(outline)}`,
+    `可写章节位置：${JSON.stringify(buildWritableSectionWorklist(outline).map((section, position) => ({ position, title: section.title, purpose: section.purpose })))}`,
     `Project：${JSON.stringify(modelContext(inputs.project))}`,
     `Requirements：${JSON.stringify(modelContext(inputs.requirements))}`,
     `Scoring：${JSON.stringify(modelContext(inputs.scoring))}`,
     `Compliance：${JSON.stringify(modelContext(inputs.compliance))}`,
     `Confirmed Writing Plan：${JSON.stringify(inputs.writingPlan)}`,
     '审视完整目录，再用 set_chapter_relations 提交有特殊关系或说明的章节。Host 为全部可写章节预置空关系，但这不代表已经证明它们没有语义依赖。无需逐章提交空数组。',
-    'depends_on 和 related_sections 的每项只填写 {"section_id":"章节 ID","reason":"原因"}。同一章节的后续提交整体覆盖原关系。',
+    'section_position 选择可写章节位置，depends_on 和 related_sections 的每项只填写 {"section_position":0,"reason":"原因"}。程序绑定实际章节 ID；同一章节的后续提交整体覆盖原关系。',
     '用 add_global_consistency_note 记录至少一项真实全书一致性要求；最后调用 finish_chapter_plan。存在环路时只修相关关系后再次 finish。',
   ].join('\n')
 }
@@ -560,7 +570,7 @@ export function renderChapterSubagentTask(
     '企业事实、产品参数、人员履历、资质、案例、业绩和既有能力只能由本地 Evidence 支撑；缺少时只写入 unresolved_topics，不得在正文中复述相应采购要求、写无依据承诺或生成占位内容。不得虚构数字、标准号、版本、日期或内部事实。',
     '明确区分已有事实、采购硬性要求和本次拟采用的实施方案。可以提出与采购要求相符的实施方法、职责分工、台账字段和质量控制措施，并明确写为“拟采用”“本方案设置”等方案设计；不要求采购原文逐项规定这些设计，但不得冒充既有能力、保证未经核实的硬指标或把旧项目条件迁入本项目。',
     '资料不支持真实项目数量、人员、设备或记录值时，不得添加带“示例”的伪数据行，也不得写“待补、XXX、最终填写”等占位值。管理表可以保留正式字段、填写规则和控制要求，由投标人按已核实资料填写。',
-    '每张 Markdown 表格都必须在紧邻上方保留一行简洁、准确的表题，只写名称不写编号，例如“表 技术偏离表”；已有表题保留，编号由 Host 按正文顺序生成。缺失表题的提交会退回当前章节修复。',
+    '每张 Markdown 表格都必须在紧邻上方保留一行简洁、准确的表题；新增表题只写名称不写编号，例如“表 技术偏离表”，编号由 Host 按正文顺序生成。已有表题保留，用户要求保留原文时连同已有表题的编号逐字保留，不自行删除或重新编号。缺失表题的提交会退回当前章节修复。',
     'Related Materials 来自 reference，只用于事实、参数、企业能力、技术依据和参考，不得大段照抄。Reference Bid Materials 是旧参考标书；reuse/adapt 可读取命中 chunk 的 index 和相邻 chunks 以取得完整方案，但必须清理旧项目名称、采购人、地点、日期、周期、数量、金额、环境和客户事实。',
     '最终必须调用 submit_chapter 返回完整 markdown 和语义 metadata；不要把 JSON 作为普通正文回复。资料引用错误在当前回合纠正；成功提交后等待审查意见，并在同一会话修改完整候选。正文不得保留 [M1]、[F1]、[W1] 等内部引用标记，也不得出现 REQ、SC、COM、RP、SEC、AC 等系统内部编号；需求对应表使用招标文件原有条款编号、需求名称或简要原文。资料使用记录通过 metadata 登记。',
     '当章节存在明确的步骤顺序、角色流转、判断分支、整改回路、审批关系或质量闭环时，判断结构化流程图是否比纯文字更清晰；只在确有表达价值时填写 metadata.flowcharts。背景、理念、人员介绍、政策说明和参数罗列等说明性章节不要为了增加图表而生成流程图。流程图必须给出完整节点和连线，不得填写“此处插入流程图”等占位文字。每张流程图必须提供唯一语义 key，并在正文最适合展示该图的位置插入唯一的 {{flowchart:<key>}}，其中 <key> 必须与 metadata.flowcharts 对应项的 key 完全一致；如果正文需要引用流程图，使用 {{flow_ref:<key>}}。例如正文可写“项目质量控制流程如下。\n\n{{flowchart:quality-control-flow}}\n\n各环节发现的问题均进入整改复核闭环。”，metadata.flowcharts 对应项的 key 为 quality-control-flow。禁止只生成 metadata.flowcharts 而不插入 anchor，禁止把流程图统一放到章节结尾，禁止生成 FLOW-*、node id、图号、坐标、SVG、Visio XML 或 Word/OLE 内容，Host 会分配身份并完成布局。',
@@ -1023,8 +1033,8 @@ function renderChapterReviewerTask(
   const revisionPromptLines = revisionIssues.length > 0 ? [
     '本次是用户审批修订。',
     '你必须逐条检查以下审批意见是否被当前候选正文满足。',
-    ...revisionIssues.flatMap(issue => [
-      `【审批意见 ${issue.issue_id}】`,
+    ...revisionIssues.flatMap((issue, issue_position) => [
+      `【审批意见位置 ${String(issue_position)}】`,
       `范围：${issue.scope === 'chapter' ? '整章' : '段落'}`,
       ...(issue.reference_text !== null ? [`原文：${issue.reference_text}`] : []),
       `修改意见：${issue.instruction}`,
@@ -1035,6 +1045,7 @@ function renderChapterReviewerTask(
     '- unsatisfied：Writer 可继续修复；',
     '- needs_input：缺少用户必须提供的信息。',
     '不能用章节总体 pass 代替逐条判断。',
+    '通过 issue_position 选择此处的意见位置；真实意见 ID 由 Host 绑定，不抄写 ID。',
   ] : []
   const opening = revisionIssues.length > 0
     ? '你是独立 S5 Chapter Reviewer。只审查当前候选；不得调用工作区、网络或子代理工具。用 review_coverage_items 记录固定覆盖项，用 review_revision_issues 逐条记录用户审批意见，用 review_acceptance_criteria 独立记录本章 semantic acceptance，用 review_global_constraints 单独记录全局要求对本章的适用性与违规，再用 review_claims、set_review_summary 和 finish_chapter_review 提交。不要调用 structured_output 或返回整份报告。'
@@ -1047,7 +1058,7 @@ function renderChapterReviewerTask(
     '先按 Current Chapter Path 和 Confirmed Outline Responsibilities 核对每段正文与当前、祖先和同级节点的主题关系及展开程度，再检查清单覆盖。structure_complete 同时要求本节承担正确职责、没有自创目录或侵入其他章节。结合证据原文语境判断内容是否适合当前任务，不凭标题或材料关键词判定归属。发现越界时将 structure_complete 设为 false，并在 blocking_issues 指出具体段落和应归属的章节；资料确有依据或清单已覆盖不能抵消放错章节的问题。',
     '若 must_answer、Writing Brief 或其他既定任务与目录职责冲突，明确记录该任务冲突，不要求 Writer 按错误位置扩写。允许本节概述相关主题并说明其与本节任务的关系；属于其他节点的内容由对应章节展开。',
     '全局要求不属于 R 覆盖项，不要求本章复述。逐项判断 conforms、violates 或 not_applicable：conforms/violates 引用适用正文，not_applicable 说明本章为何不适用且不代表整份文档已经满足。只有当前正文真实违反全局约束时才形成可执行修复意见。',
-    '逐项审查 Review Checklist 的固定 R；covered 必须至少引用一个当前 Q 且 issue=null，missing 不得引用 Q且必须说明具体 issue。Semantic Acceptance 逐项提交 criterion_id、met/unmet、reason 和可选 evidence_quote_refs；负向条件未满足时可引用违规句，全文性条件不因缺少单句引文而失效。',
+    '逐项审查 Review Checklist 的固定 R；covered 必须至少引用一个当前 Q 且 issue=null，missing 不得引用 Q且必须说明具体 issue。Semantic Acceptance 逐项提交 criterion_position、met/unmet、reason 和可选 evidence_quote_refs；全局约束使用 compliance_position，任务冲突使用 related_section_positions；程序绑定实际身份。负向条件未满足时可引用违规句，全文性条件不因缺少单句引文而失效。',
     '正文包含 metadata.flowcharts 时，将其作为正文的一部分审核：核对流程图与正文步骤、角色、分支和整改闭环是否一致，检查关键评分响应流程是否遗漏、连线是否断裂、判断节点是否缺少分支或与招标要求矛盾。只报告业务问题，不操作布局坐标或生成 Visio/OOXML。',
     '所有 evidence_quote_refs 与 claim_quote_ref 只填写当前 Quote Options 中的 Q；不得手抄或自造 quote。',
     '只对实质影响方案、事实或承诺的声明登记 claim，使用 source_reference=E 编号或 null。supported 必须实际看到适用原文，来源存在本身不表示语义支持；unsupported 说明具体问题。',
@@ -1060,12 +1071,13 @@ function renderChapterReviewerTask(
     `Relevant Requirements：${JSON.stringify(modelContext(context.requirements))}`,
     `Relevant Response Points：${JSON.stringify(modelContext(context.responsePoints))}`,
     `Chapter Required Compliance：${JSON.stringify(modelContext(context.compliance))}`,
-    `Global Compliance：${JSON.stringify(modelContext(context.globalCompliance))}`,
+    `Global Compliance：${JSON.stringify(modelContext(context.globalCompliance.map((item, position) => ({ ...item, position }))))}`,
     `Applicable Writing Contract：${JSON.stringify({ global: context.writingPlan, section: context.sectionWritingPlan })}`,
     '只审核当前章节的 task、用户要求和动态验收条件；全书级条件不得转成本章独立指标。Dynamic Host Acceptance Results 由 Host 按 evaluator 判别标签计算，Reviewer 不重新估算也不得覆盖。',
     `Review Checklist：${JSON.stringify(buildChapterReviewChecklist(context))}`,
     `Current Chapter Answer Plan（仅是计划，须以候选原文与 Evidence Pack 独立复核）：${JSON.stringify(context.answerPlan ?? [])}`,
-    `Semantic Acceptance：${JSON.stringify(context.sectionWritingPlan.acceptance_criteria.filter(item => item.evaluator.kind === 'semantic'))}`,
+    `Semantic Acceptance：${JSON.stringify(context.sectionWritingPlan.acceptance_criteria.filter(item => item.evaluator.kind === 'semantic').map((item, position) => ({ ...item, position })))}`,
+    `冲突章节位置：${JSON.stringify(context.outlineSections.map((item, position) => ({ position, title: item.title, purpose: item.purpose })))}`,
     `Dynamic Host Acceptance Results：${JSON.stringify(hostAcceptanceResults)}`,
     `Evidence Pack：${JSON.stringify(evidence)}`,
     `Dependency Handoff：${JSON.stringify(dependencies)}`,
@@ -1572,17 +1584,17 @@ export function renderGlobalComplianceReviewTask(
     '结合招标条款原文、确认目录职责、当前全部正文和材料身份，逐项判断核验性质与责任归属。不得按关键词、章节编号或项目名称硬编码分类。允许多个章节共同负责同一要求。',
     'cross_chapter_constraint 检查适用正文是否违反约束及章节之间是否矛盾，不要求每章重复条款。document_requirement 必须核对实际正文、材料或有效关联位置，不能把“未发现违规”当作内容齐全。delivery_requirement 需要实际执行证据；S5 无法观察上传、截止或递交操作时必须 pending，生成文件不等于已经递交。',
     '区分 pass、fail、pending 和 not_applicable。pass 必须选择当前依据；缺少内容可 fail 且说明缺口，缺少外部材料或人工确认应 pending。不得编造正文、材料或执行证据。',
-    'checked_section_ids 只列实际检查的正文；chapter owner 表示正文责任，document 表示全书收口责任，delivery 表示项目递交责任。affected_section_ids 只列存在可执行正文问题的章节；外部待办和无归属冲突不得复制到所有章节。',
+    'compliance_position 使用全局要求位置；checked_section_positions 只列实际检查的正文位置；chapter owner 使用 section_position 表示正文责任，document 表示全书收口责任，delivery 表示项目递交责任。affected_section_positions 只列存在可执行正文问题的章节位置；外部待办和无归属冲突不得复制到所有章节。程序绑定实际身份。',
     `Confirmed Outline Responsibilities：${JSON.stringify(outline.sections.map(({ id, parent_id, title, purpose, must_answer, compliance_ids }) => ({ id, parent_id, title, purpose, must_answer, compliance_ids })))}`,
-    `Pending Global Compliance：${JSON.stringify(modelContext(pending))}`,
+    `Pending Global Compliance：${JSON.stringify(modelContext(pending.map(item => ({ ...item, position: outline.global_compliance_ids.indexOf(item.id) }))))}`,
     `Retained Current Results：${JSON.stringify(retained)}`,
     ...(writingPlan === undefined ? [] : [
       `Confirmed Document Writing Plan：${JSON.stringify(writingPlan)}`,
       '动态验收由所属 Reviewer 在对应协议中处理；本轮只核验固定的全局 Compliance。',
     ]),
-    `Current Chapters：${JSON.stringify(chapters.map(({ section_id, title, candidate_sha256 }) => ({ section_id, title, candidate_sha256 })))}`,
+    `Current Chapters：${JSON.stringify(chapters.map(({ title }, position) => ({ position, title })))}`,
     `Material Evidence Options：${JSON.stringify(evidence.filter(item => item.kind === 'material'))}`,
-    '正文核验调用 read_completed_chapter 按 section_id 分段读取；返回的 DQ 引用可作为当前正文依据。',
+    '正文核验调用 read_completed_chapter 按 Current Chapters 的 position 分段读取；返回的 DQ 引用可作为当前正文依据。',
     '只使用 read_completed_chapter、review_global_compliance 和 finish_global_compliance_review。只提交 Pending Global Compliance；保留结果已由 Host 绑定当前正文版本。全部条目具有结果后调用 finish_global_compliance_review。合法 fail/pending 也必须正常提交，不能为了结束而改成 pass。',
   ].join('\n')
 }
@@ -1670,6 +1682,7 @@ export async function executeChapterWriting(
       if (!worklist.some(section => section.id === sectionId)) throw new Error('BID_CHAPTER_REVISION_NOT_WRITABLE')
     }
     const artifacts = await runChapterWriting(agent, workspace, task, options, undefined, options.revisionBatch)
+    if (options.documentReview === 'defer') return artifacts
     try {
       return await reviewWritingPlanCompletion(agent, workspace, task, options, artifacts)
     } catch {
@@ -2139,7 +2152,9 @@ async function runChapterWriting(
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
   }
   const planRevision = writingPlan.revision
-  const writingPlanInvalidations = appliedWritingPlanVersion === writingPlan.plan_version
+  // 局部审核及已绑定步骤输入的候选恢复按当前契约核对正文；整本计划应用标记不能撤销其候选。
+  const writingPlanInvalidations = scoped?.mode === 'review' || scoped !== undefined && options.resumeCandidate === true
+    || appliedWritingPlanVersion === writingPlan.plan_version
     || appliedWritingPlanVersion === undefined && writingPlan.plan_version === 1
     ? new Set<string>()
     : planRevision !== null && appliedWritingPlanVersion === planRevision.base_plan_version
@@ -2341,20 +2356,23 @@ async function runChapterWriting(
 
   const capturedByChild = new Map<string, Map<string, CapturedWebResult>>()
   const childSetups = new Map<string, (child: Agent) => void>()
+  const writerParentIds = new Set([agent.id])
   const liftChildSetup = agent.ctx.on('subagent/child-setup', ({ parent, childContext, request }) => {
     const child = childContext.agent as Agent
-    if (parent !== agent || request.label === undefined) return
+    if (!writerParentIds.has(parent.id) || request.label === undefined) return
     childSetups.get(request.label)?.(child)
   })
   const liftChildReadGuard = agent.ctx.on('agent/created', ({ agent: child }) => {
-    if (child.session.header.parentSession !== agent.id || child.session.header.origin !== 'subagent') return
+    const parentId = child.session.header.parentSession
+    if (parentId === undefined || !writerParentIds.has(parentId) || child.session.header.origin !== 'subagent') return
     child.ctx.tools.guard(exec => chapterReadGuard(
-      workspace, manifest, readableWebPathsByChild.get(String(child.id)) ?? new Map(), agent.id, exec,
+      workspace, manifest, readableWebPathsByChild.get(String(child.id)) ?? new Map(), parentId, exec,
     ))
   }, { global: true })
   const liftObserver = agent.ctx.on('tools/result', (exec, result) => {
     const childId = exec.agent?.session.id
-    if (childId === undefined || exec.agent?.session.header.parentSession !== agent.id
+    const parentId = exec.agent?.session.header.parentSession
+    if (childId === undefined || parentId === undefined || !writerParentIds.has(parentId)
       || (exec.name !== 'web_search' && exec.name !== 'web_fetch')) return
     const captured = capturedByChild.get(childId) ?? new Map<string, CapturedWebResult>()
     captured.set(String(exec.callId), { exec, result })
@@ -2859,10 +2877,15 @@ async function runChapterWriting(
                 revisionOriginal === undefined || !revisionOriginal.split('\n').some(original => original.trim() === line))),
             )
           })
+          const assignedSeed = scoped?.seedBySectionId?.get(sectionId)
           const reviewer = await subagents.start('spawn', {
             label: reviewLabel,
             parent: agent,
             prompt: [{ type: 'text', text: [renderChapterReviewerTask(context, candidate, dependencies, quotes, evidencePack, hostAcceptanceResults, revisionReviewIssues, paragraphRevision),
+              ...(scoped === undefined ? [] : [
+                '本次局部任务由多个叶节共同完成。你只审核当前叶节的职责和分配原文；未分配表格或流程图的叶节，不承担保留其他叶节载体的义务。整项任务的原文、表格和流程图完整保留由 Host 跨节核验，不得要求每个子章重复全部原文载体。',
+                ...(assignedSeed === undefined ? [] : ['当前叶节分配的原文载体：\n' + assignedSeed]),
+              ]),
               ...(scoped?.mode === 'review' ? [`本次审核重点：${scoped.instruction}`] : []),
               options.recovery !== undefined && (options.recovery.unit === sectionId
                 || options.recovery.unit === options.run.work.workId || options.recovery.unit.includes(serial))
@@ -2977,9 +3000,21 @@ async function runChapterWriting(
           context, plan.global_consistency_notes, planned.planning_notes, dependencies, references,
         )
         const seed = scoped?.seedBySectionId?.get(sectionId)
+        const seedFlowcharts = scoped?.seedFlowchartsBySectionId?.get(sectionId)
         const freshPrompt = scoped === undefined ? contextPrompt : [contextPrompt,
           `本次局部写作要求：${scoped.instruction}`,
-          ...(seed === undefined ? [] : [`已分配给本节的原文草稿（需要核验并改写为本项目正文）：\n${seed}`]),
+          ...(seed === undefined ? [] : ['原文草稿的保留、改写和补充以本次原始任务为准。用户要求保留原文时，保留已分配的原句、完整表格和流程图锚点，在其周围补充；不得用概括、同义改写或新绘流程图替代原文载体。',
+            scoped.preserveSeedFlowcharts === true ? [
+              '原文保留块：' + JSON.stringify(indexChapterContentBlocks(sectionId, seed)
+                .filter(block => block.type !== 'heading' && block.markdown.trim() !== '')
+                .map((block, position) => ({ position, type: block.type, readonly_markdown: block.markdown.trim() }))),
+              '你负责组织正文和补充写作。在 markdown 中用 {{reuse:位置}} 放置每个分配原块，Host 按真实原文展开；不抄写原块载荷、不改写或丢弃它们。在原块周围增补内容，原章标题用当前章节标题替代。',
+            ].join('\n') : `已分配给本节的原文草稿：\n${seed}`]),
+          ...(seedFlowcharts === undefined || seedFlowcharts.length === 0 ? [] : [
+            scoped.preserveSeedFlowcharts === true
+              ? '原流程图定义由 Host 复用；你只保留已分配原文中的图锚点，不重新提交这些图的 metadata 定义。'
+              : '本节迁移原文的流程图定义；按真实任务判断是否调整：' + JSON.stringify(seedFlowcharts),
+          ]),
         ].join('\n\n')
         const basePrompt = effectiveRevision === undefined && batchTask === undefined || revisionOriginal === undefined
           ? freshPrompt
@@ -3024,10 +3059,15 @@ async function runChapterWriting(
         childSetups.set(label, (child) => {
           readableWebPathsByChild.set(String(child.id), mappedWebPaths(context))
         })
-        writer ??= createChapterWriterChild(agent, label, options.maxRepairAttempts, async (child, value) => {
+        const writerParent = reusableWriterId !== undefined && scoped?.writerParentFor !== undefined
+          ? await scoped.writerParentFor(reusableWriterId) : agent
+        writerParentIds.add(writerParent.id)
+        writer ??= createChapterWriterChild(writerParent, label, options.maxRepairAttempts, async (child, value) => {
           const snapshots = buildWebEvidenceSnapshots(capturedByChild.get(String(child.id))?.values() ?? [])
           const parsed = preserveParagraphRevisionMetadata(await bindChapterWriterInput(
             workspace, manifest, context, references, value, snapshots,
+            scoped?.preserveSeedFlowcharts === true ? scoped.seedFlowchartsBySectionId?.get(sectionId) ?? [] : [],
+            scoped?.preserveSeedFlowcharts === true ? scoped.seedBySectionId?.get(sectionId) : undefined,
           ), revisionMetadata)
           const customerFacingIssues = chapterInternalIdentifierIssues(context, parsed.markdown)
           const tableCaptionIssues = missingTableCaptionLines(parsed.markdown)
@@ -3080,6 +3120,8 @@ async function runChapterWriting(
             try {
               const parsed = preserveParagraphRevisionMetadata(await bindChapterWriterInput(
                 workspace, manifest, context, references, result.structured, attemptSnapshots,
+                scoped?.preserveSeedFlowcharts === true ? scoped.seedFlowchartsBySectionId?.get(sectionId) ?? [] : [],
+                scoped?.preserveSeedFlowcharts === true ? scoped.seedBySectionId?.get(sectionId) : undefined,
               ), revisionMetadata)
               const validated = await validateAndBindChapterCandidate(
                 workspace, manifest, context, parsed, [...durableWebSources.values()], attemptSnapshots,
@@ -3400,7 +3442,7 @@ async function runChapterWriting(
     confirmed_outline_sha256: outlineHash,
     chapters: entries,
   }, options.run.commits)
-  if (scoped === undefined && inputBlocked.size === 0) try {
+  if (scoped === undefined && options.documentReview !== 'defer' && inputBlocked.size === 0) try {
     const chaptersForGlobalReview: GlobalComplianceChapter[] = []
     for (const section of worklist) {
       const chapter = completed.get(section.id)
@@ -3454,6 +3496,7 @@ async function runChapterWriting(
     { stage: 'chapter_writing', type: 'chapter_execution_plan', path: PLAN_PATH },
     { stage: 'chapter_writing', type: 'chapter_execution_log', path: LOG_PATH },
     { stage: 'chapter_writing', type: 'chapter_manifest', path: MANIFEST_PATH },
-    ...(scoped === undefined ? [{ stage: 'chapter_writing' as const, type: 'global_compliance_review', path: GLOBAL_REVIEW_PATH }] : []),
+    ...(scoped === undefined && options.documentReview !== 'defer'
+      ? [{ stage: 'chapter_writing' as const, type: 'global_compliance_review', path: GLOBAL_REVIEW_PATH }] : []),
   ]
 }

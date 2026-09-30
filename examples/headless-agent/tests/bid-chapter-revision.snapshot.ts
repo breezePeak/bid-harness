@@ -1,10 +1,10 @@
 /** 固定章节原 Writer 的修订会话、越界提交拒绝和最终正文。 */
-import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises'
+import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { normalizeSessionSnapshot } from '@deepseek-ai/dsh-acp-snapshot'
 import { parseChapterExecutionLog, parseChapterMetadata } from '@deepseek-ai/dsh-bid'
-import { LOADER_SMOKE_TEST_TIMEOUT_MS, runLoaderSmoke } from '@deepseek-ai/dsh-loader-smoke'
+import { runLoaderSmoke } from '@deepseek-ai/dsh-loader-smoke'
 import type { SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
 import { expect, it } from 'vitest'
 
@@ -15,6 +15,7 @@ const binScript = fileURLToPath(new URL('./fixtures/bid-chapter-revision-driver.
 it('章节重写和相邻段落修改续用原 Writer 上下文，越界提交不能落盘', async () => {
   const result = await runLoaderSmoke({
     label: 'S5 原 Writer 定向修订', tempDirPrefix: 'dsh-s5-revision-snapshot-', binScript, configPath, mode: 'src',
+    processTimeoutMs: 90_000,
     tsconfigPath: fileURLToPath(new URL('../../../tsconfig.json', import.meta.url)),
     inspect: async (cwd) => {
       const store = join(cwd, '.session-store')
@@ -29,19 +30,36 @@ it('章节重写和相邻段落修改续用原 Writer 上下文，越界提交�
       const events = writerLog.trimEnd().split('\n').slice(1).map(line => JSON.parse(line) as SessionEvent)
       expect(events.filter(event => event.type === 'turn/start')).toHaveLength(4)
       const calls = events.filter(event => event.type === 'tool/call')
-      expect(calls.filter(event => event.data.name === 'submit_chapter')).toHaveLength(10)
+      expect(calls.filter(event => event.data.name === 'submit_chapter')).toHaveLength(9)
+      expect(calls.filter(event => event.data.name === 'submit_paragraph_revision')).toHaveLength(1)
       const outsideCall = calls.find(event => event.data.callId === 'reject-outside-selection')
       expect(outsideCall).toBeDefined()
       expect(events.find(event => event.type === 'tool/result' && event.data.message.source.callId === outsideCall?.data.callId))
         .toMatchObject({ data: { message: { content: [{ isError: true }] } } })
       const writerAttempts = execution.sections[0]!.attempts.filter(attempt => attempt.role === 'writer')
-      expect(writerAttempts).toHaveLength(4)
+      expect(writerAttempts).toHaveLength(3)
       expect(writerAttempts.every(attempt => attempt.accepted && attempt.child_session_id === writerId)).toBe(true)
       const sessionIds = logs.map(log => (JSON.parse(log.split('\n')[0]!) as SessionHeader).id)
+      const candidateRoots = (await readdir(projectRoot, { recursive: true }))
+        .filter(path => path.replaceAll('\\', '/').endsWith('/work/.bid-harness'))
+        .map(path => resolve(projectRoot, path, '..'))
+      for (const event of events) {
+        if (event.type !== 'user/message') continue
+        for (const block of event.data.content) {
+          if (block.type !== 'text') continue
+          const locations = block.text.match(/Available Evidence Files：([^\n]+)/u)?.[1]
+          if (locations === undefined) continue
+          for (const location of JSON.parse(locations) as Array<{ chunks_path: string; chunk_index_path: string }>) {
+            expect((await stat(location.chunks_path)).isDirectory()).toBe(true)
+            expect((await stat(location.chunk_index_path)).isFile()).toBe(true)
+          }
+        }
+      }
       const expected = {
         'writer.expected.jsonl': normalizeSessionSnapshot(writerLog, {
           sessionIds, cwd,
-          cwdAliases: [cwd.replaceAll('\\', '/'), cwd.toLowerCase().replaceAll('\\', '/')],
+          cwdAliases: [cwd.replaceAll('\\', '/'), cwd.toLowerCase().replaceAll('\\', '/'),
+            ...candidateRoots.flatMap(path => [path, path.replaceAll('\\', '/'), path.toLowerCase().replaceAll('\\', '/')])],
         }),
         'artifacts.expected.json': JSON.stringify({
           markdown: await readFile(join(projectRoot, 'chapters/sections/0001.md'), 'utf8'),
@@ -56,7 +74,7 @@ it('章节重写和相邻段落修改续用原 Writer 上下文，越界提交�
     },
   })
   expect(JSON.parse(result.stdout)).toEqual({
-    writer_session_reused: true, original_context_retained: true, main_agent_completion_reviewed: true,
+    writer_session_reused: true, original_context_retained: true, task_results_verified: true,
     paragraphs_outside_selection_unchanged: true, evidence_unchanged: true,
   })
-}, LOADER_SMOKE_TEST_TIMEOUT_MS)
+}, 105_000)

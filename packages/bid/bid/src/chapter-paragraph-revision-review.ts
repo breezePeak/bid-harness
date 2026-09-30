@@ -7,6 +7,7 @@ import { ToolArgsError } from '@deepseek-ai/dsh-tools'
 import { z } from 'zod'
 import { chapterToolArgs, createChapterProtocol, type ChapterProtocol } from './chapter-writing-protocol.ts'
 import type { ParagraphRevisionReplacement, ParagraphRevisionSegment } from './chapter-paragraph-revision.ts'
+import { zodJsonSchema } from './zod-json-schema.ts'
 
 /** Delta Reviewer 唯一可见的结束工具名。 */
 export const PARAGRAPH_REVISION_REVIEW_TOOL = 'finish_paragraph_revision_review'
@@ -24,6 +25,11 @@ export const paragraphRevisionReviewSchema = z.object({
     segment_id: z.string().min(1), instruction: z.string().min(1),
   }).strict()),
   reason: z.string().min(1),
+}).strict()
+const modelReviewSchema = paragraphRevisionReviewSchema.extend({
+  issue_checks: z.array(paragraphRevisionReviewSchema.shape.issue_checks.element.omit({ issue_id: true })).min(1),
+  repair_instructions: z.array(z.object({ segment_position: z.number().int().nonnegative(),
+    instruction: z.string().min(1) }).strict()),
 }).strict()
 
 /** Delta Reviewer 的完整决策。 */
@@ -66,14 +72,19 @@ export function renderParagraphRevisionReviewerTask(input: {
   readonly title: string
   readonly segments: readonly ParagraphRevisionSegment[]
   readonly replacements: readonly ParagraphRevisionReplacement[]
+  readonly issueIds: readonly string[]
 }): string {
   const revised = new Map(input.replacements.map(item => [item.segment_id, item.markdown]))
   const issues = new Map(input.segments.flatMap(segment => segment.issues.map(issue => [issue.issue_id, issue] as const)))
   return [
     `章节标题：${input.title}`,
-    `用户审批意见：\n${[...issues.values()].map(issue => `${issue.issue_id}: ${issue.instruction}${issue.suggestion === null ? '' : `；建议：${issue.suggestion}`}`).join('\n')}`,
-    ...input.segments.map(segment => [
-      segment.segment_id,
+    `用户审批意见：\n${input.issueIds.map((id, index) => {
+      const issue = issues.get(id)
+      if (issue === undefined) throw new Error('PARAGRAPH_REVISION_REVIEW_ISSUE_MISSING')
+      return `${String(index)}: ${issue.instruction}${issue.suggestion === null ? '' : `；建议：${issue.suggestion}`}`
+    }).join('\n')}`,
+    ...input.segments.map((segment, index) => [
+      `授权块位置：${String(index)}`,
       `readonly_before:\n${segment.readonly_before}`,
       `original_text:\n${segment.original_text}`,
       `revised_text:\n${revised.get(segment.segment_id) ?? ''}`,
@@ -86,6 +97,7 @@ export function renderParagraphRevisionReviewerTask(input: {
       '如果改变技术事实、参数、承诺、评分响应含义、证据含义、接口含义、handoff 等，decision=full_review。',
       '禁止检查选区外正文。禁止提出修改选区外正文。禁止产生普通 Chapter blocking_issues。',
       `调用 ${PARAGRAPH_REVISION_REVIEW_TOOL} 一次提交全部结果。`,
+      'issue_checks 按审批意见输入顺序返回同样数量的判断，每项只填写 status 和 reason。repair_instructions 选择 segment_position 并填写修复办法；意见与分段身份由 Host 绑定，不抄写 ID。',
     ].join('\n'),
   ].join('\n\n')
 }
@@ -152,21 +164,18 @@ export function createParagraphRevisionReviewerChild(
     round.register({
       name: PARAGRAPH_REVISION_REVIEW_TOOL,
       description: '一次提交局部修订的意见满足度和语义保持结论。',
-      parameters: {
-        type: 'object', properties: {
-          decision: { type: 'string', enum: ['accept', 'repair', 'full_review', 'needs_input'] },
-          issue_checks: { type: 'array', items: { type: 'object', properties: {
-            issue_id: { type: 'string' }, status: { type: 'string', enum: ['satisfied', 'unsatisfied', 'needs_input'] }, reason: { type: 'string' },
-          }, required: ['issue_id', 'status', 'reason'], additionalProperties: false } },
-          semantic_preserved: { type: 'boolean' },
-          repair_instructions: { type: 'array', items: { type: 'object', properties: {
-            segment_id: { type: 'string' }, instruction: { type: 'string' },
-          }, required: ['segment_id', 'instruction'], additionalProperties: false } },
-          reason: { type: 'string' },
-        }, required: ['decision', 'issue_checks', 'semantic_preserved', 'repair_instructions', 'reason'], additionalProperties: false,
-      },
+      parameters: zodJsonSchema(modelReviewSchema),
       execute(args, exec) {
-        const parsed = chapterToolArgs(paragraphRevisionReviewSchema, args)
+        const submitted = chapterToolArgs(modelReviewSchema, args)
+        if (submitted.issue_checks.length !== issueIds.length) throw new ToolArgsError(['issue_checks 必须按输入顺序覆盖全部审批意见。'])
+        const parsed = paragraphRevisionReviewSchema.parse({ ...submitted,
+          issue_checks: issueIds.map((issue_id, index) => ({ ...submitted.issue_checks[index], issue_id })),
+          repair_instructions: submitted.repair_instructions.map(({ segment_position, instruction }) => {
+            const segment_id = segmentIds[segment_position]
+            if (segment_id === undefined) throw new ToolArgsError(['repair_instructions 只能选择当前授权块位置。'])
+            return { segment_id, instruction }
+          }),
+        })
         validateReview(parsed, new Set(issueIds), new Set(segmentIds))
         return Promise.resolve(round.finish(exec, parsed))
       },

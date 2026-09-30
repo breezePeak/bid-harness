@@ -15,6 +15,7 @@ import type { WebEvidenceSource } from './web-evidence-source-artifacts.ts'
 import { semanticAcceptanceSubmissionSchema, type HostAcceptanceResult } from './acceptance-criteria.ts'
 import { parseWebEvidenceChunkIndex, webEvidenceChunkIndexMatches, webEvidenceChunkIndexPath } from './web-evidence-chunks.ts'
 import { assertNoLinkedPath } from './workspace-path.ts'
+import { createChapterObjectPositions } from './chapter-object-positions.ts'
 import { buildSectionAnswerChecklist } from './section-answer-plan.ts'
 
 /** 仅在当前 Reviewer Child 注册的工具。 */
@@ -133,7 +134,7 @@ const globalCheckInput = z.object({
 }).strict()
 const acceptanceInput = semanticAcceptanceSubmissionSchema
 const revisionIssueCheckInput = z.object({
-  issue_id: text,
+  issue_position: z.number().int().nonnegative(),
   status: z.enum(['satisfied', 'unsatisfied', 'needs_input']),
   reason: text,
 }).strict()
@@ -168,12 +169,17 @@ export function attachChapterReview(
   changedQuoteTexts: ReadonlySet<string> = new Set(),
 ): ChapterProtocol<ChapterReview> {
   const runtime = createChapterProtocol<ChapterReview>(agent, 'finish_chapter_review', maxContinuations)
+  const positions = createChapterObjectPositions([
+    { canonical: 'criterion_id', model: 'criterion_position', ids: context.sectionWritingPlan.acceptance_criteria.filter(item => item.evaluator.kind === 'semantic').map(item => item.id) },
+    { canonical: 'compliance_id', model: 'compliance_position', ids: context.globalCompliance.map(item => item.id) },
+    { canonical: 'related_section_ids', model: 'related_section_positions', ids: context.outlineSections.map(item => item.id), many: true },
+  ])
   const checklist = buildChapterReviewChecklist(context)
   const coverage = new Map<string, z.infer<typeof coverageInput>>()
   const acceptance = new Map<string, z.infer<typeof acceptanceInput>>()
   const globalChecks = new Map<string, z.infer<typeof globalCheckInput>>()
   const claims = new Map<string, z.infer<typeof claimInput>>()
-  const revisionChecks = new Map<string, z.infer<typeof revisionIssueCheckInput>>()
+  const revisionChecks = new Map<string, NonNullable<ChapterReview['revision_issue_checks']>[number]>()
   let summary: z.infer<typeof summaryInput> | undefined
   const quote = (ref: string): string => {
     const content = quotes.get(ref)
@@ -213,7 +219,7 @@ export function attachChapterReview(
     })
     runtime.register({
       name: 'review_global_constraints', description: '逐项记录全局要求对本章的适用性；不适用不是整份文档通过，真实违反才形成正文修复问题。',
-      parameters: {
+      parameters: positions.schema({
         type: 'object', properties: { items: { type: 'array', items: {
           type: 'object', properties: {
             compliance_id: stringParameter,
@@ -222,9 +228,9 @@ export function attachChapterReview(
             issue: nullableText,
           }, required: ['compliance_id', 'status', 'evidence_quote_refs', 'issue'], additionalProperties: false,
         } } }, required: ['items'], additionalProperties: false,
-      },
+      }),
       execute: args => batch(args, (value) => {
-        const item = chapterToolArgs(globalCheckInput, value)
+        const item = chapterToolArgs(globalCheckInput, positions.bind(value))
         if (!context.globalCompliance.some(entry => entry.id === item.compliance_id)) throw new ToolArgsError([`compliance_id: 未知全局合规 ID ${item.compliance_id}。`])
         for (const ref of item.evidence_quote_refs) quote(ref)
         if (item.status === 'conforms' && (item.evidence_quote_refs.length === 0 || item.issue !== null)) {
@@ -242,7 +248,7 @@ export function attachChapterReview(
     })
     runtime.register({
       name: 'review_acceptance_criteria', description: '按独立的 met/unmet 协议记录本章 semantic acceptance；引用可为空，但填写的 Q 必须来自当前正文。',
-      parameters: {
+      parameters: positions.schema({
         type: 'object', properties: { items: { type: 'array', items: {
           type: 'object', properties: {
             criterion_id: stringParameter,
@@ -251,9 +257,9 @@ export function attachChapterReview(
             reason: stringParameter,
           }, required: ['criterion_id', 'status', 'evidence_quote_refs', 'reason'], additionalProperties: false,
         } } }, required: ['items'], additionalProperties: false,
-      },
+      }),
       execute: args => batch(args, (value) => {
-        const item = chapterToolArgs(acceptanceInput, value)
+        const item = chapterToolArgs(acceptanceInput, positions.bind(value))
         const criterion = context.sectionWritingPlan.acceptance_criteria.find(candidate =>
           candidate.id === item.criterion_id && candidate.evaluator.kind === 'semantic')
         if (criterion === undefined) throw new ToolArgsError([`criterion_id: 未知 semantic criterion ${item.criterion_id}。`])
@@ -286,7 +292,7 @@ export function attachChapterReview(
     })
     runtime.register({
       name: 'set_review_summary', description: '整体替换质量检查、正文修复问题、任务冲突和外部资料缺口；明确全部失败是否只能由外部输入解决。',
-      parameters: {
+      parameters: positions.schema({
         type: 'object', properties: {
           quality_checks: { type: 'object', properties: qualityParameters, required: Object.keys(qualityParameters), additionalProperties: false },
           blocking_issues: { type: 'array', items: stringParameter },
@@ -299,9 +305,9 @@ export function attachChapterReview(
           }, required: ['item_ref', 'required_material', 'reason'], additionalProperties: false } },
           external_input_only: { type: 'boolean' },
         }, required: ['quality_checks', 'blocking_issues', 'assignment_conflicts', 'external_input_gaps', 'external_input_only'], additionalProperties: false,
-      },
+      }),
       execute(args) {
-        summary = chapterToolArgs(summaryInput, args)
+        summary = chapterToolArgs(summaryInput, positions.bind(args))
         summary.blocking_issues = [...new Set(summary.blocking_issues.map(value => value.trim()))]
         for (const conflict of summary.assignment_conflicts) for (const sectionId of conflict.related_section_ids) {
           if (!context.outlineSections.some(section => section.id === sectionId)) throw new ToolArgsError([`assignment_conflicts: 未知章节 ${sectionId}。`])
@@ -330,21 +336,20 @@ export function attachChapterReview(
             items: {
               type: 'array', items: {
                 type: 'object', properties: {
-                  issue_id: stringParameter,
+                  issue_position: { type: 'integer' },
                   status: { type: 'string', enum: ['satisfied', 'unsatisfied', 'needs_input'] },
                   reason: stringParameter,
-                }, required: ['issue_id', 'status', 'reason'], additionalProperties: false,
+                }, required: ['issue_position', 'status', 'reason'], additionalProperties: false,
               },
             },
           }, required: ['items'], additionalProperties: false,
         },
         execute: args => batch(args, (value) => {
           const item = chapterToolArgs(revisionIssueCheckInput, value)
-          if (!revisionIssues.some(entry => entry.issue_id === item.issue_id)) {
-            throw new ToolArgsError([`issue_id: 未知审批意见 ${item.issue_id}。`])
-          }
-          revisionChecks.set(item.issue_id, item)
-          return item.issue_id
+          const issue = revisionIssues[item.issue_position]
+          if (issue === undefined) throw new ToolArgsError([`issue_position: 未知审批意见位置 ${item.issue_position}。`])
+          revisionChecks.set(issue.issue_id, { issue_id: issue.issue_id, status: item.status, reason: item.reason })
+          return String(item.issue_position)
         }),
       })
     }

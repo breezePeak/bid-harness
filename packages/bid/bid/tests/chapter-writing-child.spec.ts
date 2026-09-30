@@ -2,10 +2,40 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { ToolExecution } from '@deepseek-ai/dsh-tools'
 import { describe, expect, it, vi } from 'vitest'
-import { createChapterWriterChild } from '../src/chapter-writing-child.ts'
+import { createChapterWriterChild, createChapterWriterParentResolver } from '../src/chapter-writing-child.ts'
 import { createParagraphRevisionWriterChild } from '../src/chapter-paragraph-revision-child.ts'
 
 describe('S5 reused Writer policy', () => {
+  it('并发续写两个原 Writer 时只恢复一次原父会话，并只释放本次恢复的父会话', async () => {
+    const root = 'D:/test-project'
+    const originalParent = { id: SessionId('original-parent'), session: { header: { cwd: root } } } as unknown as Agent
+    const dispose = vi.fn(async () => {})
+    const inspect = vi.fn(async (id: SessionId) => ({ meta: id === originalParent.id ? { cwd: root }
+      : { cwd: root, origin: 'subagent', parentSession: originalParent.id }, events: [] }))
+    const resume = vi.fn(async () => ({ agent: originalParent, dispose }))
+    const current = { id: SessionId('new-execution'), ctx: {
+      get: (name: string) => name === 'sessionPersistence' ? { inspect } : undefined,
+      agents: { get: () => undefined, resume },
+    } } as unknown as Agent
+    const resolver = createChapterWriterParentResolver(current, root, new AbortController().signal)
+    const parents = await Promise.all([resolver.resolve('writer-a'), resolver.resolve('writer-b')])
+    expect(parents).toEqual([originalParent, originalParent])
+    expect(resume).toHaveBeenCalledOnce()
+    await resolver.dispose()
+    expect(dispose).toHaveBeenCalledOnce()
+  })
+
+  it('持久 Writer 来自其他项目时不恢复父会话或续写', async () => {
+    const resume = vi.fn()
+    const current = { id: SessionId('current'), ctx: {
+      get: () => ({ inspect: async () => ({ meta: { cwd: 'D:/other-project', origin: 'subagent', parentSession: SessionId('other') } }) }),
+      agents: { get: () => undefined, resume },
+    } } as unknown as Agent
+    const resolver = createChapterWriterParentResolver(current, 'D:/test-project', new AbortController().signal)
+    await expect(resolver.resolve('writer')).rejects.toThrow('BID_CHAPTER_REVISION_CONTEXT_UNAVAILABLE')
+    expect(resume).not.toHaveBeenCalled()
+    await resolver.dispose()
+  })
   it('恢复已有 Writer 时也安装 no-web guard', async () => {
     const writerId = SessionId('writer-existing')
     const guards: Array<(execution: Readonly<ToolExecution>) => string | undefined> = []
@@ -96,7 +126,7 @@ describe('S5 paragraph revision Writer policy', () => {
     } as unknown as Agent
 
     const writer = createParagraphRevisionWriterChild(
-      parent, '局部修订', writerId, new AbortController().signal,
+      parent, '局部修订', writerId, ['SEG-0001'], new AbortController().signal,
     )
 
     expect(restrictions).toContainEqual({ allow: [] })

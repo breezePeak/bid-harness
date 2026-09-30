@@ -1,3 +1,5 @@
+import { scriptedVerificationReply } from './task-verifier.ts'
+import { mappingModelReply } from './mapping-model-positions.ts'
 /** S4/S5 真实工具循环与 Loader 回放共用的外部结果和输入资料。 */
 import { lstat, mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { join, relative, resolve } from 'node:path'
@@ -75,13 +77,21 @@ class ScriptedAdapter extends LlmAdapter {
 
   async * stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
     this.requests.push(options)
-    if (!this.interactive && options.messages.at(-1)?.source.kind === 'subagent-settled') {
+    const verification = options.messages.flatMap(message => message.content)
+      .find(block => block.type === 'text' && block.text.includes('核验输入：'))
+    if (verification?.type === 'text') {
+      const input = JSON.parse(verification.text.slice(verification.text.indexOf('核验输入：') + '核验输入：'.length)) as Parameters<typeof scriptedVerificationReply>[0]
+      yield* finalText(JSON.stringify(scriptedVerificationReply(input)))
+      return
+    }
+    if (!this.interactive && options.sessionId === this.parentId && options.messages.at(-1)?.source.kind === 'subagent-settled') {
       yield* finalText('等待 Host 下发目录深化任务。')
       return
     }
     const script = options.sessionId === this.parentId ? this.parentScript
       : this.reviewScript.length > 0 && (options.system?.includes('技术标目录质量复核 Subagent')
-        || options.system?.includes('技术标章节独立审查 Subagent'))
+        || options.system?.includes('技术标章节独立审查 Subagent') || options.system?.includes('独立 S5 Chapter Reviewer')
+        || options.system?.includes('段落修订 Delta Reviewer'))
         ? this.reviewScript : this.childScript
     const response = script.shift()
     if (response === undefined && this.interactive) {
@@ -89,7 +99,7 @@ class ScriptedAdapter extends LlmAdapter {
       return
     }
     if (response === undefined) throw new Error('Bid scripted adapter exhausted')
-    yield* typeof response === 'function' ? response(options) : response
+    yield* mappingModelReply(typeof response === 'function' ? response(options) : response, options)
   }
 }
 
@@ -424,6 +434,7 @@ export async function runEvidenceMappingLoop(ctx: Context, root: string, repair:
     toolCall('fetch-source', 'web_fetch', { url: sourceUrl }),
     toolCall('list-source-chunks', 'list_web_chunks', { source_ref: expectedWebChunkRef(sourceUrl).slice(0, -6) }),
     toolCall('read-web-chunk', 'read_source', { source_ref: expectedWebChunkRef(sourceUrl) }),
+    toolCall('refresh-source-positions', 'list_mapping_objects', {}),
     ...(!repair ? [
       toolCall('search-unused', 'web_search', { queries: ['未采用的公开资料'] }),
       toolCall('fetch-unused', 'web_fetch', { url: unusedSourceUrl }),
@@ -455,7 +466,7 @@ export async function runEvidenceMappingLoop(ctx: Context, root: string, repair:
     ] : []),
     toolCall('finish-initial-mapping', 'finish_mapping_task', {}),
     ...(repair ? [toolCall('submit-refinement-incomplete', 'structured_output', {
-      ...parsedQuality, checked_requirement_ids: [],
+      ...parsedQuality, scope: 'commercial_bid',
     })] : []),
     toolCall('submit-refinement-quality', 'structured_output', parsedQuality),
     toolCall('reject-incomplete-final-check', 'finish_final_check', {}),
@@ -584,16 +595,16 @@ export async function runChapterWritingLoop(ctx: Context, root: string) {
   const parentScript = [
     toolCall('add-plan-note', 'add_global_consistency_note', { note: '统一使用访问控制项目名称和权限审计术语。' }),
     toolCall('finish-plan', 'finish_chapter_plan', {}),
-    toolCall('read-global-chapter', 'read_completed_chapter', { section_id: 'SEC-SECURITY', start: 0, length: 12_000 }),
+    toolCall('read-global-chapter', 'read_completed_chapter', { section_position: 0, start: 0, length: 12_000 }),
     toolCall('review-global', 'review_global_compliance', {
-      compliance_id: 'GLOBAL-1', category: 'cross_chapter_constraint', owners: [{ kind: 'document', section_id: null }],
-      status: 'pass', checked_section_ids: ['SEC-SECURITY'], evidence_refs: ['DQ1'], affected_section_ids: [], issue: null,
+      compliance_position: 0, category: 'cross_chapter_constraint', owners: [{ kind: 'document', section_position: null }],
+      status: 'pass', checked_section_positions: [0], evidence_refs: ['DQ1'], affected_section_positions: [], issue: null,
     }),
     toolCall('finish-global-review', 'finish_global_compliance_review', {}),
     toolCall('finish-writing-plan', 'submit_chapter_writing_completion_review', {
       action: 'complete', reason: '章节与整书 required 条件均已满足。',
       document_acceptance: [
-        { criterion_id: 'AC-000001', status: 'met', evidence_quote_refs: [], reason: '整书术语与技术响应一致。' },
+        { criterion_position: 0, status: 'met', evidence_quote_refs: [], reason: '整书术语与技术响应一致。' },
       ],
     }),
   ]
@@ -639,10 +650,10 @@ export async function runChapterWritingLoop(ctx: Context, root: string) {
     toolCall('review-incomplete', 'finish_chapter_review', {}),
     toolCall('submit-coverage', 'review_coverage_items', { items: Array.from({ length: section.must_answer.length + section.requirement_ids.length + (section.scoring_response_point_ids ?? []).length + 1 }, (_, index) => ({ item_ref: `R${index + 1}`, ...coverage })) }),
     toolCall('review-global-constraint', 'review_global_constraints', {
-      items: [{ compliance_id: 'GLOBAL-1', status: 'not_applicable', evidence_quote_refs: [], issue: '当前章节没有冲突表述。' }],
+      items: [{ compliance_position: 0, status: 'not_applicable', evidence_quote_refs: [], issue: '当前章节没有冲突表述。' }],
     }),
     toolCall('review-acceptance', 'review_acceptance_criteria', {
-      items: [{ criterion_id: 'AC-000002', status: 'met', evidence_quote_refs: ['Q2'], reason: '正文详细说明了访问控制实施流程。' }],
+      items: [{ criterion_position: 0, status: 'met', evidence_quote_refs: ['Q2'], reason: '正文详细说明了访问控制实施流程。' }],
     }),
     toolCall('submit-summary', 'set_review_summary', summary),
     toolCall('finish-review', 'finish_chapter_review', {}),

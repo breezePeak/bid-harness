@@ -41,13 +41,23 @@ S4 Initial Mapping 的客户可见编号检查只归当前任务可编辑的 Sec
 
 `BidOrchestrator` 绑定执行操作所用的 DSH Session，并通过 `reduceBidTaskState()` 归约当前 Session 已同步的状态。Run 只记录一次执行尝试的身份、epoch、基线 revision、工作描述和进度，停止原因属于外层 `suspended` 状态。Host 为每次自动执行传入强制 `BidRunContext`；调度准入、Child 收敛、取消信号和正式写入栅栏都归该 Run 所有。读取到没有活动 operation 的未完成 `running` 时，Host 在项目锁内先将其改为 `suspended(host_restart)`，释放启动操作后对绑定的 S2～S5 目标自动恢复原 Work；能力 Work 已有可验证的正式提交凭据时只补完成结算。恢复必须同时匹配挂起 Run ID 和项目 revision，并由执行器按持久检查点核对已完成工作。
 
-`capability_task` 用一个 Work 和一个 Run 顺序执行已注册适配器的能力步骤。Host 将真实用户消息、初始计划、输入摘要和任务前状态保存为不可变请求；`runs/<workId>/task-checkpoint.json` 保存已开始步骤、结果与后续授权的计划补丁。每步只在独立候选目录执行，Host 核对目标 ID 与精确文件清单后合并到 Work 候选；最终业务文件与 `requests/<workId>/result.json` 凭据同批发布。恢复先核对凭据和正式文件，已提交的 Work 只补 Run 结算及公开会话通知。`awaiting_input` 保留原 Work，并以持久化原生问题取得补充文本；用户停止使 Run 提交权限退休并等待 Child 收敛。适配器由 `BidHostRuntime.registerCapabilityTaskDispatcher()` 注册，`runCapabilityTask()` 仅接受当前公开主 Agent 与真实用户消息授权。
+`capability_task` 用一个 Work 和一个 Run 顺序执行已有能力。不可变请求冻结真实用户原话、选定意见全文、接纳时的待处理队列及完整计划；模型概括的 `goal` 不能替代这些来源。隔离、只读的子会话分别核验计划与实际产物，只返回语义要求及按输入顺序排列的判断；Host 绑定来源、章节、要求索引和文件摘要，并检查目录节点、Writer 身份和当前审核。同一 Work 已发生的计划拒绝、补丁和完成步骤由 Host 提供给后续核验。来源要求完整保留迁移原文时，验收判据记录 `preserve_migrated_content`，Host 检查当前可写叶节的原段落、表题、表格和流程图定义，并将确定性结果提供给语义核验；原章标题可由新目录标题替代，重复写作已完成叶节仍须保留原文块。步骤完成不代表任务完成：核验未通过时保留候选及已完成前缀，`bid_plan_task` 可修改后缀或追加步骤，再通过原 Work 恢复；真实授权冲突须澄清。业务文件、发布凭据及已满足意见在同一发布事务提交，结算从最新队列合并，保留后来新增的意见。`bid_project_inspect` 可按历史 Work 的对象位置读取任务、候选、检查点与核验；缺少核验的历史记录不会被视为新任务的完成证明。
+
+模型工具从最近一次 inspect 的 `objects` 选择位置，Host 绑定章节、业务条目、审批意见、模板、真实消息和历史 Work 身份；原生目录编辑使用 `draft_sections`，并沿用 inspect 时的草稿 CAS。对象表按页提供全局位置和截断信息，正文块只在本次读取窗口内展示；`objects_page` 可单独选择对象表页。段落引用的偏移、原文和 SHA、批次任务 ID、迁移块身份、当前 Run、写作请求及计划版本都由程序处理，模型提供身份字段会被拒绝。`bid_plan_task` 用 `replace_pending` 或 `append` 表达调整方式，Host 定位原 Work 与可修改起点。业务归属和原文迁移子会话按输入顺序返回语义分配；段落 Writer 按输入顺序返回替换文本，Reviewer 选择意见或块的位置，程序写入持久记录的真实 ID。原生 SDK 和磁盘记录仍使用完整身份。
+
+S5 私有工具同样按本轮对象位置选择章节关系、验收条件和合规条目，程序绑定完整身份。首次计划从当前 Main 所属的持久已回答请求绑定身份；已消费请求不能复用，已有有效计划时不读取初始请求记录。保留迁移原文时，Writer 用 `{{reuse:位置}}` 安排原文块，程序插入原段落、表题、表格和锚点，并继承原流程图定义；缺失或改写的块拒绝提交。恢复原 Writer 时，Host 从真实会话 Header 找回并验证所属 parent 和项目，批次共享同一 parent 的恢复句柄，只释放本次恢复拥有的句柄。
+
+纯章节审查交付与当前正文绑定的报告；报告发现可修复问题或缺少外部资料时仍完成审查，不自行改写正文，也不将报告发现当作等待补充输入的执行阻塞。纯整书审查核对正文、审核报告和当前目录摘要，历史 Writer 输入版本与正文质量问题记录在报告中；正式正文交付仍执行完整质量和输入版本校验。正文修订任务需要外部输入时仍保留候选并等待真实回答。
 
 主 Agent 对挂起能力 Work 的恢复指令作为执行上下文传给失败步骤；模型适配器仅在对应失败单元的提示中使用它，不改变不可变任务、输入摘要或已完成步骤。Provider、额度、凭证等阻断仍通知主 Agent 读取诊断并向用户说明，但不提供自动恢复工具。Host 重启续行失败保留当前 Run 的错误通知并唤醒主 Agent。
 
 等待输入的步骤将旧候选复制到新输入身份的候选项目，Host 在业务校验前对全部授权路径比较候选与 Work 的新增、改动和删除，并把差异并入同批发布凭据。每轮仍需输入时按本轮输入摘要发出新的原生问题，已保存的回答不会冒充下一轮回答。
 
-主 Agent 在所有 Bid 阶段都可用 `bid_project_inspect` 读取项目，用 `bid_run_task` 提交有序能力步骤。段落范围只接纳引用同一选区的单步 `chapter.revise`，后续计划补丁也不能扩大为整章或结构写入。挂起的能力 Work 可由后续真实用户消息调用 `bid_plan_task` 替换尚未开始的后缀；Host 保留已完成步骤和原任务范围，保存计划后仍等待明确恢复。旧目录、资料、写作计划及章节修订工具在原生确认或 S5 热插入边界保留既有处理，其余阶段按相同能力适配器执行；目录旧参数仍要匹配当前确认目录的 CAS 身份。运行中跨能力请求先保存到当前 Work 命令日志，收敛后由独立 Work 顺序执行。
+主 Agent 通过 `bid_run_task` 统一规划自然语言要求和选定审批意见，`chapter.revision_batch` 在当前候选复用原批次调度器、段落修订和各章原 Writer。段落范围只允许同选区修订；保存为段落的意见不能授权新增目录子章。真实拆章须依次修改目录、迁移原文、基于 seed 写完新叶节并审核。旧正文批次工具不进入 Main 工具目录。排队任务结算并释放项目锁后，以持久化结果通知唤醒空闲 Main。`docx.export` 作为独立尾效果保留在完整目标中，内容发布与导出回执均有效时才有 `goal_met=true`；导出失败保留内容结果及未完成目标。
+
+原生章节修订先核对当前正文摘要，并持久化真实用户请求；该请求的授权仅在本次入口调用与所属 Session 内有效。局部章节修订只提交授权范围的正文和审核，整书审查报告由独立能力步骤更新。`bid_run_task` 持久接纳能力 Work 后返回 `execution_status=started` 与 `completed=false`，后台执行及结算允许同一 Main 继续处理新消息并登记排队。完成通知及结果凭据决定实际交付状态；内容与导出组合任务的完成通知等待独立导出结算。
+
+模型入口的目录迁移时序由程序从后续 `chapter.reorganize` 或明确暂缓正文的目标推导；模型不提交 `defer_content_migration`。任务校验错误使用模型选择表的位置字段名，避免要求模型填写持久身份；缺少迁移来源仍拒绝接纳。
 
 目录能力以当前确认目录为已写项目的基线，首次确认前读取当前 Draft。`outline.update` 同时应用结构操作与经过真实招标 ID 校验的业务归属；拆分子章不会机械继承父章的全部要求。`outline.refine` 使用 S4 的章节研究、结构判断和终审，依据实际资料决定是否深化目录；新叶节由 Host 分配 ID 并独立形成任务级依据。`chapter.reorganize` 把旧正文按完整 Markdown 块交由子会话分配，Host 核对源正文 SHA、块身份、目标范围、完整覆盖及显式共享或删减。迁移成果写入 `chapters/reuse-seeds.json` 并保持待写、待审；退役章节的计划、资料和旧 Manifest 归属保存在 `outline/reassignment.json`，未分配的旧正文由 `chapters/pending-reorganization.json` 指明。目录、Draft、授权来源为 `user_task` 的 confirmation、Evidence、Writing Plan、执行索引及 Manifest 在同一步候选中校验，再由能力 Work 发布实际改变的精确文件。
 
@@ -83,7 +93,7 @@ S2 的 `project.json` 记录项目背景、建设目标、实施约束和项目�
 
 `bid/getDetails` 只读已发布详情：已存在的 `outline/confirmed-outline.json` 与章节位置决定最终目录和正文入口是否可见；没有最终目录时仍按首次确认边界显示初始或候选目录。阶段标签不会隐藏已有正式正文，也不改变确认接口的编辑准入。
 
-新的整本目录深化任务须由 Main Agent 随请求提交 2–8 个具体工作项，界面展示该拆分，旧请求仍可恢复。运行中的资料映射进度读取当前能力步骤候选工作区的日志；不会把项目根目录的旧 S4 日志显示成当前任务。Bid Main Agent 可在任意阶段通过 `bid_run_task` 提交真实用户消息授权的能力计划。运行中的跨能力请求先写入不可变请求，再登记到原 Work 的 `commands.json`；原 Work 结束后按顺序启动独立能力 Work，挂起时保留待办并让原 Run 先恢复。`getCapabilityTaskPlan` 从请求和步骤检查点返回实际进度，未登记的孤立文件不构成接纳。`tender.analyze`、`outline.generate` 和 `document.review` 只接受项目范围；整书审核重新核对已完成正文并更新全局合规与整书验收记录，不启动 Writer 或改写正文。`docx.export` 只能作为任务最后一步，在前序能力正式结算后使用独立 Word 导出；导出提示包含正文快照摘要。局部任务成功不推进或倒退默认整本路线，首次 S2–S5 确认仍由原生阶段入口执行。
+新的整本目录深化任务须由 Main Agent 随请求提交 2–8 个具体工作项，界面展示该拆分，旧请求仍可恢复。运行中的资料映射进度读取当前能力步骤候选工作区的日志；不会把项目根目录的旧 S4 日志显示成当前任务。Bid Main Agent 可在任意阶段通过 `bid_run_task` 提交真实用户消息授权的能力计划。运行中的跨能力请求先写入不可变请求，再登记到原 Work 的 `commands.json`；原 Work 结束后按顺序启动独立能力 Work，挂起时保留待办并让原 Run 先恢复。`getCapabilityTaskPlan` 从请求和步骤检查点返回实际进度，未登记的孤立文件不构成接纳。`tender.analyze`、`outline.generate` 和 `document.review` 只接受项目范围；整书审核重新核对已完成正文并更新全局合规与整书验收记录，不启动 Writer 或改写正文。`docx.export` 只能作为任务最后一步，在前序能力正式结算后使用独立 Word 导出；导出提示包含正文快照摘要。执行父会话只由 Host 阶段指令启动模型回合，Child 报告和结算通知不能触发额外父会话执行。局部任务成功不推进或倒退默认整本路线，首次 S2–S5 确认仍由原生阶段入口执行。
 
 S3 的评分响应点拆解与语义复核都上报 `analyzing`，对应计划第一步；`reviewing` 只用于目录确定性校验通过后的目录质量复核。首次执行和候选恢复遵守相同的进度含义，评分响应点复核失败时不标记目录生成或校验已完成。
 
@@ -96,13 +106,13 @@ S2 首次提取后立即执行 Validator；通过时进入 `tender_analysis/wait
 
 S3 先按评分语义产生候选响应点，再由独立语义复核回看评分场景是否完整；Host 用评分 Artifact 哈希和单调序列建立稳定目录。Agent 随后以 Response Point、Requirements、Compliance 和可选人工框架生成初始目录，按主框架、补充框架和无关框架明确适配，并在 Section 上保存精确 `framework_refs`。目录只组织需要向采购方展开的技术方案、实施措施和交付成果；纯投标资格、企业资质证书及行政递交要求留在 `global_compliance_ids`，不生成要求解读章节。目录质量复核负责语义粒度；Host 只校验确定性的 Schema、树、ID、覆盖和框架引用，不要求响应点全局唯一归属。用户确认结果保存为 `outline/initial-confirmed-outline.json`。
 
-S3 的 JSON 格式修复保留原文且只允许序列化标点与空白变化；字段错误只修改定位范围，未知 RP 或评分由模型重新选择合法关联。RP 覆盖、需求/合规/框架引用与结构问题使用有相应字段权限的局部操作，非法操作不覆盖候选。质量复核在同轮提交全部必要修改、自检修改后的目录并返回非阻断建议；Host 应用操作并通过确定性校验后发布质量报告及待确认草稿。可选润色只作为建议，合法修改不会触发新一轮完整复核。格式或操作错误使用独立的 `maxRepairAttempts` 重试预算，耗尽后保留目录供继续运行。正式输入损坏或版本变化要求通过阶段重置处理。S3 与 S4 目录复核的模型输出不包含问题代码或编号：建议只返回 `severity` 与 `message`，S4 阻断问题只返回已有 `section_id` 与 `reason`；程序分别填写固定诊断类别 `OUTLINE_QUALITY_ADVISORY` 和 `OUTLINE_STRUCTURE_REVIEW`。
+S3 的 JSON 格式修复保留原文且只允许序列化标点与空白变化；字段错误只修改定位范围，未知 RP 或评分由模型重新选择合法关联。RP 覆盖、需求/合规/框架引用与结构问题使用有相应字段权限的局部操作，非法操作不覆盖候选。质量复核在同轮提交全部必要修改、自检修改后的目录并返回非阻断建议；Host 应用操作并通过确定性校验后发布质量报告及待确认草稿。可选润色只作为建议，合法修改不会触发新一轮完整复核。格式或操作错误使用独立的 `maxRepairAttempts` 重试预算，耗尽后保留目录供继续运行。正式输入损坏或版本变化要求通过阶段重置处理。S3 与 S4 目录复核的模型输出不包含问题代码或编号：建议只返回 `severity` 与 `message`，S4 阻断问题只返回职责索引中的 `section_position` 与 `reason`；程序分别填写固定诊断类别 `OUTLINE_QUALITY_ADVISORY` 和 `OUTLINE_STRUCTURE_REVIEW`。
 
-S4 按目录业务分支分批映射，Evidence 以 Section ID 保存。Initial Child 逐次编辑并锁定自己的业务分支，再用 `submit_section_mapping` 按章 upsert；Host 当场校验 Section、短文件引用、分块、usage、Web 正文和 coverage，并由 `finish_mapping_task` 返回缺失章节。未完成时，修复轮次同时接收 Host 根据当前研究、Blueprint、结构判断、锁定、映射和复核状态生成的顺序清单，避免仅凭错误文本猜测下一项工具调用。Final Check 以既有 Mapping 为 baseline，只提交替换章和结构节点摘要；摘要以我方方案、措施和成果直接作答，不复述采购要求，也不显示项目内部追踪 ID。目录深化与用户编辑只对齐 Evidence，空材料由 S5 按缺口继续研究。单个 Mapping Task 只对显式的子任务物化、恢复和结果通道故障做固定有界重试；429、Provider 文本和 retry-after 不在 S4 内解释或退避，由统一 Run 挂起与恢复边界处理。最终 Evidence Map 格式与 S5 输入保持不变。详见 [S4–S5 资料映射规则](README.md#s2s5-quality-control)。
+S4 按目录业务分支分批映射，Evidence 以 Section ID 保存。模型工具使用目录、业务对象、研究依据、材料和复核条目的位置；程序绑定身份并生成覆盖记录。结构或材料变化后用 `list_mapping_objects` 获取最新位置表。Initial Child 逐次编辑并锁定自己的业务分支，再用 `submit_section_mapping` 按章 upsert；Host 当场校验 Section、短文件引用、分块、usage、Web 正文和 coverage，并由 `finish_mapping_task` 返回缺失章节。未完成时，修复轮次同时接收 Host 根据当前研究、Blueprint、结构判断、锁定、映射和复核状态生成的顺序清单，避免仅凭错误文本猜测下一项工具调用。Final Check 以既有 Mapping 为 baseline，只提交替换章和结构节点摘要；摘要以我方方案、措施和成果直接作答，不复述采购要求，也不显示项目内部追踪 ID。目录深化与用户编辑只对齐 Evidence，空材料由 S5 按缺口继续研究。单个 Mapping Task 只对显式的子任务物化、恢复和结果通道故障做固定有界重试；429、Provider 文本和 retry-after 不在 S4 内解释或退避，由统一 Run 挂起与恢复边界处理。最终 Evidence Map 格式与 S5 输入保持不变。详见 [S4–S5 资料映射规则](README.md#s2s5-quality-control)。
 
-S5 的首次整体要求由 Host 使用 Interaction Session 的原生 `ask_user_question` 询问，并将回答保存到 `chapters/writing-request.json`；Main Agent 从 `task_contract_context.writing_request` 读取回答及稳定的 request ID。自定义回答由 Host 原样加入首次 Writing Plan 顶层 `user_requirements`，原生回答不伪造 `user_message_refs`；真实用户消息仍可由 Main Agent 选择稳定的 Session、Message 和 Seq 引用，Host 回查 Session Log 原文。首次提交包含完整 Task Contract；后续只能基于当前版本提交 patch，分别更新全书指令、document acceptance、section task、section acceptance 和删除项。Host 保留未修改章节及其 `AC-*`，把实际提交 section patch 自动并入影响范围，并校验 AC 全局唯一及 scope 与容器一致。普通进度询问可以不引用，因此不会修改 Task Contract 或停止 Writer；没有额外动态要求时 section 和 document criteria 可以为空。
+S5 的首次整体要求由 Host 使用 Interaction Session 的原生 `ask_user_question` 询问，并将回答保存到 `chapters/writing-request.json`；Main Agent 从 `task_contract_context.writing_request` 读取回答。自定义回答由 Host 原样加入首次 Writing Plan 顶层 `user_requirements`，原生回答不伪造 `user_message_refs`；Main Agent 选择真实用户消息的位置，Host 绑定 Session、Message 和 Seq 并回查原文。首次提交包含完整 Task Contract；后续提交 patch，Host 绑定当前版本，分别更新全书指令、document acceptance、section task、section acceptance 和删除项。Host 保留未修改章节及其 `AC-*`，把实际提交 section patch 自动并入影响范围，并校验 AC 全局唯一及 scope 与容器一致。普通进度询问可以不引用，因此不会修改 Task Contract 或停止 Writer；没有额外动态要求时 section 和 document criteria 可以为空。
 
-动态 acceptance 与 Requirement、Scoring Response Point、Compliance 的 `covered/missing` 覆盖协议彼此独立。语义条件由相应 Reviewer 提交 `criterion_id`、`met/unmet`、正文 quote 引用和 reason；否定条件可以在 `unmet` 时引用违规句，整章或整书判断可以不提交单句 quote。确定性条件只由 Host 按显式 metric 计算，Reviewer 不能覆盖。Chapter Reviewer 是 section acceptance 的唯一权威，required 失败会回到原 Writer 并重新审核；Final Main Agent 只判断 document semantic acceptance、消费章节权威结果并选择最小修复范围，不能重判 section criterion。整书判断需要正文时可通过只读工具按 Section 获取最多 12,000 字符的当前完成正文。
+动态 acceptance 与 Requirement、Scoring Response Point、Compliance 的 `covered/missing` 覆盖协议彼此独立。语义条件由相应 Reviewer 选择 `criterion_position` 并提交 `met/unmet`、正文 quote 引用和 reason，程序绑定实际 Criterion ID；否定条件可以在 `unmet` 时引用违规句，整章或整书判断可以不提交单句 quote。确定性条件只由 Host 按显式 metric 计算，Reviewer 不能覆盖。Chapter Reviewer 是 section acceptance 的唯一权威，required 失败会回到原 Writer 并重新审核；Final Main Agent 只判断 document semantic acceptance、消费章节权威结果并选择最小修复范围，不能重判 section criterion。整书判断需要正文时可通过只读工具按 Section 位置获取最多 12,000 字符的当前完成正文。
 
 S5 只把 `outline/confirmed-outline.json` 作为章节结构来源。Main Agent 根据当前 Task Contract 生成绑定 Writing Plan 版本的章节关系计划；共用背景、资料或业务流程先后不构成写作强依赖，只有必须消费前章具体决策、成果结构或最终索引时才使用 `depends_on`。Writing Plan 更新后，Main Agent 重新判断受影响范围的 `depends_on`、`related_sections`、章节规划说明和全书一致性说明，Host 校验 DAG 并按实际强依赖传播失效。Host 按每个 Section 的 `framework_refs` 注入精确框架正文分块；框架正文是可保留、适配或改写的写作输入，不是当前项目事实 Evidence。每份有效候选正文和 Metadata 在 Reviewer 启动前即可读取；Reviewer 没有工作区或网络工具。正文以我方拟采用的方案、措施、职责、成果和承诺直接作答；主要复述采购要求、解释资格条件或采用需求分析口吻时，Reviewer 通过 `bidder_response_voice` 要求原 Writer 修订。企业事实缺少本地依据时只保留在 `unresolved_topics`，不在客户正文生成要求解读、无依据承诺或占位内容，也不得由框架或 Web 资料替代。明确作为拟议方案的实施方法、分工、台账字段与质控措施，只要不违背采购要求，不因原文未逐项列出而自动判为无依据。目录、总述及正文不得显示内部 Requirement、Scoring、Compliance、Response Point、Section 或 Acceptance Criterion ID；招标原文自身使用的同名条款编号不受影响。
 
@@ -110,7 +120,7 @@ S5 只把 `outline/confirmed-outline.json` 作为章节结构来源。Main Agent
 
 S5 完成后项目保持 `chapter_writing/completed`，审核项标签和逐章状态常驻。审核工作台中的“导出 Word”调用 Host `exportDocx`，程序核对章节 manifest 的确认目录哈希、完整章节集合及正文路径，再按确认目录顺序保留结构标题并组合正文；组合结果仍含项目内部 ID 时拒绝导出。每次成功导出在 `outputDirectory` 写入一对带时间标识的 Markdown 和 DOCX 文件。导出成功或失败都不改变 S5 状态，可重复执行。已经保存为 `docx_export/completed` 的旧项目同样保留审核工作台和导出动作。
 
-流程图属于 S5 章节的结构化 metadata。Writer 提交语义 `key` 和正文中的 `{{flowchart:key}}`，Host 生成 `FLOW-*` 与节点 ID，并校验每张图恰好有一个 anchor；`{{flow_ref:key}}` 在导出快照中按图形顺序解析为图号。浏览器预览继续使用 SVG。正式 Word 导出在 Windows 上先用 PowerShell COM 创建原生 Visio Shape 和 Connector，再由 Word COM 在正文 marker 处以 `LinkToFile=false` 嵌入对应 VSDX；Word 或 Visio 不可用时以 `VISIO_RUNTIME_UNAVAILABLE` 或 `WORD_RUNTIME_UNAVAILABLE` 失败，不降级为图片。
+流程图属于 S5 章节的结构化 metadata。Writer 提交语义 `key` 和正文中的 `{{flowchart:key}}`，Host 生成 `FLOW-*` 与节点 ID，并校验每张图恰好有一个 anchor；`{{flow_ref:key}}` 在导出快照中按图形顺序解析为图号。同名图在各章分别编号，引用优先绑定本章图形；跨章引用须使用全书唯一的语义键，源正文不改写。浏览器预览继续使用 SVG。正式 Word 导出在 Windows 上先用 PowerShell COM 创建原生 Visio Shape 和 Connector，再由 Word COM 在正文 marker 处以 `LinkToFile=false` 嵌入对应 VSDX；Word 或 Visio 不可用时以 `VISIO_RUNTIME_UNAVAILABLE` 或 `WORD_RUNTIME_UNAVAILABLE` 失败，不降级为图片。
 
 ### Inventory 文本
 

@@ -465,10 +465,13 @@ export function apply(ctx: ClientContext): void {
         triggerRevisionQueueChanged(String(sessionId))
         return result.value.value
       },
-      startRevisionBatch: () => {
+      startRevisionBatch: async () => {
         const conversation = ctx.sessions.scope(sessionId)?.get('conversation')
         if (conversation === undefined) return Promise.reject(new Error('当前会话不可用。'))
-        return conversation.send('开始处理当前全部待处理审批意见。', 'queue')
+        const queue = await ctx.remote.bid.getRevisionQueue(sessionId)
+        if (!queue.ok) throw actionFailure(queue.error)
+        const ids = queue.value.issues.filter(issue => issue.status === 'pending').map(issue => issue.issue_id)
+        return conversation.send('开始处理当前全部待处理审批意见。本次选定的意见 ID：' + ids.join('、') + '。', 'queue')
       },
       locateChapter: (sectionId: string) => {
         triggerSectionLocate(String(sessionId), sectionId)
@@ -591,10 +594,13 @@ export function apply(ctx: ClientContext): void {
           triggerRevisionQueueChanged(String(sessionId))
           return result.value.value
         },
-        startRevisionBatch: () => {
+        startRevisionBatch: async () => {
           const conversation = ctx.sessions.scope(sessionId)?.get('conversation')
           if (conversation === undefined) return Promise.reject(new Error('当前会话不可用。'))
-          return conversation.send('开始处理当前全部待处理审批意见。', 'queue')
+          const queue = await ctx.remote.bid.getRevisionQueue(sessionId)
+          if (!queue.ok) throw actionFailure(queue.error)
+          const ids = queue.value.issues.filter(issue => issue.status === 'pending').map(issue => issue.issue_id)
+          return conversation.send('开始处理当前全部待处理审批意见。本次选定的意见 ID：' + ids.join('、') + '。', 'queue')
         },
         openWordExport: () => {
           const conversation = ctx.sessions.scope(sessionId)?.get('conversation')

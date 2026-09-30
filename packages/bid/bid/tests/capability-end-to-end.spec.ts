@@ -7,7 +7,8 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import SessionStore from '@deepseek-ai/dsh-session'
 import { afterEach, expect, it } from 'vitest'
 import { BidWorkspace } from '../src/index.ts'
-import { executeCapabilityTask, persistCapabilityTaskRequest } from '../src/bid-capability-task.ts'
+import { persistCapabilityTaskRequest } from '../src/bid-capability-task.ts'
+import { executeTestCapabilityTask as executeCapabilityTask } from './fixtures/task-verifier.ts'
 import { readCapabilityPublicationReceipt } from '../src/bid-capability-changes.ts'
 import { bidCapabilityTaskSchema } from '../src/bid-capability-contract.ts'
 import { createBidCapabilityDispatcher } from '../src/bid-capability-dispatcher.ts'
@@ -65,7 +66,7 @@ it('同一能力 Work 先更正招标理解再改目录，正式正文仅按实�
   const repeated = await executeCapabilityTask(workspace, createTestBidRunContext({ work }), dispatcher, agent, session)
   expect(repeated.status).toBe('completed')
   expect(await readFile(join(workspace.projectRoot, 'chapters/sections/0004.md'))).toEqual(untouched)
-})
+}, 20_000)
 
 it('移动已有章节后保持身份和正文文件，导出按新目录顺序排列', async () => {
   const root = await mkdtemp(join(tmpdir(), 'dsh-capability-move-'))

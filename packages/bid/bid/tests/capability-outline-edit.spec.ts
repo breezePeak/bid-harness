@@ -9,8 +9,9 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { BidWorkspace } from '../src/index.ts'
 import type { BidCapabilityExecutionContext } from '../src/bid-capability-contract.ts'
 import { bidCapabilityInputSchema, bidCapabilityTaskSchema } from '../src/bid-capability-contract.ts'
-import { executeCapabilityTask, persistCapabilityTaskRequest,
+import { persistCapabilityTaskRequest,
   type CapabilityTaskDispatcher } from '../src/bid-capability-task.ts'
+import { executeTestCapabilityTask as executeCapabilityTask } from './fixtures/task-verifier.ts'
 import { validateCapabilityResult } from '../src/bid-capability-registry.ts'
 import { allowedOutlineCapabilityWrites, executeOutlineCapability,
   validateOutlineCapability } from '../src/bid-outline-capabilities.ts'
@@ -25,6 +26,7 @@ import { parseOutlineArtifact } from '../src/outline-generation-artifacts.ts'
 import { parseOrMigrateChapterExecutionLog } from '../src/chapter-writing-plan-artifacts.ts'
 import { parseChapterMetadata, parseChapterWritingManifest } from '../src/chapter-writing-artifacts.ts'
 import { parseWritingPlan } from '../src/writing-requirements.ts'
+import { parseEvidenceMapArtifact } from '../src/evidence-mapping-artifacts.ts'
 import { seedCapabilityProject } from './capability-fixture.ts'
 
 const roots: string[] = []
@@ -57,8 +59,8 @@ describe('目录能力候选', () => {
     const prefix = createHash('sha256').update(stepId).digest('hex').slice(0, 12)
     const childId = `SEC-${prefix}-1`
     const outputs = [
-      JSON.stringify([{ section_id: childId, requirement_ids: ['REQ-1'],
-        scoring_ids: ['SCORE-1'], scoring_response_point_ids: ['RP-000001'], compliance_ids: [] }]),
+      JSON.stringify([{ requirement_positions: [0], scoring_positions: [0], response_point_positions: [0], compliance_positions: [] },
+        { requirement_positions: [], scoring_positions: [], response_point_positions: [], compliance_positions: [] }]),
     ]
     const prompts: unknown[] = []
     const start = vi.fn(async (_provider: string, request: { prompt: unknown }) => {
@@ -80,9 +82,12 @@ describe('目录能力候选', () => {
       allowedWrites: await allowedOutlineCapabilityWrites(call, workspace, stepId, context.sectionIds) }
     const { result } = await executeOutlineCapability(call, scoped)
     expect(start).toHaveBeenCalledOnce()
-    expect(JSON.stringify(prompts.at(-1))).toContain(childId)
+    expect(JSON.stringify(prompts.at(-1))).not.toContain(childId)
+    expect(JSON.stringify(prompts.at(-1))).toContain('requirement_positions')
     const outline = parseOutlineArtifact(await readJson(workspace, 'outline/confirmed-outline.json'))
     expect(outline.sections.find(section => section.id === childId)?.requirement_ids).toEqual(['REQ-1'])
+    expect(parseEvidenceMapArtifact(await readJson(workspace, 'analysis/evidence-map.json'))
+      .section_mappings.find(mapping => mapping.section_id === childId)?.missing_topics).toEqual([])
     expect(await readJson(workspace, 'chapters/pending-reorganization.json'))
       .toMatchObject({ pending_source_section_ids: ['SEC-1'] })
     await expect(validateOutlineCapability(scoped, result)).resolves.toBeUndefined()
@@ -93,7 +98,10 @@ describe('目录能力候选', () => {
     const before = await readJson(workspace, 'outline/confirmed-outline.json')
     const body = await readFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), 'utf8')
     const start = vi.fn(async () => ({ result: Promise.resolve({ stopReason: 'completed',
-      output: [{ type: 'text', text: '[]' }] }), dispose: async () => {} }))
+      output: [{ type: 'text', text: JSON.stringify([
+        { requirement_positions: [0], scoring_positions: [0], response_point_positions: [], compliance_positions: [] },
+        { requirement_positions: [], scoring_positions: [], response_point_positions: [], compliance_positions: [] },
+      ]) }] }), dispose: async () => {} }))
     const agent = { ctx: { get: () => ({ getProvider: () => ({ inheritsParentContext: false }), start }) } } as unknown as BidCapabilityExecutionContext['agent']
     const call = bidCapabilityInputSchema.parse({ capability: 'outline.update', input: {
       operations: [{ type: 'split_section', section_id: 'SEC-1', children: [
@@ -302,7 +310,8 @@ describe('目录能力候选', () => {
       source_sha256: block.source_sha256, block_sha256: block.sha256,
       target_section_ids: [children[Math.min(Math.floor(index / 3), 1)]!], disposition: 'move' as const,
     }))
-    const output = JSON.stringify(assignments)
+    const output = JSON.stringify(assignments.map(assignment => ({ disposition: assignment.disposition,
+      target_positions: assignment.target_section_ids.map(id => children.indexOf(id)) })))
     const prompt = vi.fn(async () => ({ result: Promise.resolve({ stopReason: 'completed',
       output: [{ type: 'text', text: output }] }), dispose: async () => {} }))
     const agent = { ctx: { get: () => ({ getProvider: () => ({ inheritsParentContext: false }), start: prompt }) } } as unknown as BidCapabilityExecutionContext['agent']
@@ -366,12 +375,12 @@ describe('目录能力候选', () => {
       const original = await readFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), 'utf8')
       const blocks = indexChapterContentBlocks('SEC-1', original)
       const outputs = [
-        JSON.stringify([{ section_id: children[0], requirement_ids: ['REQ-1'],
-          scoring_ids: ['SCORE-1'], scoring_response_point_ids: ['RP-000001'], compliance_ids: [] }]),
-        JSON.stringify(blocks.map((block, index) => ({
-          block_id: block.block_id, source_section_id: block.source_section_id,
-          source_sha256: block.source_sha256, block_sha256: block.sha256,
-          target_section_ids: [children[Math.min(Math.floor(index / 3), 1)]!], disposition: 'move',
+        JSON.stringify([
+          { requirement_positions: [0], scoring_positions: [0], response_point_positions: [0], compliance_positions: [] },
+          { requirement_positions: [], scoring_positions: [], response_point_positions: [], compliance_positions: [] },
+        ]),
+        JSON.stringify(blocks.map((_block, index) => ({
+          target_positions: [Math.min(Math.floor(index / 3), 1)], disposition: 'move',
         }))),
       ]
       const start = vi.fn(async () => {

@@ -23,7 +23,8 @@ import { inspectBidStage } from '../src/stage-interaction.ts'
 import * as ToolGoal from '@deepseek-ai/dsh-tool-goal'
 import { resolveBidToolAuthorization } from '../src/bid-tool-authorization.ts'
 import { seedCapabilityProject } from './capability-fixture.ts'
-import { capabilityTaskRequestSchema, executeCapabilityTask, findCapabilityTaskRequest, patchCapabilityTaskSteps, persistCapabilityTaskRequest } from '../src/bid-capability-task.ts'
+import { capabilityTaskRequestSchema, findCapabilityTaskRequest, patchCapabilityTaskSteps, persistCapabilityTaskRequest } from '../src/bid-capability-task.ts'
+import { executeTestCapabilityTask as executeCapabilityTask } from './fixtures/task-verifier.ts'
 import { persistBidWorkRequest, readBidWorkRequest } from '../src/work-descriptor.ts'
 import { prepareBidWorkingTree } from '../src/working-tree.ts'
 import { createTestBidRunContext } from '../src/run-coordinator.ts'
@@ -227,13 +228,14 @@ it('原生 Goal Round 通过 bid_run_task 发布能力结果，授权只保存�
   ctx.llm.registerAdapter(['mock'], new TestAdapter(async () => {
     request++
     const goal = ctx.goals.get(agent)!
-    if (request > 2) return [{ type: 'finish', reason: { kind: 'stop' } }]
-    const name = request === 1 ? 'bid_run_task' : 'update_goal'
-    const args = request === 1 ? { task: { goal: '更正招标理解', scope: { kind: 'project' }, steps: [{ description: '执行已授权的测试步骤',
-      scope: { source: 'task' }, call: { capability: 'tender.update', input: { operations: [{
-        type: 'update_requirement', requirement_id: 'REQ-1', fields: { normalized_requirement: '明确实施边界' },
-      }] } },
-    }] } } : { action: 'complete', goal_id: goal.id, revision: goal.revision }
+    if (request > 3) return [{ type: 'finish', reason: { kind: 'stop' } }]
+    const name = request === 1 ? 'bid_project_inspect' : request === 2 ? 'bid_run_task' : 'update_goal'
+    const args = request === 1 ? { query: { object: 'tender', part: 'requirements' } } : request === 2
+      ? { supersede: false, task: { goal: '更正招标理解', scope: { kind: 'project' }, steps: [{ description: '执行已授权的测试步骤',
+        scope: { source: 'task' }, call: { capability: 'tender.update', input: { operations: [{
+          type: 'update_requirement', requirement_position: 0, fields: { normalized_requirement: '明确实施边界' },
+        }] } },
+      }] } } : { action: 'complete', goal_id: goal.id, revision: goal.revision }
     authorization ??= resolveBidToolAuthorization(agent)
     return [{ type: 'block-start', index: 0, blockType: 'tool-call' },
       { type: 'block-end', index: 0, block: { type: 'tool-call', id: CallId(`goal-task-${request}`), name, arguments: JSON.stringify(args) } },
@@ -243,7 +245,7 @@ it('原生 Goal Round 通过 bid_run_task 发布能力结果，授权只保存�
   await vi.waitFor(() =>{  expect(ctx.goals.get(agent)?.phase).toBe('complete') }, { timeout: 10_000 })
   await agent.whenIdle()
   const work = await findCapabilityTaskRequest(workspace, authorization!)
-  expect(work).not.toBeNull()
+  expect(work, JSON.stringify(agent.session.events.filter(event => event.type === 'tool/result'))).not.toBeNull()
   const saved = capabilityTaskRequestSchema.parse(await readBidWorkRequest(workspace, work!))
   expect(saved.authorization).toEqual(authorization)
   expect(Object.keys(saved.authorization).sort()).toEqual(['message_id', 'session_id'])
@@ -323,7 +325,7 @@ it('无 Goal 时主 Agent 恢复原 Run；重复失败再次 steer，相同指�
     { stage: 'tender_analysis', inputs, payload })
   const operation = host.beginOperation(agent.session)
   await host.prepareOperation(operation)
-  const failed = await operation.runs.start(descriptor)
+  await operation.runs.start(descriptor)
   await operation.runs.suspend('retry_exhausted', safeRecoverableBidFailure(descriptor, new Error('missing submission'), [{
     code: 'BID_TENDER_ANALYSIS_SUBMISSION_INCOMPLETE', artifact: 'analysis/project.json', message: '项目字段缺失',
   }]))
@@ -344,7 +346,7 @@ it('无 Goal 时主 Agent 恢复原 Run；重复失败再次 steer，相同指�
   try {
     expect(agent.ctx.tools.schemas(agent).map(tool => tool.name)).toContain('bid_recover_task')
     const call = (id: string) => agent.ctx.tools.execute({ agent, name: 'bid_recover_task',
-      arguments: { target: 'run', run_id: failed.runId, instruction: '补齐项目字段并按原提交工具提交。' },
+      arguments: { target: 'run', instruction: '补齐项目字段并按原提交工具提交。' },
       callId: CallId(id), signal: new AbortController().signal })
     const [first, second] = await Promise.all([call('recover-1'), call('recover-2')])
     if (first.isError) throw new Error(JSON.stringify(first))
@@ -369,7 +371,7 @@ it('无 Goal 时主 Agent 恢复原 Run；重复失败再次 steer，相同指�
       .rejects.toMatchObject({ code: 'BID_RECOVERY_DUPLICATE_INSTRUCTION' })
     expect(steer).toHaveBeenCalledTimes(2)
     const changed = await agent.ctx.tools.execute({ agent, name: 'bid_recover_task',
-      arguments: { target: 'run', run_id: repeated.run.runId, instruction: '先核对 chunk 原文，再逐字段补齐并提交。' },
+      arguments: { target: 'run', instruction: '先核对 chunk 原文，再逐字段补齐并提交。' },
       callId: CallId('changed-strategy'), signal: new AbortController().signal })
     expect(changed).toMatchObject({ isError: false, value: { accepted: true } })
     await vi.waitFor(() => { expect(host.inFlight.size).toBe(0) })

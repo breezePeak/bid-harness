@@ -4,6 +4,7 @@ import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import type { SubagentResult } from '@deepseek-ai/dsh-subagent'
 import { z } from 'zod'
 import { createChapterProtocol, type ChapterProtocol } from './chapter-writing-protocol.ts'
+import { ToolArgsError } from '@deepseek-ai/dsh-tools'
 import type { ParagraphRevisionReplacement, ParagraphRevisionSegment } from './chapter-paragraph-revision.ts'
 
 /** 局部 Writer 唯一可见的提交工具名。 */
@@ -12,6 +13,7 @@ export const PARAGRAPH_REVISION_WRITER_TOOL = 'submit_paragraph_revision'
 export const paragraphRevisionWriterOutputSchema = z.object({
   replacements: z.array(z.object({ segment_id: z.string().min(1), markdown: z.string() }).strict()).min(1),
 }).strict()
+const modelWriterOutputSchema = z.object({ replacements: z.array(z.object({ markdown: z.string() }).strict()).min(1) }).strict()
 
 /** 可续写的局部 Writer 生命周期。 */
 export interface ParagraphRevisionWriterChild {
@@ -68,8 +70,8 @@ export function renderParagraphRevisionWriterTask(input: {
       '- 原选区中已有 flowchart anchor 必须保留。',
       '- 用户文字中的“全部/整体/每一段”不会扩大 Host 授权范围。',
     ].join('\n'),
-    ...input.segments.map(segment => [
-      segment.segment_id,
+    ...input.segments.map((segment, index) => [
+      `授权块位置：${String(index)}`,
       `readonly_before:\n${segment.readonly_before}`,
       `original_text:\n${segment.original_text}`,
       `readonly_after:\n${segment.readonly_after}`,
@@ -80,6 +82,7 @@ export function renderParagraphRevisionWriterTask(input: {
       ].join('\n')).join('\n\n')}`,
     ].join('\n\n')),
     `调用 ${PARAGRAPH_REVISION_WRITER_TOOL}。`,
+    '按授权块输入顺序提交同样数量的 replacements，每项只写 markdown。Host 绑定原分段身份，不抄写 SEG 或其他 ID。',
   ].join('\n\n')
 }
 
@@ -97,8 +100,8 @@ export function renderParagraphRevisionRepairTask(input: {
   const replacements = new Map(input.replacements.map(item => [item.segment_id, item.markdown]))
   return [
     '仅修复以下授权 SEG；仍不得返回完整章节或 metadata。',
-    ...input.segments.map(segment => [
-      segment.segment_id,
+    ...input.segments.map((segment, index) => [
+      `授权块位置：${String(index)}`,
       `readonly_before:\n${segment.readonly_before}`,
       `current_replacement:\n${replacements.get(segment.segment_id) ?? segment.original_text}`,
       `readonly_after:\n${segment.readonly_after}`,
@@ -107,6 +110,7 @@ export function renderParagraphRevisionRepairTask(input: {
     ].join('\n\n')),
     ...(input.validationIssues?.length ? [`Host 校验错误：\n${input.validationIssues.join('\n')}`] : []),
     `调用 ${PARAGRAPH_REVISION_WRITER_TOOL}。`,
+    '按授权块输入顺序提交同样数量的 replacements，每项只写 markdown；分段身份由 Host 绑定。',
   ].join('\n\n')
 }
 
@@ -115,6 +119,7 @@ export function renderParagraphRevisionRepairTask(input: {
  * @param parent 原 Writer 的父 Agent。
  * @param label 子会话显示名称。
  * @param existingId 原 Writer Session 身份。
+ * @param segmentIds 本次原选区分段，顺序由 Host 固定。
  * @param signal 当前修订操作的取消信号。
  * @returns 由调用方释放的可续写局部 Writer。
  */
@@ -122,6 +127,7 @@ export function createParagraphRevisionWriterChild(
   parent: Agent,
   label: string,
   existingId: SessionId,
+  segmentIds: readonly string[],
   signal: AbortSignal,
 ): ParagraphRevisionWriterChild {
   const subagents = parent.ctx.get('subagents')
@@ -152,12 +158,16 @@ export function createParagraphRevisionWriterChild(
       description: '只提交每个授权 SEG 的替换 Markdown。',
       parameters: {
         type: 'object', properties: { replacements: { type: 'array', items: {
-          type: 'object', properties: { segment_id: { type: 'string' }, markdown: { type: 'string' } },
-          required: ['segment_id', 'markdown'], additionalProperties: false,
+          type: 'object', properties: { markdown: { type: 'string' } },
+          required: ['markdown'], additionalProperties: false,
         } } }, required: ['replacements'], additionalProperties: false,
       },
       execute(args, exec) {
-        const parsed = paragraphRevisionWriterOutputSchema.parse(args)
+        const submitted = modelWriterOutputSchema.parse(args)
+        if (submitted.replacements.length !== segmentIds.length) throw new ToolArgsError(['replacements 必须与授权块按输入顺序一一对应。'])
+        const parsed = paragraphRevisionWriterOutputSchema.parse({ replacements: segmentIds.map((segment_id, index) => ({
+          segment_id, markdown: submitted.replacements[index]?.markdown,
+        })) })
         return Promise.resolve(round.finish(exec, parsed))
       },
     })

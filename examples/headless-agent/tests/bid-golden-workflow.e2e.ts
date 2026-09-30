@@ -113,9 +113,7 @@ describe.skipIf(!process.env.DEEPSEEK_API_KEY && !process.env.DSH_BID_EVAL_PROVI
         { maxRepairAttempts: 2, maxConcurrency: 2, run: run() })
       await expect(validateEvidenceMapping(workspace, 'evidence_mapping', s4)).resolves.toEqual({ ok: true })
       const outline = parseOutlineArtifact(JSON.parse(await readFile(join(workspace.projectRoot, 'outline/outline.json'), 'utf8')))
-      for (const section of outline.sections) {
-        if (!section.writable && section.summary === undefined) section.summary = '本章概述我方访问控制实施思路和交付安排。'
-      }
+      expect(outline.sections.filter(section => !section.writable).every(section => section.summary !== undefined)).toBe(true)
       const outlineHash = outlineArtifactSha256(outline)
       await Promise.all([
         writeFile(join(workspace.projectRoot, 'outline/confirmed-outline.json'), `${JSON.stringify(outline)}\n`),

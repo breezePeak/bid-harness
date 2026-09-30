@@ -10,6 +10,8 @@ import { chapterRevisionReferenceSchema } from './chapter-revision.ts'
 import { tenderAnalysisEditOperationSchema } from './tender-analysis-confirmation.ts'
 import { writingPlanInputSchema, type WritingMessageSession } from './writing-requirements.ts'
 import { chapterBlockAssignmentSchema } from './chapter-content-reuse.ts'
+import type { BidTaskSourceSnapshot } from './bid-task-source.ts'
+import { revisionBatchTaskInputSchema } from './chapter-revision-batch.ts'
 import { outlineBusinessBindingSchema } from './outline-confirmation-edits.ts'
 
 const sectionIds = z.array(z.string().trim().min(1)).min(1).refine(
@@ -66,8 +68,12 @@ export const bidCapabilityInputSchema = z.discriminatedUnion('capability', [
   z.object({ capability: z.literal('chapter.revise'), input: z.object({
     instruction, reference: chapterRevisionReferenceSchema,
   }).strict() }).strict(),
+  z.object({ capability: z.literal('chapter.revision_batch'), input: z.object({
+    issue_ids: sectionIds, tasks: z.array(revisionBatchTaskInputSchema).min(1),
+  }).strict() }).strict().describe('只处理本任务已绑定的正文审批意见；同章聚合，真实依赖才串行。每条段落引用仍限制实际写入范围。'),
   z.object({ capability: z.literal('chapter.review'), input: z.object({ reason: instruction }).strict() }).strict(),
-  z.object({ capability: z.literal('document.review'), input: z.object({ reason: instruction }).strict() }).strict(),
+  z.object({ capability: z.literal('document.review'), input: z.object({ reason: instruction }).strict() }).strict()
+    .describe('整书审核要求任务 scope.kind=project 且步骤 scope.source=task；章节范围使用 chapter.review。'),
   z.object({ capability: z.literal('docx.export'), input: z.object({
     template_id: z.string().regex(/^[a-f0-9]{64}$/u).nullable(),
   }).strict() }).strict(),
@@ -84,6 +90,7 @@ export const bidCapabilityStepSchema = z.object({
 /** 模型只选择有序能力及业务范围；段落范围仅能执行匹配原选区的单步修订。 */
 export const bidCapabilityTaskSchema = z.object({
   goal: instruction,
+  issue_ids: sectionIds.optional().describe('本次实际处理的审批意见 ID；原文、选区和授权由 Host 从队列读取。'),
   scope: bidCapabilityScopeSchema,
   allow_pending_content: z.boolean().optional().describe('仅用户明确要求只改目录或暂缓正文时设为 true；执行中的临时迁移延后不属于此授权。'),
   steps: z.array(bidCapabilityStepSchema).min(1),
@@ -97,7 +104,9 @@ export const bidCapabilityTaskSchema = z.object({
   return actual.scope === 'paragraphs' && actual.section_id === expected.section_id
     && actual.content_sha256 === expected.content_sha256 && actual.start === expected.start
     && actual.end === expected.end && actual.text === expected.text
-}, 'BID_CAPABILITY_PARAGRAPH_PLAN_INVALID')
+}, 'BID_CAPABILITY_PARAGRAPH_PLAN_INVALID').refine(task => task.steps.every(step =>
+  step.call.capability !== 'document.review' || task.scope.kind === 'project' && step.scope.source === 'task'),
+'BID_DOCUMENT_REVIEW_PROJECT_SCOPE_REQUIRED')
 
 /** Host 核对过产物后形成的步骤结果。 */
 export const bidCapabilityResultSchema = z.object({
@@ -116,6 +125,10 @@ export interface BidCapabilityExecutionContext {
   readonly agent: Agent
   /** 保存用户原话与能力授权的 Interaction Session。 */
   readonly sourceSession?: WritingMessageSession
+  /** 接纳时冻结的审批意见和真实授权消息。 */
+  readonly sourceSnapshot?: BidTaskSourceSnapshot
+  /** 冻结的语义核验要求保留迁移原文；已有载体由 Host 复用。 */
+  readonly preserveMigratedContent?: boolean
   readonly run: BidRunContext
   readonly recovery?: ModelStageExecutionOptions['recovery']
   readonly sectionIds: ReadonlySet<string> | null

@@ -2,15 +2,17 @@
 import { createHash } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import { z } from 'zod'
-import type { BidWorkspace } from './index.ts'
+import { BidWorkspace } from './index.ts'
 import { readChapterLocations } from './chapter-storage.ts'
 import { parseOrMigrateChapterExecutionLog } from './chapter-writing-plan-artifacts.ts'
 import { parseEvidenceMapArtifact } from './evidence-mapping-artifacts.ts'
 import { parseConfirmedOutlineArtifact } from './outline-confirmation-artifacts.ts'
-import { parseOutlineArtifact } from './outline-generation-artifacts.ts'
-import { parseBidProjectState } from './project-state.ts'
+import { readExistingBidWorkingTree } from './working-tree.ts'
+import { readBidProjectState, parseBidProjectState } from './project-state.ts'
 import { capabilityTaskCheckpointSchema, capabilityTaskRequestSchema } from './bid-capability-task.ts'
-import { readBidWorkRequest } from './work-descriptor.ts'
+import { capabilityPublicationReceiptSchema } from './bid-capability-changes.ts'
+import { readCapabilityOutlineBaseline } from './outline-draft-store.ts'
+import { readBidWorkDescriptor, readBidWorkRequest } from './work-descriptor.ts'
 import { outlineSectionScope } from './section-evidence-context.ts'
 import { parseTenderComplianceArtifact, parseTenderProjectArtifact, parseTenderRequirementsArtifact,
   parseTenderScoringArtifact } from './tender-analysis-artifacts.ts'
@@ -32,7 +34,7 @@ export const bidProjectInspectSchema = z.discriminatedUnion('object', [
   z.object({ object: z.literal('chapters'), section_ids: sectionIds, offset: z.number().int().nonnegative().default(0),
     max_chars: z.number().int().min(1).max(12_000).default(6_000), ...page, ...source }).strict(),
   z.object({ object: z.literal('execution'), section_ids: sectionIds.optional(), ...page, ...source }).strict(),
-  z.object({ object: z.literal('task'), ...source }).strict(),
+  z.object({ object: z.literal('task'), work_id: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u).optional(), ...source }).strict(),
   z.object({ object: z.literal('recovery'), ...source }).strict(),
 ])
 
@@ -82,7 +84,14 @@ export async function inspectBidProject(
   canonical: BidWorkspace, input: BidProjectInspectRequest, candidate?: BidWorkspace,
 ): Promise<BidProjectInspectResult> {
   const request = bidProjectInspectSchema.parse(input)
-  const workspace = request.source === 'candidate' ? candidate : canonical
+  let workspace = request.source === 'candidate' ? candidate : canonical
+  if (request.source === 'candidate' && (workspace === undefined || workspace.root === canonical.root)) {
+    const state = await readBidProjectState(canonical)
+    const work = request.object === 'task' && request.work_id !== undefined
+      ? await readBidWorkDescriptor(canonical, request.work_id) : state?.run?.work
+    const paths = work == null ? null : await readExistingBidWorkingTree(canonical, work)
+    workspace = paths === null ? undefined : new BidWorkspace(paths.root, canonical.config)
+  }
   const tenderArtifact = request.object === 'tender' ? `analysis/${request.part === 'scoring_origin' ? 'scoring-origin'
     : request.part === 'selection' ? 'tender-analysis-selection'
       : request.part === 'impact' ? 'tender-update-impact' : request.part}.json` : undefined
@@ -93,11 +102,16 @@ export async function inspectBidProject(
           : object === 'chapters' ? 'chapters/sections'
             : object === 'tender' ? tenderArtifact ?? 'analysis/project.json'
               : 'project-state.json'
-  const artifact = artifactFor(request.object)
+  let artifact = artifactFor(request.object)
+  if (request.object === 'outline' && workspace !== undefined) {
+    const confirmed = await optionalText(workspace, artifact)
+    if (confirmed === undefined) artifact = await optionalText(workspace, 'outline/draft.json') === undefined
+      ? 'outline/outline.json' : 'outline/draft.json'
+  }
   const base = { object: request.object, source: request.source, artifact }
   if (workspace === undefined) return { ...base, available: false, missing: 'BID_CANDIDATE_WORKSPACE_UNAVAILABLE' }
   if (request.object === 'task' || request.object === 'recovery') {
-    const statePath = workspace.projectStatePath
+    const statePath = canonical.projectStatePath
     await assertNoLinkedPath(workspace.root, statePath)
     let raw: string | undefined
     try { raw = await readFile(statePath, 'utf8') } catch (error) {
@@ -105,17 +119,33 @@ export async function inspectBidProject(
     }
     if (raw === undefined) return { ...base, available: false, missing: 'project-state.json' }
     const state = parseBidProjectState(JSON.parse(raw))
-    const work = state.run?.work
+    const work = request.object === 'task' && request.work_id !== undefined
+      ? await readBidWorkDescriptor(canonical, request.work_id) : state.run?.work
+    if (request.object === 'task' && request.work_id !== undefined && work == null) {
+      return { ...base, available: false, missing: 'BID_WORK_REQUEST_NOT_FOUND' }
+    }
     let capabilityTask
     if (work?.kind === 'capability_task') {
-      const saved = capabilityTaskRequestSchema.parse(await readBidWorkRequest(workspace, work))
-      const rawCheckpoint = await optionalText(workspace, `runs/${work.workId}/task-checkpoint.json`)
+      const saved = capabilityTaskRequestSchema.parse(await readBidWorkRequest(canonical, work))
+      const rawCheckpoint = await optionalText(canonical, 'runs/' + work.workId + '/task-checkpoint.json')
       const checkpoint = rawCheckpoint === undefined ? undefined
         : capabilityTaskCheckpointSchema.parse(JSON.parse(rawCheckpoint))
       if (checkpoint !== undefined && (checkpoint.work_id !== work.workId || checkpoint.request_sha256 !== work.requestSha256)) {
         throw new Error('BID_CAPABILITY_CHECKPOINT_IDENTITY_MISMATCH')
       }
+      const receiptRaw = await optionalText(canonical, 'requests/' + work.workId + '/result.json')
+      const receipt = receiptRaw === undefined ? undefined : capabilityPublicationReceiptSchema.parse(JSON.parse(receiptRaw))
+      if (receipt !== undefined && (receipt.work_id !== work.workId || receipt.request_sha256 !== work.requestSha256)) {
+        throw new Error('BID_CAPABILITY_RESULT_IDENTITY_MISMATCH')
+      }
       capabilityTask = { work_id: work.workId, goal: saved.task.goal, scope: saved.task.scope,
+        source_snapshot: saved.source_snapshot ?? null, publication_receipt: receipt ?? null,
+        verifications: checkpoint?.verifications ?? [],
+        goal_met: receipt?.goal_met === true,
+        evidence_level: receipt?.verification === undefined ? '旧执行结果，未有本次任务核验证据' : '已核验的内容发布结果',
+        result_ref: receipt === undefined ? null : 'requests/' + work.workId + '/result.json',
+        completed_prefix: checkpoint?.steps.findIndex(step => step.status !== 'completed') === -1
+          ? checkpoint.steps.length : checkpoint?.steps.findIndex(step => step.status !== 'completed') ?? 0,
         steps: checkpoint?.steps.map((step, index) => ({ index, ...step.step, status: step.status,
           ...step.status === 'completed' || step.status === 'awaiting_input' ? { result: step.result } : {} }))
           ?? saved.task.steps.map((step, index) => ({ index, ...step, status: 'pending' })),
@@ -173,7 +203,7 @@ export async function inspectBidProject(
         project_changed: z.boolean(), affected_section_ids: z.array(z.string()),
         stale_artifacts: z.array(z.string()) }).strict().parse(value)
     } else items = parseTenderComplianceArtifact(value).compliance_items
-  } else if (request.object === 'outline') items = parseOutlineArtifact(value).sections
+  } else if (request.object === 'outline') items = (await readCapabilityOutlineBaseline(workspace)).outline.sections
   else if (request.object === 'evidence') items = parseEvidenceMapArtifact(value).section_mappings
   else if (request.object === 'writing_plan') {
     const plan = parseWritingPlan(value)

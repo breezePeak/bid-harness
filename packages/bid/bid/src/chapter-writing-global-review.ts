@@ -5,6 +5,7 @@ import { z } from 'zod'
 import type { BidManifest } from './index.ts'
 import { chapterToolArgs, createChapterProtocol, type ChapterProtocol } from './chapter-writing-protocol.ts'
 import { registerCompletedChapterReader } from './chapter-reading.ts'
+import { createChapterObjectPositions } from './chapter-object-positions.ts'
 import {
   GLOBAL_COMPLIANCE_REVIEW_SCHEMA_VERSION,
   parseGlobalComplianceReviewArtifact,
@@ -180,6 +181,13 @@ export function attachGlobalComplianceReview(
   const evidenceByRef = new Map(evidence.map(item => [item.evidence_ref, item]))
   const canonical = new Map(compliance.compliance_items.map(item => [item.id, item]))
   const items = new Map(retained.map(item => [item.compliance_id, item]))
+  const ids = chapters.map(chapter => chapter.section_id)
+  const positions = createChapterObjectPositions([
+    { canonical: 'compliance_id', model: 'compliance_position', ids: outline.global_compliance_ids },
+    { canonical: 'section_id', model: 'section_position', ids },
+    { canonical: 'checked_section_ids', model: 'checked_section_positions', ids, many: true },
+    { canonical: 'affected_section_ids', model: 'affected_section_positions', ids, many: true },
+  ])
   try {
     const quoteRefs = registerCompletedChapterReader(runtime, new Map(chapters.map(chapter => [chapter.section_id, {
       markdown: chapter.markdown, content_sha256: chapter.candidate_sha256,
@@ -187,7 +195,7 @@ export function attachGlobalComplianceReview(
     runtime.register({
       name: 'review_global_compliance',
       description: '记录全局要求的核验性质、责任归属、结论与当前依据；合法 fail/pending 可保存。',
-      parameters: {
+      parameters: positions.schema({
         type: 'object', properties: {
           compliance_id: stringParameter,
           category: { type: 'string', enum: ['cross_chapter_constraint', 'document_requirement', 'delivery_requirement'] },
@@ -200,9 +208,9 @@ export function attachGlobalComplianceReview(
         },
         required: ['compliance_id', 'category', 'owners', 'status', 'checked_section_ids', 'evidence_refs', 'affected_section_ids', 'issue'],
         additionalProperties: false,
-      },
+      }),
       execute(args) {
-        const input = chapterToolArgs(itemInput, args)
+        const input = chapterToolArgs(itemInput, positions.bind(args))
         if (!globalIds.has(input.compliance_id)) throw new ToolArgsError([`compliance_id: 未知全局合规 ID ${input.compliance_id}。`])
         if (duplicate(input.checked_section_ids) || duplicate(input.affected_section_ids)) throw new ToolArgsError(['checked_section_ids 和 affected_section_ids 不得重复。'])
         const checked = input.checked_section_ids.map((sectionId) => {

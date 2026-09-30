@@ -61,6 +61,6 @@ export async function validateDocumentReviewCapability(
     [REVIEW_PATHS[0], 'global_compliance_review'],
     [REVIEW_PATHS[1], 'chapter_completion_review'],
   ] as const).map(([path, type]) => ({ stage: 'chapter_writing' as const, path, type }))
-  const checked = await validateChapterWriting(context.working, 'chapter_writing', artifacts)
+  const checked = await validateChapterWriting(context.working, 'chapter_writing', artifacts, 'review_report')
   if (!checked.ok) throw new Error(`BID_DOCUMENT_REVIEW_INVALID: ${checked.issues.map(issue => issue.code).join(', ')}`)
 }

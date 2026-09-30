@@ -32,7 +32,7 @@ describe('S4 Web evidence through a real Agent Tool loop', () => {
     await ctx.plugin(spawn, { providerName: 'spawn' })
     try {
       const outcome = await runFullOutlineRegenerationLoop(ctx, root)
-      expect(outcome).toMatchObject({ result: { ok: true }, draft: { revision: 2 },
+      expect(outcome, JSON.stringify(outcome)).toMatchObject({ result: { ok: true }, draft: { revision: 2 },
         canonicalPreserved: true, state: { stage: 'evidence_mapping', status: 'waiting_user' } })
       expect(outcome.draft.outline.sections.find(section => section.id === 'SEC-SECURITY')?.title)
         .toBe('访问控制与安全审计方案')
@@ -59,7 +59,7 @@ describe('S4 Web evidence through a real Agent Tool loop', () => {
         confirmations: 0, rawWriteBlocked: true, untouchedEvidencePreserved: true, revision: 3, disposed: true,
         titles: ['访问控制与安全审计', '实施准备与资源核查', '实施过程', '验收移交'],
         visibleTools: ['bid_stage_inspect', 'bid_outline_apply_operations', 'bid_outline_regenerate_scope', 'bid_evidence_remap',
-          'bid_project_inspect', 'bid_run_task', 'bid_confirm_writing_plan', 'bid_revise_chapter'],
+          'bid_project_inspect', 'bid_run_task', 'bid_confirm_writing_plan'],
         concurrent: Array(3).fill('BID_OPERATION_IN_PROGRESS'), failures: 2, incompletePlanRejected: true,
         readOnlyNoWork: true, planOnlyNoWork: true, capabilityUpdates: 1, updatedRequirement: '明确实施边界',
       })
@@ -80,23 +80,23 @@ describe('S4 Web evidence through a real Agent Tool loop', () => {
     await ctx.plugin(spawn, { providerName: 'spawn' })
     try {
       const { agent, workspace, sourceUrl, outcome, requests } = await runEvidenceMappingLoop(ctx, root, repair)
-      expect(outcome).toMatchObject({ stage: 'evidence_mapping', status: 'waiting_user' })
+      expect(outcome, JSON.stringify(outcome)).toMatchObject({ stage: 'evidence_mapping', status: 'waiting_user' })
       const reviewTool = requests.flatMap(request => request.tools ?? []).find(tool => tool.name === 'review_items')
       expect(reviewTool?.parameters).toMatchObject({
         type: 'object',
         properties: { items: { type: 'array', items: { oneOf: [{
           type: 'object',
           properties: {
-            review_ref: { type: 'string' }, decision: { type: 'string', enum: ['keep', 'remove', 'block'] }, reason: { type: 'string' },
+            review_position: { type: 'integer' }, decision: { type: 'string', enum: ['keep', 'remove', 'block'] }, reason: { type: 'string' },
           },
-          required: ['review_ref', 'decision', 'reason'], additionalProperties: false,
+          required: ['review_position', 'decision', 'reason'], additionalProperties: false,
         }, {
           type: 'object',
           properties: {
-            review_ref: { type: 'string' }, decision: { type: 'string', const: 'correct' }, reason: { type: 'string' },
+            review_position: { type: 'integer' }, decision: { type: 'string', const: 'correct' }, reason: { type: 'string' },
             correction: { type: 'object' },
           },
-          required: ['review_ref', 'decision', 'reason', 'correction'], additionalProperties: false,
+          required: ['review_position', 'decision', 'reason', 'correction'], additionalProperties: false,
         }] } } },
         required: ['items'], additionalProperties: false,
       })

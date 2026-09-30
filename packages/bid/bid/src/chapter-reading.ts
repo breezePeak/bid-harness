@@ -19,33 +19,37 @@ export interface CompletedChapterQuote {
  * 注册按字符窗口读取当前章节的私有工具。
  * @param runtime 当前整书审核协议。
  * @param chapterBodies 当前已完成章节及正文身份。
+ * @param sectionIds 模型输入的章节位置顺序；省略时使用正文 Map 的顺序。
  * @returns 本轮读取生成的引用；协议提交时据此绑定原文。
  */
 export function registerCompletedChapterReader<T>(
   runtime: ChapterProtocol<T>,
   chapterBodies: ReadonlyMap<string, CompletedChapterBody>,
+  sectionIds: readonly string[] = [...chapterBodies.keys()],
 ): ReadonlyMap<string, CompletedChapterQuote> {
   const quoteRefs = new Map<string, CompletedChapterQuote>()
   runtime.register({
     name: 'read_completed_chapter',
-    description: '按 section_id 读取当前已完成章节的有界正文片段；只读，不修改 Artifact。',
+    description: '按 section_position 读取当前已完成章节的有界正文片段；只读，不修改 Artifact。',
     parameters: {
       type: 'object', properties: {
-        section_id: { type: 'string' }, start: { type: 'integer' }, length: { type: 'integer' },
-      }, required: ['section_id', 'start', 'length'], additionalProperties: false,
+        section_position: { type: 'integer' }, start: { type: 'integer' }, length: { type: 'integer' },
+      }, required: ['section_position', 'start', 'length'], additionalProperties: false,
     },
     execute(args) {
       const input = chapterToolArgs(z.object({
-        section_id: z.string().min(1), start: z.number().int().nonnegative(), length: z.number().int().min(1).max(12_000),
+        section_position: z.number().int().nonnegative(), start: z.number().int().nonnegative(),
+        length: z.number().int().min(1).max(12_000),
       }).strict(), args)
-      const chapter = chapterBodies.get(input.section_id)
-      if (chapter === undefined) throw new ToolArgsError([`section_id: 未知或未完成章节 ${input.section_id}。`])
+      const sectionId = sectionIds[input.section_position]
+      const chapter = sectionId === undefined ? undefined : chapterBodies.get(sectionId)
+      if (chapter === undefined || sectionId === undefined) throw new ToolArgsError([`section_position: 未知或未完成章节位置 ${input.section_position}。`])
       const quote = chapter.markdown.slice(input.start, input.start + input.length)
       if (quote.length === 0) throw new ToolArgsError(['start: 超出当前章节正文。'])
       const ref = `DQ${quoteRefs.size + 1}`
-      quoteRefs.set(ref, { section_id: input.section_id, quote })
+      quoteRefs.set(ref, { section_id: sectionId, quote })
       return Promise.resolve({
-        quote_ref: ref, section_id: input.section_id, content_sha256: chapter.content_sha256,
+        quote_ref: ref, section_position: input.section_position, content_sha256: chapter.content_sha256,
         start: input.start, end: input.start + quote.length, markdown: quote,
         truncated: input.start + quote.length < chapter.markdown.length,
       })

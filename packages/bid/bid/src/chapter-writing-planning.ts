@@ -14,16 +14,17 @@ import { chapterToolArgs, createChapterProtocol, type ChapterProtocol } from './
 export const CHAPTER_PLAN_TOOLS = ['add_global_consistency_note', 'set_chapter_relations', 'finish_chapter_plan'] as const
 
 const text = z.string().trim().min(1)
-const relation = z.object({ section_id: text, reason: text }).strict()
+const position = z.number().int().nonnegative()
+const relation = z.object({ section_position: position, reason: text }).strict()
 const relations = z.object({
-  section_id: text,
+  section_position: position,
   depends_on: z.array(relation),
   related_sections: z.array(relation),
   planning_notes: z.array(text),
 }).strict()
 const relationParameter = {
-  type: 'object', properties: { section_id: { type: 'string' }, reason: { type: 'string' } },
-  required: ['section_id', 'reason'], additionalProperties: false,
+  type: 'object', properties: { section_position: { type: 'integer' }, reason: { type: 'string' } },
+  required: ['section_position', 'reason'], additionalProperties: false,
 }
 
 /**
@@ -43,6 +44,12 @@ export function attachChapterPlan(
     section_id: section.id, depends_on: [], related_sections: [], planning_notes: [],
   }]))
   const notes = new Set<string>()
+  const sectionIds = [...sections.keys()]
+  const sectionIdAt = (position: number): string => {
+    const id = sectionIds[position]
+    if (id === undefined) throw new ToolArgsError([`section_position: 未知可写章节位置 ${position}。`])
+    return id
+  }
   const assemble = (): ChapterExecutionPlan => ({
     schema_version: CHAPTER_EXECUTION_SCHEMA_VERSION, scope: 'technical_bid',
     confirmed_outline_sha256: outlineHash, writing_plan_version: writingPlanVersion,
@@ -61,22 +68,26 @@ export function attachChapterPlan(
       name: 'set_chapter_relations', description: '整体替换一个可写章节的强依赖、弱关联和规划说明。',
       parameters: {
         type: 'object', properties: {
-          section_id: { type: 'string' },
+          section_position: { type: 'integer' },
           depends_on: { type: 'array', items: relationParameter },
           related_sections: { type: 'array', items: relationParameter },
           planning_notes: { type: 'array', items: { type: 'string' } },
-        }, required: ['section_id', 'depends_on', 'related_sections', 'planning_notes'], additionalProperties: false,
+        }, required: ['section_position', 'depends_on', 'related_sections', 'planning_notes'], additionalProperties: false,
       },
       execute(args) {
         const input = chapterToolArgs(relations, args)
-        if (!sections.has(input.section_id)) throw new ToolArgsError([`section_id: 未知或不可写章节 ${input.section_id}。`])
-        const draft = { ...input, related_sections: input.related_sections.map(item => ({ ...item, strength: 'weak' as const })) }
+        const sectionId = sectionIdAt(input.section_position)
+        const draft = {
+          section_id: sectionId, planning_notes: input.planning_notes,
+          depends_on: input.depends_on.map(item => ({ section_id: sectionIdAt(item.section_position), reason: item.reason })),
+          related_sections: input.related_sections.map(item => ({ section_id: sectionIdAt(item.section_position), reason: item.reason, strength: 'weak' as const })),
+        }
         const plan = assemble()
-        plan.sections = plan.sections.map(section => section.section_id === input.section_id ? draft : section)
+        plan.sections = plan.sections.map(section => section.section_id === sectionId ? draft : section)
         const issues = validateChapterExecutionPlan(plan, outline, outlineHash, writingPlanVersion).filter(issue => issue.code !== 'CHAPTER_PLAN_DEPENDENCY_CYCLE')
         if (issues.length > 0) throw new ToolArgsError(issues.map(issue => `${issue.path}: ${issue.message}`))
-        sections.set(input.section_id, draft)
-        return Promise.resolve({ recorded: true, section_id: input.section_id })
+        sections.set(sectionId, draft)
+        return Promise.resolve({ recorded: true, section_position: input.section_position })
       },
     })
     runtime.register({

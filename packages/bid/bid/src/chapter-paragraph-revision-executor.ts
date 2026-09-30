@@ -121,7 +121,7 @@ export async function executeParagraphRevisionTask(
     ...(issue.start === null || issue.end === null ? {} : { start: issue.start, end: issue.end }),
   }))
   const writer = createParagraphRevisionWriterChild(
-    input.parent, input.title, SessionId(input.writerId), input.signal,
+    input.parent, input.title, SessionId(input.writerId), segments.map(segment => segment.segment_id), input.signal,
   )
   const reviewer = createParagraphRevisionReviewerChild(
     input.parent, `${input.title} · 局部复审`, input.task.issue_ids, segments.map(segment => segment.segment_id), input.signal,
@@ -159,7 +159,7 @@ export async function executeParagraphRevisionTask(
       }
       await input.onPhase?.('reviewing')
       const reviewResult = await reviewer.run(renderParagraphRevisionReviewerTask({
-        title: input.title, segments, replacements,
+        title: input.title, segments, replacements, issueIds: input.task.issue_ids,
       }))
       if (reviewResult.stopReason !== 'completed' || reviewResult.structured === undefined) {
         return { status: 'failed', code: 'PARAGRAPH_REVISION_REVIEW_FAILED', message: 'Delta Reviewer 未正常提交结论。' }

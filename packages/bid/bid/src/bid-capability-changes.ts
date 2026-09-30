@@ -6,6 +6,12 @@ import type { BidWorkspace } from './index.ts'
 import { bidCapabilityResultSchema } from './bid-capability-contract.ts'
 import type { BidRunContext } from './run-coordinator.ts'
 import { assertNoLinkedPath, within } from './workspace-path.ts'
+import { bidTaskVerificationSchema, type BidTaskVerification } from './bid-task-verification.ts'
+import type { BidTaskSourceSnapshot } from './bid-task-source.ts'
+import { readRevisionQueue, REVISION_QUEUE_PATH, revisionQueueArtifactSchema } from './chapter-revision-queue.ts'
+import { readCapabilityOutlineBaseline } from './outline-draft-store.ts'
+import { outlineSectionScope } from './section-evidence-context.ts'
+import { parseRevisionBatchArtifact } from './chapter-revision-batch.ts'
 import { recordOnlySchemaVersion } from './schema-version.ts'
 
 const hashSchema = z.string().regex(/^[a-f0-9]{64}$/u)
@@ -20,10 +26,21 @@ const stepReceiptSchema = z.object({
 /** 已合并到 Work 候选的单步结果及输入、文件身份。 */
 export type CapabilityStepReceipt = z.infer<typeof stepReceiptSchema>
 
+/** 只比较意见内容及原选区，允许执行状态及时间随 Run 更新。 */
+function issueIdentity(issue: BidTaskSourceSnapshot['issues'][number]): string {
+  return JSON.stringify([issue.issue_id, issue.section_id, issue.scope, issue.reference, issue.instruction, issue.suggestion])
+}
+
 /** 与正式业务文件在同一 PublicationBatch 中提交的结果身份。 */
 export const capabilityPublicationReceiptSchema = z.object({
   schema_version: recordOnlySchemaVersion(1),
   work_id: z.string().min(1),
+  goal_met: z.boolean().optional(),
+  export_receipt: z.object({ operation_id: z.string().min(1), path: z.string().min(1), sha256: hashSchema }).strict().optional(),
+  verification: bidTaskVerificationSchema.optional(),
+  issue_results: z.array(z.object({ issue_id: z.string().min(1), target_section_ids: z.array(z.string()),
+    batch_id: z.string().min(1).nullable().optional(),
+    work_id: z.string().min(1), result_ref: z.string().min(1) }).strict()).optional(),
   request_sha256: hashSchema,
   files: z.array(fileSchema),
   removed_paths: z.array(z.string().min(1)),
@@ -52,13 +69,13 @@ function exactFilePath(workspace: BidWorkspace, path: string): string {
 function sha256(bytes: Uint8Array): string { return createHash('sha256').update(bytes).digest('hex') }
 
 /**
- * 核对正式结果凭据及它声称发布的当前文件身份。
+ * 读取同项目历史回执，不把后来合法变化误判为历史记录损坏。
  * @param workspace 正式项目。
- * @param workId 待核对的 Work。
- * @param requestSha256 不可变请求摘要。
- * @returns 完整匹配的凭据；尚未发布时为 null。
+ * @param workId 原 Work 身份。
+ * @param requestSha256 原不可变请求摘要。
+ * @returns 已校验身份的回执；尚未发布时为 null。
  */
-export async function readCapabilityPublicationReceipt(
+export async function readCapabilityPublicationRecord(
   workspace: BidWorkspace, workId: string, requestSha256: string,
 ): Promise<CapabilityPublicationReceipt | null> {
   const path = exactFilePath(workspace, resultPath(workId))
@@ -72,6 +89,21 @@ export async function readCapabilityPublicationReceipt(
   if (receipt.work_id !== workId || receipt.request_sha256 !== requestSha256) {
     throw new Error('BID_CAPABILITY_RESULT_IDENTITY_MISMATCH')
   }
+  return receipt
+}
+
+/**
+ * 核对正式结果凭据及它声称发布的当前文件身份。
+ * @param workspace 正式项目。
+ * @param workId 待核对的 Work。
+ * @param requestSha256 不可变请求摘要。
+ * @returns 完整匹配的凭据；尚未发布时为 null。
+ */
+export async function readCapabilityPublicationReceipt(
+  workspace: BidWorkspace, workId: string, requestSha256: string,
+): Promise<CapabilityPublicationReceipt | null> {
+  const receipt = await readCapabilityPublicationRecord(workspace, workId, requestSha256)
+  if (receipt === null) return null
   for (const file of receipt.files) {
     const absolute = exactFilePath(workspace, file.path)
     await assertNoLinkedPath(workspace.root, absolute)
@@ -98,11 +130,13 @@ export async function readCapabilityPublicationReceipt(
  * @param working 已验证的 Work 候选项目。
  * @param paths 实际改变的精确文件路径。
  * @param removedPaths 实际删除的精确文件路径。
+ * @param verified 原始来源及通过 Host 事实核对的任务核验。
  * @returns 与业务文件同批发布的完成凭据。
  */
 export async function publishCapabilityChanges(
   run: BidRunContext, canonical: BidWorkspace, working: BidWorkspace,
   paths: readonly string[], removedPaths: readonly string[],
+  verified?: { readonly verification: BidTaskVerification; readonly source: BidTaskSourceSnapshot },
 ): Promise<CapabilityPublicationReceipt> {
   if (run.work.kind !== 'capability_task') throw new Error('BID_CAPABILITY_WORK_REQUIRED')
   const writes = [...new Set(paths)]
@@ -119,16 +153,56 @@ export async function publishCapabilityChanges(
     files.push({ path, sha256: sha256(bytes), bytes })
   }
   for (const path of removals) exactFilePath(canonical, path)
+  if (verified !== undefined && (!verified.verification.scope_authorized || verified.verification.unmet.length > 0
+    || verified.verification.phase !== 'result')) throw new Error('BID_TASK_RESULT_UNMET')
+  const queue = await readRevisionQueue(canonical)
+  for (const source of verified?.source.issues ?? []) {
+    const current = queue.issues.find(issue => issue.issue_id === source.issue_id)
+    if (current === undefined || issueIdentity(current) !== issueIdentity(source)) {
+      throw Object.assign(new Error('BID_TASK_SOURCE_ISSUE_CHANGED'), { code: 'BID_TASK_SOURCE_ISSUE_CHANGED' })
+    }
+  }
+  const outline = verified === undefined || verified.source.issues.length === 0 ? undefined
+    : (await readCapabilityOutlineBaseline(working)).outline
+  const batches = files.filter(file => file.path.startsWith('chapters/revisions/batches/'))
+    .map(file => parseRevisionBatchArtifact(JSON.parse(Buffer.from(file.bytes).toString('utf8'))))
+  const issueResults = verified?.source.issues.map((issue) => {
+    const roots = verified.verification.requirements.filter(item => item.source_id === issue.issue_id)
+      .flatMap(item => item.section_ids)
+    const ids = outline === undefined ? new Set(roots) : outlineSectionScope(outline,
+      roots.length === 0 ? [issue.section_id] : roots)
+    return { issue_id: issue.issue_id, target_section_ids: outline === undefined ? [...ids]
+      : outline.sections.filter(item => item.writable && ids.has(item.id)).map(item => item.id),
+    batch_id: batches.find(batch => batch.issue_ids.includes(issue.issue_id))?.batch_id ?? null,
+    work_id: run.work.workId, result_ref: resultPath(run.work.workId) }
+  })
   const receipt = capabilityPublicationReceiptSchema.parse({
     schema_version: 1,
     work_id: run.work.workId,
     request_sha256: run.work.requestSha256,
     files: files.map(({ path, sha256: digest }) => ({ path, sha256: digest })),
     removed_paths: removals,
+    ...(verified === undefined ? {} : { goal_met: verified.verification.goal_met,
+      verification: verified.verification, issue_results: issueResults }),
   })
   await run.commits.publish(async (lease) => {
     for (const file of files) await lease.writeBytes(exactFilePath(canonical, file.path), file.bytes)
     for (const path of removals) await lease.remove(exactFilePath(canonical, path))
+    if (verified?.verification.goal_met === true && (issueResults?.length ?? 0) > 0) {
+      const latest = await readRevisionQueue(canonical)
+      for (const source of verified.source.issues) {
+        const current = latest.issues.find(issue => issue.issue_id === source.issue_id)
+        if (current === undefined || issueIdentity(current) !== issueIdentity(source)) {
+          throw Object.assign(new Error('BID_TASK_SOURCE_ISSUE_CHANGED'), { code: 'BID_TASK_SOURCE_ISSUE_CHANGED' })
+        }
+      }
+      const ids = new Set(issueResults?.map(item => item.issue_id))
+      await lease.writeJson(exactFilePath(canonical, REVISION_QUEUE_PATH), revisionQueueArtifactSchema.parse({
+        ...latest, revision: latest.revision + 1, issues: latest.issues.map(issue => ids.has(issue.issue_id)
+          ? { ...issue, status: 'completed', batch_id: issueResults?.find(result => result.issue_id === issue.issue_id)?.batch_id ?? null,
+            updated_at: Date.now() } : issue),
+      }))
+    }
     await lease.writeJson(exactFilePath(canonical, resultPath(run.work.workId)), receipt)
   })
   return receipt

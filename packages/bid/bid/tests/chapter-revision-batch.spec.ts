@@ -2034,24 +2034,21 @@ describe('任务 07: 用户一次开始自动规划并立即执行', () => {
     return queue
   }
 
-  it('1. 一条"开始处理这些建议"同回合 plan + execute: 交互规则要求规划成功后同一回合内紧接着调用 execute', () => {
+  it('1. 一条开始处理意见通过统一任务入口执行', () => {
     const runningPrompt = renderChapterWritingInteractionPrompt('running')
     const completedPrompt = renderChapterWritingInteractionPrompt('completed')
 
     for (const prompt of [runningPrompt, completedPrompt]) {
-      expect(prompt).toContain('当存在 pending revision issues 且用户明确要求开始处理')
-      expect(prompt).toContain('1. 调用 bid_stage_inspect 读取待处理审批意见；')
-      expect(prompt).toContain('3. 调用 bid_plan_revision_batch 创建并保存不可变批次快照；')
-      expect(prompt).toContain(
-        '4. 规划成功且有可执行任务时，在同一回合内紧接着调用 bid_execute_revision_batch 立即开始执行，'
-        + '绝不向用户发起二次确认或询问是否执行；',
-      )
+      expect(prompt).toContain('用户明确要求处理审批意见时，读取真实意见')
+      expect(prompt).toContain('用 bid_run_task 的 issue_positions 选择实际处理集合')
+      expect(prompt).not.toContain('调用 bid_plan_revision_batch')
+      expect(prompt).toContain('确认执行后立即执行，不重复询问开始。')
     }
   })
 
   it('2. 不要求第二条消息: 严禁向用户发起二次确认或询问是否执行', () => {
     const prompt = renderChapterWritingInteractionPrompt('running')
-    expect(prompt).toContain('绝不向用户发起二次确认或询问是否执行')
+    expect(prompt).toContain('确认执行后立即执行，不重复询问开始。')
     expect(prompt).not.toContain('当用户明确要求"执行修订""开始修改""按批次处理"时，调用 bid_execute_revision_batch')
   })
 
@@ -2071,7 +2068,7 @@ describe('任务 07: 用户一次开始自动规划并立即执行', () => {
 
   it('5. 无 pending 不创建 batch: 规则限定仅在存在 pending revision issues 时调用', () => {
     const prompt = renderChapterWritingInteractionPrompt('running')
-    expect(prompt).toContain('当存在 pending revision issues 且用户明确要求开始处理')
+    expect(prompt).toContain('用户明确要求处理审批意见时，读取真实意见')
 
     const emptyQueue = emptyRevisionQueue()
     const input = planInput(['REV-non-existent'], [
@@ -2124,9 +2121,7 @@ describe('任务 07: 用户一次开始自动规划并立即执行', () => {
 
   it('8. 局部 conflict 不阻断独立任务且局部 revision 不走 writing plan patch', () => {
     const prompt = renderChapterWritingInteractionPrompt('running')
-    expect(prompt).toContain(
-      '部分 task 若出现 conflict 或 needs_input，直接执行其余独立任务，绝不因局部冲突阻断其他章节或询问用户。',
-    )
+    expect(prompt).toContain('纯正文可选 chapter.revision_batch，同章聚合、独立章节并行。')
     expect(prompt).toContain(
       '局部审批意见修订绝不启动 bid_confirm_writing_plan.patch，选区中的"统一""全部"是局部 RevisionIssue 要求；',
     )
@@ -2468,8 +2463,8 @@ describe('任务 09: b54fe9a385 批量审批修订全链路端到端回归验收
 
     // 2. 交互规则验证：一条命令同回合完成规划并在同一回合启动批次，绝无二次确认
     const prompt = renderChapterWritingInteractionPrompt('running')
-    expect(prompt).toContain('在同一回合内紧接着调用 bid_execute_revision_batch 立即开始执行')
-    expect(prompt).toContain('绝不向用户发起二次确认或询问是否执行')
+    expect(prompt).toContain('纯正文可选 chapter.revision_batch，同章聚合、独立章节并行。')
+    expect(prompt).toContain('确认执行后立即执行，不重复询问开始。')
 
     // 3. 规划并校验批次（SEC-C 中一条 stale 导致整节 task 成为 conflict，SEC-D 依赖 SEC-A）
     const planIssueIds = queue.issues.map(i => i.issue_id)

@@ -73,14 +73,15 @@ describe('paragraph revision range and prompts', () => {
     for (const forbidden of ['Current Chapter Blueprint', 'Relevant Requirements', 'Evidence Pack', 'Review Checklist', '当前完整正文', 'Writer Candidate']) {
       expect(prompt).not.toContain(forbidden)
     }
-    expect(prompt).toContain('SEG-001')
+    expect(prompt).toContain('授权块位置：0')
     expect(prompt).toContain('original_text')
     expect(prompt).toContain('readonly_before')
     expect(prompt).toContain('readonly_after')
     expect(prompt).toContain('instruction')
     expect(paragraphRevisionWriterOutputSchema.safeParse({ replacements: [{ segment_id: 'SEG-001', markdown: 'B2' }], metadata: {} }).success).toBe(false)
     expect(renderParagraphRevisionReviewerTask({
-      title: '标题', segments, replacements: [{ segment_id: 'SEG-001', markdown: 'B2' }],
+      title: '标题', segments, issueIds: segments.flatMap(segment => segment.issues.map(issue => issue.issue_id)),
+      replacements: [{ segment_id: 'SEG-001', markdown: 'B2' }],
     })).not.toContain('Evidence Pack')
     expect(renderParagraphRevisionRepairTask({
       segments, replacements: [{ segment_id: 'SEG-001', markdown: 'B2' }],

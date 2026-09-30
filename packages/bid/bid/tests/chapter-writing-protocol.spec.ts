@@ -37,7 +37,9 @@ async function harness() {
 
 const relation = (section_id: string) => ({ section_id, reason: `复用 ${section_id} 的接口决策` })
 const draft = (section_id: string, depends: string[] = [], related: string[] = []) => ({
-  section_id, depends_on: depends.map(relation), related_sections: related.map(relation), planning_notes: [],
+  section_position: ['SEC-1', 'SEC-2', 'SEC-3'].indexOf(section_id),
+  depends_on: depends.map(id => ({ section_position: ['SEC-1', 'SEC-2', 'SEC-3'].indexOf(id), reason: relation(id).reason })),
+  related_sections: related.map(id => ({ section_position: ['SEC-1', 'SEC-2', 'SEC-3'].indexOf(id), reason: relation(id).reason })), planning_notes: [],
 })
 const quality = {
   bidder_response_voice: true,
@@ -235,7 +237,7 @@ describe('S5 Reviewer 分批记录', () => {
     const runtime = attachChapterReview(agent, context, new Map([['Q1', violation]]), evidence, 0)
     await call('review_coverage_items', { items: buildChapterReviewChecklist(context).map(item => covered(item.item_ref)) })
     expect((await call('review_acceptance_criteria', { items: [{
-      criterion_id: 'AC-NEGATIVE', status: 'unmet', evidence_quote_refs: ['Q1'], reason: '该企业能力没有来源支持。',
+      criterion_position: 0, status: 'unmet', evidence_quote_refs: ['Q1'], reason: '该企业能力没有来源支持。',
     }] })).isError).toBeFalsy()
     await call('set_review_summary', { quality_checks: quality, blocking_issues: [], assignment_conflicts: [], external_input_gaps: [], external_input_only: false })
     await call('finish_chapter_review', {})
@@ -265,7 +267,7 @@ describe('S5 Reviewer 分批记录', () => {
     }])
     await call('review_coverage_items', { items: buildChapterReviewChecklist(context).map(item => covered(item.item_ref)) })
     await call('review_acceptance_criteria', { items: [{
-      criterion_id: 'AC-PREFERRED-SEMANTIC', status: 'unmet', evidence_quote_refs: [], reason: '当前正文没有更多示例。',
+      criterion_position: 0, status: 'unmet', evidence_quote_refs: [], reason: '当前正文没有更多示例。',
     }] })
     await call('set_review_summary', { quality_checks: quality, blocking_issues: [], assignment_conflicts: [], external_input_gaps: [], external_input_only: false })
     await call('finish_chapter_review', {})
@@ -293,8 +295,8 @@ describe('S5 Reviewer 分批记录', () => {
       missing_global_compliance_ids: ['GLOBAL-1'], missing_summary: true,
     })
     await call('review_coverage_items', { items: [covered('R4'), { item_ref: 'R1', status: 'missing', evidence_quote_refs: [], issue: '未响应' }, covered('R1'), covered('R3')] })
-    await call('review_acceptance_criteria', { items: [{ criterion_id: 'AC-000002', status: 'met', evidence_quote_refs: [], reason: '未发现无依据能力。' }] })
-    await call('review_global_constraints', { items: [{ compliance_id: 'GLOBAL-1', status: 'not_applicable', evidence_quote_refs: [], issue: '本章不涉及该约束。' }] })
+    await call('review_acceptance_criteria', { items: [{ criterion_position: 0, status: 'met', evidence_quote_refs: [], reason: '未发现无依据能力。' }] })
+    await call('review_global_constraints', { items: [{ compliance_position: 0, status: 'not_applicable', evidence_quote_refs: [], issue: '本章不涉及该约束。' }] })
     await call('set_review_summary', { quality_checks: quality, blocking_issues: [], assignment_conflicts: [], external_input_gaps: [], external_input_only: false })
     await call('finish_chapter_review', {})
     const report = runtime.captured()!
@@ -338,8 +340,8 @@ describe('S5 Reviewer 分批记录', () => {
     const context = reviewContext()
     const runtime = attachChapterReview(agent, context, new Map([['Q1', '正文']]), evidence, 0)
     await call('review_coverage_items', { items: buildChapterReviewChecklist(context).map(item => covered(item.item_ref)) })
-    await call('review_acceptance_criteria', { items: [{ criterion_id: 'AC-000002', status: 'met', evidence_quote_refs: [], reason: '符合。' }] })
-    await call('review_global_constraints', { items: [{ compliance_id: 'GLOBAL-1', status: 'not_applicable', evidence_quote_refs: [], issue: '本章不涉及。' }] })
+    await call('review_acceptance_criteria', { items: [{ criterion_position: 0, status: 'met', evidence_quote_refs: [], reason: '符合。' }] })
+    await call('review_global_constraints', { items: [{ compliance_position: 0, status: 'not_applicable', evidence_quote_refs: [], issue: '本章不涉及。' }] })
     await call('set_review_summary', { quality_checks: quality, blocking_issues: ['  可撤销  ', '可撤销'], assignment_conflicts: [], external_input_gaps: [], external_input_only: false })
     await call('set_review_summary', { quality_checks: { ...quality, structure_complete: kind !== 'quality' }, blocking_issues: kind === 'extra' ? ['额外问题'] : [], assignment_conflicts: [], external_input_gaps: [], external_input_only: false })
     if (kind === 'coverage') await call('review_coverage_items', { items: [{ item_ref: 'R1', status: 'missing', evidence_quote_refs: [], issue: '具体缺口' }] })
@@ -357,8 +359,8 @@ describe('S5 Reviewer 分批记录', () => {
     const context = reviewContext()
     const runtime = attachChapterReview(agent, context, new Map([['Q1', '正文违反全局规则']]), evidence, 0)
     await call('review_coverage_items', { items: buildChapterReviewChecklist(context).map(item => covered(item.item_ref)) })
-    await call('review_acceptance_criteria', { items: [{ criterion_id: 'AC-000002', status: 'met', evidence_quote_refs: [], reason: '符合。' }] })
-    await call('review_global_constraints', { items: [{ compliance_id: 'GLOBAL-1', status: 'violates', evidence_quote_refs: ['Q1'], issue: '正文参数违反约束。' }] })
+    await call('review_acceptance_criteria', { items: [{ criterion_position: 0, status: 'met', evidence_quote_refs: [], reason: '符合。' }] })
+    await call('review_global_constraints', { items: [{ compliance_position: 0, status: 'violates', evidence_quote_refs: ['Q1'], issue: '正文参数违反约束。' }] })
     await call('set_review_summary', { quality_checks: quality, blocking_issues: [], assignment_conflicts: [], external_input_gaps: [], external_input_only: false })
     await call('finish_chapter_review', {})
     expect(runtime.captured()).toMatchObject({ verdict: 'repair', global_compliance_checks: [{ status: 'violates' }] })
@@ -372,8 +374,8 @@ describe('S5 Reviewer 分批记录', () => {
       external_input_only: true,
     })).isError).toBe(true)
     await call('review_coverage_items', { items: [{ item_ref: 'R1', status: 'missing', evidence_quote_refs: [], issue: '未提供企业资质证书。' }] })
-    await call('review_acceptance_criteria', { items: [{ criterion_id: 'AC-000002', status: 'met', evidence_quote_refs: [], reason: '符合。' }] })
-    await call('review_global_constraints', { items: [{ compliance_id: 'GLOBAL-1', status: 'not_applicable', evidence_quote_refs: [], issue: '本章不适用。' }] })
+    await call('review_acceptance_criteria', { items: [{ criterion_position: 0, status: 'met', evidence_quote_refs: [], reason: '符合。' }] })
+    await call('review_global_constraints', { items: [{ compliance_position: 0, status: 'not_applicable', evidence_quote_refs: [], issue: '本章不适用。' }] })
     await call('set_review_summary', {
       quality_checks: quality, blocking_issues: [], assignment_conflicts: [],
       external_input_gaps: [{ item_ref: 'R1', required_material: '企业资质证书', reason: '当前项目资料未提供。' }],
@@ -406,8 +408,8 @@ describe('S5 Reviewer 分批记录', () => {
     await call('review_coverage_items', { items: buildChapterReviewChecklist(context).map(item => item.item_ref === 'R1'
       ? { item_ref: item.item_ref, status: 'missing', evidence_quote_refs: [], issue: '尚缺人员履历。' }
       : covered(item.item_ref)) })
-    await call('review_acceptance_criteria', { items: [{ criterion_id: 'AC-000002', status: 'met', evidence_quote_refs: [], reason: '已检查。' }] })
-    await call('review_global_constraints', { items: [{ compliance_id: 'GLOBAL-1', status: 'not_applicable', evidence_quote_refs: [], issue: '不适用。' }] })
+    await call('review_acceptance_criteria', { items: [{ criterion_position: 0, status: 'met', evidence_quote_refs: [], reason: '已检查。' }] })
+    await call('review_global_constraints', { items: [{ compliance_position: 0, status: 'not_applicable', evidence_quote_refs: [], issue: '不适用。' }] })
     await call('review_claims', { items: [{ claim_quote_ref: 'Q1', kind: 'project_fact', status: 'unsupported',
       source_reference: null, issue: '资质没有项目资料证明。' }] })
     await call('set_review_summary', { quality_checks: quality, blocking_issues: [], assignment_conflicts: [],
@@ -445,6 +447,23 @@ describe('S5 Reviewer 分批记录', () => {
 })
 
 describe('S5 整书动态验收', () => {
+  it('语义位置绑定实际验收身份，抄写 ID 与越界位置拒绝提交', async () => {
+    const { ctx, agent, call } = await harness()
+    const plan = writingPlanFixture(outlineFixture())
+    plan.document_acceptance = [{ id: 'AC-opaque-23f', scope: { kind: 'document' }, description: '整书术语一致。', priority: 'required', evaluator: { kind: 'semantic' } }]
+    const runtime = attachChapterWritingCompletionReview(agent, plan, [], new Map(), [], 0)
+    for (const schema of ctx.tools.schemas(agent)) {
+      assertSupportedJsonSchema(schema.parameters)
+      expect(JSON.stringify(schema.parameters)).not.toContain('criterion_id')
+      expect(JSON.stringify(schema.parameters)).not.toContain('section_id')
+    }
+    for (const result of [{ criterion_id: 'AC-opaque-23f' }, { criterion_position: 99 }]) {
+      expect((await call('submit_chapter_writing_completion_review', { action: 'complete', reason: '核验术语', document_acceptance: [{ ...result, status: 'met', reason: '术语一致', evidence_quote_refs: [] }] })).isError).toBe(true)
+      expect(runtime.captured()).toBeUndefined()
+    }
+    await call('submit_chapter_writing_completion_review', { action: 'complete', reason: '核验术语', document_acceptance: [{ criterion_position: 0, status: 'met', reason: '术语一致', evidence_quote_refs: [] }] })
+    expect(runtime.captured()?.document_acceptance_results[0]?.criterion_id).toBe('AC-opaque-23f')
+  })
   it('Final Main Agent 记录 document acceptance 风险但不能提交 section 结论', async () => {
     const { agent, call } = await harness()
     const plan = writingPlanFixture(outlineFixture())
@@ -456,8 +475,8 @@ describe('S5 整书动态验收', () => {
     const accepted = attachChapterWritingCompletionReview(agent, plan, [], bodies, [], 0)
     expect((await call('submit_chapter_writing_completion_review', {
       action: 'complete', reason: 'required 条件已经满足。', document_acceptance: [
-        { criterion_id: 'AC-REQUIRED', status: 'met', evidence_quote_refs: [], reason: '摘要足以判断。' },
-        { criterion_id: 'AC-PREFERRED', status: 'unmet', evidence_quote_refs: [], reason: '未增加更多示例。' },
+        { criterion_position: 0, status: 'met', evidence_quote_refs: [], reason: '摘要足以判断。' },
+        { criterion_position: 1, status: 'unmet', evidence_quote_refs: [], reason: '未增加更多示例。' },
       ],
     })).isError).toBeFalsy()
     expect(accepted.captured()).toMatchObject({
@@ -468,17 +487,17 @@ describe('S5 整书动态验收', () => {
     const recorded = attachChapterWritingCompletionReview(agent, plan, [], bodies, [], 0)
     expect((await call('submit_chapter_writing_completion_review', {
       action: 'complete', reason: '记录未通过项后完成审核。', document_acceptance: [
-        { criterion_id: 'AC-REQUIRED', status: 'unmet', evidence_quote_refs: [], reason: '文档条件未满足。' },
-        { criterion_id: 'AC-PREFERRED', status: 'met', evidence_quote_refs: [], reason: '已有示例。' },
+        { criterion_position: 0, status: 'unmet', evidence_quote_refs: [], reason: '文档条件未满足。' },
+        { criterion_position: 1, status: 'met', evidence_quote_refs: [], reason: '已有示例。' },
       ],
     })).isError).toBeFalsy()
     expect(recorded.captured()?.action).toBe('complete')
     expect(recorded.captured()?.document_acceptance_results[0]).toMatchObject({ status: 'unmet' })
     expect((await call('submit_chapter_writing_completion_review', {
       action: 'complete', reason: '协议中伪造 section 结论。', document_acceptance: [
-        { criterion_id: 'AC-REQUIRED', status: 'met', evidence_quote_refs: [], reason: '文档条件满足。' },
-        { criterion_id: 'AC-PREFERRED', status: 'met', evidence_quote_refs: [], reason: '已有示例。' },
-      ], section_acceptance: [{ criterion_id: 'AC-SECTION', status: 'met' }],
+        { criterion_position: 0, status: 'met', evidence_quote_refs: [], reason: '文档条件满足。' },
+        { criterion_position: 1, status: 'met', evidence_quote_refs: [], reason: '已有示例。' },
+      ], section_acceptance: [{ criterion_position: 0, status: 'met' }],
     })).isError).toBe(true)
     recorded.dispose()
 
@@ -488,10 +507,10 @@ describe('S5 整书动态验收', () => {
     }], bodies, [], 0)
     expect((await call('submit_chapter_writing_completion_review', {
       action: 'revise', reason: '尝试把外部资料缺口交给 Writer。', document_acceptance: [
-        { criterion_id: 'AC-REQUIRED', status: 'unmet', evidence_quote_refs: [], reason: '文档条件未满足。' },
-        { criterion_id: 'AC-PREFERRED', status: 'met', evidence_quote_refs: [], reason: '已有示例。' },
+        { criterion_position: 0, status: 'unmet', evidence_quote_refs: [], reason: '文档条件未满足。' },
+        { criterion_position: 1, status: 'met', evidence_quote_refs: [], reason: '已有示例。' },
       ],
-      sections: [{ section_id: 'SEC-1', instruction: '补写缺失的资质材料。' }],
+      sections: [{ section_position: 0, instruction: '补写缺失的资质材料。' }],
     })).isError).toBe(true)
     attention.dispose()
 
@@ -501,10 +520,10 @@ describe('S5 整书动态验收', () => {
     }], bodies, [], 0)
     expect((await call('submit_chapter_writing_completion_review', {
       action: 'revise', reason: '尝试重复处理章节风险。', document_acceptance: [
-        { criterion_id: 'AC-REQUIRED', status: 'unmet', evidence_quote_refs: [], reason: '文档条件未满足。' },
-        { criterion_id: 'AC-PREFERRED', status: 'met', evidence_quote_refs: [], reason: '已有示例。' },
+        { criterion_position: 0, status: 'unmet', evidence_quote_refs: [], reason: '文档条件未满足。' },
+        { criterion_position: 1, status: 'met', evidence_quote_refs: [], reason: '已有示例。' },
       ],
-      sections: [{ section_id: 'SEC-1', instruction: '再次修复 Reviewer 已结算的问题。' }],
+      sections: [{ section_position: 0, instruction: '再次修复 Reviewer 已结算的问题。' }],
     })).isError).toBe(true)
     settledRepair.dispose()
   })
@@ -532,12 +551,12 @@ describe('S5 文档级全局合规核验', () => {
     expect(prompt).toContain('read_completed_chapter')
 
     const runtime = attachGlobalComplianceReview(agent, outline, 'b'.repeat(64), compliance, chapters, evidence, [], 0)
-    const read = await call('read_completed_chapter', { section_id: 'SEC-1', start: 0, length: 20 })
-    expect(read.value).toMatchObject({ quote_ref: 'DQ1', section_id: 'SEC-1', markdown: markdown.slice(0, 20) })
+    const read = await call('read_completed_chapter', { section_position: 0, start: 0, length: 20 })
+    expect(read.value).toMatchObject({ quote_ref: 'DQ1', section_position: 0, markdown: markdown.slice(0, 20) })
     await call('review_global_compliance', {
-      compliance_id: 'GLOBAL-CONTENT', category: 'document_requirement',
-      owners: [{ kind: 'chapter', section_id: 'SEC-1' }, { kind: 'document', section_id: null }],
-      status: 'pass', checked_section_ids: ['SEC-1'], evidence_refs: ['DQ1'], affected_section_ids: [], issue: null,
+      compliance_position: 0, category: 'document_requirement',
+      owners: [{ kind: 'chapter', section_position: 0 }, { kind: 'document', section_position: null }],
+      status: 'pass', checked_section_positions: [0], evidence_refs: ['DQ1'], affected_section_positions: [], issue: null,
     })
     expect((await call('finish_global_compliance_review', {})).value).toEqual({ completed: true })
     expect(runtime.captured()?.items[0]?.evidence).toEqual([{
@@ -558,13 +577,13 @@ describe('S5 文档级全局合规核验', () => {
     const evidence: GlobalComplianceEvidence[] = chapters.map((chapter, index) => ({ evidence_ref: `D${index + 1}`, kind: 'chapter_quote', section_id: chapter.section_id, quote: chapter.markdown }))
     const runtime = attachGlobalComplianceReview(agent, outline, 'a'.repeat(64), compliance, chapters, evidence, [], 0)
     await call('review_global_compliance', {
-      compliance_id: 'GLOBAL-CONTENT', category: 'document_requirement',
-      owners: [{ kind: 'chapter', section_id: 'SEC-1' }, { kind: 'chapter', section_id: 'SEC-2' }, { kind: 'document', section_id: null }],
-      status: 'fail', checked_section_ids: ['SEC-1', 'SEC-2'], evidence_refs: [], affected_section_ids: ['SEC-1'], issue: '正文与材料中未找到必需证明。',
+      compliance_position: 0, category: 'document_requirement',
+      owners: [{ kind: 'chapter', section_position: 0 }, { kind: 'chapter', section_position: 1 }, { kind: 'document', section_position: null }],
+      status: 'fail', checked_section_positions: [0,1], evidence_refs: [], affected_section_positions: [0], issue: '正文与材料中未找到必需证明。',
     })
     await call('review_global_compliance', {
-      compliance_id: 'GLOBAL-UPLOAD', category: 'delivery_requirement', owners: [{ kind: 'delivery', section_id: null }],
-      status: 'pending', checked_section_ids: [], evidence_refs: [], affected_section_ids: [], issue: '缺少实际上传执行证据，需人工确认。',
+      compliance_position: 1, category: 'delivery_requirement', owners: [{ kind: 'delivery', section_position: null }],
+      status: 'pending', checked_section_positions: [], evidence_refs: [], affected_section_positions: [], issue: '缺少实际上传执行证据，需人工确认。',
     })
     expect((await call('finish_global_compliance_review', {})).value).toEqual({ completed: true })
     const report = runtime.captured()!

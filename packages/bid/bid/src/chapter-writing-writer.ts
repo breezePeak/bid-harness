@@ -13,7 +13,8 @@ import { assertNoLinkedPath, within } from './workspace-path.ts'
 import { normalizeWebEvidenceUrl, parseWebEvidenceSourcesArtifact, webEvidenceContentSha256, type WebEvidenceSource } from './web-evidence-source-artifacts.ts'
 import type { WebEvidenceSnapshot } from './web-evidence-snapshot.ts'
 import { buildWebEvidenceChunkIndex } from './web-evidence-chunks.ts'
-import { normalizeFlowchartInputs } from './flowchart.ts'
+import { normalizeFlowchartInputs, type FlowchartSpec } from './flowchart.ts'
+import { indexChapterContentBlocks } from './chapter-content-reuse.ts'
 
 const text = z.string().trim().min(1)
 const strings = z.array(text).optional()
@@ -250,14 +251,28 @@ export function mergeChapterWebMaterials(materials: readonly WebEvidenceMaterial
  * @param refs 当前章节引用表。
  * @param value 模型结构化提交参数。
  * @param snapshots 当前 Writer 成功 fetch 的实际正文。
+ * @param preservedFlowcharts 须原样复用的迁移流程图；同 key 的模型定义不替代它们。
+ * @param preservedMarkdown 须保留的分配原文；原文块占位符由 Host 展开，缺失块拒绝提交。
  * @returns durable candidate parser 可接受的候选，新增 URL 尚待 Host 持久化绑定。
  */
 export async function bindChapterWriterInput(
   workspace: BidWorkspace, manifest: BidManifest, context: ChapterContext, refs: ChapterWriterReferences,
-  value: unknown, snapshots: readonly WebEvidenceSnapshot[],
+  value: unknown, snapshots: readonly WebEvidenceSnapshot[], preservedFlowcharts: readonly FlowchartSpec[] = [],
+  preservedMarkdown?: string,
 ): Promise<BoundChapterCandidate> {
   const input = chapterToolArgs(writerInput, value)
-  const headingIssues = validateChapterHeadings(input.markdown, context.section.title, context.section.id)
+  const originalBlocks = preservedMarkdown === undefined ? [] : indexChapterContentBlocks(context.section.id, preservedMarkdown)
+    .filter(block => block.type !== 'heading' && block.markdown.trim() !== '')
+  const markdown = preservedMarkdown === undefined ? input.markdown : input.markdown.replace(/\{\{reuse:(\d+)\}\}/gu,
+    (_marker, position: string) => {
+      const block = originalBlocks[Number(position)]
+      if (block === undefined) throw new ToolArgsError(['markdown: 未知原文块位置 ' + position])
+      return block.markdown.trim()
+    })
+  const missingBlocks = originalBlocks.flatMap((block, position) => markdown.includes(block.markdown.trim()) ? []
+    : ['markdown: 缺少须原样保留的原文块位置 ' + String(position) + '；使用 {{reuse:' + String(position) + '}} 放置原块，再在其周围补充。'])
+  if (missingBlocks.length > 0) throw new ToolArgsError(missingBlocks)
+  const headingIssues = validateChapterHeadings(markdown, context.section.title, context.section.id)
   if (headingIssues.length > 0) throw new ToolArgsError(headingIssues.map(issue => `markdown: ${issue}`))
   const local: LocalEvidenceMaterial[] = []
   for (const [index, material] of (input.metadata.local_materials_used ?? []).entries()) {
@@ -324,9 +339,12 @@ export async function bindChapterWriterInput(
       usage: material.usage, summary: material.summary, supports: material.supports })
   }
   mergeChapterWebMaterials([...web, ...additionalBound])
-  const flowcharts = normalizeFlowchartInputs(context.section.id, input.metadata.flowcharts ?? [])
+  const preservedKeys = new Set(preservedFlowcharts.map(chart => chart.key))
+  const flowcharts = normalizeFlowchartInputs(context.section.id, [
+    ...preservedFlowcharts, ...(input.metadata.flowcharts ?? []).filter(chart => !preservedKeys.has(chart.key)),
+  ])
   const parsed = parseChapterCandidate({
-    markdown: input.markdown, section_id: context.section.id,
+    markdown, section_id: context.section.id,
     metadata: {
       section_id: context.section.id, covered_must_answer: context.section.must_answer,
       covered_scoring_response_point_ids: context.section.scoring_response_point_ids ?? [],

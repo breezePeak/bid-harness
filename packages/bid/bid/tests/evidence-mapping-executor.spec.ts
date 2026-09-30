@@ -10,6 +10,7 @@ import SandboxPolicyService from '../../../sandbox/sandbox-policy/src/index.ts'
 import { readDocumentOutlineHeadings } from '../src/outline-framework.ts'
 import { ensureTechnicalDeviationSection } from '../src/outline-generation-normalization.ts'
 import { mappingMaterialRef } from '../src/evidence-mapping-source-tools.ts'
+import { mappingModelArguments, mappingModelQuality } from './fixtures/mapping-model-positions.ts'
 import { chapterLocation } from '../src/chapter-storage.ts'
 import { emitAgentEvent, type Agent } from '@deepseek-ai/dsh-agent'
 import SessionStore, { SessionId, snapshotJsonValue } from '@deepseek-ai/dsh-session'
@@ -68,7 +69,8 @@ import { allowedEvidenceCapabilitySourceWrites, allowedEvidenceCapabilityWrites,
   validateEvidenceCapability } from '../src/bid-evidence-capability.ts'
 import type { BidCapabilityExecutionContext } from '../src/bid-capability-contract.ts'
 import { createBidCapabilityDispatcher } from '../src/bid-capability-dispatcher.ts'
-import { executeCapabilityTask, persistCapabilityTaskRequest } from '../src/bid-capability-task.ts'
+import { persistCapabilityTaskRequest } from '../src/bid-capability-task.ts'
+import { executeTestCapabilityTask as executeCapabilityTask } from './fixtures/task-verifier.ts'
 import { BID_CAPABILITIES } from '../src/bid-capability-registry.ts'
 import { allowedWritingCapabilityWrites } from '../src/bid-writing-capability.ts'
 import { persistBidWorkRequest } from '../src/work-descriptor.ts'
@@ -542,11 +544,19 @@ function mappingFixture(
     }
   }
   let submissionSequence = 0
+  const modelObjectsByChild = new Map<string, Parameters<typeof mappingModelArguments>[1]>()
   const invokeSubmissionTool = async (
     child: Agent,
     tool: ToolDefinition,
     args: unknown,
   ): Promise<Readonly<ToolExecutionResult>> => {
+    let objects = modelObjectsByChild.get(String(child.id))
+    if (objects === undefined) {
+      const request = childRequests.get(String(child.id))
+      const line = request === undefined ? undefined : promptText(request.request).split('\n').find(value => value.startsWith('对象位置：'))
+      if (line !== undefined) objects = JSON.parse(line.slice('对象位置：'.length)) as Parameters<typeof mappingModelArguments>[1]
+    }
+    if (objects !== undefined) args = mappingModelArguments(args, objects)
     const token = {} as ToolExecution['token']
     const exec = {
       agent: child,
@@ -562,6 +572,10 @@ function mappingFixture(
     let result: Readonly<ToolExecutionResult>
     try {
       const returned = await tool.execute(args, exec)
+      if (snapshotJsonValue(returned) === undefined) throw new Error('工具返回值必须是无损 JSON。')
+      if (returned !== null && typeof returned === 'object' && 'objects' in returned) {
+        modelObjectsByChild.set(String(child.id), returned.objects as Parameters<typeof mappingModelArguments>[1])
+      }
       result = { isError: false, value: returned as never, content: [{ type: 'text', text: 'recorded' }] }
     } catch (error: unknown) {
       result = {
@@ -802,7 +816,7 @@ function mappingFixture(
         issues: [],
       }))
       let structured: unknown
-      try { structured = JSON.parse(serialized) } catch { structured = undefined }
+      try { structured = mappingModelQuality(JSON.parse(serialized), prompt) } catch { structured = undefined }
       const dispose = vi.fn(async () => {})
       outlineReviewDisposals.push(dispose)
       return {
@@ -1134,6 +1148,8 @@ describe('evidence-mapping Agent executor', () => {
     }
     const updated = await invoke('update_section_task', blueprint)
     expect(updated.isError).toBe(false)
+    expect(updated.value).toMatchObject({ before: expect.not.objectContaining({ answer_plan: expect.anything() }),
+      objects: { answer_checklists: [expect.objectContaining({ section_position: 0 })] } })
     const checklist = (updated.value as { answer_checklist: Array<{ item_ref: string; text: string }> }).answer_checklist
     expect((await invoke('update_section_task', {
       section_id: TECHNICAL_DEVIATION_SECTION_ID,
@@ -1192,16 +1208,16 @@ describe('evidence-mapping Agent executor', () => {
       properties: { items: { type: 'array', items: { oneOf: [{
         type: 'object',
         properties: {
-          review_ref: { type: 'string' }, decision: { type: 'string', enum: ['keep', 'remove', 'block'] }, reason: { type: 'string' },
+          review_position: { type: 'integer' }, decision: { type: 'string', enum: ['keep', 'remove', 'block'] }, reason: { type: 'string' },
         },
-        required: ['review_ref', 'decision', 'reason'], additionalProperties: false,
+        required: ['review_position', 'decision', 'reason'], additionalProperties: false,
       }, {
         type: 'object',
         properties: {
-          review_ref: { type: 'string' }, decision: { type: 'string', const: 'correct' }, reason: { type: 'string' },
+          review_position: { type: 'integer' }, decision: { type: 'string', const: 'correct' }, reason: { type: 'string' },
           correction: { type: 'object' },
         },
-        required: ['review_ref', 'decision', 'reason', 'correction'], additionalProperties: false,
+        required: ['review_position', 'decision', 'reason', 'correction'], additionalProperties: false,
       }] } } },
       required: ['items'], additionalProperties: false,
     })
@@ -1548,6 +1564,8 @@ describe('evidence-mapping Agent executor', () => {
     }).pending_items
     expect(firstItems).toHaveLength(4)
     const originalMaterial = firstItems.find(item => item.kind === 'local_material' && item.section_id === 'SEC-1')!
+    const originalPosition = (firstList.value as { objects: { reviews: Array<{ id: string; position: number }> } })
+      .objects.reviews.find(item => item.id === originalMaterial.review_ref)!.position
     await fixture.reviewAll(childId)
 
     const reviewedCheckpoint = JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/evidence-mapping-checkpoint.json'), 'utf8')) as {
@@ -1575,6 +1593,9 @@ describe('evidence-mapping Agent executor', () => {
       .review_records.find(item => item.review_key === originalMaterialRecord.review_key)!
     expect(changedMaterialRecord.fingerprint).not.toBe(originalMaterialRecord.fingerprint)
     expect(changedMaterialRecord.conclusion).toBeUndefined()
+    await expect(fixture.invokeSubmissionTool(childId, 'review_items', {
+      items: [{ review_position: originalPosition, decision: 'keep', reason: '旧材料复核结论。' }],
+    })).resolves.toMatchObject({ isError: true })
     await fixture.reviewAll(childId)
 
     await expect(fixture.invokeSubmissionTool(childId, 'update_section_task', {
@@ -1822,7 +1843,7 @@ describe('evidence-mapping Agent executor', () => {
     expect((await invoke('submit_section_research_assessment', unknownLocal)).isError).toBe(true)
     const invisibleRequirement = await invoke('submit_section_research_assessment', branchResearchAssessment(true, [], 'R-2'))
     expect(invisibleRequirement).toMatchObject({ isError: true })
-    expect(invisibleRequirement.isError && invisibleRequirement.error.message).toContain('R-2 不是当前运行中已验证的 requirement 引用')
+    expect(invisibleRequirement.isError && invisibleRequirement.error.message).toContain('未知对象位置')
     const research = await invoke('submit_section_research_assessment', branchResearchAssessment())
     expect(research).toMatchObject({ isError: false, value: { research_ready: true, key_findings: [{ finding_index: 1, nature: 'professional_design' }] } })
     const findingRef = submittedFindingRef(research)
@@ -3371,7 +3392,7 @@ describe('evidence-mapping Agent executor', () => {
           const name = this.requests.length === 1 ? 'bid_stage_inspect' : 'bid_recover_task'
           if (this.requests.length > 2) { yield { type: 'finish', reason: { kind: 'stop' } }; return }
           const args = name === 'bid_stage_inspect' ? { view: 'recovery' }
-            : { target: 'run', run_id: this.runId,
+            : { target: 'run',
               instruction: '只重做 S2.5 总述，清除内部编号并保留其他七个检查点。' }
           yield { type: 'block-start', index: 0, blockType: 'tool-call' }
           yield { type: 'block-end', index: 0, block: { type: 'tool-call', id: CallId(`${name}-${this.requests.length}`),

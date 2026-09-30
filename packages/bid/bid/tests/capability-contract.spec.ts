@@ -19,6 +19,15 @@ const outline = { sections: [
 ] } as OutlineArtifact
 
 describe('公共能力契约', () => {
+  it('整书审核在接纳计划时拒绝章节根范围和前一步章节范围', () => {
+    const step = { description: '核验整书实际正文', scope: { source: 'task' }, call: { capability: 'document.review', input: { reason: '核验整书' } } }
+    const task = { goal: '审查整书', scope: { kind: 'project' }, steps: [step] }
+    expect(() => bidCapabilityTaskSchema.parse(task)).not.toThrow()
+    expect(() => bidCapabilityTaskSchema.parse({ ...task, scope: { kind: 'sections', section_ids: ['A'] } }))
+      .toThrow('BID_DOCUMENT_REVIEW_PROJECT_SCOPE_REQUIRED')
+    expect(() => bidCapabilityTaskSchema.parse({ ...task, steps: [{ ...step, scope: { source: 'previous_targets' } }] }))
+      .toThrow('BID_DOCUMENT_REVIEW_PROJECT_SCOPE_REQUIRED')
+  })
   it('暂缓正文迁移要求同一任务继续迁移并复核，只有明确暂缓可省略', () => {
     const outlineStep = { description: '执行已授权的测试步骤', scope: { source: 'task' }, call: { capability: 'outline.update', input: {
       operations: [{ type: 'split_section', section_id: 'A', children: [
@@ -64,7 +73,7 @@ describe('公共能力契约', () => {
   })
 
   it('能力目录闭合，业务输入拒绝任意对象和模型指定路径', () => {
-    expect(Object.keys(BID_CAPABILITIES)).toHaveLength(13)
+    expect(Object.keys(BID_CAPABILITIES)).toHaveLength(14)
     expect(bidCapabilityInputSchema.parse({ capability: 'outline.refine', input: { feedback: '细化 A' } }).capability)
       .toBe('outline.refine')
     expect(() => bidCapabilityInputSchema.parse({ capability: 'outline.refine', input: { feedback: '细化 A', path: '../x' } })).toThrow()

@@ -10,6 +10,7 @@ import { buildChapterReviewEvidence } from '../src/chapter-writing-review.ts'
 import { webEvidenceContentSha256, webEvidenceSourceId } from '../src/web-evidence-source-artifacts.ts'
 import { buildWebEvidenceChunkIndex, webEvidenceChunkIndexPath } from '../src/web-evidence-chunks.ts'
 import type { WebEvidenceSnapshot } from '../src/web-evidence-snapshot.ts'
+import { normalizeFlowchartInputs } from '../src/flowchart.ts'
 import { emptyChapterContext, outlineFixture } from './fixtures/chapter-writing-inputs.ts'
 
 vi.mock('node:fs/promises', async (importOriginal) => {
@@ -60,6 +61,36 @@ async function fixture() {
 
 describe('S5 Writer 短引用与语义输入', () => {
   afterEach(() => vi.mocked(readFile).mockReset())
+
+  it('须保留的迁移原图由程序复用，省略或重写模型定义均不改变原节点和连线', async () => {
+    const { workspace, manifest, context, refs } = await fixture()
+    const source = normalizeFlowchartInputs('old-section', [{ key: 'process', title: '原流程', direction: 'TB',
+      nodes: [{ key: 'start', type: 'start', text: '开始' }, { key: 'end', type: 'end', text: '完成' }],
+      edges: [{ from: 'start', to: 'end' }] }])
+    for (const flowcharts of [undefined, [{ key: 'process', title: '改写图', nodes: [{ key: 'only', type: 'process', text: '改写' }], edges: [] }]]) {
+      const candidate = await bindChapterWriterInput(workspace, manifest, context, refs, {
+        markdown: `# ${context.section.title}\n\n{{flowchart:process}}`, metadata: { flowcharts },
+      }, [], source)
+      expect(candidate.metadata.flowcharts).toEqual(normalizeFlowchartInputs(context.section.id, source))
+      expect(candidate.metadata.flowcharts[0]?.id).not.toBe(source[0]?.id)
+    }
+  })
+
+  it('原文块位置由程序展开，修改或遗漏原表格的候选在提交时拒绝', async () => {
+    const { workspace, manifest, context, refs } = await fixture()
+    const seed = '原文段落。\n\n表1 校验产物\n\n| 步骤 | 产物 |\n| --- | --- |\n| 校验 | 报告 |\n'
+    const candidate = await bindChapterWriterInput(workspace, manifest, context, refs, {
+      markdown: `# ${context.section.title}\n\n补充说明。\n\n{{reuse:0}}\n\n{{reuse:1}}\n\n{{reuse:2}}`, metadata: {},
+    }, [], [], seed)
+    expect(candidate.markdown).toContain(seed.trim())
+    expect(candidate.markdown).not.toContain('{{reuse:')
+    await expect(bindChapterWriterInput(workspace, manifest, context, refs, {
+      markdown: `# ${context.section.title}\n\n${seed.replace('| 校验 | 报告 |', '| 校验 | 台账 |')}`, metadata: {},
+    }, [], [], seed)).rejects.toThrow('缺少须原样保留的原文块位置')
+    await expect(bindChapterWriterInput(workspace, manifest, context, refs, {
+      markdown: `# ${context.section.title}\n\n{{reuse:999}}`, metadata: {},
+    }, [], [], seed)).rejects.toThrow('未知原文块位置')
+  })
 
   it('共同提交路径拒绝新增 ATX 和 Setext 标题，允许修正为叶节正文', async () => {
     const { workspace, manifest, context, refs } = await fixture()

@@ -35,7 +35,11 @@ export function classifyBidRecovery(
   work: BidWorkDescriptor,
   failure: BidTaskFailure,
 ): Recovery | undefined {
-  if (!STAGES.has(work.stage) || work.kind === 'file_intake') return undefined
+  const taskProblem = work.kind === 'capability_task' && ['BID_TASK_PLAN_MISMATCH', 'BID_TASK_RESULT_UNMET'].includes(failure.code ?? '')
+  if ((!STAGES.has(work.stage) && !taskProblem) || work.kind === 'file_intake') return undefined
+  if (['BID_TASK_SCOPE_AUTHORIZATION_REQUIRED', 'BID_TASK_SOURCE_ISSUE_CHANGED'].includes(failure.code ?? '')) {
+    return { kind: 'blocked', unit: work.workId, reason: failure.message }
+  }
   const blockedIssue = failure.issues?.find(issue => BLOCKED_CODE.test(issue.code))
   const issue = blockedIssue ?? failure.issues?.[0]
   const unit = sanitizeBidErrorText(issue?.artifact ?? issue?.path ?? work.workId)
@@ -104,7 +108,9 @@ export function bidRunRecoveryEligibility(session: Session): {
   fingerprint?: string
 } {
   const task = session.events.reduce(reduceBidTaskState, BID_INITIAL_TASK_STATE)
-  if (task.status !== 'suspended' || !STAGES.has(task.stage) || task.run.work.kind === 'file_intake') {
+  const taskProblem = task.status === 'suspended' && task.run.work.kind === 'capability_task'
+    && ['BID_TASK_PLAN_MISMATCH', 'BID_TASK_RESULT_UNMET'].includes(task.run.error?.code ?? '')
+  if (task.status !== 'suspended' || !STAGES.has(task.stage) && !taskProblem || task.run.work.kind === 'file_intake') {
     return { eligible: false, reason: '当前没有 S2～S5 挂起 Run。', attempts: 0, sameProblemCount: 0, previousInstructions: [], requiresStrategyChange: false }
   }
   const { run } = task

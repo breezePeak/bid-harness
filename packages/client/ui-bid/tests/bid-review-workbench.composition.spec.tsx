@@ -8,6 +8,7 @@ import type {
   BidRevisionIssueView,
   BidRevisionQueueView,
   BidReviewChapterView,
+  BidTaskState,
   DocxTemplateId,
 } from '@deepseek-ai/dsh-bid/control-plane'
 import type { ComposerSubmitHandler } from '@deepseek-ai/dsh-client-ui-conversation/client'
@@ -26,6 +27,12 @@ const pageBasis = {
   method: 'fast' as const,
   template: { id: 'a'.repeat(64) as DocxTemplateId, name: '模版.docx', revision: 1 },
 }
+
+const activeTask: BidTaskState = { stage: 'chapter_writing', status: 'running', run: {
+  runId: 'composition-run', epoch: 1, baseProjectRevision: 1, startedAt: 1, updatedAt: 1,
+  work: { kind: 'stage_execution', workId: 'composition-work', stage: 'chapter_writing',
+    requestRef: 'requests/composition-work.json', requestSha256: 'a'.repeat(64), inputFingerprint: 'b'.repeat(64) },
+} }
 
 const mockWorkbench = {
   schema_version: 6 as const,
@@ -158,7 +165,7 @@ describe('S5 Review Workbench & Composer REAL-Composition Integration', () => {
         actions: store.actions,
         useSessions: <S,>(selector: (state: never) => S): S => selector({ byId: { bid: { agentPreset: 'bid' } } } as never),
         useProjection: (key: string) => key === 'bid.runtime'
-          ? { allowedActions: [], task: { stage: 'chapter_writing', status: 'running', run: null } }
+          ? { allowedActions: [], task: activeTask }
           : undefined,
         renderSlot: (name: string) => <div data-slot={name} />,
         getWorkbench: remoteGetWorkbench,
@@ -172,7 +179,7 @@ describe('S5 Review Workbench & Composer REAL-Composition Integration', () => {
         useSessions: <S,>(selector: (state: never) => S): S => selector({ byId: { bid: { agentPreset: 'bid' } } } as never),
         useProjection: (key: string) => key === 'bid.runtime' ? ({
           allowedActions: ['request_writing_requirements', 'auto_start_chapter_writing'],
-          task: { stage: 'chapter_writing', status: 'running', run: null },
+          task: activeTask,
           composer: { enabled: true },
         }) : undefined,
         useStore: (select: (state: { mode: string }) => unknown) => select({ mode: 'manual' }),
@@ -201,7 +208,7 @@ describe('S5 Review Workbench & Composer REAL-Composition Integration', () => {
         sessionId: 'bid' as SessionId,
         disabled: false,
         useSessions: (select: (state: unknown) => unknown) => select({ byId: { bid: { agentPreset: 'bid' } } }),
-        useProjection: () => ({ task: { stage: 'chapter_writing', status: 'running', run: null } }),
+        useProjection: () => ({ task: activeTask }),
         useStore: (selector: (state: ReturnType<typeof store.getSnapshot>) => unknown) => (
           selector(useSyncExternalStore(l => store.subscribe(l), () => store.getSnapshot()))
         ),

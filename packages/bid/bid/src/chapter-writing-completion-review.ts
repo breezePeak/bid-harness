@@ -5,6 +5,7 @@ import { z } from 'zod'
 import { recordOnlySchemaVersion } from './schema-version.ts'
 import { chapterToolArgs, createChapterProtocol, type ChapterProtocol } from './chapter-writing-protocol.ts'
 import { registerCompletedChapterReader } from './chapter-reading.ts'
+import { createChapterObjectPositions } from './chapter-object-positions.ts'
 import type { WritingPlan } from './writing-requirements.ts'
 import { semanticAcceptanceSubmissionSchema, type HostAcceptanceResult } from './acceptance-criteria.ts'
 import type { ChapterReviewArtifact } from './chapter-writing-review-artifacts.ts'
@@ -163,11 +164,15 @@ export function attachChapterWritingCompletionReview(
   const allowedSections = new Set(plan.sections.map(section => section.section_id))
   const settledRiskSections = new Set(sections.flatMap(section => section.review.verdict === 'pass' ? [] : [section.section_id]))
   const runtime = createChapterProtocol<ChapterWritingCompletionDecision>(agent, 'submit_chapter_writing_completion_review', maxContinuations)
-  const quoteRefs = registerCompletedChapterReader(runtime, chapterBodies)
+  const quoteRefs = registerCompletedChapterReader(runtime, chapterBodies, plan.sections.map(item => item.section_id))
+  const positions = createChapterObjectPositions([
+    { canonical: 'criterion_id', model: 'criterion_position', ids: semantic.map(item => item.id) },
+    { canonical: 'section_id', model: 'section_position', ids: plan.sections.map(item => item.section_id) },
+  ])
   runtime.register({
     name: 'submit_chapter_writing_completion_review',
     description: '提交 document acceptance 结论；章节 acceptance 只消费 Chapter Reviewer 权威结果。',
-    parameters: {
+    parameters: positions.schema({
       oneOf: [{
         type: 'object', properties: {
           action: { type: 'string', enum: ['complete'] }, reason: { type: 'string' },
@@ -192,9 +197,9 @@ export function attachChapterWritingCompletionReview(
           }, required: ['section_id', 'instruction'], additionalProperties: false } },
         }, required: ['action', 'reason', 'document_acceptance', 'sections'], additionalProperties: false,
       }],
-    },
+    }),
     execute(args, exec) {
-      const submission = chapterToolArgs(completionSubmissionSchema, args)
+      const submission = chapterToolArgs(completionSubmissionSchema, positions.bind(args))
       const seen = new Set<string>()
       const semanticResults = submission.document_acceptance.map((result) => {
         const criterion = semantic.find(item => item.id === result.criterion_id)
@@ -271,12 +276,12 @@ export function renderChapterWritingCompletionTask(input: {
   return [
     '当前阶段：chapter_writing / Final Document Review。你是制定当前写作计划的 Bid Main Agent；只判断 document_acceptance，并消费 Chapter Reviewer 已确定的 section 结论，不生成正文。',
     `计划版本：${input.plan.plan_version}`,
-    `Document Acceptance：${JSON.stringify(input.plan.document_acceptance)}`,
+    `Document Acceptance：${JSON.stringify(input.plan.document_acceptance.map(item => ({ ...item, position: item.evaluator.kind === 'semantic' ? input.plan.document_acceptance.filter(criterion => criterion.evaluator.kind === 'semantic').findIndex(criterion => criterion.id === item.id) : null })))}`,
     `Host Document Deterministic Results：${JSON.stringify(input.hostResults)}`,
-    `章节摘要、正文身份与 Chapter Reviewer 权威结果：${JSON.stringify(input.sections)}`,
+    `章节摘要、正文身份与 Chapter Reviewer 权威结果：${JSON.stringify(input.sections.map(item => ({ ...item, position: input.plan.sections.findIndex(section => section.section_id === item.section_id) })))}`,
     `文档级固定合规审核：${JSON.stringify(input.globalReview)}`,
-    '只为 evaluator.kind=semantic 的 document criterion 提交 criterion_id、met/unmet、reason 和可选 evidence_quote_refs；deterministic 结果由 Host 合入，绝不能重新判断 section criterion。',
-    '摘要不足以判断跨章术语、重复、矛盾或整书逻辑时，调用 read_completed_chapter 按 section_id 分段读取当前正文；返回的 DQ 引用可用于 document acceptance。',
+    '只为 Document Acceptance 提交 criterion_position、met/unmet、reason 和可选 evidence_quote_refs；deterministic 结果由 Host 合入，绝不能重新判断 section criterion。修订目标使用 section_position，实际身份由程序绑定。',
+    '摘要不足以判断跨章术语、重复、矛盾或整书逻辑时，调用 read_completed_chapter 按章节摘要中的 position 分段读取当前正文；返回的 DQ 引用可用于 document acceptance。',
     'Writer 能通过修改正文解决 document 条件时，可以 action=revise，但只能选择 Chapter Reviewer 判定为 pass 的最小充分章节并给出具体修改要求。repair 和 attention 都是已经结算的章节风险，不得再次触发 Writer；未通过项保留给工作台显示风险，不阻断阶段。不得修改目录、虚构事实、清空已有正文或靠重复内容凑指标。',
     '只使用 read_completed_chapter 和 submit_chapter_writing_completion_review；普通文本不能完成本轮验收。',
   ].join('\n')

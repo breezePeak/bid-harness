@@ -8,9 +8,9 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { BidWorkspace, checkpointBidProjectState } from '../src/index.ts'
 import { inspectBidProject } from '../src/bid-project-inspect.ts'
 import { activeCapabilityMappingWorkspace, askCapabilityTaskInput, capabilityTaskCheckpointSchema,
-  capabilityTaskRequestSchema, executeCapabilityTask,
-  findCapabilityTaskRequest, patchCapabilityTaskSteps, persistCapabilityTaskRequest,
+  capabilityTaskRequestSchema, findCapabilityTaskRequest, patchCapabilityTaskSteps, persistCapabilityTaskRequest,
   type CapabilityTaskDispatcher } from '../src/bid-capability-task.ts'
+import { executeTestCapabilityTask as executeCapabilityTask } from './fixtures/task-verifier.ts'
 import { bidCapabilityTaskSchema, type BidCapabilityCall } from '../src/bid-capability-contract.ts'
 import { createTestBidRunContext } from '../src/run-coordinator.ts'
 import { persistBidWorkRequest, readBidWorkRequest } from '../src/work-descriptor.ts'
@@ -342,9 +342,11 @@ describe('同一 Work 的能力序列', () => {
     try {
       const adapter = dispatcher()
       const originalWrite = run.commits.writeJson.bind(run.commits)
-      let checkpointWrites = 0
+      let interrupted = false
       vi.spyOn(run.commits, 'writeJson').mockImplementation((path, value) => {
-        if (path.endsWith('task-checkpoint.json') && ++checkpointWrites === 3) {
+        if (path.endsWith('task-checkpoint.json') && !interrupted
+          && capabilityTaskCheckpointSchema.parse(value).steps[0]?.status === 'completed'
+          && (interrupted = true)) {
           return Promise.reject(new Error('检查点中断'))
         }
         return originalWrite(path, value)

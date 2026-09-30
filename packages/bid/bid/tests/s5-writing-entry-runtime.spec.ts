@@ -212,6 +212,7 @@ describe('S5 写作入口运行时与完整工具链测试', () => {
         }
         expect(inspectResultText).not.toBe('')
         const inspectJson = JSON.parse(inspectResultText) as {
+          objects: { sections: Array<{ position: number; label: string }> }
           task_contract_context?: {
             writing_request?: { request_id: string; attempt_id: string }
             blueprint?: { sections: Array<{ id: string; title: string; writable: boolean }> }
@@ -219,22 +220,17 @@ describe('S5 写作入口运行时与完整工具链测试', () => {
         }
         const ctxData = inspectJson.task_contract_context
         expect(ctxData?.writing_request).toBeDefined()
-        const reqId = ctxData!.writing_request!.request_id
-        const attId = ctxData!.writing_request!.attempt_id
         const leafSections = ctxData!.blueprint!.sections.filter(s => s.writable)
 
         const planArgs = {
-          action: 'bid_confirm_writing_plan',
           update_kind: 'initial',
-          writing_request_id: reqId,
-          attempt_id: attId,
-          user_message_refs: [],
+          user_message_positions: [],
           global_instructions: ['遵循用户整体自定义要求'],
           document_acceptance: [],
           sections: leafSections.map(s => ({
-            section_id: s.id,
+            section_position: inspectJson.objects.sections.find(item => item.label === s.title)!.position,
             task: `编写 ${s.title}`,
-            user_message_refs: [],
+            user_message_positions: [],
             writing_instructions: ['符合招标文件技术要求'],
             acceptance_criteria: [],
           })),
@@ -667,10 +663,9 @@ it.each(['BID_WRITING_PLAN_NOT_COMMITTED', 'BID_WRITING_PLAN_DISPATCH_FAILED'] a
       }
       if (recovery && !recovered) {
         recovered = true
-        const request = JSON.parse(await readFile(join(workspace.projectRoot, 'chapters/writing-request.json'), 'utf8')) as WritingRequest
         yield { type: 'tool-call-delta', index: 0, id: CallId('plan-recover'), name: 'bid_recover_task',
-          argumentsDelta: JSON.stringify({ target: 'writing_plan', writing_request_id: request.request_id,
-            attempt_id: request.attempt_id, instruction: '逐项核对已保存回答与可写章节，按章节提交首次计划。' }) }
+          argumentsDelta: JSON.stringify({ target: 'writing_plan',
+            instruction: '逐项核对已保存回答与可写章节，按章节提交首次计划。' }) }
         yield { type: 'finish', reason: { kind: 'tool-calls' } }
         return
       }

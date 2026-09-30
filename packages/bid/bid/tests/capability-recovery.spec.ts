@@ -6,8 +6,9 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import SessionStore from '@deepseek-ai/dsh-session'
 import { afterEach, expect, it, vi } from 'vitest'
 import { BidWorkspace } from '../src/index.ts'
-import { askCapabilityTaskInput, executeCapabilityTask, persistCapabilityTaskRequest,
+import { askCapabilityTaskInput, persistCapabilityTaskRequest,
   type CapabilityTaskDispatcher } from '../src/bid-capability-task.ts'
+import { executeTestCapabilityTask as executeCapabilityTask } from './fixtures/task-verifier.ts'
 import { createBidCapabilityDispatcher } from '../src/bid-capability-dispatcher.ts'
 import { resolveMappingCorpusLocations } from '../src/evidence-mapping-corpus.ts'
 import { BID_CAPABILITIES } from '../src/bid-capability-registry.ts'
@@ -215,11 +216,13 @@ it('段落引用在接纳后变化时，恢复拒绝旧选区且不启动 Writer
   BID_CAPABILITIES['chapter.revise'].requires, { stage: 'chapter_writing', status: 'completed', run: null })
   const revised = markdown.replace(text, '流程一：先收集输入。')
   await writeFile(path, revised)
+  const runner = vi.fn()
   const dispatcher = createBidCapabilityDispatcher({ modelStageRepairAttempts: 1,
-    evidenceMappingMaxConcurrency: 1, chapterWritingMaxConcurrency: 1, webSearchEnabled: false })
+    evidenceMappingMaxConcurrency: 1, chapterWritingMaxConcurrency: 1, webSearchEnabled: false }, runner)
   const agent = { id: 'stale-paragraph-agent' } as Parameters<typeof executeCapabilityTask>[3]
   await expect(executeCapabilityTask(workspace, createTestBidRunContext({ work }), dispatcher, agent, session))
     .rejects.toThrow('BID_CHAPTER_REVISION_CONFLICT')
+  expect(runner).not.toHaveBeenCalled()
   expect(await readFile(path, 'utf8')).toBe(revised)
   await expect(readFile(join(workspace.projectRoot, `requests/${work.workId}/result.json`)))
     .rejects.toMatchObject({ code: 'ENOENT' })

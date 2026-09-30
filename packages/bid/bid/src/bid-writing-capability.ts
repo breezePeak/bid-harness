@@ -4,8 +4,10 @@ import type { BidWorkspace } from './index.ts'
 import type { BidCapabilityCall, BidCapabilityExecutionContext, BidCapabilityResult } from './bid-capability-contract.ts'
 import { capabilityFileHash } from './bid-capability-files.ts'
 import { buildChapterWorklist, executeChapterWriting } from './chapter-writing-executor.ts'
+import { createChapterWriterParentResolver } from './chapter-writing-child.ts'
 import { parseChapterWritingManifest, parseChapterMetadata } from './chapter-writing-artifacts.ts'
 import { chapterCandidateSha256, parseChapterReviewArtifact } from './chapter-writing-review-artifacts.ts'
+import { resolveSemanticRevisionPath } from './chapter-revision-lineage.ts'
 import { parseChapterExecutionPlan, parseOrMigrateChapterExecutionLog,
   validateChapterExecutionPlan } from './chapter-writing-plan-artifacts.ts'
 import { planChapterLocations } from './chapter-storage.ts'
@@ -115,16 +117,19 @@ export async function executeWritingCapability(
     'outline/quality-report.json', ...await sourcePaths(workspace)])
   const before = new Map(await Promise.all([...beforePaths].map(async path => [path, await capabilityFileHash(workspace, path)] as const)))
   const seedBySectionId = new Map<string, string>()
+  const seedFlowchartsBySectionId = new Map<string, ReturnType<typeof parseChapterMetadata>['flowcharts']>()
   if (call.capability !== 'chapter.review') {
     const log = before.get('chapters/execution-log.json') === undefined ? undefined
       : parseOrMigrateChapterExecutionLog(await readJson(workspace, 'chapters/execution-log.json'))
     const outline = parseConfirmedOutlineArtifact(await readJson(workspace, 'outline/confirmed-outline.json'))
     const storage = await planChapterLocations(workspace, buildChapterWorklist(outline).map(section => section.id))
     for (const id of ids) {
-      if (log?.sections.find(section => section.section_id === id)?.status === 'completed') continue
+      if (context.preserveMigratedContent !== true
+        && log?.sections.find(section => section.section_id === id)?.status === 'completed') continue
       const location = storage.locations.get(id)
       if (location === undefined || await capabilityFileHash(workspace, location.contentPath) === undefined) continue
       seedBySectionId.set(id, await readFile(within(workspace.projectRoot, location.contentPath), 'utf8'))
+      seedFlowchartsBySectionId.set(id, parseChapterMetadata(await readJson(workspace, location.metadataPath)).flowcharts)
     }
   }
   const affected = new Set<string>()
@@ -133,8 +138,11 @@ export async function executeWritingCapability(
     if (revisionOriginal === undefined) throw new Error('BID_CHAPTER_REVISION_BODY_MISSING')
     instruction = renderChapterRevisionTask(call.input, revisionOriginal)
   } else instruction = call.capability === 'chapter.write' ? call.input.instruction : call.input.reason
+  if (context.sourceSnapshot !== undefined) instruction += '\n原始用户任务与绑定意见（整项任务由 Host 核验；当前 Writer/Reviewer 只负责本节分配的原文和职责，不要求各子章重复覆盖整章原文、表格和流程图；须遵守 Host 章节范围，不以步骤摘要降级原要求）：'
+    + JSON.stringify({ message: context.sourceSnapshot.message, issues: context.sourceSnapshot.issues })
   if (context.inputAnswer?.custom !== undefined) instruction += `\n用户在本能力步骤的补充回答（公开会话 ${context.authorization.session_id}、问题 ${context.inputAnswer.id}）：${context.inputAnswer.custom}。此回答是待核验输入；“继续”或“忽略”不证明事实。`
   let attention: BidStageAttentionRequiredError | undefined
+  const writerParents = createChapterWriterParentResolver(context.agent, context.canonical.root, context.run.signal)
   try { await executeChapterWriting(context.agent, workspace, buildBidStageTask('chapter_writing'), {
     ...settings, run: context.run,
     ...(context.recovery === undefined ? {} : { recovery: context.recovery }),
@@ -142,11 +150,13 @@ export async function executeWritingCapability(
     ...(context.resumeCandidate === undefined ? {} : { resumeCandidate: context.resumeCandidate }),
     scoped: { targetSectionIds: ids, mode: call.capability === 'chapter.review' ? 'review' : 'write',
       instruction,
-      seedBySectionId, affectedDependentIds: affected },
+      seedBySectionId, seedFlowchartsBySectionId, affectedDependentIds: affected,
+      ...(context.preserveMigratedContent === true ? { preserveSeedFlowcharts: true } : {}),
+      writerParentFor: writerId => writerParents.resolve(writerId) },
   }) } catch (error) {
     if (!(error instanceof BidStageAttentionRequiredError)) throw error
     attention = error
-  }
+  } finally { await writerParents.dispose() }
   if (call.capability === 'chapter.revise') {
     const contentPath = [...paths].find(path => path.includes('/sections/') && path.endsWith('.md'))
     if (contentPath === undefined || revisionOriginal === undefined) throw new Error('BID_CHAPTER_REVISION_BODY_MISSING')
@@ -192,7 +202,8 @@ export async function executeWritingCapability(
   ...reviews.flatMap(item => item.review.external_input_gaps.map(gap =>
     `${item.sectionId}: ${gap.required_material}`)),
   ...attention?.issues.map(issue => issue.message) ?? []]
-  const needsInput = attention !== undefined || reviews.some(item => item.review.verdict === 'attention')
+  const needsInput = attention !== undefined
+    || call.capability !== 'chapter.review' && reviews.some(item => item.review.verdict === 'attention')
   return { result: {
     target_section_ids: ids, changed_artifacts: changed,
     change_summary: call.capability === 'chapter.review'
@@ -207,7 +218,7 @@ export async function executeWritingCapability(
 }
 
 /**
- * 局部候选必须保持全目录索引和目标章节的真实正文、元数据与审核绑定。
+ * 局部候选必须保持全目录索引，并以完整审核或可验证的连续 Delta 审核链绑定当前正文与元数据。
  * @param context 当前步骤候选。
  * @param targetIds 本次授权的可写叶节。
  * @param allowPending 是否允许目标章节保持待处理状态。
@@ -265,8 +276,10 @@ export async function validateWritingCapability(
     const body = await readFile(within(workspace.projectRoot, entry.content_path), 'utf8')
     const metadata = parseChapterMetadata(await readJson(workspace, location.metadataPath))
     const review = parseChapterReviewArtifact(await readJson(workspace, entry.review_path))
-    if (entry.review_sha256 !== chapterCandidateSha256(body)
-      || review.candidate_sha256 !== chapterCandidateSha256(body)
+    const bodySha256 = chapterCandidateSha256(body)
+    const reviewed = await resolveSemanticRevisionPath(workspace,
+      String(location.storageSerial).padStart(4, '0'), id, review.candidate_sha256, bodySha256)
+    if (entry.review_sha256 !== bodySha256 || !reviewed.valid
       || review.writer_child_session_id !== logged.final_writer_child_session_id
       || review.reviewer_child_session_id !== logged.final_reviewer_child_session_id
       || JSON.stringify(metadata) !== JSON.stringify({

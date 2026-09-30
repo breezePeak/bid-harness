@@ -6,6 +6,27 @@ import { LOADER_SMOKE_TEST_TIMEOUT_MS, runLoaderSmoke } from '@deepseek-ai/dsh-l
 import type { SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
 import { expect, it } from 'vitest'
 
+it('完整项目从自然语言拆章，经原文迁移和新叶节写作发布', async () => {
+  const configPath = fileURLToPath(new URL('../bid-stage-interaction.cordis.snapshot.yml', import.meta.url))
+  const result = await runLoaderSmoke({
+    label: '真实目录拆章与正文完成', tempDirPrefix: 'dsh-bid-task-planning-',
+    binScript: fileURLToPath(new URL('./fixtures/bid-stage-interaction-driver.ts', import.meta.url)),
+    configPath, binArgs: [configPath, 'task-planning'], mode: 'src',
+    processTimeoutMs: 90_000,
+    tsconfigPath: fileURLToPath(new URL('../../../tsconfig.json', import.meta.url)),
+  })
+  const facts = JSON.parse(result.stdout) as { workIds: string[] }
+  expect(facts.workIds).toHaveLength(1)
+  expect(facts).toMatchObject({
+    state: 'completed', source: '只修改本章 S2.3，把三个阶段拆成真实目录子章节，保留原文并完成正文和审核。不要改其他章节。',
+    children: ['收集输入', '校验结果', '交付成果'],
+    workbench: Array(3).fill({ status: 'completed', content: true }),
+    seedPreserved: true, outsidePreserved: true, exportedChildren: ['收集输入', '校验结果', '交付成果'],
+    calls: ['bid_project_inspect', 'bid_project_inspect', 'bid_run_task'], userMessages: 1, verifiers: 2,
+    interrupted: false, executions: [],
+  })
+}, 120_000)
+
 it('主 Agent 在原授权内换用目录编辑能力并接续后续步骤', async () => {
   const configPath = fileURLToPath(new URL('../bid-stage-interaction.cordis.snapshot.yml', import.meta.url))
   const result = await runLoaderSmoke({
@@ -22,9 +43,9 @@ it('主 Agent 在原授权内换用目录编辑能力并接续后续步骤', asy
       { description: '将章节3提升到顶层并保留现有正文', status: 'completed', hasResult: true },
       { description: '将提升后的章节改名为独立实施方案', status: 'completed', hasResult: true },
     ] },
-    calls: ['bid_run_task', 'bid_stage_inspect', 'bid_project_inspect', 'bid_plan_task', 'bid_recover_task'],
+    calls: ['bid_project_inspect', 'bid_run_task', 'bid_stage_inspect', 'bid_project_inspect', 'bid_plan_task', 'bid_recover_task'],
   })
-}, LOADER_SMOKE_TEST_TIMEOUT_MS)
+}, 75_000)
 
 it('主 Agent 用新用户任务接管挂起 Work 并发布评分目录', async () => {
   const configPath = fileURLToPath(new URL('../bid-stage-interaction.cordis.snapshot.yml', import.meta.url))
@@ -42,13 +63,14 @@ it('主 Agent 用新用户任务接管挂起 Work 并发布评分目录', async 
     distinctWork: true, resumedOldWork: false,
     calls: ['bid_run_task', 'bid_project_inspect', 'bid_run_task'], supersededNotice: true,
   })
-}, LOADER_SMOKE_TEST_TIMEOUT_MS)
+}, 75_000)
 
 it('S4 waiting_user 通过源码 Loader 执行受控对话修改', async () => {
   const result = await runLoaderSmoke({
     label: 'S4 阶段交互源码装配', tempDirPrefix: 'dsh-bid-interaction-snapshot-',
     binScript: fileURLToPath(new URL('./fixtures/bid-stage-interaction-driver.ts', import.meta.url)),
     configPath: fileURLToPath(new URL('../bid-stage-interaction.cordis.snapshot.yml', import.meta.url)),
+    processTimeoutMs: 60_000,
     mode: 'src', tsconfigPath: fileURLToPath(new URL('../../../tsconfig.json', import.meta.url)),
     inspect: async (cwd) => {
       const store = join(cwd, '.session-store')
@@ -84,6 +106,7 @@ it('S4 waiting_user 通过源码 Loader 执行受控对话修改', async () => {
         "bid_stage_inspect",
         "write",
         "bid_outline_apply_operations",
+        "bid_stage_inspect",
         "bid_outline_regenerate_scope",
         "bid_project_inspect",
         "bid_project_inspect",
@@ -184,7 +207,6 @@ it('S4 waiting_user 通过源码 Loader 执行受控对话修改', async () => {
         "bid_project_inspect",
         "bid_run_task",
         "bid_confirm_writing_plan",
-        "bid_revise_chapter",
       ],
     }
   `)

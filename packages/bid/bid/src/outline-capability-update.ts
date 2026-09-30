@@ -166,7 +166,7 @@ export async function executeCapabilityOutlineUpdate(
     && input.operations.some(operation => ['split_section', 'add_section'].includes(operation.type))
     ? await generateScopedOutlineBusinessBindings(context.agent, structural,
       context.sectionIds === null ? structural.sections.filter(section => section.parent_id === null).map(section => section.id)
-        : [...context.sectionIds], {
+        : [...context.sectionIds], old, {
         requirements: requirements.requirements.map(item => ({ id: item.id, text: item.normalized_requirement })),
         scoring: scoring.scoring_items.map(item => ({ id: item.id, text: item.criterion })),
         compliance: compliance.compliance_items.map(item => ({ id: item.id, text: item.normalized_rule })),
@@ -373,7 +373,8 @@ async function coordinateCapabilityOutline(
     section_mappings: (researchedIds.size > 0 ? parseEvidenceMapArtifact(evidenceRaw).section_mappings
       : reconcileSectionEvidence(outline, parseEvidenceMapArtifact(evidenceRaw)).section_mappings)
       .map(mapping => affected.has(mapping.section_id) && !researchedIds.has(mapping.section_id) ? { ...mapping,
-        missing_topics: [...new Set([...mapping.missing_topics, '目录调整后需复核资料适用性'])] } : mapping),
+        // 目录变化使回答依据待复核，但不能凭此制造用户需补充的业务资料缺口。
+        answer_plan: undefined } : mapping),
   }
   const draft = parseOutlineDraft({ ...base, source_outline_sha256: hash,
     draft_outline_sha256: hash, outline })

@@ -1,3 +1,4 @@
+import { modelTaskArguments } from './model-task.ts'
 /** 阶段交互的真实 Main Agent 工具循环；只脚本化外部模型回复。 */
 import { readFile, readdir, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -10,6 +11,7 @@ import { BidHostRuntime, BidOrchestratorError, checkpointBidProjectState, getOrC
 import { runEvidenceMappingLoop } from './evidence-mapping-loop.ts'
 import { outlineRegenerationChanges } from '../../src/outline-regeneration-artifacts.ts'
 import { seedCapabilityProject } from '../capability-fixture.ts'
+import { collectBidModelTaskCatalog } from '../../src/bid-model-task.ts'
 
 function call(name: string, args: object): StreamChunk[] {
   return [{ type: 'block-start', index: 0, blockType: 'tool-call' }, { type: 'block-end', index: 0, block: { type: 'tool-call', id: CallId(name), name, arguments: JSON.stringify(args) } }, { type: 'finish', reason: { kind: 'tool-calls' } }]
@@ -17,6 +19,11 @@ function call(name: string, args: object): StreamChunk[] {
 
 function answer(text: string): StreamChunk[] {
   return [{ type: 'block-start', index: 0, blockType: 'text' }, { type: 'block-end', index: 0, block: { type: 'text', text } }, { type: 'finish', reason: { kind: 'stop' } }]
+}
+
+async function waitCapabilityOperations(ctx: Context): Promise<void> {
+  const operations = (ctx.bid as unknown as { inFlight: Map<string, { done: Promise<void> }> }).inFlight
+  while (operations.size > 0) await Promise.all([...operations.values()].map(operation => operation.done))
 }
 
 function visibleTarget(options: GenerateOptions, pattern: RegExp): string {
@@ -42,13 +49,18 @@ export async function runCapabilityReplanLoop(ctx: Context, root: string) {
   const originalBody = await readFile(join(workspace.projectRoot, 'chapters/sections/0003.md'), 'utf8')
   const done = Promise.withResolvers<undefined>()
   const release = ctx.on('session/event', (session, event) => {
-    if (session === agent.session && event.type === 'bid.run.notice' && event.data.kind === 'completed') done.resolve(undefined)
+    const admitted = session.events.slice(before).find(item => item.type === 'bid.run.started'
+      && item.data.run.work.kind === 'capability_task')
+    if (session === agent.session && event.type === 'bid.run.notice' && event.data.kind === 'completed'
+      && admitted?.type === 'bid.run.started' && event.data.workId === admitted.data.run.work.workId) done.resolve(undefined)
   }, { global: true })
   let runId = ''
   parentScript.push(
-    call('bid_run_task', { task: { goal: '把章节3提升到顶层，并改名为独立实施方案；保留正文',
+    call('bid_project_inspect', { query: { object: 'outline' } }),
+    call('bid_run_task', await modelTaskArguments(agent, { task: { goal: '把章节3提升到顶层，并改名为独立实施方案；保留正文',
       scope: { kind: 'project' }, steps: [{ description: '生成包含独立实施方案的新目录', scope: { source: 'task' }, call: { capability: 'outline.generate', input: {} } }],
-    } }),
+    } })),
+    answer('已接纳任务，等待真实执行结果。'),
     call('bid_stage_inspect', { view: 'recovery' }),
     (options) => {
       if (!JSON.stringify(options.tools).includes('project 范围可跨分支重组及调整顶层章节')) throw new Error('缺少能力范围说明')
@@ -66,25 +78,38 @@ export async function runCapabilityReplanLoop(ctx: Context, root: string) {
           runId = value.data?.run?.runId ?? ''
           const failed = task.steps.find(step => step.status === 'running')
           if (failed === undefined || !runId) throw new Error('未返回实际失败步骤')
-          return call('bid_plan_task', { work_id: task.work_id, from_index: failed.index, steps: [
+          return call('bid_plan_task', { edit: 'replace_pending', steps: [
             { description: '将章节3提升到顶层并保留现有正文', scope: { source: 'task' }, call: { capability: 'outline.update', input: { operations: [
-              { type: 'move_section', section_id: 'SEC-3', parent_id: null, order: 3 },
+              { type: 'move_section', section_position: 4, parent_position: null, order: 3 },
             ] } } },
             { description: '将提升后的章节改名为独立实施方案', scope: { source: 'previous_targets' }, call: { capability: 'outline.update', input: { operations: [
-              { type: 'update_section', section_id: 'SEC-3', title: '独立实施方案' },
+              { type: 'update_section', section_position: 4, title: '独立实施方案' },
             ] } } },
           ] })
         }
       }
       throw new Error('任务检查缺少原目标和执行步骤')
     },
-    () => call('bid_recover_task', { target: 'run', run_id: runId, instruction: '使用已有目录编辑能力完成原目标，按实际结果接续修改并保留正文。' }),
+    () => call('bid_recover_task', { target: 'run', instruction: '使用已有目录编辑能力完成原目标，按实际结果接续修改并保留正文。' }),
     answer('已调整能力计划并继续。'),
   )
   try {
     agent.followup(createUserMessage({ content: [{ type: 'text', text: '把章节3提升到顶层，并改名为独立实施方案；保留正文。' }], source: { kind: 'user' } }))
-    await done.promise
+    let timer: ReturnType<typeof setTimeout> | undefined
+    try {
+      await Promise.race([done.promise, new Promise<never>((_, reject) => {
+        timer = setTimeout(() => { reject(new Error('能力重规划等待实际发布通知超时')) }, 35_000)
+      })])
+    } finally { clearTimeout(timer) }
+    const operations = (ctx.bid as unknown as { inFlight: Map<string, { done: Promise<void> }> }).inFlight
+    await Promise.all([...operations.values()].map(operation => operation.done))
     await agent.whenIdle()
+    const settled = await readBidProjectState(workspace)
+    if (settled?.status !== 'completed') throw new Error('能力重规划未完成：' + JSON.stringify({
+      state: settled, calls: agent.session.events.slice(before).filter(event => event.type === 'tool/call')
+        .map(event => event.data.name),
+      last: agent.session.deriveMessages().at(-1)?.content,
+    }))
     const outline = (await getOrCreateOutlineDraft(workspace)).outline
     const section = outline.sections.find(item => item.id === 'SEC-3')!
     const events = agent.session.events.slice(before)
@@ -117,19 +142,21 @@ export async function runCapabilitySupersedeLoop(ctx: Context, root: string) {
   if (ctx.get('bid') === undefined) await ctx.plugin(BidHostRuntime)
   const before = agent.session.events.length
   parentScript.push(
-    call('bid_run_task', { task: { goal: '完成 S4 资料映射', scope: { kind: 'project' }, steps: [{
+    call('bid_run_task', await modelTaskArguments(agent, { task: { goal: '完成 S4 资料映射', scope: { kind: 'project' }, steps: [{
       description: '重新生成已有目录', scope: { source: 'task' }, call: { capability: 'outline.generate', input: {} },
-    }] } }),
+    }] } })),
     answer('旧任务已挂起。'),
   )
   agent.followup(createUserMessage({ content: [{ type: 'text', text: '完成 S4 资料映射' }], source: { kind: 'user' } }))
+  await agent.whenIdle()
+  await waitCapabilityOperations(ctx)
   await agent.whenIdle()
   const old = await readBidProjectState(workspace)
   if (old?.status !== 'suspended' || old.run.work.kind !== 'capability_task') throw new Error('旧能力任务未挂起')
   const oldWorkId = old.run.work.workId
   parentScript.push(
     call('bid_project_inspect', { query: { object: 'task' } }),
-    call('bid_run_task', { task: { goal: '修正评分点目录层级，首个细粒度评分点不作大标题',
+    call('bid_run_task', await modelTaskArguments(agent, { task: { goal: '修正评分点目录层级，首个细粒度评分点不作大标题',
       scope: { kind: 'project' }, allow_pending_content: true, steps: [{
         description: '把误提的评分点移回设计方案叶节并恢复自然章节标题', scope: { source: 'task' },
         call: { capability: 'outline.update', input: { operations: [
@@ -137,11 +164,13 @@ export async function runCapabilitySupersedeLoop(ctx: Context, root: string) {
           { type: 'update_section', section_id: 'SEC-1', title: '总体实施方案',
             must_answer: ['回答评分1，说明实施方案的范围和方法'] },
         ] } },
-      }] }, supersede: { run_id: old.run.runId, expected_project_revision: old.revision } }),
-    answer('正式目录已修改。'),
+      }] }, supersede: { run_id: old.run.runId, expected_project_revision: old.revision } })),
+    answer('已接纳新任务，等待真实结果。'),
   )
   agent.followup(createUserMessage({ content: [{ type: 'text', text: '修正评分点目录层级，首个细粒度评分点不作大标题' }],
     source: { kind: 'user' } }))
+  await agent.whenIdle()
+  await waitCapabilityOperations(ctx)
   await agent.whenIdle()
   const current = await readBidProjectState(workspace)
   const outline = JSON.parse(await readFile(join(workspace.projectRoot, 'outline/confirmed-outline.json'), 'utf8')) as typeof wrong
@@ -233,10 +262,6 @@ export async function runStageInteractionLoop(ctx: Context, root: string, checkR
     await waitHostOperation()
     if (parentScript.length !== 0) throw new Error('Main Agent 未完成阶段工具调用')
   }
-  const identity = async () => {
-    const draft = await getOrCreateOutlineDraft(workspace)
-    return { expected_revision: draft.revision, expected_draft_sha256: draft.draft_outline_sha256 }
-  }
   for (const input of ['现在是什么情况？', '这样可以吗？', '可以', '没问题']) {
     await send(input, [call('bid_stage_inspect', {}), answer('仍需点击正式确认按钮。')])
   }
@@ -246,17 +271,31 @@ export async function runStageInteractionLoop(ctx: Context, root: string, checkR
   const rawWriteBlocked = await readFile(outlinePath, 'utf8') === original
   const initial = await getOrCreateOutlineDraft(workspace)
   const sectionId = initial.outline.sections[0]!.id
+  const businessObjects = (await collectBidModelTaskCatalog(workspace)).objects
+  childScript.push((options) => {
+    const targets = JSON.parse(visibleTarget(options, /本次可修改章节：([^\r\n]+)/u)) as object[]
+    const candidate = JSON.parse(visibleTarget(options, /当前候选目录：([^\r\n]+)/u)) as Array<{
+      title: string
+      requirement_positions: number[]
+      scoring_positions: number[]
+      response_point_positions: number[]
+      compliance_positions: number[]
+    }>
+    const parent = candidate.find(section => section.title === initial.outline.sections[0]!.title)!
+    return answer(JSON.stringify(targets.map((_, index) => ({ requirement_positions: index === 0 ? parent.requirement_positions : [],
+      scoring_positions: index === 0 ? parent.scoring_positions : [],
+      response_point_positions: index === 0 ? (initial.outline.sections[0]!.scoring_response_point_ids ?? [])
+        .map(id => businessObjects.response_points.findIndex(entry => entry.id === id)) : [],
+      compliance_positions: index === 0 ? parent.compliance_positions : [] }))))
+  })
   await send('第一章拆成实施准备、实施过程、验收移交', [call('bid_outline_apply_operations', {
-    ...await identity(), operations: [{ type: 'split_section', section_id: sectionId, children: ['实施准备', '实施过程', '验收移交'].map(title => ({ title, purpose: title, must_answer: [`${title}的安排`] })) }],
-    business_bindings: [{ section_id: 'SEC-001', requirement_ids: initial.outline.sections[0]!.requirement_ids,
-      scoring_ids: initial.outline.sections[0]!.scoring_ids,
-      scoring_response_point_ids: initial.outline.sections[0]!.scoring_response_point_ids ?? [],
-      compliance_ids: initial.outline.sections[0]!.compliance_ids }],
+    operations: [{ type: 'split_section', draft_section_position: 0, children: ['实施准备', '实施过程', '验收移交'].map(title => ({ title, purpose: title, must_answer: [`${title}的安排`] })) }],
   }), answer('已更新，请重新确认。')])
   const split = await getOrCreateOutlineDraft(workspace)
   const target = split.outline.sections.find(item => item.parent_id === sectionId)!
   childScript.push(answer(JSON.stringify([{ type: 'update_section', section_id: target.id, title: '实施准备与资源核查' }])))
-  await send('实施准备这一节重新规划一下', [call('bid_outline_regenerate_scope', { ...await identity(), section_ids: [target.id], feedback: '明确资源核查' }), answer('已更新，请重新确认。')])
+  await send('实施准备这一节重新规划一下', [call('bid_stage_inspect', {}), call('bid_outline_regenerate_scope', {
+    draft_section_positions: [split.outline.sections.findIndex(section => section.id === target.id)], feedback: '明确资源核查' }), answer('已更新，请重新确认。')])
   if (await readFile(outlinePath, 'utf8') !== original) throw new Error('连续编辑覆盖了已完成研究的目录')
   const priorMap = parseEvidenceMapArtifact(JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/evidence-map.json'), 'utf8')))
   const requirementsPath = join(workspace.projectRoot, 'analysis/requirements.json')
@@ -287,12 +326,12 @@ export async function runStageInteractionLoop(ctx: Context, root: string, checkR
     && JSON.stringify(await requestIds()) === JSON.stringify(requestsBeforePlanOnly)
     && agent.session.events.filter(event => event.type === 'bid.run.started').length === runsBeforePlanOnly
   await send('把第一条要求的理解改为明确实施边界', [
-    call('bid_run_task', { task: { goal: '更正第一条要求的理解', scope: { kind: 'project' },
+    call('bid_run_task', await modelTaskArguments(agent, { task: { goal: '更正第一条要求的理解', scope: { kind: 'project' },
       steps: [{ description: '执行已授权的测试步骤', scope: { source: 'task' }, call: { capability: 'tender.update', input: {
         operations: [{ type: 'update_requirement', requirement_id: 'REQ-1',
           fields: { normalized_requirement: '明确实施边界' } }],
       } } }],
-    } }),
+    } })),
     answer('已更正招标理解。'),
   ])
   const updatedRequirements = JSON.parse(await readFile(requirementsPath, 'utf8')) as {
@@ -318,12 +357,15 @@ export async function runStageInteractionLoop(ctx: Context, root: string, checkR
       return JSON.stringify(item) === JSON.stringify(previous)
     })
   childScript.push((options) => {
-    const candidate = JSON.parse(visibleTarget(options, /当前候选目录：([^\r\n]+)/u)) as typeof finalDraft.outline
-    const child = candidate.sections.find(section => section.parent_id === target.id)
-    if (child === undefined) throw new Error('拆分候选缺少新章节')
-    return answer(JSON.stringify([{ section_id: child.id, requirement_ids: target.requirement_ids,
-      scoring_ids: target.scoring_ids, scoring_response_point_ids: target.scoring_response_point_ids ?? [],
-      compliance_ids: target.compliance_ids }]))
+    const targets = JSON.parse(visibleTarget(options, /本次可修改章节：([^\r\n]+)/u)) as object[]
+    const positions = (entries: readonly { id: string }[], ids: readonly string[]) =>
+      ids.map(id => entries.findIndex(entry => entry.id === id))
+    return answer(JSON.stringify(targets.map((_, index) => ({
+      requirement_positions: index === 0 ? positions(businessObjects.requirements, target.requirement_ids) : [],
+      scoring_positions: index === 0 ? positions(businessObjects.scoring, target.scoring_ids) : [],
+      response_point_positions: index === 0 ? positions(businessObjects.response_points, target.scoring_response_point_ids ?? []) : [],
+      compliance_positions: index === 0 ? positions(businessObjects.compliance, target.compliance_ids) : [],
+    }))))
   })
   const splitTask = { goal: '拆分实施准备目录',
     scope: { kind: 'sections', section_ids: [target.id] }, steps: [{ description: '执行已授权的测试步骤', scope: { source: 'task' },
@@ -334,8 +376,11 @@ export async function runStageInteractionLoop(ctx: Context, root: string, checkR
       } } }],
   }
   await send('将实施准备拆为人员准备和资源核查两个小节，只调整目录', [
-    call('bid_run_task', { task: splitTask }),
-    call('bid_run_task', { task: { ...splitTask, allow_pending_content: true } }),
+    call('bid_run_task', await modelTaskArguments(agent, { task: { ...splitTask, steps: [...splitTask.steps, {
+      description: '迁移原文但故意缺少后续正文复核', scope: { source: 'task' },
+      call: { capability: 'chapter.reorganize', input: { instruction: '保留原文', source_section_ids: [target.id] } },
+    }] } })),
+    call('bid_run_task', await modelTaskArguments(agent, { task: { ...splitTask, allow_pending_content: true } })),
     answer('正在拆分目录并分配业务要求。'),
   ])
   const capabilityDraft = await getOrCreateOutlineDraft(workspace)

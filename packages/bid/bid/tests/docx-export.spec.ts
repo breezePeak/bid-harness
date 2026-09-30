@@ -9,7 +9,7 @@ import { BidWorkspace, DEFAULT_BID_CONFIG,
   assessDocxExportPageTarget as assessFromIndex,
   executeDocxExport as executeFromIndex,
   validateDocxExport as validateFromIndex } from '../src/index.ts'
-import { assessDocxExportPageTarget, executeDocxExport as executeDocxExportImplementation, validateDocxExport } from '../src/docx-export.ts'
+import { assessDocxExportPageTarget, collectDocxExportSnapshot, executeDocxExport as executeDocxExportImplementation, validateDocxExport } from '../src/docx-export.ts'
 import { createTestBidRunContext } from '../src/run-coordinator.ts'
 import { readDocxFormat } from '../src/docx-format-store.ts'
 import { outlineArtifactSha256, parseConfirmedOutlineArtifact } from '../src/outline-confirmation-artifacts.ts'
@@ -136,6 +136,30 @@ async function exportFixture() {
 }
 
 describe('Bid DOCX export', () => {
+  it('复用到不同章节的同名流程图分别编号且不改写源正文', async () => {
+    const { workspace } = await exportFixture()
+    const bodies: string[] = []
+    for (const [index, sectionId] of ['resource', 'delivery'].entries()) {
+      const suffix = `000${index + 1}`
+      const body = `${sectionId}\n\n{{flow_ref:shared-flow}}\n\n{{flowchart:shared-flow}}\n`
+      bodies.push(body)
+      await writeFile(join(workspace.projectRoot, `chapters/sections/${suffix}.md`), body)
+      const path = join(workspace.projectRoot, `chapters/meta/${suffix}.json`)
+      const metadata = JSON.parse(await readFile(path, 'utf8')) as Record<string, unknown>
+      metadata.flowcharts = [{ type: 'flowchart', schema_version: 1, id: `FLOW-${sectionId}`, key: 'shared-flow',
+        title: '原流程', direction: 'TB', nodes: [{ id: 'N1', type: 'start', text: '开始' }], edges: [] }]
+      await writeFile(path, JSON.stringify(metadata))
+    }
+    try {
+      const snapshot = await collectDocxExportSnapshot(workspace)
+      expect(snapshot.markdown).toContain('图 1')
+      expect(snapshot.markdown).toContain('图 2')
+      expect(snapshot.markdown.match(/```flowchart/gu)).toHaveLength(2)
+      for (const [index, body] of bodies.entries()) {
+        expect(await readFile(join(workspace.projectRoot, `chapters/sections/000${index + 1}.md`), 'utf8')).toBe(body)
+      }
+    } finally { await rm(workspace.root, { recursive: true, force: true }) }
+  })
   it('正文图片缺失时保留上一次成功文件及下载记录', async () => {
     const { workspace } = await exportFixture()
     await executeDocxExport(workspace)

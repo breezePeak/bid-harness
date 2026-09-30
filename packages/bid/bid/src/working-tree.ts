@@ -138,3 +138,24 @@ export async function publishBidWorkingPaths(
     for (const path of removePaths) await lease.remove(within(canonical.projectRoot, path), true)
   })
 }
+
+/**
+ * 只读打开已存在的真实 Work 候选；缺失时不创建或复制正式产物。
+ * @param workspace 正式项目。
+ * @param descriptor 请求身份。
+ * @returns 已核对的候选路径；没有候选时为 null。
+ */
+export async function readExistingBidWorkingTree(
+  workspace: WorkspacePaths, descriptor: BidWorkDescriptor,
+): Promise<WorkspacePaths | null> {
+  const root = bidWorkRoot(workspace, descriptor)
+  const marker = within(root, 'work-identity.json')
+  await assertNoLinkedPath(workspace.root, marker)
+  let raw: string
+  try { raw = await readFile(marker, 'utf8') } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null
+    throw error
+  }
+  if (JSON.stringify(JSON.parse(raw)) !== JSON.stringify(descriptor)) throw new Error('BID_WORKING_TREE_IDENTITY_MISMATCH')
+  return { root, projectRoot: resolve(root, relativeProjectRoot(workspace)) }
+}

@@ -37,6 +37,17 @@ describe('章节修订引用', () => {
     }
   })
 
+  it('拒绝错误偏移并返回真实同文段落位置，重复正文不自动选择授权范围', () => {
+    const request = selection('重复段落。')
+    const invalid = { ...request, reference: { ...request.reference, scope: 'paragraphs' as const, start: 0, end: 1, text: '重复段落。' } }
+    const first = markdown.indexOf('重复段落。')
+    const second = markdown.lastIndexOf('重复段落。')
+    expect(() => { validateChapterRevisionReference(invalid, markdown) }).toThrow(JSON.stringify([
+      { start: first, end: first + '重复段落。'.length }, { start: second, end: second + '重复段落。'.length },
+    ]))
+    expect(() => { validateChapterRevisionReference(selection('重复段'), markdown) }).toThrow('位置：[]')
+  })
+
   it('在接受路径拒绝任何选区外变动，包括标题及尾随空白', () => {
     for (const body of [markdown.replace('章节', '新标题'), markdown.replace('保留末段。', '改了末段。'), markdown.trim()]) {
       expect(() => { assertChapterRevisionScope(selection(), markdown, body) }).toThrow(ToolArgsError)

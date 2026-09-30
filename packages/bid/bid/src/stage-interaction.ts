@@ -42,16 +42,23 @@ import { assertNoLinkedPath, within } from './workspace-path.ts'
 import type { BidRunData } from './control-plane-contract.ts'
 import { bidRunRecoveryEligibility, bidWritingPlanRecoveryEligibility } from './bid-recovery.ts'
 import { resolveBidToolAuthorization } from './bid-tool-authorization.ts'
+import { bidModelTaskJsonSchema, bindBidModelTask, bindBidModelSteps, bindBidModelProjectQuery,
+  bindBidModelWritingPlan, bindBidModelReference, collectBidModelTaskCatalog,
+  presentBidModelTaskCatalog, bindBidModelOutlineEdit, bidModelOutlineEditJsonSchema, type BidModelTaskCatalog } from './bid-model-task.ts'
+import { capabilityTaskCheckpointSchema } from './bid-capability-task.ts'
+import { readBidProjectState } from './project-state.ts'
 
 const identity = { expected_revision: z.number().int().positive(), expected_draft_sha256: z.string().regex(/^[a-f0-9]{64}$/u) }
 const scope = z.array(z.string().min(1)).min(1)
 const recoveryInstruction = z.string().trim().min(1).max(4000)
 const recoveryTool = 'bid_recover_task'
 const projectInspectParams = z.object({ query: bidProjectInspectSchema }).strict()
+const modelProjectInspectParams = projectInspectParams.extend({ objects_page: z.number().int().nonnegative().optional() }).strict()
 const supersedeSchema = z.object({
   run_id: z.string().min(1), expected_project_revision: z.number().int().nonnegative(),
 }).strict()
 const runTaskParams = z.object({ task: bidCapabilityTaskSchema, supersede: supersedeSchema.optional() }).strict()
+const modelRunTaskParams = z.object({ task: bidCapabilityTaskSchema, supersede: z.boolean().optional() }).strict()
 const planTaskParams = z.object({ work_id: z.string().min(1), from_index: z.number().int().nonnegative(),
   steps: z.array(bidCapabilityStepSchema) }).strict()
 const resumeRunParams = z.object({ run_id: z.string().min(1),
@@ -59,7 +66,8 @@ const resumeRunParams = z.object({ run_id: z.string().min(1),
 const recoverRunParams = z.object({ target: z.literal('run'), run_id: z.string().min(1), instruction: recoveryInstruction }).strict()
 const recoverWritingPlanParams = z.object({ target: z.literal('writing_plan'), writing_request_id: z.string().min(1),
   attempt_id: z.string().min(1), instruction: recoveryInstruction }).strict()
-const recoverTaskParams = z.union([recoverRunParams, recoverWritingPlanParams])
+const modelRecoverTaskParams = z.object({ target: z.enum(['run', 'writing_plan']), instruction: recoveryInstruction }).strict()
+const modelPlanTaskParams = z.object({ edit: z.enum(['replace_pending', 'append']), steps: z.array(bidCapabilityStepSchema) }).strict()
 const recoveryArtifactPaths = new Set([
   'analysis/project.json', 'analysis/scoring.json', 'analysis/scoring-origin.json',
   'analysis/tender-analysis-selection.json', 'analysis/scoring-response-points.candidate.json',
@@ -525,13 +533,13 @@ export function renderStageInteractionPrompt(stage: string): string {
     '正式写作尚未开始。先调用 bid_stage_inspect(view=task_contract_context)，结合已确认目录、招标要求和资料映射理解用户的自然语言要求。',
     '只追问影响执行的关键歧义或冲突。资料不足、能力限制或招标要求冲突必须指出并提出处理建议；用户明确要求改变目录时，可调用 bid_run_task 组合目录、资料与写作能力。',
     '保留用户原话。没有特殊要求时，仍应按招标要求、目录和现有资料形成默认计划。未提供的指标不得变成用户硬性要求。',
-    '初始整体写作要求由 Host 原生提问；先读取 task_contract_context.writing_request 中已保存的真实回答和 writing_request_id，不要再次询问这个初始问题。Host 会在首次计划提交时把原生自定义回答原文加入 user_requirements。',
+    '初始整体写作要求由 Host 原生提问；先读取 task_contract_context.writing_request 中已保存的真实回答，不要再次询问这个初始问题。请求身份由程序绑定，Host 会在首次计划提交时把原生自定义回答原文加入 user_requirements。',
     '只追问影响执行的关键歧义或冲突。若原生回答尚未保存，不得提交首次计划，也不得把普通聊天消息当作首次授权。原生回答不是 user/message，不要伪造 user_message_refs；已有真实用户消息仍可按语义引用。',
     '把自然语言要求统一拆成 global_instructions、每个可写叶节的 task、相关 user_message_refs、writing_instructions、章节 acceptance_criteria 和 document_acceptance。程序不会按用户措辞选择任务结构；由你根据语义决定作用范围、required/preferred 和验收方式。',
     'semantic 条件交给 Reviewer 根据正文判断；只有要求能直接绑定工具 schema 已列出的 Host metric 时才使用 deterministic，数值由 Host 测量，不自行计算。条件 ID、作用域、计划版本和执行状态由 Host 生成，不得在描述中伪造这些字段。',
-    '获得确认或直接开始授权后调用 bid_confirm_writing_plan。只引用 task_contract_context.user_messages 中确实构成写作要求或确认语境的 ref；Host 从 Session Log 回查并持久化准确原文，进度询问等普通消息不得引用。',
+    '获得确认或直接开始授权后调用 bid_confirm_writing_plan。只选择 objects.messages 中确实构成写作要求或确认语境的位置；Host 从 Session Log 回查并持久化准确原文，进度询问等普通消息不得引用。',
     '首次提交 update_kind=initial 的完整计划，sections 覆盖每个可写叶节且只出现一次。没有额外动态验收条件时 document_acceptance 和章节 acceptance_criteria 可以为空，固定 Reviewer 仍会执行。',
-    '修改既有计划时提交 update_kind=patch 和当前 base_plan_version，只列真实变化的全局指令、document acceptance、section task/instructions/acceptance 以及明确删除的 criterion ID。affected_section_ids 表示语义影响范围；Host 自动纳入实际修改的章节，未修改章节及其 AC ID 保持不变。',
+    '修改既有计划时提交 update_kind=patch，只列真实变化的全局指令、document acceptance、section task/instructions/acceptance 以及明确删除的 criterion_position。affected_section_positions 表示语义影响范围；Host 绑定当前版本和实际章节。',
     '工具成功即完成确认；随后 Host 会在本轮结束后启动既有章节写作与审核链路。不要直接 write Artifact 或调用其他工具启动章节任务。',
   ].join('\n')
   return [
@@ -559,13 +567,9 @@ export function renderChapterWritingInteractionPrompt(status: 'running' | 'compl
     '进度、安排原因和正文解释只调用 bid_stage_inspect 读取 Host 快照并回答，不修改计划、不停止写作；运行中的章节任务继续执行。',
     '只有用户明确要求改变写作任务时，才先调用 bid_stage_inspect(view=task_contract_context)，再调用 bid_confirm_writing_plan。提交成功表示新计划已保存并进入既有定向恢复链路，不代表受影响正文已经改完。',
     ...(status === 'running' ? ['用户明确说“不要视觉检查”“不用视觉检查”“跳过流程图视觉检查”时，调用 bid_set_flowchart_visual_review(policy="skip")；明确说“恢复视觉检查”“继续检查流程图”时，调用 bid_set_flowchart_visual_review(policy="required")。这是执行策略，不得写入 Writing Plan，不得调用 bid_confirm_writing_plan.patch；工具成功前不得声称策略已生效。'] : []),
-    '引用正文只是上下文；解释时把引用传给 bid_stage_inspect，明确要求修改时才调用 bid_revise_chapter 或调整计划。',
-    '当存在 pending revision issues 且用户明确要求开始处理（如"开始处理这些建议""把这些都改掉""现在修""执行上面的意见"等）时：'
-      + '1. 调用 bid_stage_inspect 读取待处理审批意见；'
-      + '2. 规划 tasks（同一章节的本批意见强制聚合为一个 task，不同章节默认并行，真实语义依赖才设 depends_on）；'
-      + '3. 调用 bid_plan_revision_batch 创建并保存不可变批次快照；'
-      + '4. 规划成功且有可执行任务时，在同一回合内紧接着调用 bid_execute_revision_batch 立即开始执行，绝不向用户发起二次确认或询问是否执行；'
-      + '5. 部分 task 若出现 conflict 或 needs_input，直接执行其余独立任务，绝不因局部冲突阻断其他章节或询问用户。',
+    '引用正文只是上下文；解释时传给 bid_stage_inspect，明确修改时用 bid_run_task 的精确 paragraphs 范围和 chapter.revise。',
+    '用户明确要求处理审批意见时，读取真实意见、保存 scope、reference 和有关产物，用 bid_run_task 的 issue_positions 选择实际处理集合。能力由真实目标和产物依赖决定；纯正文可选 chapter.revision_batch，同章聚合、独立章节并行。确认执行后立即执行，不重复询问开始。',
+    '段落意见中的小章节若需要真实目录结构而未获范围授权，只澄清真实目录子章还是选区内分项这一个关键问题；不得越权或用分项表格假称已经拆章。',
     '用户若只是讨论、咨询或明确要求暂缓（如"这些意见你怎么看""先总结一下""还有哪些地方值得改""先别动"等），严禁调用批次规划或执行工具。',
     '局部审批意见修订绝不启动 bid_confirm_writing_plan.patch，选区中的"统一""全部"是局部 RevisionIssue 要求；'
       + '只有用户明确给出全书级新约束（如"全文统一改为""所有章节都""整本控制在 N 页""全局统一术语"）才走 bid_confirm_writing_plan.patch。',
@@ -620,8 +624,8 @@ function renderSuspendedRunPrompt(
       ? '等待输入须通过原生用户问题回答；普通聊天消息不能接管或放弃该问题。'
       : workKind === 'capability_task'
         ? cause === 'user_stop'
-          ? '原 Work 的继续、重跑或停止仍由原生用户问题处理。用户明确提出新目标时，先用 bid_project_inspect(object=task) 核对旧目标和步骤，再用带旧 Run ID 与项目 revision 的 bid_run_task.supersede 创建新 Work；不要先恢复旧 Work 来解锁项目。'
-          : '继续同一目标时先用 bid_project_inspect(object=task) 核对原目标和步骤，必要时 bid_plan_task 重规划，再 bid_recover_task；只继续被打断的原 Work 时用 bid_resume_current_run。用户明确提出新目标时，读取旧 Run ID 和项目 revision，用带 supersede 的 bid_run_task 创建新 Work；不要先恢复旧 Work 来解锁项目。'
+          ? '原 Work 的继续、重跑或停止仍由原生用户问题处理。用户明确提出新目标时，先用 bid_project_inspect(object=task) 核对旧目标和步骤，再用 bid_run_task(supersede=true) 创建新 Work；Host 绑定旧 Run 和项目版本。'
+          : '继续同一目标时先用 bid_project_inspect(object=task) 核对原目标和步骤，必要时 bid_plan_task 重规划，再 bid_recover_task；只继续被打断的原 Work 时用 bid_resume_current_run。用户明确提出新目标时，用 bid_run_task(supersede=true) 创建新 Work；Host 绑定旧 Run 和项目版本。'
         : interrupted
           ? '用户明确要求继续时调用 bid_resume_current_run，传入当前 Run ID 和项目 revision；内部可修复失败由主 Agent inspect 后调用 bid_recover_task，普通询问保持只读。'
           : '挂起 Run 的继续、当前阶段重跑或停止由 Host 通过 DSH 原生用户提问处理；普通消息不视为这些决策的答案。',
@@ -650,20 +654,22 @@ function renderCurrentRunProgress(run: BidRunData | null): string | undefined {
 }
 
 const CAPABILITY_TASK_GUIDANCE = [
+  'bid_project_inspect 返回 objects 对象选择表。bid_run_task 只选择各对象的 position，使用 section_positions、source_section_positions、issue_positions 等参数；不要抄写章节、审批意见、招标条目或模板的 ID。正文引用使用 section_position 与 start_paragraph/end_paragraph，Host 从原文绑定精确偏移及 SHA。任务与原文块身份由程序生成，正文迁移不要手工填写 assignments。',
   '项目阶段只表示默认整本路线的进度。当前状态允许新任务且用户明确修改时，先用 bid_project_inspect 读取事实，再用 bid_run_task 提交目标、根范围和有序能力步骤；普通讨论与解释只读。每个步骤必须填写 description，明确本次处理的对象、动作和预期结果，不只写“优化目录”等能力名称；步骤按真实依赖选择，不为凑步骤重复研究。',
   '根据用户目标、当前成果和能力的实际修改范围选择步骤，不按当前阶段或用户用词固定选路。tender.update 更正招标理解；outline.generate 首次生成目录；outline.update 编辑已有目录的层级、职责及跨分支结构；outline.refine 研究并深化各章节子树，不能调整顶层或跨分支移动；evidence.research 补充或替换资料映射；chapter.reorganize 分配旧正文；writing.plan 更新写作要求；chapter.write/revise/review 处理正文。',
   '规划前确认每项修改都由有权执行的能力承担，再按产物依赖安排后续步骤。已有资料或正文可复用时不重复生成。能力任务完成后读取实际结果，逐项核对用户目标；工具成功、资料覆盖或工作项完成不等于用户要求全部实现。',
   'bid_plan_task 替换未完成步骤时，同步给出每个新步骤的 description，使说明与实际能力、业务输入和范围一致。保留已完成步骤的说明与结果，不用执行状态或承诺完成的空话代替具体计划。',
-  '子任务报告超出范围或无法完成时，主 Agent 负责调整能力计划，不要求子任务越权，也不把未完成目标当作建议略过。可恢复的失败任务先用 bid_project_inspect(object=task) 读取原目标、范围和实际步骤，再用 bid_plan_task 替换未提交结果的失败步骤及后续步骤，并用 bid_recover_task 继续；保持原目标和授权范围，保留已完成步骤。能力选择错误不需要用户重复授权；用户停止、等待输入或不可恢复故障仍须遵守对应限制。',
+  '子任务报告超出范围或无法完成时，主 Agent 负责调整能力计划。可恢复的失败任务先用 bid_project_inspect(object=task) 读取原目标、范围和实际步骤，再用 bid_plan_task(edit=replace_pending) 替换未提交结果的步骤，并用 bid_recover_task(target=run) 继续；验收失败但步骤已完成时用 edit=append 追加纠正步骤。Host 绑定原 Work、失败 Run 和未完成起点，不抄写身份或步骤索引；保持原目标和授权范围，保留已完成步骤。能力选择错误不需要用户重复授权；用户停止、等待输入或不可恢复故障遵守对应限制。',
   '拆分或合并已有正文的章节时，先 inspect 目录、正文和写作要求，再用 bid_run_task 提交完整有序执行计划：目录调整、原文迁移、结果复核。用户明确只改目录时才可留下待迁移正文；不要把目录步骤完成说成整项任务完成。',
-  '用户要求执行修改或确认先前的修改建议，即授权完成该修改所必需的目录、资料、正文和复核步骤；在同一回合提交完整任务，不只回复建议、保存计划或再次询问是否开始。计划因缺少后续步骤被拒绝时，补齐步骤并重新提交，不请求重复授权。用户只讨论或明确暂缓时不执行。',
-  'outline.update.defer_content_migration=true 只把原文迁移延后到同一任务的 chapter.reorganize，之后必须安排 chapter.write 或 chapter.review；仅用户明确只改目录或暂缓正文时才设置 task.allow_pending_content=true。不得自行把正文留给用户下一次催促。',
-  'outline.update 新增或拆分章节的 ID 由工具生成；未提供 business_bindings 时，工具按新章节职责分配真实业务引用。不要猜新 ID。拆分后 chapter.reorganize 使用 task 范围并提供原 source_section_ids，后续复核可使用 previous_targets；保留原文不等于重新写作。',
+  '用户要求执行修改即授权在真实保存范围内完成所需步骤；审批意见的 paragraph 引用不授予整章结构修改，明确扩展范围的新用户消息才可扩大；在同一回合提交完整任务，不只回复建议、保存计划或再次询问是否开始。计划因缺少后续步骤被拒绝时，补齐步骤并重新提交，不请求重复授权。用户只讨论或明确暂缓时不执行。',
+  '目录操作的迁移时序由程序从后续 chapter.reorganize 或已授权的 allow_pending_content 推导，不提交 defer_content_migration。新增叶节之后必须安排 chapter.write 完成基于 seed 的写作及审核；chapter.review 只审核已有可恢复正文；仅用户明确只改目录或暂缓正文时才设置 task.allow_pending_content=true。不得自行把正文留给用户下一次催促。',
+  'outline.update 新增或拆分章节的身份由 Host 生成；独立业务分配会话读取修改前的归属和生成后的真实叶节，按职责分配业务位置，程序绑定真实引用。Main 不提交 business_bindings，不猜新章节位置。拆分后 chapter.reorganize 使用 task 范围并选择原 source_section_positions，后续复核可使用 previous_targets；保留原文不等于重新写作。',
   '目录研究已经完成且资料映射可用时，不要再追加重复的 evidence.research。深化后需继续处理旧正文时，在同一授权任务安排原文迁移及写作或审核。只修改选中的一句仍用段落级 chapter.revise，不扩成目录研究或整章重写。',
   '评分响应点是章节必须回答的要求，不等于目录标题。不得机械地把每个响应点、评分项第一条或 must_answer 文本提升为章节标题；按技术方案结构、用户框架和评分覆盖组织目录，把响应点绑定到合适的可写叶节。只有响应点确实构成独立方案主题时才作为标题。',
   '资料结果区分已核验的招标、本地或 Web 依据，本次拟采用且保留条件的方案设计，以及待补的企业事实或承诺。研究有 gap 时说明“已完成研究并标明缺口”；正文候选未完整通过时说明“候选已保留，仍需补充或修复”。不要把资料条数、计划或 metadata 当成正文已经通过的证明。',
-  '任务根范围用 project、实际 section_ids 或带原文哈希的 paragraphs；步骤可继承根范围，也可引用前一步真实 target_section_ids。不要从“全部”“流程”等字词机械扩大范围。',
-  '初次整本确认仍由原生确认入口完成；局部任务只凭本次真实用户消息授权。同一 Work 的恢复保留原目标与根范围，新用户目标必须创建新 Work。accepted 只表示 Host 接纳；queued、started、suspended、failed 不表示完成。只有 execution_status=completed 且需发布的结果已有正式凭据时，才可向用户说已完成、已修改或已修复。',
+  '任务根范围用 project、对象表的 section_positions 或 paragraphs 选区。步骤可继承根范围，也可使用 previous_targets 引用前一步真实结果。不要从“全部”“流程”等字词机械扩大范围。',
+  'paragraphs 任务只包含一个 chapter.revise 步骤且 scope.source=task，根 reference 和修订 reference 选择相同对象。审批选区使用 issue_position 绑定原意见引用；其他连续原文块选择 section_position、start_paragraph/end_paragraph。Host 从原文计算精确偏移、文字和摘要，模型不计算或抄写。修订能力包含当前正文审核，不追加 chapter.review。',
+  '初次整本确认仍由原生确认入口完成；局部任务只凭本次真实用户消息授权。同一 Work 的恢复保留原目标与根范围，新用户目标必须创建新 Work。accepted 只表示 Host 接纳；queued、started、suspended、failed 不表示完成。只有 goal_met=true 且需发布的结果已有正式凭据时，才可向用户说已完成、已修改或已修复。',
 ].join('\n')
 
 /**
@@ -671,13 +677,16 @@ const CAPABILITY_TASK_GUIDANCE = [
  * @param ctx Host 插件上下文，负责全部注册释放。
  * @param execute 共享 Host 操作入口。
  * @param interacting 当前会话是否仍被阶段交互操作占用。
+ * @param workspaceFor 当前会话对应的正式项目。
  */
 export function installStageInteractionTools(
   ctx: Context,
   execute: (agent: Agent, request: unknown, signal: AbortSignal) => Promise<unknown>,
   interacting: (session: Session) => boolean,
+  workspaceFor: (session: Session) => BidWorkspace,
 ): void {
   ctx.inject(['tools'], (toolCtx) => {
+    const modelCatalogs = new WeakMap<Agent, BidModelTaskCatalog>()
     const mounted = new Map<Agent, { scope: string; dispose: () => void }>()
     const sync = (agent: Agent): void => {
       const task = agent.session.events.reduce(reduceBidTaskState, BID_INITIAL_TASK_STATE)
@@ -719,25 +728,23 @@ export function installStageInteractionTools(
           'bid_outline_apply_operations', 'bid_outline_regenerate_scope', 'bid_evidence_remap',
           'bid_confirm_writing_plan', 'bid_revise_chapter',
         ], ...(chatResume ? ['bid_resume_current_run'] : []),
-        ...(recoveryAvailable ? [recoveryTool] : [])])]
+        ...(recoveryAvailable ? [recoveryTool] : [])])].filter(name => name !== 'bid_plan_revision_batch'
+        && name !== 'bid_execute_revision_batch' && name !== 'bid_revise_chapter')
       const disposers: Array<() => void> = []
       const text: JsonSchemaNode = { type: 'string' }
       const strings: JsonSchemaNode = { type: 'array', items: text }
-      const cas = { expected_revision: { type: 'integer' as const }, expected_draft_sha256: text }
       try {
         if (toolCtx.tools.get('create_goal', agent) !== undefined) disposers.push(tools.restrict({ deny: ['create_goal'] }))
         for (const name of installed) {
-          const properties: Record<string, JsonSchemaNode> = name === 'bid_stage_inspect' || name === 'bid_project_inspect' || name === 'bid_run_task' || name === 'bid_plan_task' || name === 'bid_resume_current_run' || name === 'bid_confirm_writing_plan'
-            || name === 'bid_revise_chapter' || name === 'bid_plan_revision_batch' || name === 'bid_execute_revision_batch' || name === 'bid_pause_stage' || name === 'bid_resume_stage' || name === 'bid_set_flowchart_visual_review' || name === recoveryTool
-            ? {} : { ...cas }
+          const properties: Record<string, JsonSchemaNode> = {}
           const required = Object.keys(properties)
           const inputSchema = { io: 'input' } as const
           let parameters: JsonSchemaNode | undefined = name === 'bid_project_inspect'
-            ? zodJsonSchema(projectInspectParams, inputSchema)
-            : name === 'bid_run_task' ? zodJsonSchema(runTaskParams, inputSchema)
-              : name === 'bid_plan_task' ? zodJsonSchema(planTaskParams, inputSchema)
-                : name === 'bid_resume_current_run' ? zodJsonSchema(resumeRunParams, inputSchema)
-                  : name === recoveryTool ? zodJsonSchema(recoverTaskParams, inputSchema) : undefined
+            ? bidModelTaskJsonSchema(zodJsonSchema(modelProjectInspectParams, inputSchema))
+            : name === 'bid_run_task' ? bidModelTaskJsonSchema(zodJsonSchema(modelRunTaskParams, inputSchema))
+              : name === 'bid_plan_task' ? bidModelTaskJsonSchema(zodJsonSchema(modelPlanTaskParams, inputSchema))
+                : name === 'bid_resume_current_run' ? zodJsonSchema(z.object({}).strict(), inputSchema)
+                  : name === recoveryTool ? zodJsonSchema(modelRecoverTaskParams, inputSchema) : undefined
           const chapterReference: JsonSchemaNode = { oneOf: [{
             type: 'object', properties: { section_id: text, content_sha256: text, scope: { type: 'string', enum: ['chapter'] } },
             required: ['section_id', 'content_sha256', 'scope'], additionalProperties: false,
@@ -850,12 +857,21 @@ export function installStageInteractionTools(
               required: ['batch_id'], additionalProperties: false,
             }
           }
+          if (name === 'bid_confirm_writing_plan' && parameters !== undefined) parameters = bidModelTaskJsonSchema(parameters)
+          if (name === 'bid_stage_inspect') parameters = bidModelTaskJsonSchema({
+            type: 'object', properties, required, additionalProperties: false,
+          })
+          if (['bid_outline_apply_operations', 'bid_outline_regenerate_scope', 'bid_evidence_remap'].includes(name)) {
+            const native = stageInteractionSchema.options.find(option => option.shape.action.value === name)
+            if (native === undefined) throw new Error('BID_MODEL_OUTLINE_SCHEMA_MISSING')
+            parameters = bidModelOutlineEditJsonSchema(zodJsonSchema(native, inputSchema))
+          }
           const definition: ToolDefinition = {
             name,
             description: name === recoveryTool ? '主 Agent 对 inspect recovery 的当前失败目标提交具体修复办法，Host 校验并执行；相同问题必须改变策略。'
-              : name === 'bid_resume_current_run' ? '按当前 Run ID 和项目 revision 继续已授权任务；内部可修复失败使用 bid_recover_task。'
+              : name === 'bid_resume_current_run' ? '继续当前已授权的挂起任务，Host 绑定 Run 和项目版本；内部可修复失败使用 bid_recover_task。'
                 : name === 'bid_stage_inspect' ? '读取当前阶段的有界权威快照；传正文引用时校验原文身份并返回受控正文。'
-                  : name === 'bid_project_inspect' ? '按真实项目对象与章节 ID 分页读取已保存资料；不依赖当前阶段，也不修改项目。'
+                  : name === 'bid_project_inspect' ? '按真实项目对象与章节位置分页读取已保存资料；不依赖当前阶段，也不修改项目。'
                     : name === 'bid_run_task' ? '用当前用户消息或原生 Goal 轮次授权有序业务能力任务；Host 核对项目输入、范围和候选文件，再发布实际结果。提问与讨论不得调用。'
                       : name === 'bid_plan_task' ? '调整挂起能力任务的未完成步骤后缀；可恢复失败可沿用原授权重新规划。已完成、仍在执行和等待用户输入的步骤不可改；保存后调用恢复能力继续。'
                         : name === 'bid_set_flowchart_visual_review' ? '设置当前 S5 work 的流程图视觉检查策略。skip 表示后续不再启动新的流程图视觉确认；required 表示恢复正常视觉确认。设置会写入当前 work 的命令日志并在挂起恢复后继续生效。'
@@ -867,11 +883,93 @@ export function installStageInteractionTools(
                                     : name === 'bid_execute_revision_batch' ? '启动已规划批次的修订执行；复用现有 S5 调度机制按 task 依赖和并发限制逐 section 修订，不重置已完成的章节。'
                                       : name === 'bid_evidence_remap' ? '只重新研究选中章节或分支。replace 替换旧证据；supplement 保留并补充。完成后等待用户正式确认。'
                                         : name === 'bid_outline_regenerate_scope' ? '按反馈局部重生成选中章节，保留范围外目录。完成后等待正式确认。'
-                                          : '使用最新 Draft CAS 执行结构化目录编辑，不直接写文件；返回更新后的目录，仍需正式确认。',
+                                          : '选择最近 inspect 的 draft_sections 位置执行结构化目录编辑；Host 绑定草稿对象和版本，更新后仍需正式确认。',
             parameters: (parameters ?? { type: 'object', properties, required, additionalProperties: false }) as Record<string, unknown>,
             output: { schema: {}, render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }] },
             async execute(args, exec) {
               if (exec.agent !== agent) throw new Error('BID_ACTION_NOT_ALLOWED')
+              if (name === 'bid_resume_current_run') {
+                z.object({}).strict().parse(args)
+                const state = await readBidProjectState(workspaceFor(agent.session))
+                if (state?.status !== 'suspended') throw new Error('BID_RUN_RESUME_NOT_READY')
+                return execute(agent, { action: name, run_id: state.run.runId,
+                  expected_project_revision: state.revision }, exec.signal)
+              }
+              if (name === recoveryTool) {
+                const request = modelRecoverTaskParams.parse(args)
+                if (request.target === 'run') {
+                  const target = bidRunRecoveryEligibility(agent.session).target
+                  if (target === undefined) throw new Error('BID_RECOVERY_TARGET_MISSING')
+                  return execute(agent, { action: name, ...request, run_id: target.runId }, exec.signal)
+                }
+                const target = bidWritingPlanRecoveryEligibility(agent.session).target
+                if (target === undefined) throw new Error('BID_RECOVERY_TARGET_MISSING')
+                return execute(agent, { action: name, ...request,
+                  writing_request_id: target.requestId, attempt_id: target.attemptId }, exec.signal)
+              }
+              if (name === 'bid_plan_task') {
+                const request = z.object({ edit: z.enum(['replace_pending', 'append']), steps: z.array(z.unknown()).min(1) }).strict().parse(args)
+                const state = agent.session.events.reduce(reduceBidTaskState, BID_INITIAL_TASK_STATE)
+                const catalog = modelCatalogs.get(agent)
+                if (catalog === undefined) throw new Error('BID_MODEL_TASK_INSPECT_REQUIRED')
+                if (state.status !== 'suspended') throw new Error('BID_CAPABILITY_PLAN_PATCH_NOT_READY')
+                const workspace = workspaceFor(agent.session)
+                const path = within(workspace.projectRoot, `runs/${state.run.work.workId}/task-checkpoint.json`)
+                await assertNoLinkedPath(workspace.root, path)
+                const checkpoint = capabilityTaskCheckpointSchema.parse(JSON.parse(await readFile(path, 'utf8')))
+                const from_index = request.edit === 'append' ? checkpoint.steps.length
+                  : checkpoint.steps.findIndex(step => step.status !== 'completed')
+                if (from_index < 0) throw new Error('BID_CAPABILITY_PLAN_PATCH_NOT_READY')
+                return execute(agent, { action: name, work_id: state.run.work.workId, from_index,
+                  steps: bindBidModelSteps(request.steps, catalog) }, exec.signal)
+              }
+              if (name === 'bid_run_task') {
+                const catalog = modelCatalogs.get(agent)
+                if (catalog === undefined) throw new Error('BID_MODEL_TASK_INSPECT_REQUIRED')
+                const request = z.object({ task: z.unknown(), supersede: z.boolean().optional() }).strict().parse(args)
+                let supersede: z.infer<typeof supersedeSchema> | undefined
+                if (request.supersede === true) {
+                  const state = await readBidProjectState(workspaceFor(agent.session))
+                  if (state?.status !== 'suspended') throw new Error('BID_CAPABILITY_SUPERSEDE_NOT_ALLOWED')
+                  supersede = { run_id: state.run.runId, expected_project_revision: state.revision }
+                }
+                return execute(agent, { action: name, ...supersede === undefined ? {} : { supersede },
+                  task: bindBidModelTask(request.task, catalog) }, exec.signal)
+              }
+              if (name === 'bid_project_inspect') {
+                const raw = z.object({ query: z.unknown(), objects_page: z.number().int().nonnegative().optional() }).strict().parse(args)
+                const catalog = modelCatalogs.get(agent) ?? await collectBidModelTaskCatalog(workspaceFor(agent.session), agent.session)
+                const query = bindBidModelProjectQuery(raw.query, catalog)
+                const result = await execute(agent, { query, action: name }, exec.signal)
+                const current = await collectBidModelTaskCatalog(workspaceFor(agent.session), agent.session)
+                modelCatalogs.set(agent, current)
+                return { ...result as object, objects: presentBidModelTaskCatalog(current,
+                  query.object === 'chapters' ? query.section_ids : [], { page: raw.objects_page ?? ('page' in query ? query.page ?? 0 : 0),
+                    pageSize: 'page_size' in query ? query.page_size ?? 20 : 20,
+                    ...query.object === 'chapters' ? { offset: query.offset ?? 0, maxChars: query.max_chars ?? 6_000 } : {} }) }
+              }
+              if (name === 'bid_stage_inspect') {
+                const request = z.object({ view: z.enum(['summary', 'task_contract_context', 'recovery']).optional(),
+                  reference: z.unknown().optional() }).strict().parse(args)
+                const catalog = modelCatalogs.get(agent) ?? await collectBidModelTaskCatalog(workspaceFor(agent.session), agent.session)
+                const reference = request.reference === undefined ? undefined : bindBidModelReference(request.reference, catalog)
+                const result = await execute(agent, { action: name, view: request.view,
+                  ...reference === undefined ? {} : { reference } }, exec.signal)
+                const current = await collectBidModelTaskCatalog(workspaceFor(agent.session), agent.session)
+                modelCatalogs.set(agent, current)
+                return { ...result as object,
+                  objects: presentBidModelTaskCatalog(current, reference === undefined ? [] : [reference.section_id]) }
+              }
+              if (name === 'bid_confirm_writing_plan') {
+                const catalog = modelCatalogs.get(agent)
+                if (catalog === undefined) throw new Error('BID_MODEL_TASK_INSPECT_REQUIRED')
+                return execute(agent, { action: name, ...bindBidModelWritingPlan(args, catalog) }, exec.signal)
+              }
+              if (['bid_outline_apply_operations', 'bid_outline_regenerate_scope', 'bid_evidence_remap'].includes(name)) {
+                const catalog = modelCatalogs.get(agent)
+                if (catalog === undefined) throw new Error('BID_MODEL_TASK_INSPECT_REQUIRED')
+                return execute(agent, { action: name, ...bindBidModelOutlineEdit(args, catalog) }, exec.signal)
+              }
               return execute(agent, { ...(args as Record<string, unknown>), action: name }, exec.signal)
             },
             presentCall: () => ({ card: 'generic', title: name }),

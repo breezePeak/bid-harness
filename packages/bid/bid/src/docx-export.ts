@@ -170,11 +170,15 @@ export async function collectDocxExportSnapshot(
   }
   const flowchartsBySection = new Map<string, readonly FlowchartSpec[]>()
   const figureNumbers = new Map<string, number>()
+  const repeatedKeys = new Set<string>()
+  const figureNumbersBySection = new Map<string, Map<string, number>>()
   let figureNumber = 0
   const format = await readDocxFormat(workspace, templateId)
   for (const [sectionId, chapter] of chapters) {
     const flowcharts = await readSavedFlowcharts(workspace, chapter.metadata_path)
     flowchartsBySection.set(sectionId, flowcharts)
+    const localNumbers = new Map<string, number>()
+    figureNumbersBySection.set(sectionId, localNumbers)
     const anchorIssues = validateFlowchartAnchors(chapter.markdown, flowcharts)
     if (anchorIssues.length > 0) throw new Error(`流程图 anchor 无效：${anchorIssues.join('；')}`)
     const ordered = [...flowcharts].sort((left, right) => {
@@ -185,16 +189,19 @@ export async function collectDocxExportSnapshot(
     let cursor = 0
     for (const flowchart of ordered) {
       const key = flowchart.key?.trim() || flowchart.id
-      if (figureNumbers.has(key)) throw new Error(`FLOWCHART_KEY_DUPLICATE:${key}`)
       const marker = `{{flowchart:${key}}}`
       const position = chapter.markdown.indexOf(marker, cursor)
       if (position < 0) throw new Error(`FLOWCHART_ANCHOR_MISSING:${key}`)
       figureNumber += chapter.markdown.slice(cursor, position).split(/\r?\n/gu)
         .filter(line => captionRole(format.state.resolved, line) === 'figureCaption').length
-      figureNumbers.set(key, ++figureNumber)
+      localNumbers.set(key, ++figureNumber)
+      if (figureNumbers.has(key)) repeatedKeys.add(key)
+      figureNumbers.set(key, figureNumber)
       cursor = position + marker.length
     }
   }
+  // 同名图在各章分别编号；跨章引用只有全书唯一的语义键才能确定目标。
+  for (const key of repeatedKeys) figureNumbers.delete(key)
   for (const [sectionId, chapter] of chapters) {
     if (chapter.content_path !== undefined && chapter.markdown !== await readSavedChapter(workspace, chapter.content_path)) {
       throw new BidStageExecutionError([{ code: 'DOCX_EXPORT_SNAPSHOT_CHANGED', message: `章节 ${sectionId} 在导出快照期间发生变化，请重新导出。`, artifact: chapter.content_path }])
@@ -218,7 +225,7 @@ export async function collectDocxExportSnapshot(
     parts.push(resolveFlowchartAnchors(
       collectDocxChapterBody(chapter.markdown, section.title, section.id, number, headingDepth),
       flowcharts,
-      figureNumbers,
+      new Map([...figureNumbers, ...(figureNumbersBySection.get(section.id) ?? [])]),
     ))
   }
   return { markdown: `${parts.join('\n\n')}\n`, technicalDeviation }

@@ -209,3 +209,25 @@ export function bidWorkRoot(workspace: WorkWorkspace, descriptor: BidWorkDescrip
   bidWorkDescriptorSchema.parse(descriptor)
   return within(workspace.projectRoot, `runs/${descriptor.workId}/work`)
 }
+
+/**
+ * 按当前项目中的真实 Work ID 加载描述符，不接受任意请求路径。
+ * @param workspace 拥有请求的项目。
+ * @param workId 真实 Work ID。
+ * @returns 请求身份；请求不存在时为 null。
+ */
+export async function readBidWorkDescriptor(workspace: WorkWorkspace, workId: string): Promise<BidWorkDescriptor | null> {
+  workIdSchema.parse(workId)
+  const requestRef = 'requests/' + workId + '.json'
+  const path = within(workspace.projectRoot, requestRef)
+  await assertNoLinkedPath(workspace.root, path)
+  let raw: string
+  try { raw = await readFile(path, 'utf8') } catch (error) {
+    if (recordCode(error) === 'ENOENT') return null
+    throw error
+  }
+  const record = bidWorkRequestSchema.parse(JSON.parse(raw))
+  if (record.work_id !== workId) throw new Error('BID_WORK_REQUEST_IDENTITY_MISMATCH')
+  return { kind: record.kind, workId, stage: record.stage, requestRef,
+    requestSha256: createHash('sha256').update(raw).digest('hex'), inputFingerprint: record.input_fingerprint }
+}

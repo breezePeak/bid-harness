@@ -560,10 +560,16 @@ describe('S5 原生提问专项测试 (H01-H24)', () => {
     delete consumedRecord.applied_plan_version
     await writeFile(join(workspace.projectRoot, 'chapters/writing-request.json'), JSON.stringify(consumedRecord))
 
+    const inspectRes = await ctx.tools.execute({ agent, name: 'bid_stage_inspect',
+      arguments: { view: 'task_contract_context' }, callId: CallId('h10-inspect'), signal: new AbortController().signal })
+    expect(inspectRes.isError).toBe(false)
     const commitRes = await ctx.tools.execute({
       agent,
       name: 'bid_confirm_writing_plan',
-      arguments: planPayload,
+      arguments: { update_kind: 'initial', user_message_positions: [],
+        global_instructions: planPayload.global_instructions, document_acceptance: [],
+        sections: [{ section_position: 0, task: '任务', user_message_positions: [],
+          writing_instructions: [], acceptance_criteria: [] }] },
       callId: CallId('h10-commit'),
       signal: new AbortController().signal,
     })

@@ -48,7 +48,7 @@ class GoalRecoveryAdapter extends LlmAdapter {
       yield* tool('update_goal', { action: 'complete', goal_id: this.goalRef.id, revision: this.goalRef.revision })
     } else if (this.requests.length === 1) yield* tool('bid_stage_inspect', { view: 'recovery' })
     else if (this.requests.length === 2) yield* tool('bid_recover_task', {
-      target: 'run', run_id: this.runId, instruction: '核对原文来源，针对当前失败单元补齐缺失内容。',
+      target: 'run', instruction: '核对原文来源，针对当前失败单元补齐缺失内容。',
     })
     else {
       yield { type: 'block-start', index: 0, blockType: 'text' }

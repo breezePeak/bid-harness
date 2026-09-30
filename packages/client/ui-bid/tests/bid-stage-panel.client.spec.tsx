@@ -1416,6 +1416,14 @@ describe('ui-bid browser plugin', () => {
       })
     const remoteGetEvidenceMappingProgress = vi.fn<(_sessionId: string, _observed?: BidClientProjection) => Promise<unknown>>()
       .mockResolvedValue({ ok: true as const, value: null })
+    const remoteGetRevisionQueue = vi.fn(async () => ({ ok: true as const, value: {
+      schema_version: 1, revision: 1, issues: ['REV-a', 'REV-b', 'REV-done'].map((issue_id, index) => ({
+        issue_id, section_id: 'SEC-1', section_title: '实施方案', scope: 'chapter' as const,
+        reference: { scope: 'chapter' as const, base_content_sha256: 'a'.repeat(64) },
+        instruction: '修订本章', suggestion: null, status: index < 2 ? 'pending' as const : 'completed' as const,
+        batch_id: null, created_at: 1, updated_at: 1,
+      })),
+    } }))
     const resumeMessage = vi.fn(async () => {})
     const conversationRegister = vi.fn(() => () => {})
     const ctx = {
@@ -1428,6 +1436,7 @@ describe('ui-bid browser plugin', () => {
         requestWritingRequirements: remoteRequestWritingRequirements,
         autoStartChapterWriting: remoteAutoStartChapterWriting,
         getEvidenceMappingProgress: remoteGetEvidenceMappingProgress,
+        getRevisionQueue: remoteGetRevisionQueue,
         stopRun: remoteStopRun,
       } },
       slots: {
@@ -1468,9 +1477,13 @@ describe('ui-bid browser plugin', () => {
         requestWritingRequirements: (intent: WritingEntryIntent) => Promise<void>
         autoStartChapterWriting: () => Promise<void>
         getEvidenceMappingProgress: (observed?: BidClientProjection) => Promise<unknown>
+        startRevisionBatch: () => Promise<void>
       }
     }
     const injected = options.inject('session_bid')
+    await injected.startRevisionBatch()
+    expect(remoteGetRevisionQueue).toHaveBeenCalledWith('session_bid')
+    expect(resumeMessage).toHaveBeenLastCalledWith('开始处理当前全部待处理审批意见。本次选定的意见 ID：REV-a、REV-b。', 'queue')
     injected.setComposerBlock('请先上传')
     expect(set).toHaveBeenLastCalledWith('session_bid', { reason: '请先上传' })
     injected.setComposerBlock(undefined)

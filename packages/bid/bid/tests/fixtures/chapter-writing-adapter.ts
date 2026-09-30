@@ -60,27 +60,28 @@ export class ChapterAdapter extends LlmAdapter {
         const documentLine = prompt.split('\n').find(line => line.startsWith('Document Acceptance：'))!
         const criteria = JSON.parse(documentLine.slice('Document Acceptance：'.length)) as Array<{
           id: string
+          position: number | null
           evaluator: { kind: 'semantic' | 'deterministic' }
         }>
         yield* call('submit_chapter_writing_completion_review', {
           action: 'complete', reason: '已消费章节权威审核并完成文档验收；章节风险保留为最终结果。',
           document_acceptance: criteria.filter(item => item.evaluator.kind === 'semantic').map(item => ({
-            criterion_id: item.id, status: 'met', evidence_quote_refs: [], reason: '章节审核与摘要足以判断。',
+            criterion_position: item.position, status: 'met', evidence_quote_refs: [], reason: '章节审核与摘要足以判断。',
           })),
         })
         return
       }
       if (globalReview) {
         const pendingLine = prompt.split('\n').find(line => line.startsWith('Pending Global Compliance：'))!
-        const pending = JSON.parse(pendingLine.slice('Pending Global Compliance：'.length)) as Array<{ id: string }>
+        const pending = JSON.parse(pendingLine.slice('Pending Global Compliance：'.length)) as Array<{ position: number }>
         const globalStep = step - 2
         if (globalStep === 0) {
-          yield* call('read_completed_chapter', { section_id: 'SEC-1', start: 0, length: 12_000 })
+          yield* call('read_completed_chapter', { section_position: 0, start: 0, length: 12_000 })
         } else if (globalStep <= pending.length) {
           yield* call('review_global_compliance', {
-            compliance_id: pending[globalStep - 1]!.id,
-            category: 'cross_chapter_constraint', owners: [{ kind: 'document', section_id: null }],
-            status: 'pass', checked_section_ids: ['SEC-1'], evidence_refs: ['DQ1'], affected_section_ids: [], issue: null,
+            compliance_position: pending[globalStep - 1]!.position,
+            category: 'cross_chapter_constraint', owners: [{ kind: 'document', section_position: null }],
+            status: 'pass', checked_section_positions: [0], evidence_refs: ['DQ1'], affected_section_positions: [], issue: null,
           })
         } else yield* call('finish_global_compliance_review', {})
         return
@@ -115,15 +116,15 @@ export class ChapterAdapter extends LlmAdapter {
         ? { item_ref: item.item_ref, status: 'missing', evidence_quote_refs: [], issue: '缺少适用的实际设备数量依据。' } : covered(item)) }); break
       case 4: {
         const line = prompt.split('\n').find(value => value.startsWith('Global Compliance：'))!
-        const globals = JSON.parse(line.slice('Global Compliance：'.length)) as Array<{ id: string }>
-        yield* call('review_global_constraints', { items: globals.map(item => ({ compliance_id: item.id, status: 'not_applicable', evidence_quote_refs: [], issue: '当前章节不适用。' })) })
+        const globals = JSON.parse(line.slice('Global Compliance：'.length)) as Array<{ position: number }>
+        yield* call('review_global_constraints', { items: globals.map(item => ({ compliance_position: item.position, status: 'not_applicable', evidence_quote_refs: [], issue: '当前章节不适用。' })) })
         break
       }
       case 5: {
         const line = prompt.split('\n').find(value => value.startsWith('Semantic Acceptance：'))!
-        const criteria = JSON.parse(line.slice('Semantic Acceptance：'.length)) as Array<{ id: string }>
+        const criteria = JSON.parse(line.slice('Semantic Acceptance：'.length)) as Array<{ position: number }>
         yield* call('review_acceptance_criteria', { items: criteria.map(item => ({
-          criterion_id: item.id, status: 'met', evidence_quote_refs: [], reason: '当前正文满足该条件。',
+          criterion_position: item.position, status: 'met', evidence_quote_refs: [], reason: '当前正文满足该条件。',
         })) })
         break
       }

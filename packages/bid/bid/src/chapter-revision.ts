@@ -67,7 +67,16 @@ export function validateChapterParagraphReference(reference: ChapterParagraphRef
   const first = nodes.findIndex(node => node.position?.start.offset === reference.start)
   const last = nodes.findIndex(node => node.position?.end.offset === reference.end)
   if (first < 0 || last < first || nodes.slice(first, last + 1).some(node => node.type !== 'paragraph')
-    || markdown.slice(reference.start, reference.end) !== reference.text) throw new Error('BID_CHAPTER_REVISION_SELECTION_INVALID')
+    || markdown.slice(reference.start, reference.end) !== reference.text) {
+    const matches = nodes.flatMap((node) => {
+      const start = node.position?.start.offset
+      const end = node.position?.end.offset
+      return node.type === 'paragraph' && start !== undefined && end !== undefined
+        && markdown.slice(start, end) === reference.text ? [{ start, end }] : []
+    })
+    throw new Error('BID_CHAPTER_REVISION_SELECTION_INVALID：选区必须对应完整连续段落；相同原文的完整段落位置：'
+      + JSON.stringify(matches.slice(0, 5)) + (matches.length > 5 ? '；更多匹配请重新 inspect 正文。' : ''))
+  }
 }
 
 /**

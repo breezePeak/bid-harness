@@ -111,14 +111,15 @@ async function validateWebMaterials(
 }
 
 /**
- * Validate complete S6 output against the confirmed outline and durable material sources.
- * @param workspace - Workspace 级 Bid 项目.
- * @param stage - stage that produced the declared Artifact.
- * @param artifacts - Executor-declared Artifact set.
- * @returns validation success or all deterministic S6 issues.
+ * 核对完整章节交付或只读审查报告的目录、正文和当前审核身份。
+ * @param workspace 当前正式或候选项目。
+ * @param stage 产物所属阶段。
+ * @param artifacts 执行器声明的完整产物集合。
+ * @param mode delivery 校验正文质量和执行输入；review_report 允许报告记录原正文缺陷，仍核对当前正文、审核和验收身份。
+ * @returns 校验成功或实际发现的不一致项。
  */
 export async function validateChapterWriting(
-  workspace: BidWorkspace, stage: BidStage, artifacts: readonly StageArtifact[],
+  workspace: BidWorkspace, stage: BidStage, artifacts: readonly StageArtifact[], mode: 'delivery' | 'review_report' = 'delivery',
 ): Promise<StageValidationResult> {
   const issues: StageValidationIssue[] = []
   if (stage !== 'chapter_writing') reject(issues, 'CHAPTER_WRITING_STAGE_INVALID', 'The chapter-writing validator only accepts chapter_writing.')
@@ -285,7 +286,7 @@ export async function validateChapterWriting(
       const body = within(workspace.projectRoot, chapter.content_path)
       await assertNoLinkedPath(workspace.root, body)
       const markdown = await readFile(body, 'utf8')
-      if (section.id === TECHNICAL_DEVIATION_SECTION_ID) {
+      if (mode === 'delivery' && section.id === TECHNICAL_DEVIATION_SECTION_ID) {
         try {
           const table = parseTechnicalDeviationTable(markdown)
           for (const message of validateTechnicalDeviationTable(table, sectionVisibleRequirements(section, requirements))) {
@@ -297,19 +298,20 @@ export async function validateChapterWriting(
           } else throw error
         }
       }
-      for (const message of validateFlowchartAnchors(markdown, chapter.flowcharts)) {
+      for (const message of mode === 'delivery' ? validateFlowchartAnchors(markdown, chapter.flowcharts) : []) {
         reject(issues, 'CHAPTER_WRITING_FLOWCHART_ANCHOR_INVALID', message, chapter.content_path)
       }
-      for (const line of missingTableCaptionLines(markdown)) {
+      for (const line of mode === 'delivery' ? missingTableCaptionLines(markdown) : []) {
         reject(issues, 'CHAPTER_WRITING_TABLE_CAPTION_INVALID', `正文第 ${line || '?'} 行的表格缺少紧邻上方的表题。`, chapter.content_path)
       }
-      const leaked = findBidInternalIdentifiers(markdown, customerTextContext)
+      const leaked = mode === 'delivery' ? findBidInternalIdentifiers(markdown, customerTextContext) : []
       if (leaked.length > 0) {
         reject(issues, 'CHAPTER_WRITING_INTERNAL_ID_VISIBLE', `正文包含系统内部编号 ${leaked.join('、')}。`, chapter.content_path)
       }
       globalChapters.push({ section_id: section.id, title: section.title, markdown, candidate_sha256: chapterCandidateSha256(markdown) })
-      if (!(await lstat(body)).isFile() || markdown.trim().length < 20 || /(?:待补充|TODO|正文)$/mu.test(markdown.trim())) throw new Error('empty')
-      for (const message of validateChapterHeadings(markdown, section.title, section.id)) {
+      if (!(await lstat(body)).isFile() || markdown.trim().length === 0
+        || mode === 'delivery' && (markdown.trim().length < 20 || /(?:待补充|TODO|正文)$/mu.test(markdown.trim()))) throw new Error('empty')
+      for (const message of mode === 'delivery' ? validateChapterHeadings(markdown, section.title, section.id) : []) {
         reject(issues, 'CHAPTER_WRITING_OUTLINE_HEADING_INVALID', message, chapter.content_path)
       }
       const reviewRaw = await readJson(workspace, chapter.review_path, issues)
@@ -483,7 +485,7 @@ export async function validateChapterWriting(
       'analysis/evidence-map.json')
     return { ok: false, issues }
   }
-  for (const sectionLog of executionLog.sections) {
+  for (const sectionLog of mode === 'delivery' ? executionLog.sections : []) {
     const planned = plan.sections.find(section => section.section_id === sectionLog.section_id)
     const section = writable.get(sectionLog.section_id)
     const location = locations.get(sectionLog.section_id)

@@ -24,7 +24,7 @@ it('corrects S4 tool arguments in one Child turn through the headless Loader', a
       const paths = (await readdir(store, { recursive: true })).filter(path => path.endsWith('.jsonl'))
       const logs = await Promise.all(paths.map(async path => readFile(join(store, path), 'utf8')))
       const childLogs = logs.filter(log => (JSON.parse(log.split('\n')[0]!) as SessionHeader).parentSession !== undefined)
-      expect(childLogs).toHaveLength(4)
+      expect(childLogs).toHaveLength(3)
       const childLog = childLogs.find(log => /"type":"tool\/call".*"name":"web_search"/u.test(log))
       if (childLog === undefined) throw new Error('缺少持久化 Child 日志')
       const [headerLine, ...eventLines] = childLog.trimEnd().split('\n')
@@ -33,7 +33,7 @@ it('corrects S4 tool arguments in one Child turn through the headless Loader', a
       const calls = events.filter(event => event.type === 'tool/call')
         .filter(event => event.data.name === 'web_search' || event.data.name === 'web_fetch')
       expect(calls.map(event => [event.data.name, event.data.turn])).toEqual([['web_search', 1], ['web_fetch', 1]])
-      expect(childLog).toContain('web_materials.0.chunk_refs')
+      expect(childLog).toContain('chunk_positions: 未知对象位置')
       expect(childLog).toContain('search-unknown-scope')
       expect(childLog).toContain('read-forged-path')
       expect(childLog).toContain('search_sources')
@@ -93,10 +93,11 @@ it('corrects S4 tool arguments in one Child turn through the headless Loader', a
       expect(finalCheckLog).not.toContain('当前章节资料与已知缺口：')
       expect(finalCheckLog).toContain('https://official.example/standard')
       const refinementLogs = childLogs.filter(log => log.includes('submit-refinement-'))
-      expect(refinementLogs).toHaveLength(2)
+      expect(refinementLogs).toHaveLength(1)
       const rejectedRefinementLog = refinementLogs.find(log => log.includes('submit-refinement-incomplete'))
       const acceptedRefinementLog = refinementLogs.find(log => log.includes('submit-refinement-quality'))
       if (rejectedRefinementLog === undefined || acceptedRefinementLog === undefined) throw new Error('缺少隔离目录复核及修复日志')
+      expect(rejectedRefinementLog).toBe(acceptedRefinementLog)
       expect(rejectedRefinementLog).toContain('submit-refinement-incomplete')
       expect(acceptedRefinementLog).toContain('submit-refinement-quality')
       expect(refinementLogs.every(log => !log.includes('tool/call') || log.includes('structured_output'))).toBe(true)
@@ -142,11 +143,9 @@ it('corrects S4 tool arguments in one Child turn through the headless Loader', a
       const sessionIds = [header.parentSession!, header.id, finalHeader.id, ...refinementHeaders.map(item => item.id)]
       const transcript = normalizeSessionSnapshot(childLog, { sessionIds, cwd, cwdAliases: [cwd.replaceAll('\\', '/')] })
       const finalCheck = normalizeSessionSnapshot(finalCheckLog, { sessionIds, cwd, cwdAliases: [cwd.replaceAll('\\', '/')] })
-      const rejectedRefinement = normalizeSessionSnapshot(rejectedRefinementLog, { sessionIds, cwd, cwdAliases: [cwd.replaceAll('\\', '/')] })
       const refinement = normalizeSessionSnapshot(acceptedRefinementLog, { sessionIds, cwd, cwdAliases: [cwd.replaceAll('\\', '/')] })
       const expected = {
         'child.expected.jsonl': transcript,
-        'refinement-rejected.expected.jsonl': rejectedRefinement,
         'refinement.expected.jsonl': refinement,
         'final-check.expected.jsonl': finalCheck,
         'artifacts.expected.json': artifacts,

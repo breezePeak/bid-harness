@@ -16,6 +16,9 @@ import { allowedTenderUpdateCapabilityWrites, executeTenderUpdateCapability,
   validateTenderUpdateCapability } from './bid-tender-update-capability.ts'
 import { allowedDocumentReviewWrites, executeDocumentReviewCapability,
   validateDocumentReviewCapability } from './bid-document-review-capability.ts'
+import { allowedRevisionCapabilityWrites, executeRevisionCapability, validateRevisionCapability,
+  executeSingleRevisionCapability, singleRevisionBatchCall,
+  type CapabilityRevisionRunner } from './bid-revision-capability.ts'
 import { allowedGenerationWrites, executeGenerationCapability,
   validateGenerationCapability } from './bid-generation-capability.ts'
 
@@ -38,9 +41,12 @@ export interface BidCapabilityDispatcher extends CapabilityTaskDispatcher {
 /**
  * 以已注册能力适配器执行一个 Work 的有序步骤。
  * @param settings 当前 Host 的并发、修复与 Web 配置。
+ * @param revisionRunner 当前 Run 内的原 Writer 批次执行入口。
  * @returns 具备文件许可、执行和候选校验的分派器。
  */
-export function createBidCapabilityDispatcher(settings: CapabilityDispatcherSettings): BidCapabilityDispatcher {
+export function createBidCapabilityDispatcher(settings: CapabilityDispatcherSettings,
+  revisionRunner?: CapabilityRevisionRunner,
+): BidCapabilityDispatcher {
   return {
     executeDefault(task, context) {
       const capability = defaultBidCapabilityForStage(task.stage)
@@ -66,12 +72,13 @@ export function createBidCapabilityDispatcher(settings: CapabilityDispatcherSett
           if (sectionIds !== null) throw new Error('BID_DOCUMENT_REVIEW_PROJECT_SCOPE_REQUIRED')
           return Promise.resolve(allowedDocumentReviewWrites())
         }
+        case 'chapter.revision_batch': return allowedRevisionCapabilityWrites(call, working, stepId)
         case 'chapter.write': return allowedWritingCapabilityWrites(working, sectionIds)
         case 'chapter.review': return allowedWritingCapabilityWrites(working, sectionIds, 'review')
         case 'chapter.revise': {
           const id = call.input.reference.section_id
           if (sectionIds !== null && !sectionIds.has(id)) throw new Error('BID_CHAPTER_REVISION_SCOPE_INVALID')
-          return allowedWritingCapabilityWrites(working, new Set([id]))
+          return allowedRevisionCapabilityWrites(singleRevisionBatchCall(call, stepId), working, stepId)
         }
         default: throw new Error(`BID_CAPABILITY_ADAPTER_UNAVAILABLE: ${call.capability}`)
       }
@@ -81,6 +88,7 @@ export function createBidCapabilityDispatcher(settings: CapabilityDispatcherSett
         case 'outline.refine':
         case 'evidence.research': return allowedEvidenceCapabilitySourceWrites(working)
         case 'chapter.write':
+        case 'chapter.revision_batch':
         case 'chapter.revise': return allowedWritingCapabilitySourceWrites(working)
         case 'chapter.review': return Promise.resolve(new Set<string>())
         default: return Promise.resolve(new Set<string>())
@@ -105,10 +113,17 @@ export function createBidCapabilityDispatcher(settings: CapabilityDispatcherSett
           maxConcurrency: settings.evidenceMappingMaxConcurrency,
           webSearchEnabled: settings.webSearchEnabled,
         })
+        case 'chapter.revision_batch': {
+          if (revisionRunner === undefined) throw new Error('BID_CAPABILITY_REVISION_RUNNER_UNAVAILABLE')
+          return executeRevisionCapability(call, context, revisionRunner)
+        }
         case 'writing.plan': return executeWritingPlanCapability(call, context)
         case 'document.review': return executeDocumentReviewCapability(context, settings.modelStageRepairAttempts)
+        case 'chapter.revise': {
+          if (revisionRunner === undefined) throw new Error('BID_CAPABILITY_REVISION_RUNNER_UNAVAILABLE')
+          return executeSingleRevisionCapability(call, context, revisionRunner)
+        }
         case 'chapter.write':
-        case 'chapter.revise':
         case 'chapter.review': return executeWritingCapability(call, context, {
           maxRepairAttempts: settings.modelStageRepairAttempts,
           maxConcurrency: settings.chapterWritingMaxConcurrency,
@@ -129,10 +144,12 @@ export function createBidCapabilityDispatcher(settings: CapabilityDispatcherSett
           return validateOutlineCapability(context, result)
         }
         case 'evidence.research': return validateEvidenceCapability(context, result)
+        case 'chapter.revision_batch': return validateRevisionCapability(call, context, result)
         case 'writing.plan': return validateWritingPlanCapability(context)
         case 'document.review': return validateDocumentReviewCapability(context)
+        case 'chapter.revise': return validateRevisionCapability(singleRevisionBatchCall(call,
+          context.sourceSnapshot?.message.message_id ?? context.stepId), context, result)
         case 'chapter.write':
-        case 'chapter.revise':
         case 'chapter.review': return validateWritingCapability(context, result.target_section_ids, result.needs_input)
         default: throw new Error(`BID_CAPABILITY_ADAPTER_UNAVAILABLE: ${call.capability}`)
       }

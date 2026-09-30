@@ -1,7 +1,7 @@
 /** 真实 Loader 中续用章节 Writer，验证全章重写、最小修改和相邻段落修订。 */
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { readFile } from 'node:fs/promises'
+import { readFile, readdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { boot } from '@deepseek-ai/dsh-app-boot'
@@ -54,48 +54,56 @@ try {
   const runRevision = async (revision: BidChapterRevisionRequest, markdown: string, invalidMarkdown?: string) => {
     revisionNumber += 1
     if (invalidMarkdown !== undefined) childScript.push(toolCall('reject-outside-selection', 'submit_chapter', candidate(invalidMarkdown)))
-    childScript.push(
-      toolCall(`submit-revision-${revisionNumber}`, 'submit_chapter', candidate(markdown)),
-    )
-    reviewScript.push(
-      toolCall('review-coverage', 'review_coverage_items', { items: ['R1', 'R2', 'R3', 'R4'].map(item_ref => ({
-        item_ref, status: 'covered', evidence_quote_refs: ['Q2'], issue: null,
-      })) }),
-      toolCall('review-global-constraint', 'review_global_constraints', {
-        items: [{ compliance_id: 'GLOBAL-1', status: 'not_applicable', evidence_quote_refs: [], issue: '当前章节没有冲突表述。' }],
-      }),
-      toolCall('review-acceptance', 'review_acceptance_criteria', {
-        items: [{ criterion_id: 'AC-000002', status: 'met', evidence_quote_refs: ['Q2'], reason: '正文详细说明了访问控制实施流程。' }],
-      }),
-      toolCall('review-summary', 'set_review_summary', {
-        quality_checks: {
-          bidder_response_voice: true, project_specific: true, structure_complete: true, legacy_project_pollution_free: true,
-          placeholder_free: true, obvious_repetition_free: true },
-        blocking_issues: [],
-        assignment_conflicts: [],
-        external_input_gaps: [],
-        external_input_only: false,
-      }),
-      toolCall('finish-review', 'finish_chapter_review', {}),
-    )
-    parentScript.push(
-      toolCall(`read-global-chapter-${revisionNumber}`, 'read_completed_chapter', {
-        section_id: 'SEC-SECURITY', start: 0, length: 12_000,
-      }),
-      toolCall(`review-global-${revisionNumber}`, 'review_global_compliance', {
-        compliance_id: 'GLOBAL-1', category: 'cross_chapter_constraint', owners: [{ kind: 'document', section_id: null }],
-        status: 'pass', checked_section_ids: ['SEC-SECURITY'], evidence_refs: ['DQ1'], affected_section_ids: [], issue: null,
-      }),
-      toolCall(`finish-global-review-${revisionNumber}`, 'finish_global_compliance_review', {}),
-      toolCall(`finish-writing-plan-${revisionNumber}`, 'submit_chapter_writing_completion_review', {
-        action: 'complete', reason: '修订后的章节与整书 required 条件均已满足。',
-        document_acceptance: [
-          { criterion_id: 'AC-000001', status: 'met', evidence_quote_refs: [], reason: '整书术语与技术响应一致。' },
-        ],
-      }),
-    )
+    if (revision.reference.scope === 'paragraphs') {
+      const prefix = revision.reference.start
+      const suffixLength = (await readFile(markdownPath, 'utf8')).length - revision.reference.end
+      childScript.push(toolCall(`submit-revision-${revisionNumber}`, 'submit_paragraph_revision', {
+        replacements: [{ markdown: markdown.slice(prefix, markdown.length - suffixLength) }],
+      }))
+      reviewScript.push(toolCall('finish-delta-review', 'finish_paragraph_revision_review', {
+        decision: 'accept', issue_checks: [{ status: 'satisfied', reason: '已细化选区内审批和复核责任。' }],
+        semantic_preserved: true, repair_instructions: [], reason: '未改变技术语义或选区外正文。',
+      }))
+    } else {
+      childScript.push(toolCall(`submit-revision-${revisionNumber}`, 'submit_chapter', candidate(markdown)))
+      reviewScript.push(
+        toolCall('review-coverage', 'review_coverage_items', { items: ['R1', 'R2', 'R3'].map(item_ref => ({
+          item_ref, status: 'covered', evidence_quote_refs: ['Q2'], issue: null,
+        })) }),
+        toolCall('review-global-constraint', 'review_global_constraints', {
+          items: [{ compliance_position: 0, status: 'not_applicable', evidence_quote_refs: [], issue: '当前章节没有冲突表述。' }],
+        }),
+        toolCall('review-acceptance', 'review_acceptance_criteria', {
+          items: [{ criterion_position: 0, status: 'met', evidence_quote_refs: ['Q2'], reason: '正文详细说明了访问控制实施流程。' }],
+        }),
+        toolCall('review-revision-issue', 'review_revision_issues', {
+          items: [{ issue_position: 0, status: 'satisfied', reason: '按真实请求完成本章修订。' }],
+        }),
+        toolCall('review-summary', 'set_review_summary', {
+          quality_checks: {
+            bidder_response_voice: true, project_specific: true, structure_complete: true, legacy_project_pollution_free: true,
+            placeholder_free: true, obvious_repetition_free: true },
+          blocking_issues: [],
+          assignment_conflicts: [],
+          external_input_gaps: [],
+          external_input_only: false,
+        }),
+        toolCall('finish-review', 'finish_chapter_review', {}),
+      )
+    }
     const outcome = await ctx!.bid.reviseChapter(user, revision)
-    assert.equal(outcome.ok, true, JSON.stringify(outcome))
+    const diagnostics = outcome.ok ? [] : await Promise.all((await readdir(workspace.projectRoot, { recursive: true }))
+      .filter(path => path.endsWith('execution-log.json')).map(async (path) => {
+        const execution = parseChapterExecutionLog(JSON.parse(await readFile(join(workspace.projectRoot, path), 'utf8')))
+        return { path, sections: execution.sections.map(section => ({ id: section.section_id, status: section.status,
+          attempts: section.attempts.slice(-2).map(attempt => ({
+            role: attempt.role, accepted: attempt.accepted, issues: attempt.issues,
+          })) })) }
+      }))
+    assert.equal(outcome.ok, true, JSON.stringify({ outcome, notices: user.events.filter(event => event.type === 'bid.run.notice'),
+      diagnostics,
+      errors: requests.slice(initialRequestCount).flatMap(request => request.messages.flatMap(message => message.content
+        .filter(block => block.type === 'tool-result' && block.isError))).slice(-5) }))
     const persisted = await readFile(markdownPath, 'utf8')
     assert.equal(persisted, markdown)
     const log = parseChapterExecutionLog(JSON.parse(await readFile(logPath, 'utf8')))
@@ -152,7 +160,7 @@ try {
   assert.equal(reviewScript.length, 0)
   assert.equal(parentScript.length, 0)
   process.stdout.write(`${JSON.stringify({
-    writer_session_reused: true, original_context_retained: true, main_agent_completion_reviewed: true,
+    writer_session_reused: true, original_context_retained: true, task_results_verified: true,
     paragraphs_outside_selection_unchanged: true, evidence_unchanged: true,
   })}\n`)
 } finally {

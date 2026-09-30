@@ -5,6 +5,7 @@ import { z } from 'zod'
 import type { BidWorkspace } from './index.ts'
 import type { BidCommitLease, BidRunContext } from './run-coordinator.ts'
 import { bidCapabilityTaskSchema, type BidCapabilityTask } from './bid-capability-contract.ts'
+import { bidTaskSourceSnapshotSchema } from './bid-task-source.ts'
 import { BID_CAPABILITIES } from './bid-capability-registry.ts'
 import { readBidChapterCommandJournal, withBidCommandJournalLock, writeBidChapterCommandJournal,
   type BidChapterCommandRecord } from './chapter-command-journal.ts'
@@ -13,7 +14,7 @@ import { assertNoLinkedPath, within } from './workspace-path.ts'
 const identity = z.object({ session_id: z.string().min(1), message_id: z.string().min(1) }).strict()
 const requestSchema = z.object({ schema_version: z.literal(1), origin_work_id: z.string().min(1),
   queue_id: z.string().regex(/^[a-f0-9]{32}$/u), task: bidCapabilityTaskSchema,
-  authorization: identity }).strict()
+  authorization: identity, source_snapshot: bidTaskSourceSnapshotSchema.optional() }).strict()
 const commandSchema = z.object({ kind: z.literal('enqueue_capability_task'),
   queue_id: z.string().regex(/^[a-f0-9]{32}$/u), request_ref: z.string().min(1),
   request_sha256: z.string().regex(/^[a-f0-9]{64}$/u) }).strict()
@@ -43,16 +44,17 @@ function digest(value: unknown): string { return createHash('sha256').update(JSO
  * @param run 当前拥有提交权的 Work。
  * @param task 用户授权的能力计划。
  * @param authorization 当前真实用户消息。
+ * @param sourceSnapshot 接纳时冻结的真实来源及意见队列。
  * @returns 持久化的排队身份。
  */
 export async function enqueueCapabilityRequest(
   workspace: BidWorkspace, run: BidRunContext, task: BidCapabilityTask,
-  authorization: z.infer<typeof identity>,
+  authorization: z.infer<typeof identity>, sourceSnapshot?: z.infer<typeof bidTaskSourceSnapshotSchema>,
 ): Promise<{ readonly queue_id: string; readonly request_ref: string }> {
   const id = queueId(identity.parse(authorization))
   const path = requestPath(run.work.workId, id)
   const request = requestSchema.parse({ schema_version: 1, origin_work_id: run.work.workId,
-    queue_id: id, task, authorization })
+    queue_id: id, task, authorization, ...(sourceSnapshot === undefined ? {} : { source_snapshot: sourceSnapshot }) })
   const absolute = within(workspace.projectRoot, path)
   await assertNoLinkedPath(workspace.root, absolute)
   let existingRequest: unknown

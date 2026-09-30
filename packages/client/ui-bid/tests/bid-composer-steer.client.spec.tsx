@@ -71,7 +71,7 @@ it('章节引用默认保留 queue，未带引用交还普通发送', async () =
   view.drop()
   await screen.findByText('章节 · 1 实施方案')
   await act(async () => {
-    await expect(view.submit('排队修改', [], undefined, 'queue')).resolves.toEqual({ kind: 'success' })
+    await expect(view.submit('排队修改', [], undefined, 'queue', 'submission-2')).resolves.toEqual({ kind: 'success' })
   })
   expect(view.forward).toHaveBeenCalledWith(expect.stringContaining('排队修改'), [])
 })
