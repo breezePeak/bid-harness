@@ -126,8 +126,8 @@ export async function runCapabilityReplanLoop(ctx: Context, root: string) {
   } finally { release() }
 }
 
-/** @param ctx 源码 Loader 装配。 @param root 临时项目。 @returns 新用户任务接管挂起 Work 后的正式目录身份。 */
-export async function runCapabilitySupersedeLoop(ctx: Context, root: string) {
+/** @param ctx 源码 Loader 装配。 @param root 临时项目。 @param terminal 是否模拟旧任务已终止的持久边界。 @returns 新用户任务接管旧 Work 后的正式目录身份。 */
+export async function runCapabilitySupersedeLoop(ctx: Context, root: string, terminal = false) {
   const { agent, workspace, parentScript } = await runEvidenceMappingLoop(ctx, root, false, true)
   const seeded = await seedCapabilityProject(workspace, 'complete')
   const wrongTitle = '提供完整的建设方案，包括首个细粒度评分响应点'
@@ -154,6 +154,15 @@ export async function runCapabilitySupersedeLoop(ctx: Context, root: string) {
   const old = await readBidProjectState(workspace)
   if (old?.status !== 'suspended' || old.run.work.kind !== 'capability_task') throw new Error('旧能力任务未挂起')
   const oldWorkId = old.run.work.workId
+  if (terminal) {
+    const failed = { stage: old.stage, status: 'failed' as const, run: null,
+      failure: { code: 'BID_TASK_SCOPE_AUTHORIZATION_REQUIRED', message: '旧任务授权范围需要新用户消息澄清',
+        recovery: { kind: 'blocked' as const, unit: oldWorkId, reason: '旧任务授权范围需要新用户消息澄清' } } }
+    agent.session.append('bid.task.changed', { state: failed })
+    agent.session.append('bid.run.notice', { noticeId: `run:${old.run.runId}:failed`, supersedesTurn: null,
+      runId: old.run.runId, stage: old.stage, kind: 'interrupted', severity: 'error', message: failed.failure.message })
+    await checkpointBidProjectState(workspace, failed)
+  }
   parentScript.push(
     call('bid_project_inspect', { query: { object: 'task' } }),
     call('bid_run_task', await modelTaskArguments(agent, { task: { goal: '修正评分点目录层级，首个细粒度评分点不作大标题',

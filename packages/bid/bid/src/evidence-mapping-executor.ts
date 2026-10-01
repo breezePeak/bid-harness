@@ -266,6 +266,11 @@ function mappingSubagentTurnInfrastructureFailure(
 ): MappingSubagentInfrastructureError | undefined {
   const code = record(error)?.code
   const detail = error instanceof Error ? error.message : String(error)
+  if (typeof code === 'string' && ['QUOTA', 'AUTH', 'NO_ADAPTER'].includes(code)) {
+    return new MappingSubagentInfrastructureError([{
+      code, message: `Mapping Subagent 模型通道不可用：${detail}`,
+    }], false, false, taskId, 0, 'subagent')
+  }
   const permanent = /authentication|invalid api key|insufficient (?:balance|credit)|billing|permanent quota/iu.test(detail)
   const rateLimited = code === 'RATE_LIMIT'
     || !permanent && /(?:HTTP\s*)?429|rpm exhausted|inference exceeds (?:tpm|rpm) limit|rate_limit_error/iu.test(detail)
@@ -276,16 +281,20 @@ function mappingSubagentTurnInfrastructureFailure(
   }], true, false, taskId, MAPPING_SUBAGENT_RATE_LIMIT_COOLDOWN_MS, 'subagent')
 }
 
+function mappingInfrastructureRetryDelay(attempt: number, retryAfterMs: number): number {
+  return Math.max(retryAfterMs, Math.min(
+    MAPPING_INFRASTRUCTURE_RETRY_MAX_DELAY_MS,
+    MAPPING_INFRASTRUCTURE_RETRY_BASE_DELAY_MS * 2 ** attempt,
+  ))
+}
+
 async function waitForMappingInfrastructureRetry(
   signal: AbortSignal,
   attempt: number,
   retryAfterMs = 0,
 ): Promise<void> {
   signal.throwIfAborted()
-  const delay = Math.max(retryAfterMs, Math.min(
-    MAPPING_INFRASTRUCTURE_RETRY_MAX_DELAY_MS,
-    MAPPING_INFRASTRUCTURE_RETRY_BASE_DELAY_MS * 2 ** attempt,
-  ))
+  const delay = mappingInfrastructureRetryDelay(attempt, retryAfterMs)
   let onAbort!: () => void
   const cancelled = new Promise<never>((_resolve, reject) => {
     onAbort = () => { reject(signal.reason instanceof Error ? signal.reason : new Error(String(signal.reason))) }
@@ -4812,7 +4821,7 @@ async function executeEvidenceMappingRun(
     mappingTask: EvidenceMappingTask,
     runInputs: EvidenceMappingInputs,
   ): Promise<CompletedMappingTask> => {
-    for (let retry = 0; ; retry++) {
+    while (true) {
       let releaseAttempt = false
       try {
         await waitForProviderCooldown()
@@ -4836,7 +4845,7 @@ async function executeEvidenceMappingRun(
         infrastructureRetries.set(retryKey, retries + 1)
         providerCooldownUntil.set(provider, Math.max(
           providerCooldownUntil.get(provider) ?? 0,
-          Date.now() + error.retryAfterMs,
+          Date.now() + mappingInfrastructureRetryDelay(retries, error.retryAfterMs),
         ))
         const log = executionLog.tasks.find(item => item.task_id === mappingTask.task_id)
         if (log === undefined) throw new Error(`Bid evidence mapping lost task ${mappingTask.task_id}`)
@@ -4846,7 +4855,6 @@ async function executeEvidenceMappingRun(
         reportMappingProgress('正在等待重试章节资料映射任务')
         releaseMappingAttempt()
         releaseAttempt = false
-        await waitForMappingInfrastructureRetry(signal, retry, error.retryAfterMs)
       } finally {
         if (releaseAttempt) releaseMappingAttempt()
       }

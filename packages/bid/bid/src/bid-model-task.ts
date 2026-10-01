@@ -8,7 +8,7 @@ import { bidCapabilityTaskSchema, type BidCapabilityTask, type BidCapabilityStep
 import { getOrCreateOutlineDraft, readCapabilityOutlineBaseline } from './outline-draft-store.ts'
 import { readChapterLocations } from './chapter-storage.ts'
 import { indexChapterContentBlocks } from './chapter-content-reuse.ts'
-import { chapterContentSha256 } from './chapter-revision.ts'
+import { chapterContentSha256, validateChapterParagraphReference } from './chapter-revision.ts'
 import { chapterRevisionReferenceSchema } from './chapter-revision.ts'
 import { readRevisionQueue } from './chapter-revision-queue.ts'
 import { parseTenderRequirementsArtifact, parseTenderScoringArtifact,
@@ -280,7 +280,9 @@ function bindModelObjects(value: unknown, catalog: BidModelTaskCatalog): unknown
           const start = catalog.paragraphs.get(id)?.[position.parse(reference.start_paragraph)]
           const end = catalog.paragraphs.get(id)?.[position.parse(reference.end_paragraph)]
           if (start === undefined || end === undefined || end.end <= start.start) throw new Error('BID_MODEL_TASK_REFERENCE_INVALID')
-          output[name] = { ...base, start: start.start, end: end.end, text: body.slice(start.start, end.end) }
+          const bound = { ...base, start: start.start, end: end.end, text: body.slice(start.start, end.end) }
+          validateChapterParagraphReference(bound, body)
+          output[name] = bound
         }
         continue
       }

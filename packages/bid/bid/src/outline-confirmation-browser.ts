@@ -78,7 +78,7 @@ function updateLevels(sections: readonly OutlineSection[]): void {
  * @param source Current canonical outline.
  * @param operations Ordered browser edit operations.
  * @param allocateSectionId Optional allocator for newly inserted sections.
- * @returns 保留已有章节业务引用的目录；拆分产生的子章等待显式业务绑定。
+ * @returns 保留已有章节业务引用的目录；新增子章使原可写父章成为目录节点，子章等待显式业务绑定。
  */
 export function applyOutlineEdits(
   source: OutlineArtifact,
@@ -124,6 +124,12 @@ export function applyOutlineEdits(
         .sort((left, right) => left.order - right.order || left.id.localeCompare(right.id))
       siblings.splice(Math.min(operation.order - 1, siblings.length), 0, section)
       siblings.forEach((candidate, index) => { candidate.order = index + 1 })
+      if (parent?.writable) {
+        parent.writable = false
+        parent.must_answer = []
+        parent.scoring_response_point_ids = []
+        parent.scoring_response_points = []
+      }
     } else if (operation.type === 'split_section') {
       const section = byId.get(operation.section_id)
       if (section === undefined || !section.writable || sections.some(item => item.parent_id === section.id)) throw new Error('split requires a writable leaf')

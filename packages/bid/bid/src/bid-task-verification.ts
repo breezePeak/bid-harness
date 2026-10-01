@@ -300,11 +300,14 @@ export const modelBidTaskVerifier: BidTaskVerifier = async (input, agent, signal
   if (subagents === undefined || subagents.getProvider('spawn')?.inheritsParentContext !== false) {
     throw new Error('BID_TASK_VERIFIER_UNAVAILABLE')
   }
+  const outputSchema = zodJsonSchema(input.requirements === undefined ? modelPlanSchema : modelResultSchema)
+  delete outputSchema.$schema
   const child = await subagents.start('spawn', {
     parent: agent, signal, label: input.phase === 'plan' ? '任务计划核验' : '任务产物核验',
     maxDepth: 1, toolFilter: { allow: [] },
     prompt: [{ type: 'text', text: [
       '你只核验任务，不规划、不写文件、不提问。最终返回符合 schema 的 JSON。',
+      '输出 schema 描述返回值的结构，不是返回值本身。只返回业务字段，不返回 $schema、type、properties、required 等 schema 描述字段。返回裸 JSON 对象，不加 Markdown 代码围栏或说明文字。',
       '目标依据是 source.message 原话和 frozen issues；task.goal、步骤说明及 Writer/Reviewer 自述不能替代它们。',
       '根据真实语义判断用户是否授权执行及根范围。段落意见不能授权整章目录修改；新用户明确授权扩展本章才可扩大。',
       '按输入 sources 的顺序判断每个来源是否与任务有关；用户要求处理全部意见时纳入全部待处理意见。普通问答不能因有意见就授权执行。',
@@ -326,7 +329,7 @@ export const modelBidTaskVerifier: BidTaskVerifier = async (input, agent, signal
       'met 表示要求是否满足。对“不得改其他章节”等否定要求，摘要对照证明没有发生禁止的修改时 met=true；不是因为要求禁止修改就填 false。reason 必须与 met 的实际满足结论一致。',
       'execution_history 是 Host 保存的同一 Work 已发生的拒绝、计划补丁及已完成步骤。prior_plan_rejections 非空证明首次计划确实被拒绝；后续修正计划应核验剩余业务成果，不能要求已发生的故障注入重新执行。编排顺序不作为新的正文、目录或资料要求。',
       'preservation_evidence 是 Host 对正式原始正文及当前可写叶节的逐字、表格和流程图定义检查；retained=true 证明原有内容均在叶节完整保留，允许在原文周围增补。旧父节点保留的历史正文不参与该检查，也不进入交付正文。依据此事实判断内容保留，另行核验迁移归属及新增方案是否满足语义要求。',
-      '输出 schema：' + JSON.stringify(zodJsonSchema(input.requirements === undefined ? modelPlanSchema : modelResultSchema)),
+      '输出 schema：' + JSON.stringify(outputSchema),
       '核验输入：' + JSON.stringify({ phase: input.phase, task: input.task,
         execution_history: input.execution_history,
         preservation_evidence: input.preservation_evidence,

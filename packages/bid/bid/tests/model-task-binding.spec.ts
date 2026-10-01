@@ -95,6 +95,23 @@ it('程序从原文块计算精确引用，正式正文变更后拒绝旧引用'
     .rejects.toThrow()
 })
 
+it('模型选择表格或跨标题的段落范围时在绑定入口拒绝，整章引用仍可绑定', async () => {
+  const { workspace, section } = await fixture()
+  const body = '# 标题\n\n导语。\n\n| 项目 | 内容 |\n| --- | --- |\n| A | B |\n\n## 分项\n\n末段。\n'
+  await writeFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), body)
+  const catalog = await collectBidModelTaskCatalog(workspace)
+  const bind = (reference: object) => bindBidModelTask({ goal: '仅清理表格，其他内容保持原样',
+    scope: { kind: 'sections', section_positions: [section] }, steps: [{ description: '局部清理表格',
+      scope: { source: 'task' }, call: { capability: 'chapter.revise', input: { instruction: '仅清理表格', reference } } }],
+  }, catalog)
+  for (const [start, end] of [[2, 2], [1, 2], [1, 4]]) {
+    expect(() => bind({ scope: 'paragraphs', section_position: section, start_paragraph: start, end_paragraph: end }))
+      .toThrow('BID_CHAPTER_REVISION_SELECTION_INVALID')
+  }
+  expect(bind({ scope: 'chapter', section_position: section }).steps[0]?.call.input)
+    .toMatchObject({ reference: { scope: 'chapter', content_sha256: chapterContentSha256(body) } })
+})
+
 it('审批选区直接绑定冻结引用，模型不能扩大或重算选区', async () => {
   const { workspace, body } = await fixture()
   const text = '收集输入'

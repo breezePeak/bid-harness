@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto'
 import { lstat, readFile, readdir, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
+import { installModelSelection } from '@deepseek-ai/dsh-agent'
 import { CallId, createUserMessage, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { BidWorkspace, checkpointBidProjectState, outlineArtifactSha256, parseOutlineArtifact, readBidProjectState } from '@deepseek-ai/dsh-bid'
@@ -43,7 +44,8 @@ function inputJson<T>(prompt: string, prefix: string): T {
 }
 
 class PlanningAdapter extends ChapterAdapter {
-  constructor(private readonly recoveryWorkspace?: BidWorkspace, private readonly repeatCompletedWriting = false) { super() }
+  constructor(private readonly recoveryWorkspace?: BidWorkspace, private readonly repeatCompletedWriting = false,
+    private readonly structure: 'split' | 'add' = 'split') { super() }
   override resolveModel(provider: string, model: string) {
     return Promise.resolve({ provider, id: model, name: model, inputModalities: ['text', 'image'] as const })
   }
@@ -57,6 +59,9 @@ class PlanningAdapter extends ChapterAdapter {
     const prompt = options.messages.flatMap(message => message.content)
       .flatMap(block => block.type === 'text' ? [block.text] : []).join('\n')
     if (prompt.includes('核验输入：')) {
+      const schema = inputJson<{ $schema?: string; additionalProperties?: boolean }>(prompt, '输出 schema：')
+      if (schema.$schema !== undefined || schema.additionalProperties !== false
+        || !prompt.includes('只返回业务字段，不返回 $schema')) throw new Error('任务核验输出协议混入 schema 元数据或缺少严格字段约束')
       const input = inputJson<{ requirements?: readonly object[]; sources: readonly object[] }>(prompt, '核验输入：')
       const check = { met: true, reason: '脚本要求 Host 另行校验真实新节点及全部新叶节的当前审核' }
       const requirements = [{
@@ -146,11 +151,18 @@ class PlanningAdapter extends ChapterAdapter {
         case 2: yield* call('bid_run_task', { task: { goal: '本章三个阶段建立真实子章并完成正文',
           scope: { kind: 'sections', section_positions: [2] }, steps: [
             { description: '将本章三个阶段拆成真实目录子章', scope: { source: 'task' }, call: { capability: 'outline.update', input: {
-              operations: [{ type: 'split_section', section_position: 2, children: [
+              operations: this.structure === 'split' ? [{ type: 'split_section', section_position: 2, children: [
                 { title: '收集输入', purpose: '收集输入并回答主题1', must_answer: ['回答主题1', '收集输入'] },
                 { title: '校验结果', purpose: '校验结果', must_answer: ['校验结果'] },
                 { title: '交付成果', purpose: '交付成果', must_answer: ['交付成果'] },
-              ] }],
+              ] }] : [
+                { type: 'add_section', parent_position: 2, order: 1, writable: true,
+                  title: '收集输入', purpose: '收集输入并回答主题1', must_answer: ['回答主题1', '收集输入'] },
+                { type: 'add_section', parent_position: 2, order: 2, writable: true,
+                  title: '校验结果', purpose: '校验结果', must_answer: ['校验结果'] },
+                { type: 'add_section', parent_position: 2, order: 3, writable: true,
+                  title: '交付成果', purpose: '交付成果', must_answer: ['交付成果'] },
+              ],
             } } },
             { description: '完整迁移本章原文块到 Host 返回的新叶节', scope: { source: 'task' }, call: {
               capability: 'chapter.reorganize', input: { source_section_positions: [2], instruction: '完整保留原文，按三个阶段迁移。' } } },
@@ -202,7 +214,6 @@ class PlanningAdapter extends ChapterAdapter {
 /**
  * 建立含 S2.3 原文、表格和流程图的五章已完成项目。
  * @param root 隔离项目根目录。
- * @param fault 故障位置或对已完成新叶节的重复写作。
  * @param completeSourceFacts 真实模型验收使用完整的虚构工作流程采购条款和来源，避免占位条款造成外部资料缺口。
  * @returns 已保存完成态的项目。
  */
@@ -281,11 +292,20 @@ export async function seedMainTaskPlanningProject(root: string, completeSourceFa
     schema_version: 3, scope: 'technical_bid', confirmed_outline_sha256: outlineHash, writing_plan_version: 1,
     global_consistency_notes: ['初始项目各章保持可追踪交付术语。'],
     sections: renamedOutline.sections.filter(section => section.writable).map(section => ({
-      section_id: section.id, depends_on: [], related_sections: [], planning_notes: [],
+      section_id: section.id, depends_on: [], related_sections: section.id === 'SEC-2'
+        ? [{ section_id: 'S2.3', strength: 'weak', reason: '关联原章的流程交付术语。' }] : [], planning_notes: [],
     })),
   })) + '\n')
   const plan = parseWritingPlan(JSON.parse(await readFile(join(workspace.projectRoot, 'chapters/writing-plan.json'), 'utf8')))
   const locations = await readChapterLocations(workspace)
+  const completedLocation = locations.get('SEC-2')!
+  await writeFile(join(workspace.projectRoot, 'chapters/reuse-seeds.json'), JSON.stringify({
+    schema_version: 1, confirmed_outline_sha256: outlineArtifactSha256(renamedOutline), seeds: [{
+      section_id: 'SEC-2', source_section_ids: ['completed-source'],
+      content_path: completedLocation.contentPath, metadata_path: completedLocation.metadataPath,
+      content_sha256: '0'.repeat(64),
+    }],
+  }) + '\n')
   const read = async (path: string): Promise<unknown> => JSON.parse(await readFile(join(workspace.projectRoot, path), 'utf8')) as unknown
   const context = { project: parseTenderProjectArtifact(await read('analysis/project.json')),
     requirements: parseTenderRequirementsArtifact(await read('analysis/requirements.json')),
@@ -297,6 +317,8 @@ export async function seedMainTaskPlanningProject(root: string, completeSourceFa
   const manifest = await workspace.readManifest()
   const sources = parseWebEvidenceSourcesArtifact(await read('analysis/web-evidence-sources.json')).sources
   const executionLog = parseOrMigrateChapterExecutionLog(await read('chapters/execution-log.json'))
+  const relatedLog = executionLog.sections.find(section => section.section_id === 'SEC-2')!
+  relatedLog.related_sections = ['S2.3']
   for (const section of renamedOutline.sections.filter(section => section.writable)) {
     const location = locations.get(section.id)!
     const body = await readFile(join(workspace.projectRoot, location.contentPath), 'utf8')
@@ -321,6 +343,9 @@ export async function seedMainTaskPlanningProject(root: string, completeSourceFa
     for (const attempt of log.attempts) attempt.input.evidence_sha256 = fingerprint
   }
   await writeFile(join(workspace.projectRoot, 'chapters/execution-log.json'), JSON.stringify(executionLog) + '\n')
+  await writeFile(join(workspace.projectRoot, 'chapters/applied-writing-plan.json'), JSON.stringify({
+    schema_version: 1, plan_version: plan.plan_version,
+  }) + '\n')
   await writeFile(join(workspace.projectRoot, 'outline/confirmation.json'), JSON.stringify({
     schema_version: 2, scope: 'technical_bid', decision: 'confirmed', source_outline_sha256: outlineHash,
     confirmed_outline_sha256: outlineHash, confirmed_draft_revision: 1, confirmed_draft_sha256: outlineHash,
@@ -334,14 +359,18 @@ export async function seedMainTaskPlanningProject(root: string, completeSourceFa
  * 使用可控 provider 驱动真实工具循环。
  * @param ctx 已装配真实服务的 Context。
  * @param root 隔离项目根目录。
+ * @param fault 故障位置或对已完成新叶节的重复写作。
+ * @param structure 在原章下新增子章或一次拆分。
+ * @param selectedRoute 是否通过会话模型选择覆盖启动时的路由。
  * @returns 工具序列和正式产物事实。
  */
 export async function runMainTaskPlanningLoop(ctx: Context, root: string,
-  fault?: 'after_split' | 'after_migration' | 'writing' | 'before_verification' | 'repeat_completed') {
+  fault?: 'after_split' | 'after_migration' | 'writing' | 'before_verification' | 'repeat_completed',
+  structure: 'split' | 'add' = 'split', selectedRoute = false) {
   const workspace = await seedMainTaskPlanningProject(root)
   const outside = await readFile(join(workspace.projectRoot, 'chapters/sections/0002.md'), 'utf8')
   const canonicalBody = await readFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), 'utf8')
-  const adapter = new PlanningAdapter(fault === undefined ? undefined : workspace, fault === 'repeat_completed')
+  const adapter = new PlanningAdapter(fault === undefined ? undefined : workspace, fault === 'repeat_completed', structure)
   const executions: string[] = []
   let interrupted = false
   if (fault !== undefined) {
@@ -372,12 +401,15 @@ export async function runMainTaskPlanningLoop(ctx: Context, root: string,
       },
     }))
   }
-  ctx.effect(() => ctx.llm.registerAdapter(['planning-mock'], adapter))
+  ctx.effect(() => ctx.llm.registerAdapter(['planning-mock', 'planning-selected'], adapter))
   if (ctx.get('fs') === undefined) await ctx.plugin(IntegrationFileSystem)
   registerIntegrationTools(ctx, root, [])
   const handle = await ctx.agentLoop.createAgent(ctx, { sessionId: SessionId('task-planning-main'),
     agentOptions: { provider: 'planning-mock', model: 'planning-mock' }, meta: { cwd: root, agentPreset: 'bid' } })
   const agent = handle.agent
+  if (selectedRoute) ctx.effect(() => installModelSelection(agent.ctx, {
+    current: { provider: 'planning-selected', model: 'selected-model' }, assembled: undefined,
+  }))
   const text = '只修改本章 S2.3，把三个阶段拆成真实目录子章节，保留原文并完成正文和审核。不要改其他章节。'
   agent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text }] }))
   await agent.whenIdle()
@@ -402,6 +434,8 @@ export async function runMainTaskPlanningLoop(ctx: Context, root: string,
   const executionParents = new Set(agent.session.events.flatMap(event => event.type === 'bid.run.started'
     && event.data.run.executionSessionId !== undefined ? [event.data.run.executionSessionId] : []))
   return { state: state?.status, source: text, children: children.map(section => section.title),
+    ...selectedRoute ? { selectedRouteInherited: adapter.inputs.length > 0
+      && adapter.inputs.every(input => input.provider === 'planning-selected' && input.model === 'selected-model') } : {},
     executionParentModelTurns: adapter.inputs.filter(input => input.sessionId !== undefined
       && executionParents.has(input.sessionId)).length,
     workbench: workbench.outline.filter(section => children.some(child => child.id === section.section_id))
@@ -409,6 +443,9 @@ export async function runMainTaskPlanningLoop(ctx: Context, root: string,
     seedPreserved: ['流程一：收集输入。', '流程二：校验结果。', '流程三：交付成果。', '表1 校验产物', '| 校验 | 报告 |', '{{flowchart:process-flow}}']
       .every(text => bodies.some(body => body.includes(text))),
     outsidePreserved: outside === await readFile(join(workspace.projectRoot, 'chapters/sections/0002.md'), 'utf8'),
+    outsideCompleted: parseOrMigrateChapterExecutionLog(JSON.parse(await readFile(
+      join(workspace.projectRoot, 'chapters/execution-log.json'), 'utf8'))).sections
+      .filter(section => !children.some(child => child.id === section.section_id)).every(section => section.status === 'completed'),
     exportedChildren: children.filter(section => snapshot.markdown.includes(section.title)).map(section => section.title),
     calls: agent.session.events.filter(event => event.type === 'tool/call').map(event => event.data.name),
     userMessages: agent.session.events.filter(event => event.type === 'user/message' && event.data.source.kind === 'user').length,

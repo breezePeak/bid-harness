@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
@@ -23,7 +23,7 @@ import { createTestBidRunContext } from '../src/run-coordinator.ts'
 import { prepareBidWorkingTree } from '../src/working-tree.ts'
 import { outlineArtifactSha256, parseOutlineConfirmationArtifact, parseOutlineDraft } from '../src/outline-confirmation-artifacts.ts'
 import { parseOutlineArtifact } from '../src/outline-generation-artifacts.ts'
-import { parseOrMigrateChapterExecutionLog } from '../src/chapter-writing-plan-artifacts.ts'
+import { parseChapterExecutionPlan, parseOrMigrateChapterExecutionLog } from '../src/chapter-writing-plan-artifacts.ts'
 import { parseChapterMetadata, parseChapterWritingManifest } from '../src/chapter-writing-artifacts.ts'
 import { parseWritingPlan } from '../src/writing-requirements.ts'
 import { parseEvidenceMapArtifact } from '../src/evidence-mapping-artifacts.ts'
@@ -54,7 +54,43 @@ async function fixture() {
 }
 
 describe('目录能力候选', () => {
-  it('outline.update 对 Host 新 ID 分配真实业务引用', async () => {
+  it.each(['completed', 'pending'] as const)('再次改目录时仅清理已完成章节的迁移种子（%s）', async (status) => {
+    const { workspace, context } = await fixture()
+    const outline = parseOutlineArtifact(await readJson(workspace, 'outline/confirmed-outline.json'))
+    const log = parseOrMigrateChapterExecutionLog(await readJson(workspace, 'chapters/execution-log.json'))
+    const chapter = log.sections.find(section => section.section_id === 'SEC-2')!
+    chapter.status = status
+    chapter.storage_serial = 2
+    await writeFile(join(workspace.projectRoot, 'chapters/execution-log.json'), JSON.stringify(log))
+    const manifest = parseChapterWritingManifest(await readJson(workspace, 'chapters/manifest.json'))
+    if (status === 'pending') {
+      await writeFile(join(workspace.projectRoot, 'chapters/manifest.json'), JSON.stringify({ ...manifest,
+        chapters: manifest.chapters.filter(entry => entry.section_id !== 'SEC-2') }))
+    }
+    const serial = String(chapter.storage_serial).padStart(4, '0')
+    await writeFile(join(workspace.projectRoot, 'chapters/reuse-seeds.json'), JSON.stringify({
+      schema_version: 1, confirmed_outline_sha256: outlineArtifactSha256(outline), seeds: [{
+        section_id: 'SEC-2', source_section_ids: ['old-source'],
+        content_path: `chapters/sections/${serial}.md`, metadata_path: `chapters/meta/${serial}.json`,
+        content_sha256: '0'.repeat(64),
+      }],
+    }))
+    const body = await readFile(join(workspace.projectRoot, `chapters/sections/${serial}.md`), 'utf8')
+    const call = bidCapabilityInputSchema.parse({ capability: 'outline.update', input: {
+      operations: [{ type: 'update_section', section_id: 'SEC-1', title: '流程检查' }],
+    } })
+    if (call.capability !== 'outline.update') throw new Error('test call mismatch')
+    const { result } = await executeOutlineCapability(call, context)
+    const seeds = chapterReuseSeedsSchema.parse(await readJson(workspace, 'chapters/reuse-seeds.json'))
+    expect(seeds.seeds).toHaveLength(status === 'completed' ? 0 : 1)
+    if (status === 'completed') await expect(validateOutlineCapability(context, result)).resolves.toBeUndefined()
+    else await expect(validateOutlineCapability(context, result)).rejects.toThrow('BID_OUTLINE_CAPABILITY_SEED_MISMATCH: SEC-2')
+    expect(await readFile(join(workspace.projectRoot, `chapters/sections/${serial}.md`), 'utf8')).toBe(body)
+    expect(parseOrMigrateChapterExecutionLog(await readJson(workspace, 'chapters/execution-log.json')).sections
+      .find(section => section.section_id === 'SEC-2')).toEqual(chapter)
+  })
+
+  it.each(['split', 'add'] as const)('outline.update %s 对 Host 新 ID 分配真实业务引用并保留待迁移原文', async (operation) => {
     const { workspace, context, stepId } = await fixture()
     const prefix = createHash('sha256').update(stepId).digest('hex').slice(0, 12)
     const childId = `SEC-${prefix}-1`
@@ -72,20 +108,28 @@ describe('目录能力候选', () => {
     })
     const agent = { ctx: { get: () => ({ getProvider: () => ({ inheritsParentContext: false }), start }) } } as unknown as BidCapabilityExecutionContext['agent']
     const call = bidCapabilityInputSchema.parse({ capability: 'outline.update', input: {
-      operations: [{ type: 'split_section', section_id: 'SEC-1', children: [
+      operations: operation === 'split' ? [{ type: 'split_section', section_id: 'SEC-1', children: [
         { title: '设计流程', purpose: '设计', must_answer: ['设计'] },
         { title: '交付流程', purpose: '交付', must_answer: ['交付'] },
-      ] }], defer_content_migration: true,
+      ] }] : [
+        { type: 'add_section', parent_id: 'SEC-1', order: 1, writable: true,
+          title: '设计流程', purpose: '设计', must_answer: ['设计'] },
+        { type: 'add_section', parent_id: 'SEC-1', order: 2, writable: true,
+          title: '交付流程', purpose: '交付', must_answer: ['交付'] },
+      ], defer_content_migration: true,
     } })
     if (call.capability !== 'outline.update') throw new Error('test call mismatch')
     const scoped = { ...context, agent,
       allowedWrites: await allowedOutlineCapabilityWrites(call, workspace, stepId, context.sectionIds) }
+    const body = await readFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), 'utf8')
     const { result } = await executeOutlineCapability(call, scoped)
     expect(start).toHaveBeenCalledOnce()
     expect(JSON.stringify(prompts.at(-1))).not.toContain(childId)
     expect(JSON.stringify(prompts.at(-1))).toContain('requirement_positions')
     const outline = parseOutlineArtifact(await readJson(workspace, 'outline/confirmed-outline.json'))
     expect(outline.sections.find(section => section.id === childId)?.requirement_ids).toEqual(['REQ-1'])
+    expect(outline.sections.find(section => section.id === 'SEC-1')?.writable).toBe(false)
+    expect(await readFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), 'utf8')).toBe(body)
     expect(parseEvidenceMapArtifact(await readJson(workspace, 'analysis/evidence-map.json'))
       .section_mappings.find(mapping => mapping.section_id === childId)?.missing_topics).toEqual([])
     expect(await readJson(workspace, 'chapters/pending-reorganization.json'))
@@ -134,6 +178,16 @@ describe('目录能力候选', () => {
 
   it('拆分已写章节保留原块，发布目录、绑定、待审草稿和真实任务授权', async () => {
     const { workspace, context, stepId } = await fixture()
+    const originalLog = parseOrMigrateChapterExecutionLog(await readJson(workspace, 'chapters/execution-log.json'))
+    originalLog.sections.find(section => section.section_id === 'SEC-2')!.related_sections = ['SEC-1']
+    await writeFile(join(workspace.projectRoot, 'chapters/execution-log.json'), JSON.stringify(originalLog) + '\n')
+    await writeFile(join(workspace.projectRoot, 'chapters/execution-plan.json'), JSON.stringify({
+      schema_version: 3, scope: 'technical_bid', confirmed_outline_sha256: originalLog.confirmed_outline_sha256,
+      writing_plan_version: 1, global_consistency_notes: ['各章保持一致的流程术语。'], sections: originalLog.sections.map(section => ({
+        section_id: section.section_id, depends_on: [], planning_notes: [],
+        related_sections: section.related_sections.map(section_id => ({ section_id, strength: 'weak', reason: '流程术语关联。' })),
+      })),
+    }) + '\n')
     const body = await readFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), 'utf8')
     const untouched = await readFile(join(workspace.projectRoot, 'chapters/sections/0002.md'), 'utf8')
     const blocks = indexChapterContentBlocks('SEC-1', body)
@@ -169,6 +223,14 @@ describe('目录能力候选', () => {
     expect(draft.draft_outline_sha256).toBe(confirmation.confirmed_outline_sha256)
     expect(log.sections.filter(section => children.includes(section.section_id)).map(section => section.status))
       .toEqual(['pending', 'pending', 'pending'])
+    expect(log.sections.find(section => section.section_id === 'SEC-2')).toMatchObject({
+      status: 'completed', related_sections: [],
+      attempts: originalLog.sections.find(section => section.section_id === 'SEC-2')!.attempts,
+      final_writer_child_session_id: 'writer-SEC-2', final_reviewer_child_session_id: 'reviewer-SEC-2',
+    })
+    expect(parseChapterExecutionPlan(await readJson(workspace, 'chapters/execution-plan.json')).sections
+      .find(section => section.section_id === 'SEC-2'))
+      .toEqual({ section_id: 'SEC-2', depends_on: [], related_sections: [], planning_notes: [] })
     expect(manifest.chapters.map(entry => entry.section_id)).toEqual(['SEC-2', 'SEC-3', 'SEC-4', 'SEC-5'])
     expect(seeds.seeds).toHaveLength(3)
     expect(reassignment.retired_sections[0]).toMatchObject({ source_section_id: 'SEC-1',

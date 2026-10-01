@@ -348,7 +348,11 @@ async function coordinateCapabilityOutline(
       const previous = oldLogSections.get(section.id)
       const location = storage.locations.get(section.id)
       if (location === undefined) throw new Error(`BID_CHAPTER_STORAGE_MISSING: ${section.id}`)
-      if (previous !== undefined && !staleReview.has(section.id)) return { ...previous, storage_serial: location.storageSerial }
+      if (previous !== undefined && !staleReview.has(section.id)) return {
+        ...previous, storage_serial: location.storageSerial,
+        depends_on: previous.depends_on.filter(id => newLeafIds.has(id)),
+        related_sections: previous.related_sections.filter(id => newLeafIds.has(id)),
+      }
       return { section_id: section.id, storage_serial: location.storageSerial,
         depends_on: (previous?.depends_on ?? []).filter(id => newLeafIds.has(id)),
         related_sections: (previous?.related_sections ?? []).filter(id => newLeafIds.has(id)),
@@ -405,7 +409,8 @@ async function coordinateCapabilityOutline(
   }))
   const priorSeedsRaw = await optionalJson(workspace, 'chapters/reuse-seeds.json')
   const priorSeeds = priorSeedsRaw === undefined ? [] : chapterReuseSeedsSchema.parse(priorSeedsRaw).seeds
-    .filter(seed => newLeafIds.has(seed.section_id) && !staleReview.has(seed.section_id))
+    .filter(seed => newLeafIds.has(seed.section_id) && !staleReview.has(seed.section_id)
+      && oldLogSections.get(seed.section_id)?.status !== 'completed')
   const hasConfirmedOutline = await optionalJson(workspace, 'outline/confirmed-outline.json') !== undefined
   await context.run.commits.publish(async (lease) => {
     const write = async (path: string, value: unknown): Promise<void> => {

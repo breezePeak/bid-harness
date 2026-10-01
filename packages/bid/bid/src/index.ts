@@ -172,7 +172,7 @@ import { BID_STAGES, BidStageExecutionError, isBidDocumentRole } from './control
 import { BID_BINARY_UPLOAD_PATH, BID_UPLOAD_FILES_HEADER, BID_UPLOAD_SESSION_HEADER } from './control-plane-contract.ts'
 import { appendBidSchemaWarning, createBidSchemaWarning } from './bid-events.ts'
 import type {} from '@deepseek-ai/dsh-goal-round-driver'
-import { bidRecoveryInstructionRepeated, bidRunRecoveryEligibility, bidWritingPlanRecoveryEligibility, safeRecoverableBidFailure } from './bid-recovery.ts'
+import { bidCapabilityTakeoverRun, bidRecoveryInstructionRepeated, bidRunRecoveryEligibility, bidWritingPlanRecoveryEligibility, safeRecoverableBidFailure } from './bid-recovery.ts'
 import { resolveBidToolAuthorization, withBidNativeTaskAuthorization } from './bid-tool-authorization.ts'
 import type { BidSessionEventMap } from './bid-events.ts'
 import {
@@ -1899,6 +1899,7 @@ export class BidHostRuntime extends TypertRemoteService {
     const agentPreset = resolveSessionPreset(operation.session)
     if (presets !== undefined && agentPreset === undefined) throw new Error('Bid execution Session has no preset.')
     const executionSessionId = SessionId(randomUUID())
+    const selectedRoute = interaction.session.requestHeader()?.config
     operation.executionSessionId = executionSessionId
     try {
       const handle = await this.ctx.agents.create({
@@ -1908,7 +1909,9 @@ export class BidHostRuntime extends TypertRemoteService {
           provider: 'bid',
           label: bidStageExecutionLabel(stage),
         })),
-        agentOptions: interaction.options,
+        agentOptions: { ...interaction.options,
+          ...selectedRoute?.provider === undefined ? {} : { provider: selectedRoute.provider },
+          ...selectedRoute?.model === undefined ? {} : { model: selectedRoute.model } },
         meta: {
           cwd: operation.workspace.root,
           ...(agentPreset === undefined ? {} : {
@@ -5341,7 +5344,7 @@ export class BidHostRuntime extends TypertRemoteService {
    * @param authorization 用户消息身份。
    * @param inputPaths 本次任务读取的正式输入文件。
    * @param onAdmitted Run 落盘后调用的可选接纳回调。
-   * @param supersede 精确接管当前挂起能力任务的 Run 身份与项目修订号。
+   * @param supersede 精确接管当前挂起或失败能力任务的 Run 身份与项目修订号。
    * @param completeTask 含独立导出尾步骤的完整任务。
    * @returns Run 结算后的项目状态。
    */
@@ -5367,9 +5370,9 @@ export class BidHostRuntime extends TypertRemoteService {
         }
         returnState = current
       } else {
-        if (current.status !== 'suspended' || current.run.work.kind !== 'capability_task'
-          || current.run.cause === 'awaiting_input') throw new Error('BID_CAPABILITY_SUPERSEDE_NOT_ALLOWED')
-        if (current.run.runId !== supersede.run_id
+        const previousRun = bidCapabilityTakeoverRun(session, current)
+        if (previousRun === undefined) throw new Error('BID_CAPABILITY_SUPERSEDE_NOT_ALLOWED')
+        if (previousRun.runId !== supersede.run_id
           || operation.projectRevision !== supersede.expected_project_revision) {
           throw new Error('BID_CAPABILITY_SUPERSEDE_STALE')
         }
@@ -5381,7 +5384,7 @@ export class BidHostRuntime extends TypertRemoteService {
           || message?.type !== 'user/message' || message.data.source.kind !== 'user') {
           throw new Error('BID_CAPABILITY_USER_MESSAGE_REQUIRED')
         }
-        const previous = capabilityTaskRequestSchema.parse(await readBidWorkRequest(operation.workspace, current.run.work))
+        const previous = capabilityTaskRequestSchema.parse(await readBidWorkRequest(operation.workspace, previousRun.work))
         if (authorization.message_id === previous.authorization.message_id) {
           throw new Error('BID_CAPABILITY_USER_MESSAGE_REQUIRED')
         }
@@ -5401,18 +5404,18 @@ export class BidHostRuntime extends TypertRemoteService {
       const execution = await this.executionAgent(operation, current.stage)
       let run: BidRunContext
       try { run = await operation.runs.start(work) } catch (error) {
-        if (supersede !== undefined && bidSessionTaskState(session).status !== 'suspended') {
+        if (supersede !== undefined && bidSessionTaskState(session).status !== current.status) {
           session.append('bid.task.changed', { state: current })
           await this.ctx.sessions.flush(session)
         }
         throw error
       }
       admitted = true
-      if (supersede !== undefined && current.status === 'suspended') {
+      if (supersede !== undefined) {
         this.cancelRunDecisions(session)
         session.append('bid.run.notice', {
-          noticeId: `run:${current.run.runId}:superseded`, supersedesTurn: null,
-          runId: current.run.runId, stage: current.stage, kind: 'stopped', severity: 'info',
+          noticeId: `run:${supersede.run_id}:superseded`, supersedesTurn: null,
+          runId: supersede.run_id, stage: current.stage, kind: 'stopped', severity: 'info',
           message: '旧能力任务已由新的用户任务替代；旧候选和 checkpoint 已保留，不再自动恢复。',
         })
         await this.ctx.sessions.flush(session)
@@ -5497,7 +5500,13 @@ export class BidHostRuntime extends TypertRemoteService {
         || task.run.runId !== suspendedRunId) throw new BidOrchestratorError('BID_RESUME_NOT_ALLOWED', 'The suspended Bid Run changed before resume.')
       const suspended = task.run
       if (suspended.work.kind === 'file_intake') await readFileIntakeWork(operation.workspace, suspended.work)
-      else await readHostWork(operation.workspace, suspended.work)
+      else {
+        const payload = await readHostWork(operation.workspace, suspended.work)
+        if (suspended.work.kind === 'capability_task'
+          && capabilityTaskRequestSchema.parse(payload).authorization.session_id !== String(session.id)) {
+          throw new BidOrchestratorError('BID_RESUME_OWNER_SESSION_REQUIRED', '请回到原授权会话继续此任务；当前会话不能恢复原 Work。')
+        }
+      }
       if (recovery !== undefined) {
         const main = this.ctx.agents.get(session.id)
         const eligibility = bidRunRecoveryEligibility(session)

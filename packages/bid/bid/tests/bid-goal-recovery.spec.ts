@@ -34,6 +34,12 @@ it('keeps repairable candidate issues distinct from provider and input faults', 
   }]).recovery?.kind).toBe('blocked')
 })
 
+it.each(['QUOTA', 'AUTH', 'NO_ADAPTER'])('模型通道 %s 阻断自动恢复且保留真实原因', (code) => {
+  const issues = [{ code, message: '模型通道不可用' }]
+  expect(safeRecoverableBidFailure(work, new BidStageExecutionError(issues)))
+    .toMatchObject({ issues, recovery: { kind: 'blocked', reason: '模型通道不可用' } })
+})
+
 it('相同指纹与方案只在同一 Work 内视为重复', async () => {
   const ctx = new Context()
   cleanup.push(() => ctx.fiber.dispose())

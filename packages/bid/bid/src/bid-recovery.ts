@@ -1,6 +1,6 @@
 /** S2–S5 recovery decisions derived from Host-owned failures. */
 import { createHash } from 'node:crypto'
-import type { BidRunProgress, BidTaskFailure, BidWorkDescriptor, StageValidationIssue } from './control-plane-contract.ts'
+import type { BidRunData, BidRunProgress, BidTaskFailure, BidTaskState, BidWorkDescriptor, StageValidationIssue } from './control-plane-contract.ts'
 import { BidStageExecutionError } from './control-plane-contract.ts'
 import type { Session } from '@deepseek-ai/dsh-session'
 import { BID_INITIAL_TASK_STATE, reduceBidTaskState } from './runtime-state.ts'
@@ -9,10 +9,29 @@ import { safeBidRunError, sanitizeBidErrorText } from './safe-error.ts'
 
 type Recovery = NonNullable<BidTaskFailure['recovery']>
 
+/**
+ * 查找当前可由新用户目标接管的能力 Run；不授予恢复或消息权限。
+ * @param session 拥有原 Run 记录的 Main 会话。
+ * @param task 项目锁内读取或会话投影的当前状态。
+ * @returns 当前挂起 Run 或与当前失败通知对应的最后一个能力 Run。
+ */
+export function bidCapabilityTakeoverRun(session: Session, task: BidTaskState): BidRunData | undefined {
+  if (task.status === 'suspended') {
+    return task.run.work.kind === 'capability_task' && task.run.cause !== 'awaiting_input' ? task.run : undefined
+  }
+  if (task.status !== 'failed') return
+  const started = session.events.findLast(event => event.type === 'bid.run.started')
+  const notice = session.events.findLast(event => event.type === 'bid.run.notice')
+  if (started?.type !== 'bid.run.started' || notice?.type !== 'bid.run.notice'
+    || started.data.run.work.kind !== 'capability_task' || started.data.run.work.stage !== task.stage
+    || notice.data.noticeId !== `run:${started.data.run.runId}:failed` || notice.data.stage !== task.stage) return
+  return started.data.run
+}
+
 const STAGES = new Set(['tender_analysis', 'outline_generation', 'evidence_mapping', 'chapter_writing'])
 const BLOCKED_CODE = new RegExp(
   'INPUT_(?:INVALID|CHANGED|MISMATCH|MISSING|CORRUPT)|FILE_(?:MISSING|CORRUPT)|REVISION_(?:CONFLICT|MISMATCH)|RUN_RETIRED|EACCES|EPERM|'
-  + 'CHAPTER_REVISION_(?:NOT_WRITABLE|SELECTION_INVALID|CONTEXT_UNAVAILABLE)|CREDENTIAL|QUOTA|PROVIDER|INFRASTRUCTURE|'
+  + 'CHAPTER_REVISION_(?:NOT_WRITABLE|SELECTION_INVALID|CONTEXT_UNAVAILABLE)|CREDENTIAL|QUOTA|PROVIDER|INFRASTRUCTURE|^AUTH$|^NO_ADAPTER$|'
   + 'CONTEXT_WINDOW_EXCEEDED|FATAL|CORRUPTION|FINGERPRINT|SEMANTIC_BLOCKED|CATALOG_MISMATCH|'
   + 'SCOPE_STALE|DEPENDENCY_STALE|STALE_BASE|PREVIOUS_TARGET_INVALID|INVARIANT', 'iu',
 )

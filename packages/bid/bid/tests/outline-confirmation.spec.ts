@@ -7,6 +7,8 @@ import {
   parseOutlineConfirmationArtifact,
   type OutlineArtifact,
 } from '@deepseek-ai/dsh-bid'
+import { validateOutlineSharedStructure } from '../src/outline-shared-validator.ts'
+import type { StageValidationIssue } from '../src/control-plane-contract.ts'
 
 const outline: OutlineArtifact = {
   schema_version: 3,
@@ -20,6 +22,27 @@ const outline: OutlineArtifact = {
 }
 
 describe('outline confirmation artifacts', () => {
+  it('在可写叶节下新增子章转换父节点并保留原目录', () => {
+    const source: OutlineArtifact = { ...outline, sections: [{ ...outline.sections[0]!,
+      scoring_response_point_ids: ['RP-000001'],
+      scoring_response_points: [{ scoring_id: 'SCORE-1', response_point: '交付计划' }],
+    }] }
+    const edited = applyOutlineEdits(source, parseOutlineEditOperations([
+      { type: 'add_section', parent_id: 'SEC-001', order: 1, writable: true,
+        title: '交付准备', purpose: '准备', must_answer: ['交付准备计划'] },
+      { type: 'add_section', parent_id: 'SEC-001', order: 2, writable: true,
+        title: '交付实施', purpose: '实施', must_answer: ['交付实施计划'] },
+    ]))
+    const issues: StageValidationIssue[] = []
+    validateOutlineSharedStructure(edited.sections, issues)
+    expect(issues).toEqual([])
+    expect(edited.sections[0]).toMatchObject({ id: 'SEC-001', writable: false, must_answer: [],
+      requirement_ids: ['REQ-1'], scoring_ids: ['SCORE-1'],
+      scoring_response_point_ids: [], scoring_response_points: [] })
+    expect(edited.sections.slice(1).map(section => section.requirement_ids)).toEqual([[], []])
+    expect(source.sections[0]).toMatchObject({ writable: true, must_answer: ['交付计划'],
+      scoring_response_point_ids: ['RP-000001'] })
+  })
   it('拆分和合并保留稳定父 ID，子章不机械继承全部业务义务', () => {
     const split = applyOutlineEdits(outline, parseOutlineEditOperations([{ type: 'split_section', section_id: 'SEC-001', children: [
       { title: '交付准备', purpose: '准备', must_answer: ['交付准备计划'] },

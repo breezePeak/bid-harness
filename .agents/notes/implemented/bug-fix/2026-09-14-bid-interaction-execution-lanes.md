@@ -8,7 +8,7 @@ Bid S2–S5 的长任务和公开聊天共用一个 Agent 与 Session 时，Agen
 
 ## Decision
 
-Bid Host 为每个 Long Run 保留一个顶层 Interaction Session，并创建一个 Host 持有的 Execution Session。Interaction Session 只处理公开消息和阶段 scoped 工具；Execution Session 复制模型选项、Workspace 与 Bid preset，使用内部 `subagent` origin 阻止通用 API、UI 和公开消息把它当成聊天目标，并在创建种子中写入一次性 `subagent/descriptor`，使持久化子会话目录能够折叠其身份。阶段模型步骤以及其 Child、Writer 和 Reviewer 都从 Execution Session 派生。
+Bid Host 为每个 Long Run 保留一个顶层 Interaction Session，并创建一个 Host 持有的 Execution Session。Interaction Session 只处理公开消息和阶段 scoped 工具；Execution Session 从最新持久请求 Header 读取 Provider 与模型，保留其他模型选项、Workspace 与 Bid preset，使用内部 `subagent` origin 阻止通用 API、UI 和公开消息把它当成聊天目标，并在创建种子中写入一次性 `subagent/descriptor`，使持久化子会话目录能够折叠其身份。阶段模型步骤以及其 Child、Writer 和 Reviewer 都从 Execution Session 派生；恢复新 Run 时重新读取当前选择。
 
 项目 operation 仍是唯一执行控制器和写入所有者。`BidRunSnapshot` 持久化 `interactionSessionId` 与 `executionSessionId`，控制事件写入 Interaction Session 并广播项目投影；Execution Session 只保存可恢复的模型执行日志。Host 在 Run 和后代 Activity 收敛后释放 Execution Agent，刷新后从项目文件与 Session Log 恢复身份，不把内存对象当作权威状态。
 

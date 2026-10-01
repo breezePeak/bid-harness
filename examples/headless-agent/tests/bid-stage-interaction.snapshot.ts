@@ -55,12 +55,12 @@ it('遗漏导出的计划拒绝后，Main 在原 Work 补齐尾步骤并完成�
   `)
 }, 120_000)
 
-it('完整项目从自然语言拆章，经原文迁移和新叶节写作发布', async () => {
+it.each(['task-planning', 'task-adding'])('完整项目通过 %s 在原章下建立子章，经原文迁移和新叶节写作发布', async (scenario) => {
   const configPath = fileURLToPath(new URL('../bid-stage-interaction.cordis.snapshot.yml', import.meta.url))
   const result = await runLoaderSmoke({
     label: '真实目录拆章与正文完成', tempDirPrefix: 'dsh-bid-task-planning-',
     binScript: fileURLToPath(new URL('./fixtures/bid-stage-interaction-driver.ts', import.meta.url)),
-    configPath, binArgs: [configPath, 'task-planning'], mode: 'src',
+    configPath, binArgs: [configPath, scenario], mode: 'src',
     processTimeoutMs: 90_000,
     tsconfigPath: fileURLToPath(new URL('../../../tsconfig.json', import.meta.url)),
   })
@@ -70,9 +70,29 @@ it('完整项目从自然语言拆章，经原文迁移和新叶节写作发布'
     state: 'completed', source: '只修改本章 S2.3，把三个阶段拆成真实目录子章节，保留原文并完成正文和审核。不要改其他章节。',
     children: ['收集输入', '校验结果', '交付成果'],
     workbench: Array(3).fill({ status: 'completed', content: true }),
-    seedPreserved: true, outsidePreserved: true, exportedChildren: ['收集输入', '校验结果', '交付成果'],
+    seedPreserved: true, outsidePreserved: true, outsideCompleted: true,
+    exportedChildren: ['收集输入', '校验结果', '交付成果'],
     calls: ['bid_project_inspect', 'bid_project_inspect', 'bid_run_task'], userMessages: 1, verifiers: 2,
     interrupted: false, executions: [],
+  })
+}, 120_000)
+
+it('模型切换和原文迁移后中断仍以原 Work 完成资料、正文、审核与发布', async () => {
+  const configPath = fileURLToPath(new URL('../bid-stage-interaction.cordis.snapshot.yml', import.meta.url))
+  const result = await runLoaderSmoke({
+    label: '当前模型下原 Work 完整恢复', tempDirPrefix: 'dsh-bid-selected-route-',
+    binScript: fileURLToPath(new URL('./fixtures/bid-stage-interaction-driver.ts', import.meta.url)),
+    configPath, binArgs: [configPath, 'selected-route'], mode: 'src',
+    processTimeoutMs: 90_000,
+    tsconfigPath: fileURLToPath(new URL('../../../tsconfig.json', import.meta.url)),
+  })
+  expect(JSON.parse(result.stdout)).toMatchObject({
+    state: 'completed', selectedRouteInherited: true, interrupted: true,
+    children: ['收集输入', '校验结果', '交付成果'],
+    workIds: [expect.any(String)], seedPreserved: true, outsidePreserved: true, outsideCompleted: true,
+    workbench: Array(3).fill({ status: 'completed', content: true }),
+    calls: ['bid_project_inspect', 'bid_project_inspect', 'bid_run_task', 'bid_recover_task'],
+    executions: ['outline.update', 'chapter.reorganize', 'chapter.write', 'chapter.review'],
   })
 }, 120_000)
 
@@ -96,12 +116,12 @@ it('主 Agent 在原授权内换用目录编辑能力并接续后续步骤', asy
   })
 }, 75_000)
 
-it('主 Agent 用新用户任务接管挂起 Work 并发布评分目录', async () => {
+it.each(['supersede', 'failed-supersede'])('主 Agent 用新用户任务通过 %s 接管旧 Work 并发布评分目录', async (scenario) => {
   const configPath = fileURLToPath(new URL('../bid-stage-interaction.cordis.snapshot.yml', import.meta.url))
   const result = await runLoaderSmoke({
     label: '挂起能力任务接管源码装配', tempDirPrefix: 'dsh-bid-supersede-snapshot-',
     binScript: fileURLToPath(new URL('./fixtures/bid-stage-interaction-driver.ts', import.meta.url)),
-    configPath, binArgs: [configPath, 'supersede'], mode: 'src',
+    configPath, binArgs: [configPath, scenario], mode: 'src',
     processTimeoutMs: 60_000,
     tsconfigPath: fileURLToPath(new URL('../../../tsconfig.json', import.meta.url)),
   })

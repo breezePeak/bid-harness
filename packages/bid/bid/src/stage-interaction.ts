@@ -40,7 +40,7 @@ import { revisionBatchTaskInputSchema } from './chapter-revision-batch.ts'
 import { buildWritableSectionWorklist } from './section-evidence-context.ts'
 import { assertNoLinkedPath, within } from './workspace-path.ts'
 import type { BidRunData } from './control-plane-contract.ts'
-import { bidRunRecoveryEligibility, bidWritingPlanRecoveryEligibility } from './bid-recovery.ts'
+import { bidCapabilityTakeoverRun, bidRunRecoveryEligibility, bidWritingPlanRecoveryEligibility } from './bid-recovery.ts'
 import { resolveBidToolAuthorization } from './bid-tool-authorization.ts'
 import { bidModelTaskJsonSchema, bindBidModelTask, bindBidModelSteps, bindBidModelProjectQuery,
   bindBidModelWritingPlan, bindBidModelReference, collectBidModelTaskCatalog,
@@ -604,7 +604,7 @@ function renderIdleStageInteractionPrompt(
     `当前 Bid 阶段：${stage}；当前状态：${status}。`,
     '先调用 bid_stage_inspect(view=summary) 获取权威状态。普通聊天只负责查询、解释和理解用户意图，不得直接 read/write Artifact。',
     status === 'ready' ? '普通问答不启动写操作；用户明确授权的局部修改可调用 bid_run_task，不能把该任务当作原生阶段确认。'
-      : '当前失败状态不接纳新的 bid_run_task；读取诊断并使用当前可用的恢复入口。',
+      : '先读取失败诊断。已终止的能力任务不能沿用原授权重试；用户明确澄清或给出新目标后，用 bid_run_task(supersede=true) 创建新 Work。Host 核对新的直接用户消息并保留旧候选；其他失败使用当前可用的恢复入口。',
     '若用户询问为什么没开始或现在能不能继续，应解释当前 Host 状态和正式入口。',
     status === 'ready'
       ? '阶段已经准备好；Host 将自动驱动，不把普通聊天当作启动命令。'
@@ -669,6 +669,7 @@ const CAPABILITY_TASK_GUIDANCE = [
   '资料结果区分已核验的招标、本地或 Web 依据，本次拟采用且保留条件的方案设计，以及待补的企业事实或承诺。研究有 gap 时说明“已完成研究并标明缺口”；正文候选未完整通过时说明“候选已保留，仍需补充或修复”。不要把资料条数、计划或 metadata 当成正文已经通过的证明。',
   '任务根范围用 project、对象表的 section_positions 或 paragraphs 选区。步骤可继承根范围，也可使用 previous_targets 引用前一步真实结果。不要从“全部”“流程”等字词机械扩大范围。',
   'paragraphs 任务只包含一个 chapter.revise 步骤且 scope.source=task，根 reference 和修订 reference 选择相同对象。审批选区使用 issue_position 绑定原意见引用；其他连续原文块选择 section_position、start_paragraph/end_paragraph。Host 从原文计算精确偏移、文字和摘要，模型不计算或抄写。修订能力包含当前正文审核，不追加 chapter.review。',
+  'paragraphs 引用只接受完整连续普通段落，不能选择表格或跨标题。表格修改须在用户已授权的章节范围内使用 chapter 引用，并在 instruction 中限定实际修改位置及保留内容。',
   '初次整本确认仍由原生确认入口完成；局部任务只凭本次真实用户消息授权。同一 Work 的恢复保留原目标与根范围，新用户目标必须创建新 Work。accepted 只表示 Host 接纳；queued、started、suspended、failed 不表示完成。只有 goal_met=true 且需发布的结果已有正式凭据时，才可向用户说已完成、已修改或已修复。',
 ].join('\n')
 
@@ -696,8 +697,9 @@ export function installStageInteractionTools(
       const scope = stage === undefined ? undefined : `${stage}:${suspended === undefined ? task.status : `suspended:${suspended.runId}`}`
       const recoveryAvailable = bidRunRecoveryEligibility(agent.session).eligible
         || bidWritingPlanRecoveryEligibility(agent.session).eligible
+      const takeoverAvailable = bidCapabilityTakeoverRun(agent.session, task) !== undefined
       const hasGoal = toolCtx.get('goals')?.get(agent) !== undefined
-      const actualScope = `${scope ?? 'none'}:${String(hasGoal)}:${String(recoveryAvailable)}`
+      const actualScope = `${scope ?? 'none'}:${String(hasGoal)}:${String(recoveryAvailable)}:${String(takeoverAvailable)}`
       const existing = mounted.get(agent)
       if (existing?.scope === actualScope) return
       existing?.dispose()
@@ -719,7 +721,7 @@ export function installStageInteractionTools(
               : stage === 'outline_generation' ? BID_INTERACTION_TOOL_NAMES.slice(0, 3)
                 : stage === 'evidence_mapping' ? BID_INTERACTION_TOOL_NAMES.slice(0, 4) : [BID_INTERACTION_TOOL_NAMES[0], BID_INTERACTION_TOOL_NAMES[4]]
       const installed = [...new Set([...available, 'bid_project_inspect',
-        ...task.status === 'failed' || task.status === 'suspended'
+        ...task.status === 'failed' && !takeoverAvailable || task.status === 'suspended'
           && (suspended?.work.kind !== 'capability_task' || suspended.cause === 'awaiting_input')
           ? [] : ['bid_run_task'],
         ...task.status === 'suspended' && suspended?.work.kind === 'capability_task'
@@ -930,8 +932,9 @@ export function installStageInteractionTools(
                 let supersede: z.infer<typeof supersedeSchema> | undefined
                 if (request.supersede === true) {
                   const state = await readBidProjectState(workspaceFor(agent.session))
-                  if (state?.status !== 'suspended') throw new Error('BID_CAPABILITY_SUPERSEDE_NOT_ALLOWED')
-                  supersede = { run_id: state.run.runId, expected_project_revision: state.revision }
+                  const run = state === undefined ? undefined : bidCapabilityTakeoverRun(agent.session, state)
+                  if (run === undefined || state === undefined) throw new Error('BID_CAPABILITY_SUPERSEDE_NOT_ALLOWED')
+                  supersede = { run_id: run.runId, expected_project_revision: state.revision }
                 }
                 return execute(agent, { action: name, ...supersede === undefined ? {} : { supersede },
                   task: bindBidModelTask(request.task, catalog) }, exec.signal)

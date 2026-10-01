@@ -4492,6 +4492,28 @@ describe('S4 Host 准入与最终确认', () => {
     }
   })
 
+  it.each(['QUOTA', 'AUTH', 'NO_ADAPTER'])('Child %s 保留模型错误码且不进入限流重试', async (code) => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-task-provider-blocked-')))
+    const fixture = mappingFixture(workspace, await writeInputs(workspace))
+    const execution = executeEvidenceMapping(fixture.agent, workspace, buildBidStageTask('evidence_mapping'), {
+      maxRepairAttempts: 0, maxConcurrency: 1, maxInfrastructureRetryAttempts: 1,
+    })
+    const rejection = expect(execution).rejects.toMatchObject({ issues: [{ code }] })
+    await vi.waitFor(() => { expect(fixture.starts).toHaveLength(1) })
+    const failed = fixture.starts[0]!
+    const child = fixture.children.get(String(failed.request.childId))!
+    ;(child.session.events as unknown[]).push({
+      type: 'turn/end', data: { reason: { kind: 'error', error: {
+        code, message: '429: inference exceeds tpm/rpm limit',
+      } } },
+    })
+    failed.complete()
+    await rejection
+    expect(fixture.starts).toHaveLength(1)
+    expect((await readEvidenceMappingProgress(workspace))?.tasks[0])
+      .toMatchObject({ status: 'failed', latest_issue: expect.stringContaining('tpm/rpm') })
+  })
+
   it('Child RATE_LIMIT 耗尽共享预算时保留限流根因', async () => {
     const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-task-rate-limit-exhausted-')))
     const fixture = mappingFixture(workspace, await writeInputs(workspace))
