@@ -11,6 +11,7 @@ import type {} from '@deepseek-ai/dsh-subagent'
 import type { ToolExecution } from '@deepseek-ai/dsh-tools'
 import { ToolArgsError } from '@deepseek-ai/dsh-tools'
 import { recordOnlySchemaVersion } from './schema-version.ts'
+import { safeRecoverableBidFailure } from './bid-recovery.ts'
 import type { BidManifest, BidWorkspace } from './index.ts'
 import { attachChapterPlan, CHAPTER_PLAN_TOOLS } from './chapter-writing-planning.ts'
 import { appendChapterWebReferences, bindChapterWriterInput, createChapterWriterReferences, mergeChapterWebMaterials, projectChapterWriterCandidate, renderChapterWriterReferences, type ChapterWriterReferences } from './chapter-writing-writer.ts'
@@ -2752,6 +2753,18 @@ async function runChapterWriting(
           Object.assign(log, committed)
         })
         await logWrites
+        if (batchTask !== undefined) {
+          const missing = review.revision_issue_checks?.filter(item => item.status === 'needs_input') ?? []
+          const needsInput = review.verdict === 'attention' || missing.length > 0
+          const satisfied = review.verdict === 'pass' && batchTask.issue_ids.every(id =>
+            review.revision_issue_checks?.some(item => item.issue_id === id && item.status === 'satisfied'))
+          await updateBatchTask(sectionId, { status: needsInput ? 'needs_input' : satisfied ? 'completed' : 'failed',
+            failure: satisfied ? null : {
+              code: needsInput ? 'CHAPTER_EXTERNAL_INPUT_REQUIRED' : 'BID_REVISION_REVIEW_INCOMPLETE',
+              message: [...missing.map(item => item.reason), ...review.blocking_issues].join('；') || '审批意见未全部满足。',
+              phase: 'reviewing',
+            } })
+        }
         reportWritingProgress('章节正文已完成，正在推进剩余章节')
         return { candidate, entry: entryFor(context, candidate, reviewPath, candidateSha256) }
       }
@@ -3106,6 +3119,9 @@ async function runChapterWriting(
           let result: Awaited<ReturnType<ChapterWriterChild['run']>>
           try { result = await run.run(recoveryPrompt) } finally { childSetups.delete(label) }
           signal.throwIfAborted()
+          if (revisionBatch !== undefined && result.failure !== undefined) {
+            throw Object.assign(new Error(result.failure.message), { code: result.failure.code })
+          }
           latestStopReason = result.stopReason
           const captured = capturedByChild.get(String(run.id)) ?? new Map()
           const snapshots = buildWebEvidenceSnapshots(captured.values())
@@ -3276,7 +3292,8 @@ async function runChapterWriting(
           if (activeWriterIds.get(sectionId) === String(run.id)) activeWriterIds.delete(sectionId)
           writer = undefined
           capturedByChild.delete(String(run.id))
-          if (effectiveRevision !== undefined) throw error
+          if (effectiveRevision !== undefined || revisionBatch !== undefined
+            && safeRecoverableBidFailure(options.run.work, error).recovery?.kind === 'blocked') throw error
         }
         if (stopAfterVisualIssue) break
         if (stopAfterReview) break
@@ -3314,11 +3331,14 @@ async function runChapterWriting(
       await persistLog()
       reportWritingProgress('章节写作失败，正在保留诊断信息')
       if (revisionBatch !== undefined && batchTask !== undefined) {
+        const failure = safeRecoverableBidFailure(options.run.work, error)
+        const issue = failure.issues?.find(item => item.artifact === failure.recovery?.unit)
+          ?? failure.issues?.[0]
         await updateBatchTask(sectionId, {
           status: 'failed',
           failure: {
-            code: 'CHAPTER_WRITING_FAILED',
-            message: error instanceof Error ? error.message : String(error),
+            code: failure.code !== 'BID_EXECUTOR_ERROR' ? failure.code : issue?.code ?? 'CHAPTER_WRITING_FAILED',
+            message: issue?.message ?? failure.message,
             phase: log.failure_phase,
           },
         })

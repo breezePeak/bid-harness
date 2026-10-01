@@ -4,6 +4,7 @@ import { boot } from '@deepseek-ai/dsh-app-boot'
 import AttachmentLocal from '@deepseek-ai/dsh-attachment-local'
 import { join } from 'node:path'
 import { runMainTaskPlanningLoop } from '../../../../packages/bid/bid/tests/fixtures/main-task-planning-loop.ts'
+import { runTaskExportLoop } from '../../../../packages/bid/bid/tests/fixtures/task-export-loop.ts'
 import { runCapabilityReplanLoop, runCapabilitySupersedeLoop,
   runStageInteractionLoop } from '../../../../packages/bid/bid/tests/fixtures/stage-interaction-loop.ts'
 
@@ -16,5 +17,6 @@ try {
   const run = process.argv[3] === 'replan' ? runCapabilityReplanLoop
     : process.argv[3] === 'supersede' ? runCapabilitySupersedeLoop
       : process.argv[3] === 'task-planning' ? runMainTaskPlanningLoop : runStageInteractionLoop
-  process.stdout.write(`${JSON.stringify(await run(ctx, process.cwd()))}\n`)
+  const result = process.argv[3] === 'task-export' ? await runTaskExportLoop(ctx, process.cwd()) : await run(ctx, process.cwd())
+  process.stdout.write(`${JSON.stringify(result)}\n`)
 } finally { await ctx?.fiber.dispose() }

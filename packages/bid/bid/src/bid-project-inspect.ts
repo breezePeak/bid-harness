@@ -112,7 +112,7 @@ export async function inspectBidProject(
   if (workspace === undefined) return { ...base, available: false, missing: 'BID_CANDIDATE_WORKSPACE_UNAVAILABLE' }
   if (request.object === 'task' || request.object === 'recovery') {
     const statePath = canonical.projectStatePath
-    await assertNoLinkedPath(workspace.root, statePath)
+    await assertNoLinkedPath(canonical.root, statePath)
     let raw: string | undefined
     try { raw = await readFile(statePath, 'utf8') } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error

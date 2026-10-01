@@ -9,7 +9,7 @@ import type { BidTaskVerifier } from '../../src/bid-task-verification.ts'
  */
 export function scriptedVerificationReply(input: {
   requirements?: readonly object[]
-  sources: readonly { selected: boolean }[]
+  sources: readonly { selected: boolean; text?: string }[]
   task: { steps: readonly { call: { capability: string } }[] }
 }): object {
   const check = { met: true, reason: '测试指定的执行器校验已通过' }
@@ -18,7 +18,8 @@ export function scriptedVerificationReply(input: {
     new_children: false, completed_content: false, repair: false, preserve_migrated_content: false, check }
   return { scope_authorized: true, sources: input.sources.map((source, index) => ({
     relevant: source.selected, requirements: !source.selected ? [] : [requirement,
-      ...index === 0 && input.task.steps.some(step => step.call.capability === 'docx.export')
+      ...index === 0 && (input.task.steps.some(step => step.call.capability === 'docx.export')
+        || input.sources[0]?.text === '更正要求并导出 Word。')
         ? [{ ...requirement, description: '执行器测试的独立导出尾步骤', object: 'export' }] : []],
   })) }
 }

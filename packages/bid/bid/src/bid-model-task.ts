@@ -44,7 +44,9 @@ type CatalogKind = typeof fields[keyof typeof fields][1]
 const fieldMap: ReadonlyMap<string, readonly [string, CatalogKind]> = new Map(Object.entries(fields))
 const taskProgramFields = new Set(['task_id', 'content_assignments', 'assignments', 'business_bindings',
   'writing_request_id', 'attempt_id', 'base_plan_version', 'defer_content_migration'])
-type CatalogEntry = { readonly id: string; readonly label: string }
+type CatalogEntry = { readonly id: string
+  readonly label: string
+  readonly issue?: { readonly issue_id: string; readonly status: string; readonly reference: object } }
 
 /** 一次已记录 inspect 提供的对象表；模型不可提供或修改其中的身份。 */
 export interface BidModelTaskCatalog {
@@ -136,8 +138,10 @@ export async function collectBidModelTaskCatalog(workspace: BidWorkspace, sessio
         .map(item => ({ id: item.id, label: item.normalized_rule })),
       response_points: points === undefined ? [] : parseScoringResponsePointCatalog(JSON.parse(points)).points
         .map(item => ({ id: item.id, label: item.text })),
-      issues: queue.issues.filter(issue => issue.status === 'pending').map(issue => ({ id: issue.issue_id,
-        label: issue.section_title + '：' + issue.instruction })),
+      issues: queue.issues.map(issue => ({ id: issue.issue_id,
+        label: issue.section_title + '：' + issue.instruction,
+        issue: { issue_id: issue.issue_id, status: issue.status,
+          reference: { section_id: issue.section_id, ...issue.reference } } })),
       templates: templates.templates.map(template => ({ id: template.id, label: template.name })),
       messages: session?.events.flatMap(event => event.type !== 'user/message'
       || !['user', 'goal'].includes(event.data.source.kind) ? [] : [{
@@ -152,7 +156,7 @@ export async function collectBidModelTaskCatalog(workspace: BidWorkspace, sessio
 }
 
 /**
- * 将 Host 对象表投影为不含 ID 和摘要的模型输入。
+ * 将 Host 对象表投影为位置选择；审批意见附带历史状态与原始引用供追溯。
  * @param catalog 已冻结的对象及正文选区。
  * @param bodySections 此次正文 inspect 实际读取的章节；其他章节不投影正文。
  * @param window 对象页和正文窗口；位置始终是完整对象表中的位置。
@@ -165,7 +169,8 @@ export function presentBidModelTaskCatalog(catalog: BidModelTaskCatalog, bodySec
   const offset = window.offset ?? 0
   const maxChars = window.maxChars ?? 6_000
   const view = (entry: CatalogEntry, position: number) => ({ position, label: entry.label.slice(0, 1_500),
-    label_total_chars: entry.label.length, label_truncated: entry.label.length > 1_500 })
+    label_total_chars: entry.label.length, label_truncated: entry.label.length > 1_500,
+    ...entry.issue === undefined ? {} : entry.issue })
   const namespaces = { ...catalog.objects, draft_sections: catalog.outlineDraft?.sections ?? [] }
   const latestMessage = catalog.objects.messages.at(-1)
   const pages = Object.fromEntries(Object.entries(namespaces).map(([kind, entries]) => [kind,

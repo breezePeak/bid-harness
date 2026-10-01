@@ -81,3 +81,16 @@ describe('项目级只读检查', () => {
     expect((next.data as Array<{ id: string }>)[0]?.id).toBe('REQ-3')
   })
 })
+
+it('候选任务检查使用正式状态文件所属根，候选产物仍检查候选根', async () => {
+  const canonical = await project()
+  const candidate = await project()
+  await checkpointBidProjectState(canonical, { stage: 'chapter_writing', status: 'completed', run: null })
+  expect(await inspectBidProject(canonical, { object: 'task', source: 'candidate' }, candidate))
+    .toMatchObject({ available: true, source: 'candidate', data: { status: 'completed' } })
+  expect(await inspectBidProject(canonical, { object: 'task', source: 'candidate' }))
+    .toMatchObject({ available: false, missing: 'BID_CANDIDATE_WORKSPACE_UNAVAILABLE' })
+  Object.defineProperty(candidate, 'projectRoot', { value: canonical.projectRoot })
+  await expect(inspectBidProject(canonical, { object: 'chapters', source: 'candidate', section_ids: ['SEC-1'] }, candidate))
+    .rejects.toThrow('bid-workspace-path-outside-root')
+})

@@ -14,6 +14,7 @@ import { buildParagraphRevisionReviewPath, readParagraphRevisionReview } from '.
 import { buildChapterRevisionLineagePath } from './chapter-revision-lineage.ts'
 import { parseChapterReviewArtifact } from './chapter-writing-review-artifacts.ts'
 import { assertNoLinkedPath, within } from './workspace-path.ts'
+import { BidStageExecutionError } from './control-plane-contract.ts'
 
 type RevisionCall = Extract<BidCapabilityCall, { capability: 'chapter.revision_batch' }>
 /** 在既有 Run 内执行已由 Host 从冻结意见构造的批次。 */
@@ -51,7 +52,7 @@ export async function allowedRevisionCapabilityWrites(
  * @param call 已授权的正文分组。
  * @param context 当前候选及唯一 Run。
  * @param runner 原批处理器的底层执行入口。
- * @returns 保存的逐项结果；局部缺输入不丢弃其他候选。
+ * @returns 保存的逐项结果；真实缺输入等待用户，内部失败抛出原错误并保留候选。
  */
 export async function executeRevisionCapability(
   call: RevisionCall, context: BidCapabilityExecutionContext, runner: CapabilityRevisionRunner,
@@ -93,9 +94,20 @@ export async function executeRevisionCapability(
   // 完成项依据当前正文审核复用；冲突及其依赖留在同一候选，不妨碍独立任务。
   await validateRevisionCapability(call, context, { target_section_ids: [...hashes.keys()], changed_artifacts: [],
     change_summary: '检查已完成候选', warnings: [], missing_topics: [], needs_input: false })
-  const runnable = batch.tasks.filter(task => task.status !== 'completed' && task.status !== 'conflict'
-    && task.status !== 'blocked')
+  const conflictIds = new Set(batch.tasks.filter(task => task.status === 'conflict').map(task => task.task_id))
+  for (let changed = true; changed;) {
+    changed = false
+    for (const task of batch.tasks) if (!conflictIds.has(task.task_id) && task.depends_on.some(id => conflictIds.has(id))) {
+      conflictIds.add(task.task_id)
+      changed = true
+    }
+  }
+  const runnable = batch.tasks.filter(task => task.status !== 'completed' && !conflictIds.has(task.task_id))
   const runnableIds = new Set(runnable.map(task => task.task_id))
+  if (runnable.some(task => task.status !== 'queued')) await writeRevisionBatch(context.working, {
+    ...batch, status: 'running', tasks: batch.tasks.map(task => runnableIds.has(task.task_id)
+      ? { ...task, status: 'queued', failure: null, started_at: null, completed_at: null } : task), updated_at: Date.now(),
+  })
   const execution: RevisionBatchExecutionInput = { batchId, tasks: runnable.map(task => ({
     ...task, depends_on: task.depends_on.filter(id => runnableIds.has(id)), issues: task.issue_ids.map((id) => {
       const issue = issues.find(item => item.issue_id === id)
@@ -111,7 +123,22 @@ export async function executeRevisionCapability(
   if (finished === null) throw new Error('BID_REVISION_BATCH_NOT_FOUND')
   await writeRevisionBatch(context.working, { ...finished,
     status: finished.tasks.every(task => task.status === 'completed') ? 'completed' : 'failed', updated_at: Date.now() })
-  const missing = finished.tasks.filter(task => task.status !== 'completed')
+  const waitingIds = new Set(finished.tasks.filter(task => task.status === 'needs_input').map(task => task.task_id))
+  for (let changed = true; changed;) {
+    changed = false
+    for (const task of finished.tasks) if (task.status === 'blocked' && !waitingIds.has(task.task_id)
+      && task.depends_on.some(id => waitingIds.has(id))
+      && task.depends_on.every(id => waitingIds.has(id) || finished.tasks.some(item => item.task_id === id && item.status === 'completed'))) {
+      waitingIds.add(task.task_id)
+      changed = true
+    }
+  }
+  const failures = finished.tasks.filter(task => task.status !== 'completed' && !waitingIds.has(task.task_id))
+  if (failures.length > 0) throw new BidStageExecutionError(failures.map(task => ({
+    code: task.failure?.code ?? (task.status === 'conflict' ? 'BID_REVISION_CONFLICT' : 'BID_REVISION_TASK_FAILED'),
+    message: task.failure?.message ?? task.status, artifact: task.section_id, path: task.task_id,
+  })))
+  const missing = finished.tasks.filter(task => task.status === 'needs_input')
     .map(task => task.section_id + '：' + (task.failure?.message ?? task.status))
   const changed: string[] = []
   for (const path of context.allowedWrites) {
@@ -124,7 +151,7 @@ export async function executeRevisionCapability(
 }
 
 /**
- * 每项成功候选须有当前正文对应的 Delta 或完整审核；未满足项保留待输入。
+ * 每项成功候选须有当前正文对应的 Delta 或完整审核，恢复不能重复执行成功项。
  * @param _call 审批批次输入。
  * @param context 当前步骤。
  * @param result 候选结果。

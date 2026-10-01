@@ -3,14 +3,14 @@ import { createHash } from 'node:crypto'
 import { lstat, readFile } from 'node:fs/promises'
 import { z } from 'zod'
 import type { BidWorkspace } from './index.ts'
-import { bidCapabilityResultSchema } from './bid-capability-contract.ts'
+import { bidCapabilityResultSchema, type BidCapabilityTask } from './bid-capability-contract.ts'
 import type { BidRunContext } from './run-coordinator.ts'
 import { assertNoLinkedPath, within } from './workspace-path.ts'
 import { bidTaskVerificationSchema, type BidTaskVerification } from './bid-task-verification.ts'
 import type { BidTaskSourceSnapshot } from './bid-task-source.ts'
 import { readRevisionQueue, REVISION_QUEUE_PATH, revisionQueueArtifactSchema } from './chapter-revision-queue.ts'
 import { readCapabilityOutlineBaseline } from './outline-draft-store.ts'
-import { outlineSectionScope } from './section-evidence-context.ts'
+import { resolveBidTaskSections } from './bid-task-sections.ts'
 import { parseRevisionBatchArtifact } from './chapter-revision-batch.ts'
 import { recordOnlySchemaVersion } from './schema-version.ts'
 
@@ -136,7 +136,7 @@ export async function readCapabilityPublicationReceipt(
 export async function publishCapabilityChanges(
   run: BidRunContext, canonical: BidWorkspace, working: BidWorkspace,
   paths: readonly string[], removedPaths: readonly string[],
-  verified?: { readonly verification: BidTaskVerification; readonly source: BidTaskSourceSnapshot },
+  verified?: { readonly verification: BidTaskVerification; readonly source: BidTaskSourceSnapshot; readonly task: BidCapabilityTask },
 ): Promise<CapabilityPublicationReceipt> {
   if (run.work.kind !== 'capability_task') throw new Error('BID_CAPABILITY_WORK_REQUIRED')
   const writes = [...new Set(paths)]
@@ -166,16 +166,16 @@ export async function publishCapabilityChanges(
     : (await readCapabilityOutlineBaseline(working)).outline
   const batches = files.filter(file => file.path.startsWith('chapters/revisions/batches/'))
     .map(file => parseRevisionBatchArtifact(JSON.parse(Buffer.from(file.bytes).toString('utf8'))))
-  const issueResults = verified?.source.issues.map((issue) => {
+  const issueResults = verified === undefined ? undefined : await Promise.all(verified.source.issues.map(async (issue) => {
     const roots = verified.verification.requirements.filter(item => item.source_id === issue.issue_id)
       .flatMap(item => item.section_ids)
-    const ids = outline === undefined ? new Set(roots) : outlineSectionScope(outline,
+    const ids = outline === undefined ? new Set(roots) : await resolveBidTaskSections(canonical, working, verified.task,
       roots.length === 0 ? [issue.section_id] : roots)
     return { issue_id: issue.issue_id, target_section_ids: outline === undefined ? [...ids]
       : outline.sections.filter(item => item.writable && ids.has(item.id)).map(item => item.id),
     batch_id: batches.find(batch => batch.issue_ids.includes(issue.issue_id))?.batch_id ?? null,
     work_id: run.work.workId, result_ref: resultPath(run.work.workId) }
-  })
+  }))
   const receipt = capabilityPublicationReceiptSchema.parse({
     schema_version: 1,
     work_id: run.work.workId,

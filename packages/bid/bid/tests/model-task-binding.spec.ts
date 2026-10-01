@@ -203,3 +203,44 @@ it('选择表分页保留全局位置，正文窗口不会泄露其他块或冒�
   expect(JSON.stringify(visible)).not.toContain('private-')
   expect(JSON.stringify(visible)).not.toContain('流程一：收集输入。')
 })
+
+it('新会话可通过模型对象表选择历史 completed 意见，新授权冻结最新正文而保留旧记录', async () => {
+  const { workspace, body, section } = await fixture()
+  let queue = addRevisionIssue(await readRevisionQueue(workspace), { section_id: 'S2.3', scope: 'chapter',
+    reference: { scope: 'chapter', base_content_sha256: chapterContentSha256(body) },
+    instruction: '旧意见假完成，须定向纠正', suggestion: null }, '流程章', 1)
+  const previous = { ...queue.issues[0]!, status: 'completed' as const, batch_id: 'historical-batch' }
+  queue = { ...queue, issues: [previous] }
+  await writeRevisionQueue(workspace, queue)
+  const latest = body + '\n当前新增原文。\n'
+  await writeFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), latest)
+  const ctx = new Context()
+  await ctx.plugin(SessionStore)
+  try {
+    const session = ctx.sessions.create()
+    const message = createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: '纠正这条历史假完成意见，仅处理本章。' }] })
+    session.append('turn/start', { turn: 1 })
+    session.append('user/message', message, { surfaceOp: 'append' })
+    const catalog = await collectBidModelTaskCatalog(workspace, session)
+    const view = presentBidModelTaskCatalog(catalog) as {
+      issues: Array<{ position: number; issue_id: string; status: string; reference: object }>
+    }
+    expect(view.issues).toMatchObject([{ position: 0, issue_id: previous.issue_id, status: 'completed', reference: previous.reference }])
+    const task = bindBidModelTask({ goal: '定向纠正旧意见', issue_positions: [view.issues[0]!.position],
+      scope: { kind: 'sections', section_positions: [section] }, steps: [{ description: '基于最新正文纠正', scope: { source: 'task' },
+        call: { capability: 'chapter.revise', input: { instruction: previous.instruction,
+          reference: { scope: 'chapter', section_position: section } } } }],
+    }, catalog)
+    expect(task.issue_ids).toEqual([previous.issue_id])
+    expect(task.steps[0]!.call.input).toMatchObject({ reference: { content_sha256: chapterContentSha256(latest) } })
+    const { persistCapabilityTaskRequest } = await import('../src/bid-capability-task.ts')
+    const { readBidWorkRequest } = await import('../src/work-descriptor.ts')
+    const work = await persistCapabilityTaskRequest(workspace, session, 'chapter_writing', task,
+      { session_id: String(session.id), message_id: String(message.id) }, [],
+      { stage: 'chapter_writing', status: 'completed', run: null })
+    expect(await readBidWorkRequest(workspace, work)).toMatchObject({ source_snapshot: {
+      message: { message_id: String(message.id) }, issues: [previous], observed_issues: [],
+    }, task: { steps: [{ call: { input: { reference: { content_sha256: chapterContentSha256(latest) } } } }] } })
+    expect((await readRevisionQueue(workspace)).issues).toEqual([previous])
+  } finally { await ctx.fiber.dispose() }
+})

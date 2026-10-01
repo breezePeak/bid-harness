@@ -93,13 +93,15 @@ it('过期项及其依赖保留冲突，独立任务完成后重入不再执行�
   const { workspace, call, context, runner } = await fixture()
   const path = join(workspace.projectRoot, 'chapters/sections/0001.md')
   await writeFile(path, (await readFile(path, 'utf8')) + '\n外部修改。\n')
-  const first = await executeRevisionCapability(call, context, runner)
-  expect(first.result.needs_input).toBe(true)
+  await expect(executeRevisionCapability(call, context, runner)).rejects.toMatchObject({
+    issues: [expect.objectContaining({ code: 'STALE_BASE', artifact: 'SEC-1' }),
+      expect.objectContaining({ code: 'DEPENDENCY_BLOCKED', artifact: 'SEC-2' })],
+  })
   expect(runner.mock.calls[0]?.[0].tasks.map(task => task.task_id)).toEqual(['task-3'])
   expect((await readRevisionBatch(workspace, 'BATCH-step-1'))?.tasks.map(task => task.status))
     .toEqual(['conflict', 'blocked', 'completed'])
   expect(context.allowedWrites.has('chapters/revisions/queue.json')).toBe(false)
-  await executeRevisionCapability(call, context, runner)
+  await expect(executeRevisionCapability(call, context, runner)).rejects.toThrow('STALE_BASE')
   expect(runner).toHaveBeenCalledOnce()
   expect((await readRevisionQueue(workspace)).issues.every(issue => issue.status === 'pending')).toBe(true)
 })
@@ -113,4 +115,31 @@ it.each(['batch_id', 'task_id', 'section_id', 'after_sha256'] as const)('完成�
   await writeFile(path, JSON.stringify(artifact))
   await expect(executeRevisionCapability(call, context, runner)).rejects.toThrow('BID_REVISION_REVIEW_INCOMPLETE')
   expect(runner).toHaveBeenCalledOnce()
+})
+
+it.each(['failed', 'needs_input'] as const)('批次 %s 保留成功项并按真实原因恢复', async (status) => {
+  const { workspace, call, context, runner } = await fixture()
+  const partial: CapabilityRevisionRunner = async (input, candidate) => {
+    const [failed, dependent, independent] = input.tasks
+    const completed = [independent!]
+    await runner({ ...input, tasks: completed }, candidate)
+    const batch = await readRevisionBatch(workspace, input.batchId)
+    await writeRevisionBatch(workspace, { ...batch!, tasks: batch!.tasks.map(task => task.task_id === failed!.task_id
+      ? { ...task, status, failure: { code: status === 'failed' ? 'CHAPTER_WRITER_SUBMISSION_INCOMPLETE' : 'MATERIAL_MISSING',
+        message: status === 'failed' ? 'Writer 未提交正文' : '缺企业资质材料', phase: 'writing' } }
+      : task.task_id === dependent!.task_id ? { ...task, status: 'blocked', failure: {
+        code: 'DEPENDENCY_BLOCKED', message: '依赖尚未完成', phase: 'writing' } } : task) })
+  }
+  if (status === 'failed') await expect(executeRevisionCapability(call, context, partial)).rejects.toMatchObject({
+    issues: [expect.objectContaining({ code: 'CHAPTER_WRITER_SUBMISSION_INCOMPLETE', artifact: 'SEC-1', path: 'task-1' }),
+      expect.objectContaining({ code: 'DEPENDENCY_BLOCKED', artifact: 'SEC-2' })],
+  })
+  else expect(await executeRevisionCapability(call, context, partial)).toMatchObject({ result: {
+    needs_input: true, missing_topics: ['SEC-1：缺企业资质材料'],
+  } })
+  expect((await readRevisionBatch(workspace, 'BATCH-step-1'))!.tasks.map(task => task.status))
+    .toEqual([status, 'blocked', 'completed'])
+  expect(await executeRevisionCapability(call, context, runner)).toMatchObject({ result: { needs_input: false } })
+  expect(runner.mock.calls.map(([input]) => input.tasks.map(task => task.task_id)))
+    .toEqual([['task-3'], ['task-1', 'task-2']])
 })

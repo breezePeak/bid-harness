@@ -6,6 +6,55 @@ import { LOADER_SMOKE_TEST_TIMEOUT_MS, runLoaderSmoke } from '@deepseek-ai/dsh-l
 import type { SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
 import { expect, it } from 'vitest'
 
+it('遗漏导出的计划拒绝后，Main 在原 Work 补齐尾步骤并完成真实 Word 导出', async () => {
+  const configPath = fileURLToPath(new URL('../bid-stage-interaction.cordis.snapshot.yml', import.meta.url))
+  const result = await runLoaderSmoke({
+    label: '原 Work 补齐导出', tempDirPrefix: 'dsh-bid-task-export-',
+    binScript: fileURLToPath(new URL('./fixtures/bid-stage-interaction-driver.ts', import.meta.url)),
+    configPath, binArgs: [configPath, 'task-export'], mode: 'src', processTimeoutMs: 90_000,
+    tsconfigPath: fileURLToPath(new URL('../../../tsconfig.json', import.meta.url)),
+  })
+  expect(JSON.parse(result.stdout)).toMatchInlineSnapshot(`
+    {
+      "calls": [
+        "bid_project_inspect",
+        "bid_run_task",
+        "bid_stage_inspect",
+        "bid_project_inspect",
+        "bid_plan_task",
+        "bid_recover_task",
+      ],
+      "completedNotices": 1,
+      "displayedSteps": [
+        {
+          "capability": "tender.update",
+          "status": "completed",
+        },
+        {
+          "capability": "docx.export",
+          "status": "completed",
+        },
+      ],
+      "goalMet": true,
+      "planRejected": true,
+      "sameWork": true,
+      "state": "completed",
+      "steps": [
+        {
+          "capability": "tender.update",
+          "status": "completed",
+        },
+        {
+          "capability": "docx.export",
+          "status": "pending",
+        },
+      ],
+      "userMessages": 1,
+      "wordFile": true,
+    }
+  `)
+}, 120_000)
+
 it('完整项目从自然语言拆章，经原文迁移和新叶节写作发布', async () => {
   const configPath = fileURLToPath(new URL('../bid-stage-interaction.cordis.snapshot.yml', import.meta.url))
   const result = await runLoaderSmoke({

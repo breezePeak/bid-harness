@@ -5,6 +5,7 @@ import type { SubagentResult } from '@deepseek-ai/dsh-subagent'
 import { z } from 'zod'
 import { createChapterProtocol, type ChapterProtocol } from './chapter-writing-protocol.ts'
 import { ToolArgsError } from '@deepseek-ai/dsh-tools'
+import { safeBidRunError } from './safe-error.ts'
 import type { ParagraphRevisionReplacement, ParagraphRevisionSegment } from './chapter-paragraph-revision.ts'
 
 /** 局部 Writer 唯一可见的提交工具名。 */
@@ -191,6 +192,10 @@ export function createParagraphRevisionWriterChild(
       })
       if (child === undefined || runtime === undefined) throw new Error('S5 段落 Writer 缺少提交工具。')
       const end = await waitForTurn(parent, child, eventStart, signal)
+      if (end.data.reason.kind === 'error') {
+        const failure = safeBidRunError(end.data.reason.error)
+        throw Object.assign(new Error(failure.message), { code: failure.code })
+      }
       return end.data.reason.kind === 'completed'
         ? { stopReason: 'completed', output: [], structured: runtime.captured() }
         : { stopReason: end.data.reason.kind === 'blocked' ? 'refusal' : end.data.reason.kind, output: [] } as SubagentResult

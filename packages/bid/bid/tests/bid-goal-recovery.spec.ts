@@ -49,7 +49,7 @@ it('相同指纹与方案只在同一 Work 内视为重复', async () => {
 })
 
 it.each(['EVIDENCE_MAPPING_OUTLINE_SCOPE_STALE', 'EVIDENCE_MAPPING_DEPENDENCY_STALE',
-  'OUTLINE_GENERATION_INPUT_CHANGED', 'PREVIOUS_TARGET_INVALID', 'EACCES', 'INVARIANT_VIOLATION'])
+  'OUTLINE_GENERATION_INPUT_CHANGED', 'PREVIOUS_TARGET_INVALID', 'EACCES', 'INVARIANT_VIOLATION', 'STALE_BASE'])
 ('候选可修也不能掩盖后续 %s', (code) => {
   expect(safeRecoverableBidFailure(work, new Error('failed'), [
     { code: 'OUTLINE_GENERATION_CANDIDATE_INVALID', message: 'missing sections' },

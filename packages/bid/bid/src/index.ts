@@ -91,7 +91,7 @@ import { readChapterLocation, readChapterLocations } from './chapter-storage.ts'
 import { BID_CAPABILITIES, defaultBidCapabilityForStage } from './bid-capability-registry.ts'
 import {
   activeCapabilityMappingWorkspace, askCapabilityTaskInput, executeCapabilityTask, patchCapabilityTaskSteps,
-  readCapabilityAwaitingInput, persistCapabilityTaskRequest, findCapabilityTaskRequest,
+  readCapabilityAwaitingInput, persistCapabilityTaskRequest, findCapabilityTaskRequest, readCapabilityTaskCheckpoint,
   capabilityTaskRequestSchema, capabilityTaskCheckpointSchema,
   type CapabilityTaskDispatcher, type CapabilityTaskRequest,
 } from './bid-capability-task.ts'
@@ -99,7 +99,7 @@ import { capabilityPublicationReceiptSchema, readCapabilityPublicationReceipt, r
 import {
   bidCapabilityTaskSchema, validateCapabilityTaskContentFollowup, type BidCapabilityTask,
 } from './bid-capability-contract.ts'
-import { readBidWorkDescriptor } from './work-descriptor.ts'
+import { readBidWorkDescriptor, bidWorkRoot } from './work-descriptor.ts'
 import { freezeBidTaskSource } from './bid-task-source.ts'
 import { createBidCapabilityDispatcher, type BidCapabilityDispatcher } from './bid-capability-dispatcher.ts'
 import { cancelCapabilityRequestsForReset, enqueueCapabilityRequest, markCapabilityRequestApplied, markCapabilityRequestAppliedWithLease,
@@ -5118,7 +5118,7 @@ export class BidHostRuntime extends TypertRemoteService {
       const admitted = Promise.withResolvers<BidRunContext>()
       const completed = this.runCapabilityTask(agent, executionTask, authorization, inputs,
         (run) => { admitted.resolve(run); return Promise.resolve() }, supersede, task).then(async (state) => {
-        if (state.status !== 'failed' && state.status !== 'suspended' && exportStep !== null) {
+        if (state.status !== 'failed' && state.status !== 'suspended') {
           const work = await findCapabilityTaskRequest(new BidWorkspace(key, workspaceConfig(this.config)), authorization)
           if (work === null) throw new Error('BID_CAPABILITY_TASK_REQUEST_MISSING')
           await this.continueCapabilityExport(session, work.workId)
@@ -5156,7 +5156,10 @@ export class BidHostRuntime extends TypertRemoteService {
     const work = await readBidWorkDescriptor(workspace, workId)
     if (work?.kind !== 'capability_task') return true
     const request = capabilityTaskRequestSchema.parse(await readBidWorkRequest(workspace, work))
-    const call = this.capabilityExportStep(request.complete_task ?? request.task)
+    const working = new BidWorkspace(bidWorkRoot(workspace, work), workspace.config)
+    const checkpoint = await readCapabilityTaskCheckpoint(workspace, working, { work }, request, session)
+    const call = this.capabilityExportStep({ ...request.task,
+      steps: checkpoint?.steps.map(record => record.step) ?? (request.complete_task ?? request.task).steps })
     if (call === null) return true
     const receipt = await readCapabilityPublicationReceipt(workspace, work.workId, work.requestSha256)
     if (receipt === null) return false
@@ -5259,7 +5262,8 @@ export class BidHostRuntime extends TypertRemoteService {
           const completed = session.events.some(event => event.type === 'bid.run.completed'
             && event.data.run.work.workId === existing.workId)
           if (!completed) return
-          if (exportStep === null) {
+          const receipt = await readCapabilityPublicationRecord(workspace, existing.workId, existing.requestSha256)
+          if (receipt?.goal_met !== false) {
             await this.acknowledgeQueuedCapability(session, workspace, originWorkId, pending.recordId)
             continue
           }
@@ -5269,16 +5273,18 @@ export class BidHostRuntime extends TypertRemoteService {
         event.type === 'bid.run.completed' && event.data.run.work.workId === existing.workId))) {
         const outcome = await this.runCapabilityTask(agent, executionTask, pending.request.authorization, inputs,
           exportStep === null ? run => markCapabilityRequestApplied(workspace, originWorkId, pending.recordId, run)
-            : undefined)
+            : undefined, undefined, pending.request.task)
         if (outcome.status === 'suspended' || outcome.status === 'failed') return
       }
-      if (exportStep !== null) {
+      const contentWork = await findCapabilityTaskRequest(workspace, pending.request.authorization)
+      if (contentWork !== null) {
+        if (!await this.continueCapabilityExport(session, contentWork.workId)) return
+        await this.acknowledgeQueuedCapability(session, workspace, originWorkId, pending.recordId)
+      } else if (exportStep !== null) {
         const exported = await this.exportDocxWithIdentity(session,
           exportStep.input.template_id as DocxTemplateId | null,
           this.capabilityExportIdentity(pending.request.authorization, exportStep.input.template_id))
         if (!exported.ok) return
-        const contentWork = await findCapabilityTaskRequest(workspace, pending.request.authorization)
-        if (contentWork !== null && !await this.continueCapabilityExport(session, contentWork.workId)) return
         await this.acknowledgeQueuedCapability(session, workspace, originWorkId, pending.recordId)
       }
     }
@@ -5510,8 +5516,7 @@ export class BidHostRuntime extends TypertRemoteService {
           const request = capabilityTaskRequestSchema.parse(await readBidWorkRequest(operation.workspace, suspended.work))
           const raw = await readFile(within(operation.workspace.projectRoot, 'runs/' + suspended.work.workId + '/task-checkpoint.json'), 'utf8')
           const checkpoint = capabilityTaskCheckpointSchema.parse(JSON.parse(raw))
-          const task = { ...request.task, steps: [...checkpoint.steps.map(record => record.step),
-            ...request.complete_task?.steps.filter(step => step.call.capability === 'docx.export') ?? []] }
+          const task = { ...request.task, steps: checkpoint.steps.map(record => record.step) }
           if (checkpoint.verifications?.at(-1)?.plan_sha256 === bidInputFingerprint(task)) {
             throw Object.assign(new Error('原任务核验未通过，请先修改能力步骤或真实业务输入，再恢复原 Work。'), { code: 'BID_RECOVERY_STRATEGY_CHANGE_REQUIRED' })
           }
@@ -6249,16 +6254,23 @@ export class BidHostRuntime extends TypertRemoteService {
           },
         }) } catch (error) {
           candidate.run.signal.throwIfAborted()
-          return { status: 'failed', code: 'BID_CHAPTER_REVISION_FAILED',
-            message: sanitizeBidErrorText(error instanceof Error ? error.message : String(error)) }
+          const failure = safeRecoverableBidFailure(candidate.run.work, error)
+          return { status: 'failed', code: failure.issues?.[0]?.code ?? failure.code ?? 'BID_CHAPTER_REVISION_FAILED',
+            message: failure.issues?.[0]?.message ?? failure.message }
         }
-        return { status: 'completed' }
+        const unit = (await readRevisionBatch(candidate.workspace, batchExecutionInput.batchId))?.tasks
+          .find(task => task.task_id === item.task.task_id)
+        if (unit === undefined) throw new Error('BID_REVISION_BATCH_TASK_NOT_FOUND')
+        if (unit.status === 'completed' || unit.status === 'needs_input') return { status: unit.status }
+        return { status: unit.status === 'blocked' ? 'blocked' : 'failed',
+          code: unit.failure?.code ?? 'BID_CHAPTER_REVISION_FAILED', message: unit.failure?.message ?? '正文修订未完成。' }
       }
       const results = await runParagraphRevisionScheduler({
         tasks: scheduled,
         maxConcurrency: this.config.chapterWritingMaxConcurrency,
-        run: item => isParagraphOnlyRevisionTask(item.task)
-          ? executeParagraphRevisionTask({
+        run: async (item) => {
+          if (!isParagraphOnlyRevisionTask(item.task)) return { status: 'full_review' }
+          try { return await executeParagraphRevisionTask({
             parent: parentFor(item.value.writerId),
             workspace: candidate.workspace,
             batchId: batchExecutionInput.batchId,
@@ -6268,8 +6280,13 @@ export class BidHostRuntime extends TypertRemoteService {
             writerId: item.value.writerId,
             signal: candidate.run.signal,
             customerTextContext,
-          })
-          : Promise.resolve({ status: 'full_review' as const }),
+          }) } catch (error) {
+            candidate.run.signal.throwIfAborted()
+            const failure = safeRecoverableBidFailure(candidate.run.work, error)
+            return { status: 'failed', code: failure.issues?.[0]?.code ?? failure.code ?? 'BID_CHAPTER_REVISION_FAILED',
+              message: failure.issues?.[0]?.message ?? failure.message }
+          }
+        },
         fallback,
       })
       let updatedBatch = await readRevisionBatch(candidate.workspace, batchExecutionInput.batchId)
@@ -6283,7 +6300,7 @@ export class BidHostRuntime extends TypertRemoteService {
             return result.status === 'completed'
               ? { ...task, status: 'completed' as const, failure: null, started_at: task.started_at ?? now, completed_at: task.completed_at ?? now }
               : result.status === 'needs_input'
-                ? { ...task, status: 'needs_input' as const, failure: null, started_at: task.started_at ?? now, completed_at: null }
+                ? { ...task, status: 'needs_input' as const, started_at: task.started_at ?? now, completed_at: null }
                 : result.status === 'blocked'
                   ? { ...task, status: 'blocked' as const, started_at: task.started_at, completed_at: null, failure: {
                     code: result.code, message: result.message, phase: null,
@@ -6979,7 +6996,7 @@ export class BidHostRuntime extends TypertRemoteService {
   }
 
   /**
-   * 读取当前能力 Work 或已登记请求的计划；只返回检查点中的步骤状态。
+   * 读取有效能力计划，导出尾步骤的完成状态来自正式导出回执。
    * @param session 项目公开主会话。
    * @returns 最近任务的只读摘要；尚无能力任务时为 null。
    */
@@ -7018,15 +7035,18 @@ export class BidHostRuntime extends TypertRemoteService {
         || checkpoint.request_sha256 !== run.work.requestSha256)) {
         throw new Error('BID_CAPABILITY_CHECKPOINT_IDENTITY_MISMATCH')
       }
+      const publication = await readCapabilityPublicationRecord(workspace, run.work.workId, run.work.requestSha256)
       const completed = session.events.some(event => event.type === 'bid.run.completed'
         && event.data.run.work.workId === run.work.workId)
+        && publication?.goal_met !== false
       const status: BidCapabilityPlanView['status'] = completed ? 'completed'
         : current?.work.workId === run.work.workId
           ? task.status === 'suspended'
             ? task.run.cause === 'awaiting_input' ? 'awaiting_input' : 'suspended'
             : 'running'
-          : 'failed'
-      const steps = checkpoint?.steps ?? request.task.steps.map((step, index) => ({
+          : this.docxInFlight.has(projectKey(session)) && publication?.verification?.deferred_export === true
+            ? 'running' : 'failed'
+      const steps = checkpoint?.steps ?? (request.complete_task ?? request.task).steps.map((step, index) => ({
         step_id: `${run.work.workId}:${index}`, step, status: 'pending' as const,
       }))
       const firstUnfinished = steps.findIndex(step => step.status !== 'completed')
@@ -7038,8 +7058,9 @@ export class BidHostRuntime extends TypertRemoteService {
         status,
         steps: steps.map((record, index) => ({
           id: record.step_id, capability: record.step.call.capability, description: record.step.description,
-          status: index === firstUnfinished && (status === 'failed' || status === 'awaiting_input')
-            ? status : status === 'suspended' && record.status === 'running' ? 'suspended' as const : record.status,
+          status: record.step.call.capability === 'docx.export' && publication?.export_receipt !== undefined
+            ? 'completed' : index === firstUnfinished && (status === 'failed' || status === 'awaiting_input')
+              ? status : status === 'suspended' && record.status === 'running' ? 'suspended' as const : record.status,
           detail: [
             ...'result' in record ? [record.result.change_summary, ...record.result.missing_topics, ...record.result.warnings] : [],
             ...task.status === 'suspended' && current?.work.workId === run.work.workId

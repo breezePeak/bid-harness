@@ -1794,7 +1794,7 @@ describe('Workspace 项目与独立 Session', () => {
       && event.data.operation.status === 'completed')).toHaveLength(1)
   }, 20_000)
 
-  it('同一句修改并导出先提交能力 Work，再取独立 Word 快照', async () => {
+  it.each([false, true])('同一句修改并导出先提交能力 Work，导出失败只重试尾效果：%s', async (failExport) => {
     const { ctx, workspace, fresh } = await fixture()
     await seedCapabilityProject(workspace, 'complete')
     const firstBodyPath = join(workspace.projectRoot, 'chapters/sections/0001.md')
@@ -1807,7 +1807,14 @@ describe('Workspace 项目与独立 Session', () => {
     agent.session.append('turn/start', { turn: 1 })
     agent.session.append('user/message', createUserMessage({ content: [{ type: 'text', text: '更正要求并导出' }],
       source: { kind: 'user' } }), { surfaceOp: 'append' })
-    const result = await ctx.tools.execute({ agent, name: 'bid_run_task', arguments: await modelTaskArguments(agent, { task: {
+    // oxlint-disable-next-line typescript/unbound-method -- The original method is applied to its workspace below.
+    const original = BidWorkspace.prototype.exportDocxMarkdown
+    let unavailable = failExport
+    vi.spyOn(BidWorkspace.prototype, 'exportDocxMarkdown').mockImplementation(function (this: BidWorkspace, ...args) {
+      if (unavailable) return Promise.reject(new Error('Word 渲染器暂不可用'))
+      return original.apply(this, args)
+    })
+    const argumentsValue = await modelTaskArguments(agent, { task: {
       goal: '更正要求并导出', scope: { kind: 'project' }, steps: [
         { description: '执行已授权的测试步骤', scope: { source: 'task' }, call: { capability: 'tender.update', input: {
           operations: [{ type: 'update_requirement', requirement_id: 'REQ-1',
@@ -1815,14 +1822,36 @@ describe('Workspace 项目与独立 Session', () => {
         } } },
         { description: '执行已授权的测试步骤', scope: { source: 'task' }, call: { capability: 'docx.export', input: { template_id: null } } },
       ],
-    } }), callId: CallId('capability-update-export'), signal: new AbortController().signal })
+    } })
+    const execute = () => ctx.tools.execute({ agent, name: 'bid_run_task', arguments: argumentsValue,
+      callId: CallId('capability-update-export'), signal: new AbortController().signal })
+    const result = await execute()
     expect(result.isError, JSON.stringify(result)).toBe(false)
     expect(result.value).toMatchObject({ execution_status: 'started', completed: false })
+    if (failExport) {
+      await vi.waitFor(() => {
+        expect(agent.session.events.findLast(event => event.type === 'bid.docx_export.changed')?.data.operation.status).toBe('failed')
+      }, { timeout: 20_000 })
+      await settleCapabilityOperations(ctx)
+      const started = agent.session.events.find(event => event.type === 'bid.run.started')
+      if (started?.type !== 'bid.run.started') throw new Error('缺少原 Work')
+      const { readCapabilityPublicationRecord } = await import('../src/bid-capability-changes.ts')
+      const content = await readCapabilityPublicationRecord(workspace, started.data.run.work.workId, started.data.run.work.requestSha256)
+      expect(content).toMatchObject({ goal_met: false })
+      expect(agent.session.events.filter(event => event.type === 'bid.run.notice' && event.data.kind === 'completed')).toHaveLength(0)
+      expect((await ctx.bid.getCapabilityTaskPlan(agent.session))?.status).toBe('failed')
+      unavailable = false
+      expect((await execute()).isError).toBe(false)
+      expect(await readFile(join(workspace.projectRoot, 'analysis/requirements.json'), 'utf8')).toContain('交付范围包含测试')
+      expect(agent.session.events.filter(event => event.type === 'bid.run.started')).toHaveLength(1)
+    }
     await vi.waitFor(() => {
       expect(agent.session.events.findLast(event => event.type === 'bid.docx_export.changed')?.data.operation.status)
         .toBe('completed')
     }, { timeout: 20_000 })
     await settleCapabilityOperations(ctx)
+    expect(agent.session.events.filter(event => event.type === 'bid.docx_export.changed'
+      && event.data.operation.status === 'completed')).toHaveLength(1)
     expect((await readFile(join(workspace.projectRoot, 'analysis/requirements.json'), 'utf8')))
       .toContain('交付范围包含测试')
     const exported = agent.session.events.findLast(event => event.type === 'bid.docx_export.changed')?.data.operation

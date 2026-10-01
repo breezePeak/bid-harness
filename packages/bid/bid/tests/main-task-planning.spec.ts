@@ -312,7 +312,7 @@ it.each(['新增意见', '修改来源'] as const)('已核验任务发布对最�
   } else await writeRevisionQueue(workspace, { ...queue, revision: queue.revision + 1,
     issues: queue.issues.map(item => ({ ...item, instruction: '接纳后修改了原意见' })) })
   const run = createTestBidRunContext({ work })
-  const publication = publishCapabilityChanges(run, workspace, workspace, [], [], { source, verification })
+  const publication = publishCapabilityChanges(run, workspace, workspace, [], [], { source, verification, task })
   if (change === '修改来源') {
     await expect(publication).rejects.toMatchObject({ code: 'BID_TASK_SOURCE_ISSUE_CHANGED' })
     expect(await readCapabilityPublicationReceipt(workspace, work.workId, work.requestSha256)).toBeNull()
@@ -322,4 +322,114 @@ it.each(['新增意见', '修改来源'] as const)('已核验任务发布对最�
       issue_results: [{ issue_id: issue.issue_id, target_section_ids: [issue.section_id], work_id: work.workId }] })
     expect((await readRevisionQueue(workspace)).issues.map(item => item.status)).toEqual(['completed', 'pending'])
   }
+})
+
+it.each(['plan', 'result'] as const)('混合任务 %s 允许正文批次覆盖子集，仍拒绝无关意见与遗漏来源', async (phase) => {
+  const { workspace, session, message, issue } = await fixture()
+  const body = await readFile(join(workspace.projectRoot, 'chapters/sections/0002.md'), 'utf8')
+  const queue = addRevisionIssue(await readRevisionQueue(workspace), { section_id: 'SEC-2', scope: 'chapter',
+    reference: { scope: 'chapter', base_content_sha256: chapterContentSha256(body) },
+    instruction: '将本章拆成真实目录子节', suggestion: null }, '章节2', 2)
+  await writeRevisionQueue(workspace, queue)
+  const second = queue.issues[1]!
+  const task = bidCapabilityTaskSchema.parse({ goal: '分别处理正文和结构意见', issue_ids: [issue.issue_id, second.issue_id],
+    scope: { kind: 'project' }, steps: [{ description: '正文意见使用批次', scope: { source: 'task' },
+      call: { capability: 'chapter.revision_batch', input: { issue_ids: [issue.issue_id], tasks: [{
+        task_id: 'first', section_id: 'SEC-1', issue_ids: [issue.issue_id], depends_on: [],
+      }] } } }, { description: '结构意见使用目录能力', scope: { source: 'task' },
+      call: { capability: 'outline.update', input: { operations: [{ type: 'update_section', section_id: 'SEC-2', title: '结构目标' }] } } }] })
+  const work = await persistCapabilityTaskRequest(workspace, session, 'chapter_writing', task,
+    { session_id: String(session.id), message_id: String(message.id) }, [],
+    { stage: 'chapter_writing', status: 'completed', run: null })
+  const source = capabilityTaskRequestSchema.parse(await readBidWorkRequest(workspace, work)).source_snapshot!
+  const input = { phase, source, task, evidence: await collectBidTaskEvidence(workspace, task, []) }
+  const decision = await executorTestVerifier(input, {} as Parameters<BidTaskVerifier>[1], new AbortController().signal)
+  expect(await validateBidTaskVerification(input, decision, workspace, workspace)).toMatchObject({ unmet: [] })
+  const omitted = { ...decision, requirements: decision.requirements.filter(item => item.source_id !== second.issue_id),
+    checks: decision.checks.slice(0, 2) }
+  expect((await validateBidTaskVerification(input, omitted, workspace, workspace)).unmet)
+    .toContain('核验未覆盖完整原始来源。')
+  const extra = structuredClone(task)
+  if (extra.steps[0]!.call.capability !== 'chapter.revision_batch') throw new Error('缺少批次')
+  extra.steps[0]!.call.input.issue_ids.push('unrelated')
+  expect((await validateBidTaskVerification({ ...input, task: extra }, decision, workspace, workspace)).unmet)
+    .toContain('计划遗漏或增加了原始任务要求处理的审批意见。')
+})
+
+it.each(['plan', 'result'] as const)('导出要求在 %s 核验时必须有唯一末尾步骤', async (phase) => {
+  const { workspace, session, message } = await fixture()
+  const task = bidCapabilityTaskSchema.parse({ goal: '审核并导出', scope: { kind: 'project' }, steps: [{
+    description: '审核', scope: { source: 'task' }, call: { capability: 'chapter.review', input: { reason: '审核' } },
+  }] })
+  const work = await persistCapabilityTaskRequest(workspace, session, 'chapter_writing', task,
+    { session_id: String(session.id), message_id: String(message.id) }, [],
+    { stage: 'chapter_writing', status: 'completed', run: null })
+  const source = capabilityTaskRequestSchema.parse(await readBidWorkRequest(workspace, work)).source_snapshot!
+  const input = { phase, source, task, evidence: await collectBidTaskEvidence(workspace, task, []) }
+  const decision = await executorTestVerifier(input, {} as Parameters<BidTaskVerifier>[1], new AbortController().signal)
+  decision.requirements[0] = { ...decision.requirements[0]!, object: 'export' }
+  const missing = await validateBidTaskVerification(input, decision, workspace, workspace)
+  expect(missing.unmet.join('')).toContain('缺少唯一的末尾 docx.export')
+  expect(missing.goal_met).toBe(false)
+  expect(missing.deferred_export).toBe(false)
+  const tail = { description: '导出 Word', scope: { source: 'task' as const },
+    call: { capability: 'docx.export' as const, input: { template_id: null } } }
+  expect(await validateBidTaskVerification({ ...input, task: { ...task, steps: [...task.steps, tail] } },
+    decision, workspace, workspace)).toMatchObject({ unmet: [], goal_met: false, deferred_export: true })
+  for (const steps of [[tail, ...task.steps], [...task.steps, tail, tail]]) {
+    expect((await validateBidTaskVerification({ ...input, task: { ...task, steps } }, decision, workspace, workspace)).unmet.join(''))
+      .toContain('缺少唯一的末尾 docx.export')
+  }
+})
+
+it('局部合并保留原文与退役来源意见，当前目标解析为合并叶节且拒绝未知节点', async () => {
+  const { workspace, session } = await fixture()
+  const first = await readFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), 'utf8')
+  const second = await readFile(join(workspace.projectRoot, 'chapters/sections/0002.md'), 'utf8')
+  const outside = await readFile(join(workspace.projectRoot, 'chapters/sections/0003.md'), 'utf8')
+  const message = createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: '合并第一、二章，逐字保留原文和表格，处理第二章意见。' }] })
+  session.append('user/message', message, { surfaceOp: 'append' })
+  const queue = addRevisionIssue(await readRevisionQueue(workspace), { section_id: 'SEC-2', scope: 'chapter',
+    reference: { scope: 'chapter', base_content_sha256: chapterContentSha256(second) },
+    instruction: '合并到第一章并保留原文', suggestion: null }, '章节2', 2)
+  await writeRevisionQueue(workspace, queue)
+  const selected = queue.issues.at(-1)!
+  const { indexChapterContentBlocks } = await import('../src/chapter-content-reuse.ts')
+  const { allowedOutlineCapabilityWrites, executeOutlineCapability, validateOutlineCapability } = await import('../src/bid-outline-capabilities.ts')
+  const blocks = [...indexChapterContentBlocks('SEC-1', first), ...indexChapterContentBlocks('SEC-2', second)]
+  const task = bidCapabilityTaskSchema.parse({ goal: '合并且保留原文', issue_ids: [selected.issue_id],
+    scope: { kind: 'sections', section_ids: ['SEC-1', 'SEC-2'] }, steps: [{ description: '合并章节并迁移原文', scope: { source: 'task' },
+      call: { capability: 'outline.update', input: { operations: [{ type: 'merge_sections', section_ids: ['SEC-1', 'SEC-2'],
+        title: '合并交付流程', purpose: '合并交付流程' }], content_assignments: blocks.map(block => ({
+        block_id: block.block_id, source_section_id: block.source_section_id, source_sha256: block.source_sha256,
+        block_sha256: block.sha256, target_section_ids: ['SEC-1'], disposition: 'move',
+      })) } } }, { description: '读取合并后的目标', scope: { source: 'task' },
+      call: { capability: 'chapter.review', input: { reason: '检查合并目标' } } }] })
+  const verifier: BidTaskVerifier = async (...args) => {
+    const result = await executorTestVerifier(...args)
+    return { ...result, requirements: result.requirements.map(item => ({ ...item, preserve_migrated_content: true,
+      section_ids: item.source_id === selected.issue_id ? ['SEC-2'] : ['SEC-1', 'SEC-2'] })) }
+  }
+  const work = await persistCapabilityTaskRequest(workspace, session, 'chapter_writing', task,
+    { session_id: String(session.id), message_id: String(message.id) }, [],
+    { stage: 'chapter_writing', status: 'completed', run: null })
+  const outcome = await executeCapabilityTask(workspace, createTestBidRunContext({ work }), {
+    verifyTask: verifier,
+    allowedWrites: (call, ids, working, stepId) => call.capability === 'outline.update'
+      ? allowedOutlineCapabilityWrites(call, working, stepId, ids) : Promise.resolve(new Set()),
+    execute: async (call, context) => {
+      if (call.capability === 'outline.update') return executeOutlineCapability(call, context)
+      expect(context.sectionIds).toEqual(new Set(['SEC-1']))
+      return { result: { target_section_ids: ['SEC-1'], changed_artifacts: [], change_summary: '读取合并目标',
+        warnings: [], missing_topics: [], needs_input: false } }
+    },
+    validate: async (call, context, result) => { if (call.capability === 'outline.update') await validateOutlineCapability(context, result) },
+  }, {} as Parameters<typeof executeCapabilityTask>[3], session)
+  expect(outcome).toMatchObject({ status: 'completed', receipt: { goal_met: true,
+    issue_results: [{ issue_id: selected.issue_id, target_section_ids: ['SEC-1'] }] } })
+  expect((await readRevisionQueue(workspace)).issues.at(-1)?.status).toBe('completed')
+  expect(await readFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), 'utf8')).toBe(first + second)
+  expect(await readFile(join(workspace.projectRoot, 'chapters/sections/0003.md'), 'utf8')).toBe(outside)
+  const { resolveBidTaskSections } = await import('../src/bid-task-sections.ts')
+  await expect(resolveBidTaskSections(workspace, workspace, task, ['UNKNOWN'])).rejects.toThrow('BID_SECTION_SCOPE_INVALID')
 })

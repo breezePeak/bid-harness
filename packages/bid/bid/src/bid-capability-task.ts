@@ -19,7 +19,6 @@ import { BID_CAPABILITIES, resolveCapabilityStepScope, validateCapabilityResult,
   verifyCapabilityTaskScope } from './bid-capability-registry.ts'
 import { parseConfirmedOutlineArtifact, parseOutlineDraft } from './outline-confirmation-artifacts.ts'
 import { readChapterLocation } from './chapter-storage.ts'
-import { outlineSectionScope } from './section-evidence-context.ts'
 import { readCapabilityPublicationReceipt, readCapabilityStepReceipt, publishCapabilityChanges, publishCapabilityStepChanges,
   type CapabilityPublicationReceipt } from './bid-capability-changes.ts'
 import type { BidRunContext } from './run-coordinator.ts'
@@ -35,6 +34,7 @@ import { bidTaskVerificationSchema, collectBidTaskEvidence, collectBidTaskScopeE
   modelBidTaskVerifier, validateBidTaskVerification,
   type BidTaskVerifier, type BidTaskVerification } from './bid-task-verification.ts'
 import { readPendingChapterReorganization } from './outline-capability-update.ts'
+import { resolveBidTaskSections } from './bid-task-sections.ts'
 
 const sha256Schema = z.string().regex(/^[a-f0-9]{64}$/u)
 const messageReferenceSchema = z.object({ session_id: z.string().min(1), message_id: z.string().min(1) }).strict()
@@ -425,11 +425,12 @@ async function readOutline(workspace: BidWorkspace) {
   return undefined
 }
 
-async function hasScopedChapterContent(workspace: BidWorkspace, task: BidCapabilityTask): Promise<boolean> {
+async function hasScopedChapterContent(workspace: BidWorkspace, task: BidCapabilityTask,
+  canonical: BidWorkspace = workspace): Promise<boolean> {
   const outline = await readOutline(workspace)
   if (outline === undefined) return false
   const selected = task.scope.kind === 'project' ? null
-    : outlineSectionScope(outline, task.scope.kind === 'sections'
+    : await resolveBidTaskSections(canonical, workspace, task, task.scope.kind === 'sections'
       ? task.scope.section_ids : [task.scope.reference.section_id])
   for (const section of outline.sections) {
     if (!section.writable || selected !== null && !selected.has(section.id)) continue
@@ -463,7 +464,7 @@ export async function readCapabilityTaskCheckpoint(
   if (checkpoint.work_id !== run.work.workId || checkpoint.request_sha256 !== run.work.requestSha256) {
     throw new Error('BID_CAPABILITY_CHECKPOINT_IDENTITY_MISMATCH')
   }
-  let expected = request.task.steps.map(step => ({ step, authorization: request.authorization }))
+  let expected = (request.complete_task ?? request.task).steps.map(step => ({ step, authorization: request.authorization }))
   for (const patch of checkpoint.plan_patches) {
     if (patch.from_index > expected.length || patch.authorization.session_id !== session.id
       || !hasBidTaskAuthorization(session, patch.authorization)) {
@@ -508,7 +509,7 @@ function initialCheckpoint(run: BidRunContext, request: CapabilityTaskRequest): 
     work_id: run.work.workId,
     request_sha256: run.work.requestSha256,
     plan_patches: [],
-    steps: request.task.steps.map((step, index) => ({
+    steps: (request.complete_task ?? request.task).steps.map((step, index) => ({
       step_id: stepId(run.work.workId, index),
       step, status: 'pending', authorization: request.authorization,
     })),
@@ -583,7 +584,7 @@ export async function patchCapabilityTaskSteps(
     plan_patches: [...checkpoint.plan_patches, patch] })
   const updatedTask = bidCapabilityTaskSchema.parse({ ...request.task,
     steps: updated.steps.map(record => record.step) })
-  validateCapabilityTaskContentFollowup(updatedTask, await hasScopedChapterContent(working, updatedTask))
+  validateCapabilityTaskContentFollowup(updatedTask, await hasScopedChapterContent(working, updatedTask, canonical))
   await saveCheckpoint(run, canonical, updated)
   return updated
 }
@@ -618,8 +619,7 @@ export async function executeCapabilityTask(
   const removed = new Set<string>()
   const source = request.source_snapshot ?? await freezeBidTaskSource(canonical, session, request.task, request.authorization)
   const verify = async (phase: 'plan' | 'result'): Promise<BidTaskVerification> => {
-    const tail = request.complete_task?.steps.filter(step => step.call.capability === 'docx.export') ?? []
-    const task = { ...request.task, steps: [...checkpoint.steps.map(record => record.step), ...tail] }
+    const task = { ...request.task, steps: checkpoint.steps.map(record => record.step) }
     const requirements = checkpoint.verifications?.find(record => record.scope_authorized && record.unmet.length === 0)?.requirements
     const input = { phase, source, task,
       execution_history: {
@@ -632,7 +632,7 @@ export async function executeCapabilityTask(
       ...(requirements === undefined ? {} : { requirements }),
       ...(phase === 'result' && requirements?.some(requirement => requirement.preserve_migrated_content) === true
         ? { preservation_evidence: await collectBidTaskPreservationEvidence(canonical, working, task) } : {}),
-      evidence: await collectBidTaskEvidence(working, task, [...changed]),
+      evidence: await collectBidTaskEvidence(working, task, [...changed], canonical),
       scope_evidence: await collectBidTaskScopeEvidence(canonical, working, task) }
     const identity = bidInputFingerprint(input)
     let verification = checkpoint.verifications?.find(record => record.phase === phase && record.input_sha256 === identity)
@@ -656,6 +656,8 @@ export async function executeCapabilityTask(
   let previous: { status: 'completed' | 'pending' | 'failed'; result?: BidCapabilityResult } | undefined
   for (const [index, record] of checkpoint.steps.entries()) {
     run.signal.throwIfAborted()
+    // 导出尾步骤由正式发布后的独立导出器消费，始终保留在有效计划中。
+    if (record.step.call.capability === 'docx.export') continue
     let saved = record
     if (saved.status === 'completed') {
       for (const file of saved.result.changed_artifacts) { removed.delete(file); changed.add(file) }
@@ -687,8 +689,23 @@ export async function executeCapabilityTask(
     if (outline === undefined && (request.task.scope.kind !== 'project' || saved.step.scope.source !== 'task')) {
       throw new Error('BID_CAPABILITY_OUTLINE_REQUIRED')
     }
-    const scope = outline === undefined ? { sectionIds: null, paragraphs: null }
-      : resolveCapabilityStepScope(request.task.scope, saved.step.scope, outline, previous)
+    const effectiveTask = { ...request.task, steps: checkpoint.steps.map(step => step.step) }
+    const effectiveScope = request.task.scope.kind !== 'sections' ? request.task.scope
+      : { kind: 'sections' as const, section_ids: [...await resolveBidTaskSections(canonical, working,
+        effectiveTask, request.task.scope.section_ids)] }
+    const effectiveStepScope = saved.step.scope.source !== 'section_ids' ? saved.step.scope
+      : { source: 'section_ids' as const, section_ids: [...await resolveBidTaskSections(canonical, working,
+        effectiveTask, saved.step.scope.section_ids)] }
+    let scope = outline === undefined ? { sectionIds: null, paragraphs: null }
+      : resolveCapabilityStepScope(effectiveScope, effectiveStepScope, outline, previous)
+    if (saved.step.call.capability === 'chapter.reorganize' && scope.sectionIds !== null) {
+      const sourceIds = new Set(scope.sectionIds)
+      for (const id of saved.step.call.input.source_section_ids) {
+        await resolveBidTaskSections(canonical, working, effectiveTask, [id])
+        sourceIds.add(id)
+      }
+      scope = { ...scope, sectionIds: sourceIds }
+    }
     const sectionScopeRoots = outline === undefined || scope.sectionIds === null ? undefined
       : outline.sections.filter(section => scope.sectionIds?.has(section.id)
         && (section.parent_id === null || !scope.sectionIds.has(section.parent_id))).map(section => section.id)
@@ -913,7 +930,7 @@ export async function executeCapabilityTask(
     return issue
   }) }
   const receipt = await publishCapabilityChanges(run, canonical, working, [...changed], [...removed],
-    { verification, source: boundSource })
+    { verification, source: boundSource, task: { ...request.task, steps: checkpoint.steps.map(record => record.step) } })
   return { status: 'completed', receipt,
     results: checkpoint.steps.flatMap(step => step.status === 'completed' ? [step.result] : []) }
 }

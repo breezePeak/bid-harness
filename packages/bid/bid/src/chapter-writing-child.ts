@@ -8,6 +8,8 @@ import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import type { SubagentResult } from '@deepseek-ai/dsh-subagent'
 import { createChapterProtocol, type ChapterProtocol } from './chapter-writing-protocol.ts'
 import { chapterWriterOutputSchema } from './chapter-writing-writer.ts'
+import { safeBidRunError } from './safe-error.ts'
+import type { BidTaskFailure } from './control-plane-contract.ts'
 
 /** 原 Writer 的父会话按持久关系恢复，同一父会话只恢复一次。 */
 export interface ChapterWriterParentResolver {
@@ -85,9 +87,9 @@ export interface ChapterWriterChild {
   /**
    * 提交初始任务或修复意见，等待本轮结束及私有工具的权威结果。
    * @param prompt 本轮章节任务。
-   * @returns 本轮停止原因及成功提交的候选。
+   * @returns 本轮停止原因、成功提交的候选及原模型错误；诊断经过脱敏。
    */
-  run(prompt: string | readonly ContentBlock[]): Promise<SubagentResult>
+  run(prompt: string | readonly ContentBlock[]): Promise<SubagentResult & { readonly failure?: BidTaskFailure }>
   /** Require the current Writer route to declare native image input. */
   assertImageInput(): Promise<void>
   /** 取消并等待 Writer 静止，再释放私有注册；历史会话保留。 */
@@ -257,8 +259,8 @@ export function createChapterWriterChild(
         case 'max-tokens': return { stopReason: 'max-tokens', output: [] }
         case 'blocked': return { stopReason: 'refusal', output: [] }
         case 'error': {
-          const code = /^[A-Za-z0-9_.:-]{1,128}$/u.test(reason.error.code) ? reason.error.code : 'UNKNOWN'
-          return { stopReason: 'error', output: [], diagnostic: `章节模型回合失败（${code}）。` }
+          const failure = safeBidRunError(reason.error)
+          return { stopReason: 'error', output: [], diagnostic: `章节模型回合失败（${failure.code}）。`, failure }
         }
         // TurnEndReason 可由插件扩展；未完成回合不能作为成功提交。
         default: return { stopReason: 'error', output: [], diagnostic: '章节回合未正常完成。' }

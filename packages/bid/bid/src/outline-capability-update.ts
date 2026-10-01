@@ -383,12 +383,15 @@ async function coordinateCapabilityOutline(
     : outlineReassignmentSchema.parse(priorReassignmentRaw).retired_sections
   const oldWriting = writingRaw === undefined ? undefined : parseWritingPlan(writingRaw)
   const oldEvidence = previousEvidence ?? (evidenceRaw === undefined ? undefined : parseEvidenceMapArtifact(evidenceRaw))
-  const retired = oldLeaves.filter(section => !newLeafIds.has(section.id)).map(section => ({
+  const retired = old.sections.filter(section => !outline.sections.some(item => item.id === section.id)
+    || section.writable && !newLeafIds.has(section.id)).map(section => ({
     source_section_id: section.id,
     target_section_ids: [...new Set([
       ...input.content_assignments.filter(item => item.source_section_id === section.id)
         .flatMap(item => item.target_section_ids),
       ...outline.sections.filter(item => item.parent_id === section.id && item.writable).map(item => item.id),
+      ...input.operations.flatMap(operation => operation.type === 'merge_sections' && operation.section_ids.includes(section.id)
+        ? operation.section_ids.slice(0, 1) : []),
     ])],
     ...(oldWriting?.sections.find(item => item.section_id === section.id) === undefined ? {} : {
       writing_task: oldWriting.sections.find(item => item.section_id === section.id),

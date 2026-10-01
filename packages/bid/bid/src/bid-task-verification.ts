@@ -17,6 +17,7 @@ import { zodJsonSchema } from './zod-json-schema.ts'
 import { indexChapterContentBlocks } from './chapter-content-reuse.ts'
 import { parseChapterMetadata } from './chapter-writing-artifacts.ts'
 import { normalizeFlowchartInputs } from './flowchart.ts'
+import { resolveBidTaskSections } from './bid-task-sections.ts'
 
 const hash = z.string().regex(/^[a-f0-9]{64}$/u)
 const evidenceSchema = z.object({ path: z.string().min(1), sha256: hash }).strict()
@@ -167,10 +168,15 @@ export async function collectBidTaskScopeEvidence(
     ? task.scope.section_ids : [task.scope.reference.section_id])
   const locations = await readChapterLocations(canonical)
   const evidence: Array<NonNullable<BidTaskVerificationInput['scope_evidence']>[number]> = []
+  // 授权节点退役会压缩相邻编号；范围外节点仍须保留全部属性及彼此的兄弟顺序。
+  const outsideIdentity = (outline: typeof before, section: typeof before.sections[number]) => allowed === null ? section
+    : { ...section, order: outline.sections.filter(item => item.parent_id === section.parent_id && !allowed.has(item.id))
+      .sort((left, right) => left.order - right.order || left.id.localeCompare(right.id)).findIndex(item => item.id === section.id) }
   for (const section of before.sections.filter(item => allowed === null || !allowed.has(item.id))) {
     const current = after.sections.find(item => item.id === section.id)
-    evidence.push({ section_id: section.id, object: 'outline', outside_scope: allowed !== null, before_sha256: bidInputFingerprint(section),
-      after_sha256: current === undefined ? null : bidInputFingerprint(current) })
+    evidence.push({ section_id: section.id, object: 'outline', outside_scope: allowed !== null,
+      before_sha256: bidInputFingerprint(outsideIdentity(before, section)),
+      after_sha256: current === undefined ? null : bidInputFingerprint(outsideIdentity(after, current)) })
     const location = locations.get(section.id)
     if (location === undefined) continue
     for (const path of [location.contentPath, location.metadataPath, location.reviewPath]) {
@@ -206,7 +212,7 @@ export async function collectBidTaskPreservationEvidence(canonical: BidWorkspace
   const roots = task.scope.kind === 'project' ? before.sections.map(section => section.id)
     : task.scope.kind === 'sections' ? task.scope.section_ids : [task.scope.reference.section_id]
   const beforeScope = outlineSectionScope(before, roots)
-  const afterScope = outlineSectionScope(after, roots)
+  const afterScope = await resolveBidTaskSections(canonical, working, task, roots)
   const beforeLocations = await readChapterLocations(canonical)
   const afterLocations = await readChapterLocations(working)
   const bodies: string[] = []
@@ -249,10 +255,11 @@ export async function collectBidTaskPreservationEvidence(canonical: BidWorkspace
  * @param working 当前候选。
  * @param task 原范围及当前计划。
  * @param changed 已完成步骤的真实变更文件。
+ * @param canonical 原授权身份所属正式目录，默认读取当前工作区。
  * @returns 带内容摘要的完整证据。
  */
 export async function collectBidTaskEvidence(
-  working: BidWorkspace, task: BidCapabilityTask, changed: readonly string[],
+  working: BidWorkspace, task: BidCapabilityTask, changed: readonly string[], canonical: BidWorkspace = working,
 ): Promise<BidTaskVerificationInput['evidence']> {
   const paths = new Set([...changed, 'outline/confirmed-outline.json', 'outline/draft.json',
     'analysis/evidence-map.json', 'chapters/writing-plan.json', 'chapters/execution-plan.json',
@@ -261,8 +268,7 @@ export async function collectBidTaskEvidence(
   const locations = await readChapterLocations(working)
   let ids: ReadonlySet<string> | null = null
   if (task.scope.kind !== 'project') {
-    const outline = (await readCapabilityOutlineBaseline(working)).outline
-    ids = outlineSectionScope(outline, task.scope.kind === 'sections'
+    ids = await resolveBidTaskSections(canonical, working, task, task.scope.kind === 'sections'
       ? task.scope.section_ids : [task.scope.reference.section_id])
   }
   for (const [id, location] of locations) {
@@ -382,8 +388,7 @@ export async function validateBidTaskVerification(
   const scheduled = new Set(input.task.steps.flatMap(step => step.call.capability === 'chapter.revision_batch'
     ? step.call.input.issue_ids : []))
   if ([...bound].some(id => !parsed.relevant_issue_ids.includes(id))
-    || scheduled.size > 0 && (scheduled.size !== parsed.relevant_issue_ids.length
-      || parsed.relevant_issue_ids.some(id => !scheduled.has(id)))) {
+    || [...scheduled].some(id => !parsed.relevant_issue_ids.includes(id))) {
     unmet.push('计划遗漏或增加了原始任务要求处理的审批意见。')
   }
   if (input.requirements !== undefined && JSON.stringify(parsed.requirements) !== JSON.stringify(input.requirements)) {
@@ -403,7 +408,7 @@ export async function validateBidTaskVerification(
   }
   const scopedRequirements = parsed.requirements.filter(item => item.section_ids.length > 0)
   if (scopedRequirements.length > 0) {
-    const outline = (await readCapabilityOutlineBaseline(working)).outline
+    const outline = (await readCapabilityOutlineBaseline(canonical)).outline
     const known = new Set(outline.sections.map(section => section.id))
     const allowed = input.task.scope.kind === 'project' ? known : outlineSectionScope(outline,
       input.task.scope.kind === 'sections' ? input.task.scope.section_ids : [input.task.scope.reference.section_id])
@@ -421,14 +426,20 @@ export async function validateBidTaskVerification(
     })
     const requirement = parsed.requirements[check.requirement_index]
     if (requirement === undefined) throw new Error('BID_TASK_VERIFICATION_REQUIREMENT_INVALID')
-    if (requirement.object === 'export') continue
+    if (requirement.object === 'export') {
+      const positions = input.task.steps.flatMap((step, index) => step.call.capability === 'docx.export' ? [index] : [])
+      if (positions.length !== 1 || positions[0] !== input.task.steps.length - 1) {
+        unmet.push(requirement.description + '：缺少唯一的末尾 docx.export 步骤。')
+      } else if (input.phase === 'plan' && !check.met) unmet.push(requirement.description + '：' + check.reason)
+      continue
+    }
     if (!check.met || input.phase === 'result' && check.evidence.length === 0) unmet.push(requirement.description + '：' + check.reason)
     if (input.phase !== 'result') continue
     if (requirement.new_children) {
       const before = (await readCapabilityOutlineBaseline(canonical)).outline
       const outline = (await readCapabilityOutlineBaseline(working)).outline
       const allowed = input.task.scope.kind === 'project' ? null
-        : outlineSectionScope(outline, input.task.scope.kind === 'sections'
+        : await resolveBidTaskSections(canonical, working, input.task, input.task.scope.kind === 'sections'
           ? input.task.scope.section_ids : [input.task.scope.reference.section_id])
       if (requirement.section_ids.length === 0 || requirement.section_ids.some((id) => {
         const parent = outline.sections.find(section => section.id === id)
@@ -441,9 +452,10 @@ export async function validateBidTaskVerification(
     if (requirement.completed_content || requirement.repair && requirement.object === 'content') {
       const outline = (await readCapabilityOutlineBaseline(working)).outline
       const roots = requirement.section_ids.length > 0 ? requirement.section_ids
-        : input.task.scope.kind === 'project' ? outline.sections.filter(section => section.parent_id === null).map(section => section.id)
+        : input.task.scope.kind === 'project' ? (await readCapabilityOutlineBaseline(canonical)).outline.sections
+          .filter(section => section.parent_id === null).map(section => section.id)
           : input.task.scope.kind === 'sections' ? input.task.scope.section_ids : [input.task.scope.reference.section_id]
-      const ids = outlineSectionScope(outline, roots)
+      const ids = await resolveBidTaskSections(canonical, working, input.task, roots)
       const targets = outline.sections.filter(section => section.writable && ids.has(section.id)).map(section => section.id)
       if (targets.length === 0) unmet.push(requirement.description + '：没有可写目标叶节。')
       else {
@@ -461,8 +473,8 @@ export async function validateBidTaskVerification(
       }
     }
   }
-  const deferredExport = input.task.steps.some(step => step.call.capability === 'docx.export')
-    || parsed.requirements.some(item => item.object === 'export')
+  const deferredExport = input.task.steps.at(-1)?.call.capability === 'docx.export'
+    && input.task.steps.filter(step => step.call.capability === 'docx.export').length === 1
   if (deferredExport && !parsed.requirements.some(item => item.object === 'export')) {
     unmet.push('完整任务中的导出要求未进入验收项目。')
   }

@@ -640,6 +640,10 @@ function fixtureAgent(
             })), external_input_gaps: review.external_input_gaps,
             external_input_only: review.external_input_only ?? false,
           })
+          if (review.revision_issue_checks !== undefined) await call(localAgent, registry, events, 'review_revision_issues', {
+            items: review.revision_issue_checks.map((item, position) => ({ issue_position: position,
+              status: item.status, reason: item.reason })),
+          })
           await call(localAgent, registry, events, 'finish_chapter_review', {})
           return { stopReason: 'completed', output: [] }
         })()
@@ -2592,6 +2596,50 @@ describe('chapter-writing executor', () => {
     const finalLog = parseChapterExecutionLog(JSON.parse(await readFile(logPath, 'utf8')))
     expect(finalLog.sections.every(section => section.status === 'completed')).toBe(true)
     expect(finalLog.sections[0]?.attempts).toEqual(priorLog.sections[0]?.attempts)
+  })
+
+  it('正文批次保存原 Writer 错误码，失败后复用原完成产物恢复同一单元', async () => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-writing-batch-retry-')))
+    const outline = await writeInputs(workspace)
+    const first = fixtureAgent(workspace, outline)
+    await executeChapterWriting(first.agent, workspace, buildBidStageTask('chapter_writing'), { maxRepairAttempts: 0 })
+    const { addRevisionIssue, readRevisionQueue } = await import('../src/chapter-revision-queue.ts')
+    const { createRevisionBatch, readRevisionBatch, writeRevisionBatch } = await import('../src/chapter-revision-batch.ts')
+    const body = await readFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), 'utf8')
+    const queue = addRevisionIssue(await readRevisionQueue(workspace), { section_id: 'SEC-1', scope: 'chapter',
+      reference: { scope: 'chapter', base_content_sha256: chapterContentSha256(body) },
+      instruction: '保持原业务含义，修订表达', suggestion: null }, '章节1', 1)
+    const issue = queue.issues[0]!
+    const plan = { issue_ids: [issue.issue_id], expected_queue_revision: queue.revision,
+      tasks: [{ task_id: 'task-1', section_id: 'SEC-1', issue_ids: [issue.issue_id], depends_on: [] }] }
+    const { batch } = createRevisionBatch(queue, plan, 'BATCH-RETRY', 1, [])
+    await writeRevisionBatch(workspace, batch)
+    const input = { batchId: batch.batch_id, tasks: [{ ...plan.tasks[0]!, issues: [{
+      issue_id: issue.issue_id, instruction: issue.instruction, suggestion: null, scope: 'chapter' as const,
+      reference_text: null, start: null, end: null,
+    }] }] }
+    const failed = fixtureAgent(workspace, outline)
+    const work = { ...createTestBidRunContext().work, kind: 'capability_task' as const, stage: 'chapter_writing' as const }
+    failed.subagents.followup.mockRejectedValueOnce(Object.assign(new Error('凭证不可用'), { code: 'CREDENTIAL_MISSING' }))
+    await executeChapterWriting(failed.agent, workspace, buildBidStageTask('chapter_writing'), {
+      maxRepairAttempts: 0, revisionBatch: input, documentReview: 'defer', run: createTestBidRunContext({ work }),
+    })
+    const saved = (await readRevisionBatch(workspace, batch.batch_id))!
+    expect(saved.tasks[0]).toMatchObject({ status: 'failed', failure: { code: 'CREDENTIAL_MISSING', message: '凭证不可用' } })
+    expect(await readFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), 'utf8')).toBe(body)
+    const independent = await readFile(join(workspace.projectRoot, 'chapters/sections/0003.md'), 'utf8')
+    await writeRevisionBatch(workspace, { ...saved, tasks: saved.tasks.map(task => ({ ...task, status: 'queued', failure: null })) })
+    const retry = fixtureAgent(workspace, outline)
+    retry.reviewerResult.mockImplementation(request => ({ ...reviewFrom(request), revision_issue_checks: [{
+      issue_id: issue.issue_id, status: 'satisfied', reason: '修订已满足意见',
+    }] }))
+    await executeChapterWriting(retry.agent, workspace, buildBidStageTask('chapter_writing'), {
+      maxRepairAttempts: 0, revisionBatch: input, documentReview: 'defer', run: createTestBidRunContext({ work }),
+    })
+    const retried = await readRevisionBatch(workspace, batch.batch_id)
+    expect(retried?.tasks[0]?.status, JSON.stringify(retried?.tasks[0]?.failure)).toBe('completed')
+    expect(retry.subagents.followup).toHaveBeenCalledTimes(1)
+    expect(await readFile(join(workspace.projectRoot, 'chapters/sections/0003.md'), 'utf8')).toBe(independent)
   })
 
   it('写作计划升级只重写模型判定受影响的已完成章节', async () => {

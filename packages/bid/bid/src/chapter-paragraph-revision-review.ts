@@ -8,6 +8,7 @@ import { z } from 'zod'
 import { chapterToolArgs, createChapterProtocol, type ChapterProtocol } from './chapter-writing-protocol.ts'
 import type { ParagraphRevisionReplacement, ParagraphRevisionSegment } from './chapter-paragraph-revision.ts'
 import { zodJsonSchema } from './zod-json-schema.ts'
+import { safeBidRunError } from './safe-error.ts'
 
 /** Delta Reviewer 唯一可见的结束工具名。 */
 export const PARAGRAPH_REVISION_REVIEW_TOOL = 'finish_paragraph_revision_review'
@@ -209,6 +210,10 @@ export function createParagraphRevisionReviewerChild(
       }
       if (child === undefined || runtime === undefined) throw new Error('S5 Delta Reviewer 缺少结束工具。')
       const end = await waitForTurn(parent, child, eventStart, signal)
+      if (end.data.reason.kind === 'error') {
+        const failure = safeBidRunError(end.data.reason.error)
+        throw Object.assign(new Error(failure.message), { code: failure.code })
+      }
       return end.data.reason.kind === 'completed'
         ? { stopReason: 'completed', output: [], structured: runtime.captured() }
         : { stopReason: end.data.reason.kind === 'blocked' ? 'refusal' : end.data.reason.kind, output: [] } as SubagentResult
