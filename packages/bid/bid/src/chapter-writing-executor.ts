@@ -3337,7 +3337,8 @@ async function runChapterWriting(
         await updateBatchTask(sectionId, {
           status: 'failed',
           failure: {
-            code: failure.code !== 'BID_EXECUTOR_ERROR' ? failure.code : issue?.code ?? 'CHAPTER_WRITING_FAILED',
+            code: failure.code !== undefined && failure.code !== 'BID_EXECUTOR_ERROR'
+              ? failure.code : issue?.code ?? 'CHAPTER_WRITING_FAILED',
             message: issue?.message ?? failure.message,
             phase: log.failure_phase,
           },
