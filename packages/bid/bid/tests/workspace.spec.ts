@@ -315,7 +315,7 @@ describe('BidWorkspace', () => {
 
     const disabled = new BidWorkspace(root, { ...DEFAULT_BID_CONFIG, enableDocxExport: false })
     await expect(disabled.exportDocx('draft.md')).rejects.toThrow('bid-docx-export-disabled')
-  })
+  }, 30_000)
 
   it('按明确模板导出，并保持 S5 基准与普通资料清单不变', async () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-bid-'))

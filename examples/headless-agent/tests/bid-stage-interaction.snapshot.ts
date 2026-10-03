@@ -175,7 +175,7 @@ it('S4 waiting_user 通过源码 Loader 执行受控对话修改', async () => {
         "bid_stage_inspect",
         "write",
         "bid_outline_apply_operations",
-        "bid_stage_inspect",
+        "bid_project_inspect",
         "bid_outline_regenerate_scope",
         "bid_project_inspect",
         "bid_project_inspect",

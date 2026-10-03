@@ -303,7 +303,7 @@ export async function runStageInteractionLoop(ctx: Context, root: string, checkR
   const split = await getOrCreateOutlineDraft(workspace)
   const target = split.outline.sections.find(item => item.parent_id === sectionId)!
   childScript.push(answer(JSON.stringify([{ type: 'update_section', section_id: target.id, title: '实施准备与资源核查' }])))
-  await send('实施准备这一节重新规划一下', [call('bid_stage_inspect', {}), call('bid_outline_regenerate_scope', {
+  await send('实施准备这一节重新规划一下', [call('bid_project_inspect', { query: { object: 'outline' } }), call('bid_outline_regenerate_scope', {
     draft_section_positions: [split.outline.sections.findIndex(section => section.id === target.id)], feedback: '明确资源核查' }), answer('已更新，请重新确认。')])
   if (await readFile(outlinePath, 'utf8') !== original) throw new Error('连续编辑覆盖了已完成研究的目录')
   const priorMap = parseEvidenceMapArtifact(JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/evidence-map.json'), 'utf8')))
