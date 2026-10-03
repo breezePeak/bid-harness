@@ -1199,6 +1199,9 @@ describe('Workspace 项目与独立 Session', () => {
       query: { object: 'writing_plan', source: 'candidate' },
     }, callId: CallId('candidate-catalog-inspect'), signal: new AbortController().signal })
     expect(query).toMatchObject({ isError: false, value: { available: true, data: { plan_version: plan.plan_version + 1 } } })
+    const recovery = await ctx.tools.execute({ agent, name: 'bid_stage_inspect', arguments: { view: 'recovery' },
+      callId: CallId('candidate-catalog-recovery'), signal: new AbortController().signal })
+    expect(recovery).toMatchObject({ isError: false })
     const args = { edit: 'replace_pending', steps: [{ description: '更新写作要求', scope: { source: 'task' },
       call: { capability: 'writing.plan', input: { update_kind: 'patch', user_message_positions: [0],
         summary: '补充写作要求', affected_section_positions: [], sections: [], global_instructions: ['保持真实资料边界。'] } } }] }

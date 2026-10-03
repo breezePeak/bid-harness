@@ -963,7 +963,9 @@ export function installStageInteractionTools(
                 const reference = request.reference === undefined ? undefined : bindBidModelReference(request.reference, catalog)
                 const result = await execute(agent, { action: name, view: request.view,
                   ...reference === undefined ? {} : { reference } }, exec.signal)
-                const current = await collectBidModelTaskCatalog(workspaceFor(agent.session), agent.session)
+                // 状态与恢复查询沿用最近对象表；正文读取才切换到其正式项目来源。
+                const current = reference === undefined ? catalog
+                  : await collectBidModelTaskCatalog(workspaceFor(agent.session), agent.session)
                 modelCatalogs.set(agent, current)
                 return { ...result as object,
                   objects: presentBidModelTaskCatalog(current, reference === undefined ? [] : [reference.section_id]) }
