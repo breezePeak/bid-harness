@@ -46,12 +46,13 @@ export const bidCapabilityInputSchema = z.discriminatedUnion('capability', [
   z.object({ capability: z.literal('outline.generate'), input: z.object({}).strict() }).strict()
     .describe('首次生成整本目录；已有确认目录时使用 outline.update 编辑结构。'),
   z.object({ capability: z.literal('outline.update'), input: z.object({
-    operations: z.array(outlineEditOperationSchema).min(1),
-    business_bindings: z.array(outlineBusinessBindingSchema).default([]),
+    operations: z.array(outlineEditOperationSchema).default([]),
+    business_bindings: z.array(outlineBusinessBindingSchema).default([])
+      .describe('重新分配已有章节的需求、评分、响应点及合规归属；提供每个目标章节完整列表。结构父节点仅允许全空。新增章节身份由执行器分配并自动生成归属。'),
     content_assignments: z.array(chapterBlockAssignmentSchema).default([]),
     allow_content_deletion: z.boolean().default(false),
     defer_content_migration: z.boolean().default(false),
-  }).strict() }).strict().describe('编辑已有目录的标题、职责和层级，支持新增、删除、移动、拆分、合并；project 范围可跨分支重组及调整顶层章节。保留未涉及内容，协调受影响的资料和正文索引。'),
+  }).strict().refine(value => value.operations.length > 0 || value.business_bindings.length > 0) }).strict().describe('独立编辑已有目录的结构、写作注记或业务归属；变更后的章节须重新完成写作和审核。编辑已有目录的标题、职责和层级，支持新增、删除、移动、拆分、合并；project 范围可跨分支重组及调整顶层章节。保留未涉及内容，协调受影响的资料和正文索引。'),
   z.object({ capability: z.literal('outline.refine'), input: z.object({ feedback: instruction }).strict() }).strict()
     .describe('研究已有章节并深化其子树；每个研究任务只能修改自身子树，不能重组整本目录的顶层或跨分支移动。'),
   z.object({ capability: z.literal('chapter.reorganize'), input: z.object({

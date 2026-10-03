@@ -151,7 +151,8 @@ describe('目录能力候选', () => {
     expect(JSON.stringify(prompts.at(-1))).toContain('requirement_positions')
     const outline = parseOutlineArtifact(await readJson(workspace, 'outline/confirmed-outline.json'))
     expect(outline.sections.find(section => section.id === childId)?.requirement_ids).toEqual(['REQ-1'])
-    expect(outline.sections.find(section => section.id === 'SEC-1')?.writable).toBe(false)
+    expect(outline.sections.find(section => section.id === 'SEC-1')).toMatchObject({ writable: false,
+      requirement_ids: [], scoring_ids: [], compliance_ids: [], scoring_response_point_ids: [] })
     expect(await readFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), 'utf8')).toBe(body)
     expect(parseEvidenceMapArtifact(await readJson(workspace, 'analysis/evidence-map.json'))
       .section_mappings.find(mapping => mapping.section_id === childId)?.missing_topics).toEqual([])
@@ -160,13 +161,16 @@ describe('目录能力候选', () => {
     await expect(validateOutlineCapability(scoped, result)).resolves.toBeUndefined()
   })
 
-  it('拆分生成的业务归属缺少响应点时拒绝候选并保留原目录和正文', async () => {
+  it.each([
+    ['requirement_positions', 'requirement_ids'], ['scoring_positions', 'scoring_ids'],
+    ['response_point_positions', 'scoring_response_point_ids'],
+  ] as const)('拆分生成的业务归属遗漏 %s 时拒绝候选并保留原目录和正文', async (field, key) => {
     const { workspace, context } = await fixture()
     const before = await readJson(workspace, 'outline/confirmed-outline.json')
     const body = await readFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), 'utf8')
     const start = vi.fn(async () => ({ result: Promise.resolve({ stopReason: 'completed',
       output: [{ type: 'text', text: JSON.stringify([
-        { requirement_positions: [0], scoring_positions: [0], response_point_positions: [], compliance_positions: [] },
+        { requirement_positions: [0], scoring_positions: [0], response_point_positions: [0], compliance_positions: [], [field]: [] },
         { requirement_positions: [], scoring_positions: [], response_point_positions: [], compliance_positions: [] },
       ]) }] }), dispose: async () => {} }))
     const agent = { ctx: { get: () => ({ getProvider: () => ({ inheritsParentContext: false }), start }) } } as unknown as BidCapabilityExecutionContext['agent']
@@ -178,9 +182,30 @@ describe('目录能力候选', () => {
     } })
     if (call.capability !== 'outline.update') throw new Error('test call mismatch')
     await expect(executeCapabilityOutlineUpdate({ ...context, agent }, call.input))
-      .rejects.toThrow('OUTLINE_SHARED_RESPONSE_POINT_MISSING')
+      .rejects.toThrow('BID_OUTLINE_BINDING_COVERAGE_MISSING: ' + key)
     expect(await readJson(workspace, 'outline/confirmed-outline.json')).toEqual(before)
     expect(await readFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), 'utf8')).toBe(body)
+  })
+
+  it.each(['in_scope', 'outside_scope'] as const)('仅改业务归属无需目录占位操作，并拒绝越界（%s）', async (scope) => {
+    const { workspace, context, stepId } = await fixture()
+    const before = parseOutlineArtifact(await readJson(workspace, 'outline/confirmed-outline.json'))
+    const id = scope === 'in_scope' ? 'SEC-1' : 'SEC-2'
+    const section = before.sections.find(section => section.id === id)!
+    const binding = { section_id: id, requirement_ids: section.requirement_ids, scoring_ids: section.scoring_ids,
+      scoring_response_point_ids: section.scoring_response_point_ids ?? [], compliance_ids: section.compliance_ids }
+    const call = bidCapabilityInputSchema.parse({ capability: 'outline.update', input: { business_bindings: [binding] } })
+    if (call.capability !== 'outline.update') throw new Error('test call mismatch')
+    const scoped = { ...context, allowedWrites: await allowedOutlineCapabilityWrites(call, workspace, stepId, context.sectionIds) }
+    if (scope === 'outside_scope') {
+      await expect(executeOutlineCapability(call, scoped)).rejects.toThrow('BID_OUTLINE_CAPABILITY_SCOPE_INVALID')
+      expect(await readJson(workspace, 'outline/confirmed-outline.json')).toEqual(before)
+      return
+    }
+    const { result } = await executeOutlineCapability(call, scoped)
+    await expect(validateOutlineCapability(scoped, result)).resolves.toBeUndefined()
+    expect(await readJson(workspace, 'outline/confirmed-outline.json')).toEqual(before)
+    expect(() => bidCapabilityInputSchema.parse({ capability: 'outline.update', input: {} })).toThrow()
   })
 
   it('适配器限定精确写入并复核真实候选', async () => {

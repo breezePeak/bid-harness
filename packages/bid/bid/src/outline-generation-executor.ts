@@ -203,7 +203,7 @@ export async function generateScopedOutlineOperations(
  * @param agent 当前执行 Agent。
  * @param candidate 已分配新 ID 的候选目录。
  * @param sectionIds 本次可修改的章节范围。
- * @param before 结构修改前的正式目录；保留父章原业务归属。
+ * @param before 修改前的目录，父章原归属须由范围内可写叶节承接。
  * @param facts 当前招标事实和响应点的有界摘要。
  * @param feedback 用户本次局部深化目标。
  * @param signal 当前 Run 的取消信号。
@@ -222,7 +222,7 @@ export async function generateScopedOutlineBusinessBindings(
   const targets = buildWritableSectionWorklist(candidate).filter(section => selected.has(section.id))
   const choices = z.array(z.number().int().nonnegative())
   const outputSchema = z.array(z.object({ requirement_positions: choices, scoring_positions: choices,
-    response_point_positions: choices, compliance_positions: choices }).strict())
+    response_point_positions: choices, compliance_positions: choices }).strict()).length(targets.length)
   const pick = (items: readonly { id: string }[], positions: readonly number[]): string[] => positions.map((position) => {
     const item = items[position]
     if (item === undefined) throw new Error('BID_OUTLINE_BINDING_OBJECT_UNKNOWN')
@@ -275,11 +275,21 @@ export async function generateScopedOutlineBusinessBindings(
       result.output.flatMap(block => block.type === 'text' ? [block.text] : []).join(''),
     ) as unknown)
     if (output.length !== targets.length) throw new Error('BID_OUTLINE_BINDING_TARGET_COUNT_INVALID')
-    return output.map((binding, index) => outlineBusinessBindingSchema.parse({ section_id: targets[index]?.id,
+    const bindings = output.map((binding, index) => outlineBusinessBindingSchema.parse({ section_id: targets[index]?.id,
       requirement_ids: pick(facts.requirements, binding.requirement_positions),
       scoring_ids: pick(facts.scoring, binding.scoring_positions),
       scoring_response_point_ids: pick(facts.response_points, binding.response_point_positions),
       compliance_ids: pick(facts.compliance, binding.compliance_positions) }))
+    for (const key of ['requirement_ids', 'scoring_ids', 'scoring_response_point_ids', 'compliance_ids'] as const) {
+      const assigned = new Set(bindings.flatMap(binding => binding[key]))
+      if (before.sections.filter(section => selected.has(section.id))
+        .some(section => (section[key] ?? []).some(id => !assigned.has(id)))) {
+        throw new Error('BID_OUTLINE_BINDING_COVERAGE_MISSING: ' + key)
+      }
+    }
+    return [...bindings, ...candidate.sections.filter(section => selected.has(section.id) && !section.writable)
+      .map(section => ({ section_id: section.id, requirement_ids: [], scoring_ids: [],
+        scoring_response_point_ids: [], compliance_ids: [] }))]
   } finally { await run.dispose() }
 }
 

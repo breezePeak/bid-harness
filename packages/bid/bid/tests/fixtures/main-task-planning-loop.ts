@@ -153,6 +153,10 @@ class PlanningAdapter extends ChapterAdapter {
         yield* answer('已读取任务核验和发布凭据，三个新子章节已写完并通过审核。')
         return
       }
+      const taskTool = options.tools?.find(tool => tool.name === 'bid_run_task')
+      if (taskTool !== undefined && !JSON.stringify(taskTool).includes('"business_bindings"')) {
+        throw new Error('公开目录能力未提供已有章节的业务归属选择')
+      }
       switch (this.mainStep++) {
         case 0: yield* call('bid_project_inspect', { query: { object: 'outline' } }); return
         case 1: yield* call('bid_project_inspect', { query: { object: 'chapters', section_positions: [2] } }); return

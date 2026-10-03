@@ -42,7 +42,7 @@ const fields = {
 } as const
 type CatalogKind = typeof fields[keyof typeof fields][1]
 const fieldMap: ReadonlyMap<string, readonly [string, CatalogKind]> = new Map(Object.entries(fields))
-const taskProgramFields = new Set(['task_id', 'content_assignments', 'assignments', 'business_bindings',
+const taskProgramFields = new Set(['task_id', 'content_assignments', 'assignments',
   'writing_request_id', 'attempt_id', 'base_plan_version', 'defer_content_migration'])
 type CatalogEntry = { readonly id: string
   readonly label: string

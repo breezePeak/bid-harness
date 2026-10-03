@@ -49,6 +49,29 @@ it('模型只选择真实章节位置，任务身份及目录编辑目标由程�
   expect(schema).not.toContain('"defer_content_migration":')
 })
 
+it('已有章节的业务归属按对象位置绑定，拒绝身份抄写和越界选择', async () => {
+  const { catalog, section } = await fixture()
+  const binding = { section_position: section, requirement_positions: [0], scoring_positions: [0],
+    response_point_positions: [0], compliance_positions: [] }
+  const bind = (value: object) => bindBidModelTask({ goal: '重新分配本章业务归属',
+    scope: { kind: 'sections', section_positions: [section] }, steps: [{ description: '更新归属',
+      scope: { source: 'task' }, call: { capability: 'outline.update', input: {
+        operations: [{ type: 'update_section', section_position: section, title: '输入与交付流程' }],
+        business_bindings: [value],
+      } } }],
+  }, catalog)
+  expect(bind(binding).steps[0]?.call.input).toMatchObject({ business_bindings: [{ section_id: 'S2.3',
+    requirement_ids: [catalog.objects.requirements[0]!.id], scoring_ids: [catalog.objects.scoring[0]!.id],
+    scoring_response_point_ids: [catalog.objects.response_points[0]!.id], compliance_ids: [] }] })
+  expect(() => bind({ ...binding, requirement_positions: [999] })).toThrow('BID_MODEL_TASK_OBJECT_UNKNOWN')
+  expect(() => bind({ ...binding, section_id: 'S2.3' })).toThrow('BID_MODEL_TASK_IDENTITY_FORBIDDEN')
+  expect(() => bind({ ...binding, requirement_ids: ['REQ-1'] })).toThrow('BID_MODEL_TASK_IDENTITY_FORBIDDEN')
+  const schema = JSON.stringify(bidModelTaskJsonSchema(zodJsonSchema(bidCapabilityTaskSchema)))
+  expect(schema).toContain('"business_bindings":')
+  expect(schema).toContain('"requirement_positions":')
+  expect(schema).not.toContain('"requirement_ids":')
+})
+
 it('目录迁移时序由后续能力或明确暂缓目标推导，拒绝模型指定程序开关', async () => {
   const { catalog, section } = await fixture()
   const directory = { description: '调整本章结构', scope: { source: 'task' }, call: { capability: 'outline.update', input: {
