@@ -29,10 +29,10 @@ import { prepareBidWorkingTree } from './working-tree.ts'
 import { reconcileBidPublications } from './publication-batch.ts'
 import { assertNoLinkedPath, within } from './workspace-path.ts'
 import { recordOnlySchemaVersion } from './schema-version.ts'
-import { bidTaskSourceSnapshotSchema, freezeBidTaskSource } from './bid-task-source.ts'
+import { bidTaskSourceSnapshotSchema, freezeBidTaskSource, type BidTaskSourceSnapshot } from './bid-task-source.ts'
 import { bidTaskVerificationSchema, collectBidTaskEvidence, collectBidTaskScopeEvidence, collectBidTaskPreservationEvidence,
   modelBidTaskVerifier, validateBidTaskVerification,
-  type BidTaskVerifier, type BidTaskVerification } from './bid-task-verification.ts'
+  type BidTaskVerifier, type BidTaskVerification, type BidTaskVerificationInput } from './bid-task-verification.ts'
 import { readPendingChapterReorganization } from './outline-capability-update.ts'
 import { resolveBidTaskSections } from './bid-task-sections.ts'
 
@@ -590,6 +590,45 @@ export async function patchCapabilityTaskSteps(
 }
 
 /**
+ * 从同一检查点和真实候选重建计划或产物核验输入。
+ * @param canonical 正式基线。
+ * @param working 当前 Work 候选。
+ * @param source 冻结的真实任务来源。
+ * @param request 原始请求与根范围。
+ * @param checkpoint 当前步骤及核验历史。
+ * @param phase 要重新核对的核验阶段。
+ * @returns 恢复准入和执行核验共同使用的完整事实。
+ */
+export async function collectCapabilityTaskVerificationInput(
+  canonical: BidWorkspace, working: BidWorkspace, source: BidTaskSourceSnapshot,
+  request: CapabilityTaskRequest, checkpoint: CapabilityTaskCheckpoint, phase: 'plan' | 'result',
+): Promise<BidTaskVerificationInput> {
+  const changed = new Set<string>()
+  if (phase === 'result') {
+    for (const record of checkpoint.steps) {
+      if (record.status !== 'completed') continue
+      for (const path of record.result.changed_artifacts) changed.add(path)
+      for (const path of record.removed_paths) changed.delete(path)
+    }
+  }
+  const task = { ...request.task, steps: checkpoint.steps.map(record => record.step) }
+  const requirements = checkpoint.verifications?.find(record => record.scope_authorized && record.unmet.length === 0)?.requirements
+  return { phase, source, task,
+    execution_history: {
+      prior_plan_rejections: (checkpoint.verifications ?? []).filter(record => record.phase === 'plan' && record.unmet.length > 0)
+        .map(record => ({ scope_authorized: record.scope_authorized, unmet: record.unmet })),
+      plan_patch_count: checkpoint.plan_patches.length,
+      completed_steps: checkpoint.steps.filter(record => record.status === 'completed')
+        .map(record => ({ description: record.step.description, capability: record.step.call.capability })),
+    },
+    ...(requirements === undefined ? {} : { requirements }),
+    ...(phase === 'result' && requirements?.some(requirement => requirement.preserve_migrated_content) === true
+      ? { preservation_evidence: await collectBidTaskPreservationEvidence(canonical, working, task) } : {}),
+    evidence: await collectBidTaskEvidence(working, task, [...changed], canonical),
+    scope_evidence: await collectBidTaskScopeEvidence(canonical, working, task) }
+}
+
+/**
  * 恢复完成凭据或按检查点依次执行步骤，最后一次发布正式文件。
  * @param canonical 正式项目。
  * @param run 唯一根 Run。
@@ -619,21 +658,7 @@ export async function executeCapabilityTask(
   const removed = new Set<string>()
   const source = request.source_snapshot ?? await freezeBidTaskSource(canonical, session, request.task, request.authorization)
   const verify = async (phase: 'plan' | 'result'): Promise<BidTaskVerification> => {
-    const task = { ...request.task, steps: checkpoint.steps.map(record => record.step) }
-    const requirements = checkpoint.verifications?.find(record => record.scope_authorized && record.unmet.length === 0)?.requirements
-    const input = { phase, source, task,
-      execution_history: {
-        prior_plan_rejections: (checkpoint.verifications ?? []).filter(record => record.phase === 'plan' && record.unmet.length > 0)
-          .map(record => ({ scope_authorized: record.scope_authorized, unmet: record.unmet })),
-        plan_patch_count: checkpoint.plan_patches.length,
-        completed_steps: checkpoint.steps.filter(record => record.status === 'completed')
-          .map(record => ({ description: record.step.description, capability: record.step.call.capability })),
-      },
-      ...(requirements === undefined ? {} : { requirements }),
-      ...(phase === 'result' && requirements?.some(requirement => requirement.preserve_migrated_content) === true
-        ? { preservation_evidence: await collectBidTaskPreservationEvidence(canonical, working, task) } : {}),
-      evidence: await collectBidTaskEvidence(working, task, [...changed], canonical),
-      scope_evidence: await collectBidTaskScopeEvidence(canonical, working, task) }
+    const input = await collectCapabilityTaskVerificationInput(canonical, working, source, request, checkpoint, phase)
     const identity = bidInputFingerprint(input)
     let verification = checkpoint.verifications?.find(record => record.phase === phase && record.input_sha256 === identity)
     if (verification === undefined) {

@@ -90,12 +90,13 @@ it('S3 没有确认目录时返回真实草稿及 artifact', async () => {
 
 import { vi } from 'vitest'
 import { executeCapabilityTask, capabilityTaskCheckpointSchema, capabilityTaskRequestSchema,
-  patchCapabilityTaskSteps } from '../src/bid-capability-task.ts'
+  patchCapabilityTaskSteps, collectCapabilityTaskVerificationInput } from '../src/bid-capability-task.ts'
 import { executorTestVerifier } from './fixtures/task-verifier.ts'
 import { createTestBidRunContext } from '../src/run-coordinator.ts'
 import { readCapabilityPublicationReceipt, publishCapabilityChanges } from '../src/bid-capability-changes.ts'
 import { checkpointBidProjectState } from '../src/index.ts'
 import { prepareBidWorkingTree } from '../src/working-tree.ts'
+import { bidInputFingerprint } from '../src/work-descriptor.ts'
 import { collectBidTaskEvidence, collectBidTaskScopeEvidence, collectBidTaskPreservationEvidence,
   validateBidTaskVerification, type BidTaskVerifier } from '../src/bid-task-verification.ts'
 
@@ -157,6 +158,39 @@ it('范围外核验读取真实基线和候选摘要，并拒绝核验器忽略�
     .find(item => item.section_id === 'SEC-1' && item.object === 'outline')!
   expect(baselineProof.before_section).toMatchObject({ requirement_ids: ['REQ-1'], scoring_response_point_ids: ['RP-000001'] })
   expect(baselineProof.after_sha256).not.toBe(baselineProof.before_sha256)
+})
+
+it('恢复与执行核验共享输入身份，原计划不变时区分真实候选变化', async () => {
+  const { workspace, session, message } = await fixture()
+  const task = bidCapabilityTaskSchema.parse({ goal: '审核第一章', scope: { kind: 'sections', section_ids: ['SEC-1'] },
+    steps: [{ description: '审核第一章', scope: { source: 'task' }, call: { capability: 'chapter.review', input: { reason: '审核第一章' } } }] })
+  const work = await persistCapabilityTaskRequest(workspace, session, 'chapter_writing', task,
+    { session_id: String(session.id), message_id: String(message.id) }, [], { stage: 'chapter_writing', status: 'completed', run: null })
+  const agent = {} as Parameters<typeof executeCapabilityTask>[3]
+  await expect(executeCapabilityTask(workspace, createTestBidRunContext({ work }), {
+    allowedWrites: async () => new Set(),
+    execute: async () => ({ result: { target_section_ids: [], changed_artifacts: [], change_summary: '已核查',
+      warnings: [], missing_topics: [], needs_input: false } }), validate: async () => {},
+    verifyTask: async (input, execution, signal) => {
+      const decision = await executorTestVerifier(input, execution, signal)
+      if (input.phase === 'result') decision.checks[0]!.met = false
+      return decision
+    },
+  }, agent, session)).rejects.toThrow('BID_TASK_RESULT_UNMET')
+  const request = capabilityTaskRequestSchema.parse(await readBidWorkRequest(workspace, work))
+  const checkpoint = capabilityTaskCheckpointSchema.parse(JSON.parse(await readFile(join(workspace.projectRoot,
+    'runs', work.workId, 'task-checkpoint.json'), 'utf8')))
+  const previous = checkpoint.verifications!.at(-1)!
+  const working = new BidWorkspace((await prepareBidWorkingTree(workspace, work)).root, workspace.config)
+  const collect = () => collectCapabilityTaskVerificationInput(workspace, working, request.source_snapshot!, request,
+    checkpoint, previous.phase)
+  expect(bidInputFingerprint(await collect())).toBe(previous.input_sha256)
+  const path = join(working.projectRoot, 'chapters/writing-plan.json')
+  const plan = JSON.parse(await readFile(path, 'utf8')) as { global_instructions: string[] }
+  plan.global_instructions = ['依据当前真实输入完成核查。']
+  await writeFile(path, JSON.stringify(plan))
+  expect(bidInputFingerprint((await collect()).task)).toBe(previous.plan_sha256)
+  expect(bidInputFingerprint(await collect())).not.toBe(previous.input_sha256)
 })
 
 const structureVerifier: BidTaskVerifier = async input => ({

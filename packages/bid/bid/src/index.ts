@@ -92,7 +92,7 @@ import { BID_CAPABILITIES, defaultBidCapabilityForStage } from './bid-capability
 import {
   activeCapabilityMappingWorkspace, askCapabilityTaskInput, executeCapabilityTask, patchCapabilityTaskSteps,
   readCapabilityAwaitingInput, persistCapabilityTaskRequest, findCapabilityTaskRequest, readCapabilityTaskCheckpoint,
-  capabilityTaskRequestSchema, capabilityTaskCheckpointSchema,
+  capabilityTaskRequestSchema, capabilityTaskCheckpointSchema, collectCapabilityTaskVerificationInput,
   type CapabilityTaskDispatcher, type CapabilityTaskRequest,
 } from './bid-capability-task.ts'
 import { capabilityPublicationReceiptSchema, readCapabilityPublicationReceipt, readCapabilityPublicationRecord } from './bid-capability-changes.ts'
@@ -166,7 +166,7 @@ import { sanitizeBidErrorText } from './safe-error.ts'
 import { bidProjectTaskState, checkpointBidProjectState, commitBidProjectMutation, readBidProjectState, type BidProjectState } from './project-state.ts'
 import { publishBidBatch, reconcileBidPublications, type BidPublicationLease } from './publication-batch.ts'
 import { bidInputFingerprint, bidResetWorkPaths, persistBidWorkRequest, readBidWorkRequest } from './work-descriptor.ts'
-import { prepareBidWorkingTree, publishBidWorkingPaths } from './working-tree.ts'
+import { prepareBidWorkingTree, publishBidWorkingPaths, readExistingBidWorkingTree } from './working-tree.ts'
 import { assertNoLinkedPath, within, atomicBytes } from './workspace-path.ts'
 import { BID_STAGES, BidStageExecutionError, isBidDocumentRole } from './control-plane-contract.ts'
 import { BID_BINARY_UPLOAD_PATH, BID_UPLOAD_FILES_HEADER, BID_UPLOAD_SESSION_HEADER } from './control-plane-contract.ts'
@@ -5526,8 +5526,18 @@ export class BidHostRuntime extends TypertRemoteService {
           const raw = await readFile(within(operation.workspace.projectRoot, 'runs/' + suspended.work.workId + '/task-checkpoint.json'), 'utf8')
           const checkpoint = capabilityTaskCheckpointSchema.parse(JSON.parse(raw))
           const task = { ...request.task, steps: checkpoint.steps.map(record => record.step) }
-          if (checkpoint.verifications?.at(-1)?.plan_sha256 === bidInputFingerprint(task)) {
-            throw Object.assign(new Error('原任务核验未通过，请先修改能力步骤或真实业务输入，再恢复原 Work。'), { code: 'BID_RECOVERY_STRATEGY_CHANGE_REQUIRED' })
+          const previousVerification = checkpoint.verifications?.at(-1)
+          if (previousVerification?.plan_sha256 === bidInputFingerprint(task)) {
+            const paths = await readExistingBidWorkingTree(operation.workspace, suspended.work)
+            if (paths === null) throw new Error('BID_WORKING_TREE_REQUIRED')
+            const working = new BidWorkspace(paths.root, operation.workspace.config)
+            const source = request.source_snapshot
+              ?? await freezeBidTaskSource(operation.workspace, session, task, request.authorization)
+            const input = await collectCapabilityTaskVerificationInput(operation.workspace, working, source,
+              request, checkpoint, previousVerification.phase)
+            if (previousVerification.input_sha256 === bidInputFingerprint(input)) {
+              throw Object.assign(new Error('原任务核验未通过，请先修改能力步骤或真实业务输入，再恢复原 Work。'), { code: 'BID_RECOVERY_STRATEGY_CHANGE_REQUIRED' })
+            }
           }
         }
         if (bidRecoveryInstructionRepeated(session, eligibility.target, eligibility.fingerprint, recovery.instruction)) {
