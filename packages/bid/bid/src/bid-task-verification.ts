@@ -327,6 +327,7 @@ export const modelBidTaskVerifier: BidTaskVerifier = async (input, agent, signal
       '输入已提供 requirements 时，无论 phase 是 plan 还是 result，都只返回与它们数量和顺序完全对应的 checks；不得合并、删除或重新列出要求。plan 结合已完成步骤的真实证据与未完成步骤核验覆盖，result 核验实际成果。',
       '所有来源 ID、章节 ID、编号、文件路径、摘要和证据记录由 Host 绑定。你只返回语义判断，不抄写这些字段。',
       '导出是 Host 在内容发布后执行的尾效果；这里只将 object=export 保留为未执行项。',
+      'result 核验在正式发布之前执行。你核对候选业务成果，Host 在核验通过后才原子写入正式文件、goal_met=true 的发布凭据和完成通知；此时没有正式发布收据是正常时序，不能因此判定业务成果未满足，也不能将本次候选核验声称为已经正式发布。',
       '内容证据不足或无相应文件不得声称 met。保持所有原文约束和真实资料限制。',
       'scope_evidence 是 Host 从正式基线与候选读取的既有章节目录、正文、元数据和审核摘要对照；outside_scope 标识根范围外对象。unchanged=true 证明该对象未改变，不需要额外读取正文或创建审查步骤。',
       'met 表示要求是否满足。对“不得改其他章节”等否定要求，摘要对照证明没有发生禁止的修改时 met=true；不是因为要求禁止修改就填 false。reason 必须与 met 的实际满足结论一致。',

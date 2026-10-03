@@ -9,6 +9,7 @@ export type OutlineEditOperation =
     readonly purpose?: string
     readonly summary?: string
     readonly must_answer?: readonly string[]
+    readonly writing_notes?: readonly string[]
   }
   | {
     readonly type: 'add_section'
@@ -104,6 +105,7 @@ export function applyOutlineEdits(
       if (operation.purpose !== undefined) section.purpose = operation.purpose
       if (operation.summary !== undefined) section.summary = operation.summary
       if (operation.must_answer !== undefined) section.must_answer = [...operation.must_answer]
+      if (operation.writing_notes !== undefined) section.writing_notes = [...operation.writing_notes]
     } else if (operation.type === 'add_section') {
       const id = allocateSectionId?.() ?? `SEC-${String(++nextId).padStart(3, '0')}`
       if (byId.has(id)) throw new Error(`duplicate outline section ${id}`)

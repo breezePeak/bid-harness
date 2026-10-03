@@ -28,6 +28,10 @@ import { parseChapterMetadata, parseChapterWritingManifest } from '../src/chapte
 import { parseWritingPlan } from '../src/writing-requirements.ts'
 import { parseEvidenceMapArtifact } from '../src/evidence-mapping-artifacts.ts'
 import { seedCapabilityProject } from './capability-fixture.ts'
+import { applyOutlineBusinessBindings } from '../src/outline-confirmation-edits.ts'
+import { parseTenderRequirementsArtifact, parseTenderScoringArtifact,
+  parseTenderComplianceArtifact } from '../src/tender-analysis-artifacts.ts'
+import { parseScoringResponsePointCatalog } from '../src/scoring-response-point-artifacts.ts'
 
 const roots: string[] = []
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))) })
@@ -54,6 +58,25 @@ async function fixture() {
 }
 
 describe('目录能力候选', () => {
+  it('结构父节点可清空遗留叶节覆盖，但不能接纳非空业务归属', async () => {
+    const { workspace } = await fixture()
+    const prior = parseOutlineArtifact(await readJson(workspace, 'outline/confirmed-outline.json'))
+    const requirements = parseTenderRequirementsArtifact(await readJson(workspace, 'analysis/requirements.json'))
+    const scoring = parseTenderScoringArtifact(await readJson(workspace, 'analysis/scoring.json'))
+    const compliance = parseTenderComplianceArtifact(await readJson(workspace, 'analysis/compliance.json'))
+    const points = parseScoringResponsePointCatalog(await readJson(workspace, 'analysis/scoring-response-points.json'))
+    const source = { ...prior, sections: prior.sections.map((section, index) => index === 0
+      ? { ...section, writable: false, must_answer: [], requirement_ids: [requirements.requirements[0]!.id] } : section) }
+    const empty = { section_id: source.sections[0]!.id, requirement_ids: [], scoring_ids: [],
+      compliance_ids: [], scoring_response_point_ids: [] }
+    const result = applyOutlineBusinessBindings(source, [empty], requirements, scoring, compliance, points)
+    expect(result.sections[0]).toMatchObject({ id: empty.section_id, writable: false, requirement_ids: [], scoring_ids: [],
+      compliance_ids: [], scoring_response_point_ids: [], scoring_response_points: [] })
+    expect(source.sections[0]?.requirement_ids).toEqual([requirements.requirements[0]!.id])
+    expect(result.sections.slice(1)).toEqual(source.sections.slice(1))
+    expect(() => applyOutlineBusinessBindings(source, [{ ...empty, requirement_ids: [requirements.requirements[0]!.id] }],
+      requirements, scoring, compliance, points)).toThrow('BID_OUTLINE_BINDING_SECTION_INVALID')
+  })
   it.each(['completed', 'pending'] as const)('再次改目录时仅清理已完成章节的迁移种子（%s）', async (status) => {
     const { workspace, context } = await fixture()
     const outline = parseOutlineArtifact(await readJson(workspace, 'outline/confirmed-outline.json'))

@@ -10,7 +10,7 @@ export type { OutlineEditOperation, OutlineViewSection }
 const text = z.string().min(1)
 /** 模型与浏览器共用的结构化目录编辑参数。 */
 export const outlineEditOperationSchema = z.discriminatedUnion('type', [
-  z.object({ type: z.literal('update_section'), section_id: text, title: text.optional(), purpose: text.optional(), summary: text.optional(), must_answer: z.array(text).optional() }).strict().refine(value => value.title !== undefined || value.purpose !== undefined || value.summary !== undefined || value.must_answer !== undefined),
+  z.object({ type: z.literal('update_section'), section_id: text, title: text.optional(), purpose: text.optional(), summary: text.optional(), must_answer: z.array(text).optional(), writing_notes: z.array(text).optional() }).strict().refine(value => value.title !== undefined || value.purpose !== undefined || value.summary !== undefined || value.must_answer !== undefined || value.writing_notes !== undefined),
   z.object({ type: z.literal('add_section'), parent_id: z.string().min(1).nullable(), order: z.number().int().positive(), writable: z.boolean(), title: text, purpose: text, summary: text.optional(), must_answer: z.array(text).optional() }).strict().superRefine((value, context) => {
     if (value.writable && (value.must_answer?.length ?? 0) === 0) context.addIssue({ code: 'custom', message: 'a writable section requires must_answer' })
     if (!value.writable && (value.must_answer?.length ?? 0) !== 0) context.addIssue({ code: 'custom', message: 'a structural section cannot have must_answer' })
@@ -60,7 +60,11 @@ export function applyOutlineBusinessBindings(
   const updates = bindings.map(raw => outlineBusinessBindingSchema.parse(raw))
   for (const binding of updates) {
     const section = byId.get(binding.section_id)
-    if (section === undefined || !section.writable || seen.has(section.id)) throw new Error('BID_OUTLINE_BINDING_SECTION_INVALID')
+    if (section === undefined || seen.has(section.id)
+      || !section.writable && [binding.requirement_ids, binding.scoring_ids,
+        binding.compliance_ids, binding.scoring_response_point_ids].some(ids => ids.length > 0)) {
+      throw new Error('BID_OUTLINE_BINDING_SECTION_INVALID')
+    }
     seen.add(section.id)
     for (const key of ['requirement_ids', 'scoring_ids', 'compliance_ids', 'scoring_response_point_ids'] as const) {
       const ids = binding[key]

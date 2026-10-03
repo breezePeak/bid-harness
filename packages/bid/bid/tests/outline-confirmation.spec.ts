@@ -22,6 +22,16 @@ const outline: OutlineArtifact = {
 }
 
 describe('outline confirmation artifacts', () => {
+  it('只更新写作注记，不改目录身份、覆盖及原对象', () => {
+    const notes = ['流程图仅归本叶节，保持原文及条件化边界。']
+    const edited = applyOutlineEdits(outline, parseOutlineEditOperations([
+      { type: 'update_section', section_id: 'SEC-001', writing_notes: notes },
+    ]))
+    expect(edited.sections[0]).toEqual({ ...outline.sections[0], writing_notes: notes })
+    expect(outline.sections[0]?.writing_notes).toEqual([])
+    expect(() => parseOutlineEditOperations([{ type: 'update_section', section_id: 'SEC-001', writing_notes: [''] }]))
+      .toThrow()
+  })
   it('在可写叶节下新增子章转换父节点并保留原目录', () => {
     const source: OutlineArtifact = { ...outline, sections: [{ ...outline.sections[0]!,
       scoring_response_point_ids: ['RP-000001'],
