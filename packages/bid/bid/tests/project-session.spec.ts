@@ -1165,6 +1165,17 @@ describe('Workspace 项目与独立 Session', () => {
       { status: 'completed', description: '审核章节', detail: '本章已审核' },
       { status: 'pending', description: '只检查一致性', detail: '等待后续计划' },
     ] })
+    const remove = createUserMessage({ content: [{ type: 'text', text: '保留已完成章节审核，删除未开始的整书审核步骤。' }], source: { kind: 'user' } })
+    agent.session.append('turn/start', { turn: 2 })
+    agent.session.append('user/message', remove, { surfaceOp: 'append' })
+    const removed = await ctx.tools.execute({ agent, name: 'bid_plan_task', arguments: {
+      edit: 'replace_pending', steps: [],
+    }, callId: CallId('remove-pending-capability-plan'), signal: new AbortController().signal })
+    expect(removed, JSON.stringify(removed)).toMatchObject({ isError: false, value: { accepted: true, steps: 1 } })
+    expect(await ctx.bid.getCapabilityTaskPlan(agent.session)).toMatchObject({
+      steps: [{ status: 'completed', description: '审核章节', detail: '本章已审核' }],
+    })
+    expect(executed).toHaveBeenCalledOnce()
   })
 
   it('候选查询绑定候选计划版本，缺失候选撤回旧对象表', async () => {

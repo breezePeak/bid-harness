@@ -910,7 +910,7 @@ export function installStageInteractionTools(
                   writing_request_id: target.requestId, attempt_id: target.attemptId }, exec.signal)
               }
               if (name === 'bid_plan_task') {
-                const request = z.object({ edit: z.enum(['replace_pending', 'append']), steps: z.array(z.unknown()).min(1) }).strict().parse(args)
+                const request = z.object({ edit: z.enum(['replace_pending', 'append']), steps: z.array(z.unknown()) }).strict().parse(args)
                 const state = agent.session.events.reduce(reduceBidTaskState, BID_INITIAL_TASK_STATE)
                 const catalog = modelCatalogs.get(agent)
                 if (catalog === undefined) throw new Error('BID_MODEL_TASK_INSPECT_REQUIRED')

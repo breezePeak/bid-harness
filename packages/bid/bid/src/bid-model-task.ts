@@ -369,6 +369,7 @@ export function bindBidModelReference(value: unknown, catalog: BidModelTaskCatal
  * @returns 保留 Host 身份的业务步骤；原 Work 范围由补丁入口继续核对。
  */
 export function bindBidModelSteps(value: unknown, catalog: BidModelTaskCatalog): BidCapabilityStep[] {
+  if (z.array(z.unknown()).parse(value).length === 0) return []
   return bindBidModelTask({ goal: '继续完成原任务', scope: { kind: 'project' }, steps: value }, catalog).steps
 }
 
