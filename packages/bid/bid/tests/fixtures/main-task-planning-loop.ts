@@ -68,7 +68,24 @@ class PlanningAdapter extends ChapterAdapter {
         || !prompt.includes('只返回业务字段，不返回 $schema')) throw new Error('任务核验输出协议混入 schema 元数据或缺少严格字段约束')
       if (!prompt.includes('result 核验在正式发布之前执行')) throw new Error('任务产物核验混淆候选检查与正式发布')
       if (!prompt.includes('以这些原始绑定为准')) throw new Error('任务核验缺少原始目录绑定的归属依据')
-      const input = inputJson<{ requirements?: readonly object[]; sources: readonly object[] }>(prompt, '核验输入：')
+      const input = inputJson<{
+        requirements?: readonly object[]
+        sources: readonly object[]
+        evidence: readonly { evidence_position: number; path: string; total_characters: number; text?: string }[]
+      }>(prompt, '核验输入：')
+      if (input.evidence.some(file => file.text !== undefined)) throw new Error('任务核验首次输入不得内联完整文件')
+      if (!options.tools?.some(tool => tool.name === 'read_task_evidence')) throw new Error('核验会话缺少冻结证据只读工具')
+      const file = input.evidence.find(file => file.total_characters > 0)
+      if (file === undefined) throw new Error('核验没有真实文件证据')
+      const read = options.messages.flatMap(message => message.content)
+        .filter(block => block.type === 'tool-result').flatMap(block => block.content)
+        .filter(block => block.type === 'text').map(block => JSON.parse(block.text) as { path?: string; text?: string })
+        .find(item => item.path === file.path)
+      if (read === undefined) {
+        yield* call('read_task_evidence', { evidence_position: file.evidence_position, start: 0, length: 12_000 })
+        return
+      }
+      if (read.text === undefined || read.text.length === 0 || read.text.length > 12_000) throw new Error('核验只读工具没有返回有界原文')
       const array = schema.properties[input.requirements === undefined ? 'sources' : 'checks']
       const count = input.requirements?.length ?? input.sources.length
       if (array?.minItems !== count || array.maxItems !== count) throw new Error('任务核验未约束完整来源或检查项数量')
@@ -464,6 +481,6 @@ export async function runMainTaskPlanningLoop(ctx: Context, root: string,
     userMessages: agent.session.events.filter(event => event.type === 'user/message' && event.data.source.kind === 'user').length,
     interrupted, executions,
     workIds: [...new Set(agent.session.events.flatMap(event => event.type === 'bid.run.started' ? [event.data.run.work.workId] : []))],
-    verifiers: adapter.inputs.filter(input => input.messages.some(message => message.content.some(block =>
-      block.type === 'text' && block.text.includes('核验输入：')))).length }
+    verifiers: new Set(adapter.inputs.filter(input => input.messages.some(message => message.content.some(block =>
+      block.type === 'text' && block.text.includes('核验输入：')))).map(input => input.sessionId)).size }
 }

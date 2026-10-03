@@ -16,6 +16,7 @@ import { parseChapterMetadata } from '../src/chapter-writing-artifacts.ts'
 import { createChapterProtocol } from '../src/chapter-writing-protocol.ts'
 import { attachGlobalComplianceReview, validateGlobalComplianceReview, type GlobalComplianceEvidence } from '../src/chapter-writing-global-review.ts'
 import { attachChapterWritingCompletionReview } from '../src/chapter-writing-completion-review.ts'
+import { attachBidTaskEvidenceReader } from '../src/bid-task-evidence-reader.ts'
 
 const roots: Context[] = []
 afterEach(async () => { await Promise.all(roots.splice(0).map(ctx => ctx.fiber.dispose())) })
@@ -46,6 +47,29 @@ const quality = {
   project_specific: true, structure_complete: true, legacy_project_pollution_free: true,
   placeholder_free: true, obvious_repetition_free: true,
 }
+
+it('任务核验按冻结证据分段读取，拒绝越界及超限读取并释放私有工具', async () => {
+  const { ctx, agent, call } = await harness()
+  const text = '范围内原文。'.repeat(100_000) + '文件末尾证据。'
+  const dispose = attachBidTaskEvidenceReader(agent, [{ path: 'chapters/current.md', sha256: 'a'.repeat(64), text }])
+  expect((await call('read_task_evidence', { evidence_position: 0, start: 0, length: 12_000 })).value)
+    .toMatchObject({ text: text.slice(0, 12_000), end: 12_000, next_start: 12_000, total_characters: text.length })
+  expect((await call('read_task_evidence', { evidence_position: 0, start: text.length - 8, length: 12_000 })).value)
+    .toMatchObject({ text: text.slice(-8), end: text.length, next_start: null })
+  for (const args of [{ evidence_position: 1, start: 0, length: 1 },
+    { evidence_position: 0, start: text.length, length: 1 },
+    { evidence_position: 0, start: -1, length: 1 },
+    { evidence_position: 0, start: 0, length: 12_001 },
+    { evidence_position: 0, start: 0, length: 0 }]) {
+    expect((await call('read_task_evidence', args)).isError).toBe(true)
+  }
+  const other = ctx.agentLoop.create(SessionId('other-evidence-reader'), { provider: 'mock', model: 'mock' })
+  expect((await ctx.tools.execute({ agent: other, name: 'read_task_evidence',
+    arguments: { evidence_position: 0, start: 0, length: 1 }, callId: CallId('foreign-read'),
+    signal: new AbortController().signal })).isError).toBe(true)
+  dispose()
+  expect(ctx.tools.schemas(agent).some(tool => tool.name === 'read_task_evidence')).toBe(false)
+})
 
 describe('Writer 逐轮提交', () => {
   it('下一轮清除旧候选；旧轮次的异步校验完成不能覆盖新提交', async () => {

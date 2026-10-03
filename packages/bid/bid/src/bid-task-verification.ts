@@ -19,6 +19,7 @@ import { indexChapterContentBlocks } from './chapter-content-reuse.ts'
 import { parseChapterMetadata } from './chapter-writing-artifacts.ts'
 import { normalizeFlowchartInputs } from './flowchart.ts'
 import { resolveBidTaskSections } from './bid-task-sections.ts'
+import { attachBidTaskEvidenceReader } from './bid-task-evidence-reader.ts'
 
 const hash = z.string().regex(/^[a-f0-9]{64}$/u)
 const evidenceSchema = z.object({ path: z.string().min(1), sha256: hash }).strict()
@@ -294,7 +295,7 @@ export async function collectBidTaskEvidence(
 }
 
 /**
- * 使用隔离 Subagent 比较来源、计划及产物；无写入、提问或编排工具。
+ * 使用隔离 Subagent 比较来源、计划及产物；完整证据通过私有只读工具分段读取。
  * @param input Host 收集的完整来源和证据。
  * @param agent 当前执行 Agent。
  * @param signal 原 Run 的取消信号。
@@ -309,53 +310,66 @@ export const modelBidTaskVerifier: BidTaskVerifier = async (input, agent, signal
     ? modelPlanSchema.extend({ sources: modelPlanSchema.shape.sources.length(verificationSources(input).length) })
     : modelResultSchema.extend({ checks: modelResultSchema.shape.checks.length(input.requirements.length) }))
   delete outputSchema.$schema
-  const child = await subagents.start('spawn', {
-    parent: agent, signal, label: input.phase === 'plan' ? '任务计划核验' : '任务产物核验',
-    maxDepth: 1, toolFilter: { allow: [] },
-    prompt: [{ type: 'text', text: [
-      '你只核验任务，不规划、不写文件、不提问。最终返回符合 schema 的 JSON。',
-      '输出 schema 描述返回值的结构，不是返回值本身。只返回业务字段，不返回 $schema、type、properties、required 等 schema 描述字段。返回裸 JSON 对象，不加 Markdown 代码围栏或说明文字。',
-      '目标依据是 source.message 原话和 frozen issues；task.goal、步骤说明及 Writer/Reviewer 自述不能替代它们。',
-      '根据真实语义判断用户是否授权执行及根范围。段落意见不能授权整章目录修改；新用户明确授权扩展本章才可扩大。',
-      '按输入 sources 的顺序判断每个来源是否与任务有关；用户要求处理全部意见时纳入全部待处理意见。普通问答不能因有意见就授权执行。',
-      'plan 返回同样数量、同样顺序的 sources，每个来源填写 relevant 和其语义 requirements；无关来源 requirements=[]。消息来源和用户选中的意见不得遗漏。',
-      '真实目录子章节必须 object=outline、new_children=true；Markdown 标题、表格和分项不是目录节点。章节身份由 Host 从任务根范围或意见来源绑定。',
-      '要求写完新章节和审核时 completed_content=true；只审核可交付 repair 报告，要求修好时 repair=true。',
-      'preserve_migrated_content 表示拆分或迁移时须保留原文、原表格等内容，用户明确要求保留迁移原文时填写 true；其他要求填写 false。原章标题可由新目录标题替代，原文段落、表题及表格不得改写或删除。',
-      '没有明确结构授权且小章节含义与段落 scope 冲突时 scope_authorized=false，说明需澄清真实目录子章还是选区内分项。',
-      'plan 阶段核验步骤能否覆盖要求；指向新拆叶节的 chapter.write 本身交付正文及独立审核。计划已经包含该步骤时，附加 chapter.review 不代表缺少审核，不得因此否决；仅有 chapter.review 而没有 chapter.write 才不能覆盖新叶节写作。',
-      'outline.update.defer_content_migration=true 只推迟该目录步骤中的迁移；同一计划后续的 chapter.reorganize 可用原父章 source_section_ids 将完整原文块分配给新叶节。后续 chapter.write 的 previous_targets 由 Host 使用迁移结果解析为真实新叶节，不需要模型预先猜新 ID；这样的目录、迁移、写作序列可以覆盖完整要求。',
-      '能力事实：chapter.write 和 chapter.revise 均包含独立 Reviewer 和 Host 的候选核对，完成后交付当前正文及审核；它们可以同时覆盖“写作/修订和审核”，不要求重复添加 chapter.review。paragraphs 根范围仅允许一个引用完全相同选区的 chapter.revise 步骤。chapter.review 只复核已有可恢复正文，不承担修复。',
-      'Host 编排事实：本核验已在 bid_run_task 接纳或原 Work 恢复后执行；输入 task 是业务计划，不含入口调用。不得因 task 未写 bid_run_task 而否决。已有运行时由 Host 持久登记队列，结束后自动执行，并按发布收据主动通知 Main；不需要排队或通知能力步骤。requirements 列业务成果及范围约束，编排时序由 Host 的运行记录核对。首次计划故意遗漏步骤的测试仍须据实拒绝缺失的业务成果；同一任务后续修正完整计划可以通过，不要求后续继续遗漏。',
-      'plan 的 met 表示拟执行计划能满足要求，不表示产物已完成；不要因为目录尚未拆分或尚未写作而否定包含这些能力的完整计划。result 的 met 才表示实际产物满足要求。',
-      'plan 将可独立验收的语义要求分开，每项附带一个 check，填写 met 和 reason。result 只返回与给定 requirements 同样数量、同样顺序的 checks，填写 met 和 reason，不再生成或复制要求。',
-      '输入已提供 requirements 时，无论 phase 是 plan 还是 result，都只返回与它们数量和顺序完全对应的 checks；不得合并、删除或重新列出要求。plan 结合已完成步骤的真实证据与未完成步骤核验覆盖，result 核验实际成果。',
-      '所有来源 ID、章节 ID、编号、文件路径、摘要和证据记录由 Host 绑定。你只返回语义判断，不抄写这些字段。',
-      '导出是 Host 在内容发布后执行的尾效果；这里只将 object=export 保留为未执行项。',
-      'result 核验在正式发布之前执行。你核对候选业务成果，Host 在核验通过后才原子写入正式文件、goal_met=true 的发布凭据和完成通知；此时没有正式发布收据是正常时序，不能因此判定业务成果未满足，也不能将本次候选核验声称为已经正式发布。',
-      '内容证据不足或无相应文件不得声称 met。保持所有原文约束和真实资料限制。',
-      'scope_evidence 是 Host 从正式基线与候选读取的既有章节目录、正文、元数据和审核摘要对照；outside_scope 标识根范围外对象。unchanged=true 证明该对象未改变，不需要额外读取正文或创建审查步骤。',
-      'scope_evidence.before_section 是任务范围内节点的正式原始目录记录。核对原有需求、评分、响应点和合规覆盖的迁移时，以这些原始绑定为准；不能把其他节点或完整招标清单中的业务项推定为该节点的原有覆盖。候选目录表示本次成果，不能替代原始目录事实。',
-      'met 表示要求是否满足。对“不得改其他章节”等否定要求，摘要对照证明没有发生禁止的修改时 met=true；不是因为要求禁止修改就填 false。reason 必须与 met 的实际满足结论一致。',
-      'execution_history 是 Host 保存的同一 Work 已发生的拒绝、计划补丁及已完成步骤。prior_plan_rejections 非空证明首次计划确实被拒绝；后续修正计划应核验剩余业务成果，不能要求已发生的故障注入重新执行。编排顺序不作为新的正文、目录或资料要求。',
-      'preservation_evidence 是 Host 对正式原始正文及当前可写叶节的逐字、表格和流程图定义检查；retained=true 证明原有内容均在叶节完整保留，允许在原文周围增补。旧父节点保留的历史正文不参与该检查，也不进入交付正文。依据此事实判断内容保留，另行核验迁移归属及新增方案是否满足语义要求。',
-      '输出 schema：' + JSON.stringify(outputSchema),
-      '核验输入：' + JSON.stringify({ phase: input.phase, task: input.task,
-        execution_history: input.execution_history,
-        preservation_evidence: input.preservation_evidence,
-        sources: verificationSources(input).map(source => source.content),
-        requirements: input.requirements?.map(({ source_id: _source, section_ids: _sections, ...requirement }) => requirement),
-        evidence: input.evidence.map(({ sha256: _hash, ...file }) => file),
-        scope_evidence: input.scope_evidence?.map(({ before_sha256, after_sha256, ...file }) => ({ ...file,
-          unchanged: before_sha256 === after_sha256, exists: after_sha256 !== null })) }),
-    ].join('\n') }],
+  const prompt = [{ type: 'text' as const, text: [
+    '你只核验任务，不规划、不写文件、不提问。最终返回符合 schema 的 JSON。',
+    '输出 schema 描述返回值的结构，不是返回值本身。只返回业务字段，不返回 $schema、type、properties、required 等 schema 描述字段。返回裸 JSON 对象，不加 Markdown 代码围栏或说明文字。',
+    '目标依据是 source.message 原话和 frozen issues；task.goal、步骤说明及 Writer/Reviewer 自述不能替代它们。',
+    '根据真实语义判断用户是否授权执行及根范围。段落意见不能授权整章目录修改；新用户明确授权扩展本章才可扩大。',
+    '按输入 sources 的顺序判断每个来源是否与任务有关；用户要求处理全部意见时纳入全部待处理意见。普通问答不能因有意见就授权执行。',
+    'plan 返回同样数量、同样顺序的 sources，每个来源填写 relevant 和其语义 requirements；无关来源 requirements=[]。消息来源和用户选中的意见不得遗漏。',
+    '真实目录子章节必须 object=outline、new_children=true；Markdown 标题、表格和分项不是目录节点。章节身份由 Host 从任务根范围或意见来源绑定。',
+    '要求写完新章节和审核时 completed_content=true；只审核可交付 repair 报告，要求修好时 repair=true。',
+    'preserve_migrated_content 表示拆分或迁移时须保留原文、原表格等内容，用户明确要求保留迁移原文时填写 true；其他要求填写 false。原章标题可由新目录标题替代，原文段落、表题及表格不得改写或删除。',
+    '没有明确结构授权且小章节含义与段落 scope 冲突时 scope_authorized=false，说明需澄清真实目录子章还是选区内分项。',
+    'plan 阶段核验步骤能否覆盖要求；指向新拆叶节的 chapter.write 本身交付正文及独立审核。计划已经包含该步骤时，附加 chapter.review 不代表缺少审核，不得因此否决；仅有 chapter.review 而没有 chapter.write 才不能覆盖新叶节写作。',
+    'outline.update.defer_content_migration=true 只推迟该目录步骤中的迁移；同一计划后续的 chapter.reorganize 可用原父章 source_section_ids 将完整原文块分配给新叶节。后续 chapter.write 的 previous_targets 由 Host 使用迁移结果解析为真实新叶节，不需要模型预先猜新 ID；这样的目录、迁移、写作序列可以覆盖完整要求。',
+    '能力事实：chapter.write 和 chapter.revise 均包含独立 Reviewer 和 Host 的候选核对，完成后交付当前正文及审核；它们可以同时覆盖“写作/修订和审核”，不要求重复添加 chapter.review。paragraphs 根范围仅允许一个引用完全相同选区的 chapter.revise 步骤。chapter.review 只复核已有可恢复正文，不承担修复。',
+    'Host 编排事实：本核验已在 bid_run_task 接纳或原 Work 恢复后执行；输入 task 是业务计划，不含入口调用。不得因 task 未写 bid_run_task 而否决。已有运行时由 Host 持久登记队列，结束后自动执行，并按发布收据主动通知 Main；不需要排队或通知能力步骤。requirements 列业务成果及范围约束，编排时序由 Host 的运行记录核对。首次计划故意遗漏步骤的测试仍须据实拒绝缺失的业务成果；同一任务后续修正完整计划可以通过，不要求后续继续遗漏。',
+    'plan 的 met 表示拟执行计划能满足要求，不表示产物已完成；不要因为目录尚未拆分或尚未写作而否定包含这些能力的完整计划。result 的 met 才表示实际产物满足要求。',
+    'plan 将可独立验收的语义要求分开，每项附带一个 check，填写 met 和 reason。result 只返回与给定 requirements 同样数量、同样顺序的 checks，填写 met 和 reason，不再生成或复制要求。',
+    '输入已提供 requirements 时，无论 phase 是 plan 还是 result，都只返回与它们数量和顺序完全对应的 checks；不得合并、删除或重新列出要求。plan 结合已完成步骤的真实证据与未完成步骤核验覆盖，result 核验实际成果。',
+    '所有来源 ID、章节 ID、编号、文件路径、摘要和证据记录由 Host 绑定。你只返回语义判断，不抄写这些字段。',
+    '导出是 Host 在内容发布后执行的尾效果；这里只将 object=export 保留为未执行项。',
+    'result 核验在正式发布之前执行。你核对候选业务成果，Host 在核验通过后才原子写入正式文件、goal_met=true 的发布凭据和完成通知；此时没有正式发布收据是正常时序，不能因此判定业务成果未满足，也不能将本次候选核验声称为已经正式发布。',
+    '内容证据不足或无相应文件不得声称 met。保持所有原文约束和真实资料限制。',
+    'evidence 只列出本次冻结证据的位置、路径和总字符数。用 read_task_evidence 按位置读取与要求相关的完整目录、正文、审核和执行记录；next_start 非空时可继续读取，未读部分不能当作已核验。证据目录不是正文或审核结论；不要一次读取整本项目，也不要以文件存在代替内容核验。计划核验结合已完成步骤证据与剩余能力判断，产物核验必须读取实际成果。',
+    'scope_evidence 是 Host 从正式基线与候选读取的既有章节目录、正文、元数据和审核摘要对照；outside_scope 标识根范围外对象。unchanged=true 证明该对象未改变，不需要额外读取正文或创建审查步骤。',
+    'scope_evidence.before_section 是任务范围内节点的正式原始目录记录。核对原有需求、评分、响应点和合规覆盖的迁移时，以这些原始绑定为准；不能把其他节点或完整招标清单中的业务项推定为该节点的原有覆盖。候选目录表示本次成果，不能替代原始目录事实。',
+    'met 表示要求是否满足。对“不得改其他章节”等否定要求，摘要对照证明没有发生禁止的修改时 met=true；不是因为要求禁止修改就填 false。reason 必须与 met 的实际满足结论一致。',
+    'execution_history 是 Host 保存的同一 Work 已发生的拒绝、计划补丁及已完成步骤。prior_plan_rejections 非空证明首次计划确实被拒绝；后续修正计划应核验剩余业务成果，不能要求已发生的故障注入重新执行。编排顺序不作为新的正文、目录或资料要求。',
+    'preservation_evidence 是 Host 对正式原始正文及当前可写叶节的逐字、表格和流程图定义检查；retained=true 证明原有内容均在叶节完整保留，允许在原文周围增补。旧父节点保留的历史正文不参与该检查，也不进入交付正文。依据此事实判断内容保留，另行核验迁移归属及新增方案是否满足语义要求。',
+    '输出 schema：' + JSON.stringify(outputSchema),
+    '核验输入：' + JSON.stringify({ phase: input.phase, task: input.task,
+      execution_history: input.execution_history,
+      preservation_evidence: input.preservation_evidence,
+      sources: verificationSources(input).map(source => source.content),
+      requirements: input.requirements?.map(({ source_id: _source, section_ids: _sections, ...requirement }) => requirement),
+      evidence: input.evidence.map((file, evidence_position) => ({ evidence_position,
+        path: file.path, total_characters: file.text.length })),
+      scope_evidence: input.scope_evidence?.map(({ before_sha256, after_sha256, ...file }) => ({ ...file,
+        unchanged: before_sha256 === after_sha256, exists: after_sha256 !== null })) }),
+  ].join('\n') }]
+  const liftReader = agent.ctx.on('subagent/child-setup', ({ parent, childContext, request }) => {
+    if (parent !== agent || request.prompt !== prompt) return
+    attachBidTaskEvidenceReader(childContext.agent as Agent, input.evidence)
   })
+  let child: Awaited<ReturnType<typeof subagents.start>> | undefined
   try {
+    child = await subagents.start('spawn', {
+      parent: agent, signal, label: input.phase === 'plan' ? '任务计划核验' : '任务产物核验',
+      maxDepth: 1, toolFilter: { allow: [] }, prompt,
+    })
     const result = await child.result
     signal.throwIfAborted()
-    if (result.stopReason !== 'completed') throw new Error('BID_TASK_VERIFICATION_MODEL_FAILED: ' + result.stopReason)
+    if (result.stopReason !== 'completed') {
+      throw new Error('BID_TASK_VERIFICATION_MODEL_FAILED: ' + result.stopReason
+        + (result.diagnostic === undefined ? '' : ' (' + result.diagnostic + ')'))
+    }
     return bindSemanticDecision(input, JSON.parse(result.output.flatMap(block => block.type === 'text' ? [block.text] : []).join('')))
-  } finally { await child.dispose() }
+  } finally {
+    liftReader()
+    await child?.dispose()
+  }
 }
 
 /**
