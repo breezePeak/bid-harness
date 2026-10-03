@@ -67,6 +67,7 @@ class PlanningAdapter extends ChapterAdapter {
       if (schema.$schema !== undefined || schema.additionalProperties !== false
         || !prompt.includes('只返回业务字段，不返回 $schema')) throw new Error('任务核验输出协议混入 schema 元数据或缺少严格字段约束')
       if (!prompt.includes('result 核验在正式发布之前执行')) throw new Error('任务产物核验混淆候选检查与正式发布')
+      if (!prompt.includes('以这些原始绑定为准')) throw new Error('任务核验缺少原始目录绑定的归属依据')
       const input = inputJson<{ requirements?: readonly object[]; sources: readonly object[] }>(prompt, '核验输入：')
       const array = schema.properties[input.requirements === undefined ? 'sources' : 'checks']
       const count = input.requirements?.length ?? input.sources.length

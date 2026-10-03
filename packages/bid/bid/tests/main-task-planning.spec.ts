@@ -112,7 +112,10 @@ it('范围外核验读取真实基线和候选摘要，并拒绝核验器忽略�
   const working = new BidWorkspace((await prepareBidWorkingTree(workspace, work)).root, workspace.config)
   const unchanged = await collectBidTaskScopeEvidence(workspace, working, task)
   expect(unchanged.every(item => item.before_sha256 === item.after_sha256)).toBe(true)
-  expect(unchanged.some(item => item.section_id === 'SEC-1')).toBe(false)
+  expect(unchanged.find(item => item.section_id === 'SEC-1' && item.object === 'outline'))
+    .toMatchObject({ outside_scope: false, before_section: { id: 'SEC-1', requirement_ids: ['REQ-1'],
+      scoring_response_point_ids: ['RP-000001'] } })
+  expect(unchanged.filter(item => item.outside_scope).every(item => item.before_section === undefined)).toBe(true)
   const projectEvidence = await collectBidTaskScopeEvidence(workspace, working, { ...task, scope: { kind: 'project' } })
   expect(projectEvidence.some(item => item.section_id === 'SEC-1' && item.object === 'outline')).toBe(true)
   expect(projectEvidence.every(item => !item.outside_scope && item.before_sha256 === item.after_sha256)).toBe(true)
@@ -142,6 +145,18 @@ it('范围外核验读取真实基线和候选摘要，并拒绝核验器忽略�
   const verified = await validateBidTaskVerification(input, decision, workspace, working)
   expect(verified.goal_met).toBe(false)
   expect(verified.unmet).toContain('范围外既有章节的目录或文件发生变化。')
+  const outlinePath = join(working.projectRoot, 'outline/confirmed-outline.json')
+  const edited = JSON.parse(await readFile(outlinePath, 'utf8')) as {
+    sections: Array<{ id: string; requirement_ids: string[]; scoring_response_point_ids: string[] }>
+  }
+  const scopedSection = edited.sections.find(section => section.id === 'SEC-1')!
+  scopedSection.requirement_ids = []
+  scopedSection.scoring_response_point_ids = []
+  await writeFile(outlinePath, JSON.stringify(edited))
+  const baselineProof = (await collectBidTaskScopeEvidence(workspace, working, task))
+    .find(item => item.section_id === 'SEC-1' && item.object === 'outline')!
+  expect(baselineProof.before_section).toMatchObject({ requirement_ids: ['REQ-1'], scoring_response_point_ids: ['RP-000001'] })
+  expect(baselineProof.after_sha256).not.toBe(baselineProof.before_sha256)
 })
 
 const structureVerifier: BidTaskVerifier = async input => ({

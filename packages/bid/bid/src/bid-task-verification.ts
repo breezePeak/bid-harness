@@ -9,6 +9,7 @@ import { capabilityFileHash } from './bid-capability-files.ts'
 import { readFile } from 'node:fs/promises'
 import { assertNoLinkedPath, within } from './workspace-path.ts'
 import { readCapabilityOutlineBaseline } from './outline-draft-store.ts'
+import type { OutlineArtifact } from './outline-generation-artifacts.ts'
 import { readChapterLocations } from './chapter-storage.ts'
 import { outlineSectionScope } from './section-evidence-context.ts'
 import { validateWritingCapability } from './bid-writing-capability.ts'
@@ -139,6 +140,7 @@ export interface BidTaskVerificationInput {
     section_id: string
     object: string
     outside_scope: boolean
+    before_section?: OutlineArtifact['sections'][number]
     before_sha256: string | null
     after_sha256: string | null
   }[]
@@ -172,11 +174,14 @@ export async function collectBidTaskScopeEvidence(
   const outsideIdentity = (outline: typeof before, section: typeof before.sections[number]) => allowed === null ? section
     : { ...section, order: outline.sections.filter(item => item.parent_id === section.parent_id && !allowed.has(item.id))
       .sort((left, right) => left.order - right.order || left.id.localeCompare(right.id)).findIndex(item => item.id === section.id) }
-  for (const section of before.sections.filter(item => allowed === null || !allowed.has(item.id))) {
+  for (const section of before.sections) {
+    const outsideScope = allowed !== null && !allowed.has(section.id)
     const current = after.sections.find(item => item.id === section.id)
-    evidence.push({ section_id: section.id, object: 'outline', outside_scope: allowed !== null,
+    evidence.push({ section_id: section.id, object: 'outline', outside_scope: outsideScope,
+      ...outsideScope ? {} : { before_section: section },
       before_sha256: bidInputFingerprint(outsideIdentity(before, section)),
       after_sha256: current === undefined ? null : bidInputFingerprint(outsideIdentity(after, current)) })
+    if (allowed !== null && !outsideScope) continue
     const location = locations.get(section.id)
     if (location === undefined) continue
     for (const path of [location.contentPath, location.metadataPath, location.reviewPath]) {
@@ -330,6 +335,7 @@ export const modelBidTaskVerifier: BidTaskVerifier = async (input, agent, signal
       'result 核验在正式发布之前执行。你核对候选业务成果，Host 在核验通过后才原子写入正式文件、goal_met=true 的发布凭据和完成通知；此时没有正式发布收据是正常时序，不能因此判定业务成果未满足，也不能将本次候选核验声称为已经正式发布。',
       '内容证据不足或无相应文件不得声称 met。保持所有原文约束和真实资料限制。',
       'scope_evidence 是 Host 从正式基线与候选读取的既有章节目录、正文、元数据和审核摘要对照；outside_scope 标识根范围外对象。unchanged=true 证明该对象未改变，不需要额外读取正文或创建审查步骤。',
+      'scope_evidence.before_section 是任务范围内节点的正式原始目录记录。核对原有需求、评分、响应点和合规覆盖的迁移时，以这些原始绑定为准；不能把其他节点或完整招标清单中的业务项推定为该节点的原有覆盖。候选目录表示本次成果，不能替代原始目录事实。',
       'met 表示要求是否满足。对“不得改其他章节”等否定要求，摘要对照证明没有发生禁止的修改时 met=true；不是因为要求禁止修改就填 false。reason 必须与 met 的实际满足结论一致。',
       'execution_history 是 Host 保存的同一 Work 已发生的拒绝、计划补丁及已完成步骤。prior_plan_rejections 非空证明首次计划确实被拒绝；后续修正计划应核验剩余业务成果，不能要求已发生的故障注入重新执行。编排顺序不作为新的正文、目录或资料要求。',
       'preservation_evidence 是 Host 对正式原始正文及当前可写叶节的逐字、表格和流程图定义检查；retained=true 证明原有内容均在叶节完整保留，允许在原文周围增补。旧父节点保留的历史正文不参与该检查，也不进入交付正文。依据此事实判断内容保留，另行核验迁移归属及新增方案是否满足语义要求。',
