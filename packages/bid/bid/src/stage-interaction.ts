@@ -30,7 +30,7 @@ import { readCurrentWritingPlan } from './writing-entry-state.ts'
 import { evaluateHostAcceptanceCriteria } from './acceptance-criteria.ts'
 import { parseOrMigrateChapterExecutionLog } from './chapter-writing-plan-artifacts.ts'
 import { readChapterLocation } from './chapter-storage.ts'
-import { bidProjectInspectSchema } from './bid-project-inspect.ts'
+import { bidProjectInspectSchema, resolveBidProjectInspectWorkspace } from './bid-project-inspect.ts'
 import { bidCapabilityStepSchema, bidCapabilityTaskSchema } from './bid-capability-contract.ts'
 import { zodJsonSchema } from './zod-json-schema.ts'
 import { estimateChapterWritingPages } from './page-estimate.ts'
@@ -944,7 +944,12 @@ export function installStageInteractionTools(
                 const catalog = modelCatalogs.get(agent) ?? await collectBidModelTaskCatalog(workspaceFor(agent.session), agent.session)
                 const query = bindBidModelProjectQuery(raw.query, catalog)
                 const result = await execute(agent, { query, action: name }, exec.signal)
-                const current = await collectBidModelTaskCatalog(workspaceFor(agent.session), agent.session)
+                const catalogWorkspace = await resolveBidProjectInspectWorkspace(workspaceFor(agent.session), query)
+                if (catalogWorkspace === undefined) {
+                  modelCatalogs.delete(agent)
+                  return result
+                }
+                const current = await collectBidModelTaskCatalog(catalogWorkspace, agent.session)
                 modelCatalogs.set(agent, current)
                 return { ...result as object, objects: presentBidModelTaskCatalog(current,
                   query.object === 'chapters' ? query.section_ids : [], { page: raw.objects_page ?? ('page' in query ? query.page ?? 0 : 0),

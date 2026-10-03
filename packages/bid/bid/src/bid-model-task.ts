@@ -69,8 +69,8 @@ async function optionalText(workspace: BidWorkspace, path: string): Promise<stri
 }
 
 /**
- * 从正式对象生成模型选择表，正文选区由程序计算偏移。
- * @param workspace 当前正式项目。
+ * 从查询来源的真实对象生成模型选择表，正文选区由程序计算偏移。
+ * @param workspace 本次查询的正式或候选项目。
  * @param session 提供真实用户消息及当前原生写作请求的 Main 会话。
  * @returns 可冻结在工具结果中的对象及选区身份。
  */

@@ -300,7 +300,9 @@ export const modelBidTaskVerifier: BidTaskVerifier = async (input, agent, signal
   if (subagents === undefined || subagents.getProvider('spawn')?.inheritsParentContext !== false) {
     throw new Error('BID_TASK_VERIFIER_UNAVAILABLE')
   }
-  const outputSchema = zodJsonSchema(input.requirements === undefined ? modelPlanSchema : modelResultSchema)
+  const outputSchema = zodJsonSchema(input.requirements === undefined
+    ? modelPlanSchema.extend({ sources: modelPlanSchema.shape.sources.length(verificationSources(input).length) })
+    : modelResultSchema.extend({ checks: modelResultSchema.shape.checks.length(input.requirements.length) }))
   delete outputSchema.$schema
   const child = await subagents.start('spawn', {
     parent: agent, signal, label: input.phase === 'plan' ? '任务计划核验' : '任务产物核验',
@@ -322,6 +324,7 @@ export const modelBidTaskVerifier: BidTaskVerifier = async (input, agent, signal
       'Host 编排事实：本核验已在 bid_run_task 接纳或原 Work 恢复后执行；输入 task 是业务计划，不含入口调用。不得因 task 未写 bid_run_task 而否决。已有运行时由 Host 持久登记队列，结束后自动执行，并按发布收据主动通知 Main；不需要排队或通知能力步骤。requirements 列业务成果及范围约束，编排时序由 Host 的运行记录核对。首次计划故意遗漏步骤的测试仍须据实拒绝缺失的业务成果；同一任务后续修正完整计划可以通过，不要求后续继续遗漏。',
       'plan 的 met 表示拟执行计划能满足要求，不表示产物已完成；不要因为目录尚未拆分或尚未写作而否定包含这些能力的完整计划。result 的 met 才表示实际产物满足要求。',
       'plan 将可独立验收的语义要求分开，每项附带一个 check，填写 met 和 reason。result 只返回与给定 requirements 同样数量、同样顺序的 checks，填写 met 和 reason，不再生成或复制要求。',
+      '输入已提供 requirements 时，无论 phase 是 plan 还是 result，都只返回与它们数量和顺序完全对应的 checks；不得合并、删除或重新列出要求。plan 结合已完成步骤的真实证据与未完成步骤核验覆盖，result 核验实际成果。',
       '所有来源 ID、章节 ID、编号、文件路径、摘要和证据记录由 Host 绑定。你只返回语义判断，不抄写这些字段。',
       '导出是 Host 在内容发布后执行的尾效果；这里只将 object=export 保留为未执行项。',
       '内容证据不足或无相应文件不得声称 met。保持所有原文约束和真实资料限制。',

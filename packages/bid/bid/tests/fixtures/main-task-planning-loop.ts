@@ -59,10 +59,17 @@ class PlanningAdapter extends ChapterAdapter {
     const prompt = options.messages.flatMap(message => message.content)
       .flatMap(block => block.type === 'text' ? [block.text] : []).join('\n')
     if (prompt.includes('核验输入：')) {
-      const schema = inputJson<{ $schema?: string; additionalProperties?: boolean }>(prompt, '输出 schema：')
+      const schema = inputJson<{
+        $schema?: string
+        additionalProperties?: boolean
+        properties: Record<string, { minItems?: number; maxItems?: number }>
+      }>(prompt, '输出 schema：')
       if (schema.$schema !== undefined || schema.additionalProperties !== false
         || !prompt.includes('只返回业务字段，不返回 $schema')) throw new Error('任务核验输出协议混入 schema 元数据或缺少严格字段约束')
       const input = inputJson<{ requirements?: readonly object[]; sources: readonly object[] }>(prompt, '核验输入：')
+      const array = schema.properties[input.requirements === undefined ? 'sources' : 'checks']
+      const count = input.requirements?.length ?? input.sources.length
+      if (array?.minItems !== count || array.maxItems !== count) throw new Error('任务核验未约束完整来源或检查项数量')
       const check = { met: true, reason: '脚本要求 Host 另行校验真实新节点及全部新叶节的当前审核' }
       const requirements = [{
         description: '本章建立三个真实目录子节并保留原文、完成正文和审核', object: 'outline' as const,

@@ -74,7 +74,28 @@ function paginated<T>(items: readonly T[], pageNumber: number, pageSize: number)
 }
 
 /**
- * 读取已保存的 Bid 业务对象；候选读取必须显式提供候选工作区。
+ * 解析查询实际读取的工作区；缺失候选不回退到正式项目。
+ * @param canonical 正式项目。
+ * @param request 已解析的查询来源和 Work 身份。
+ * @param candidate 当前任务的候选项目，若存在。
+ * @returns 已核对身份的查询工作区；候选不存在时返回 undefined。
+ */
+export async function resolveBidProjectInspectWorkspace(
+  canonical: BidWorkspace, request: BidProjectInspectRequest, candidate?: BidWorkspace,
+): Promise<BidWorkspace | undefined> {
+  let workspace = request.source === 'candidate' ? candidate : canonical
+  if (request.source === 'candidate' && (workspace === undefined || workspace.root === canonical.root)) {
+    const state = await readBidProjectState(canonical)
+    const work = request.object === 'task' && request.work_id !== undefined
+      ? await readBidWorkDescriptor(canonical, request.work_id) : state?.run?.work
+    const paths = work == null ? null : await readExistingBidWorkingTree(canonical, work)
+    workspace = paths === null ? undefined : new BidWorkspace(paths.root, canonical.config)
+  }
+  return workspace
+}
+
+/**
+ * 读取已保存的 Bid 业务对象及其来源，不创建缺失候选。
  * @param canonical 正式项目。
  * @param input 对象、实际章节 ID 和分页请求。
  * @param candidate 当前任务的候选项目，若存在。
@@ -84,14 +105,7 @@ export async function inspectBidProject(
   canonical: BidWorkspace, input: BidProjectInspectRequest, candidate?: BidWorkspace,
 ): Promise<BidProjectInspectResult> {
   const request = bidProjectInspectSchema.parse(input)
-  let workspace = request.source === 'candidate' ? candidate : canonical
-  if (request.source === 'candidate' && (workspace === undefined || workspace.root === canonical.root)) {
-    const state = await readBidProjectState(canonical)
-    const work = request.object === 'task' && request.work_id !== undefined
-      ? await readBidWorkDescriptor(canonical, request.work_id) : state?.run?.work
-    const paths = work == null ? null : await readExistingBidWorkingTree(canonical, work)
-    workspace = paths === null ? undefined : new BidWorkspace(paths.root, canonical.config)
-  }
+  const workspace = await resolveBidProjectInspectWorkspace(canonical, request, candidate)
   const tenderArtifact = request.object === 'tender' ? `analysis/${request.part === 'scoring_origin' ? 'scoring-origin'
     : request.part === 'selection' ? 'tender-analysis-selection'
       : request.part === 'impact' ? 'tender-update-impact' : request.part}.json` : undefined

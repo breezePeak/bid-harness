@@ -1,4 +1,5 @@
 import { modelTaskArguments } from './fixtures/model-task.ts'
+import { prepareBidWorkingTree } from '../src/working-tree.ts'
 import { executorTestVerifier, scriptedVerificationReply } from './fixtures/task-verifier.ts'
 /* oxlint-disable typescript/no-unsafe-assignment -- Vitest asymmetric matchers return any. */
 import { mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from 'node:fs/promises'
@@ -1164,6 +1165,60 @@ describe('Workspace 项目与独立 Session', () => {
       { status: 'completed', description: '审核章节', detail: '本章已审核' },
       { status: 'pending', description: '只检查一致性', detail: '等待后续计划' },
     ] })
+  })
+
+  it('候选查询绑定候选计划版本，缺失候选撤回旧对象表', async () => {
+    const { ctx, workspace, fresh } = await fixture()
+    await seedCapabilityProject(workspace, 'complete')
+    await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'completed' })
+    const agent = await fresh('candidate-catalog-main')
+    const message = createUserMessage({ content: [{ type: 'text', text: '继续更新写作要求' }], source: { kind: 'user' } })
+    agent.session.append('turn/start', { turn: 1 })
+    agent.session.append('user/message', message, { surfaceOp: 'append' })
+    const work = await persistCapabilityTaskRequest(workspace, agent.session, 'chapter_writing', {
+      goal: '更新写作要求', scope: { kind: 'project' }, steps: [{ description: '审核章节', scope: { source: 'task' },
+        call: { capability: 'chapter.review', input: { reason: '审核章节' } } }],
+    }, { session_id: String(agent.id), message_id: String(message.id) }, ['chapters/writing-plan.json'],
+    { stage: 'chapter_writing', status: 'completed', run: null })
+    const paths = await prepareBidWorkingTree(workspace, work)
+    await expect(executeCapabilityTask(workspace, createTestBidRunContext({ work }), {
+      allowedWrites: async () => { throw new Error('等待计划调整') },
+      execute: async () => { throw new Error('不得执行未开始步骤') }, validate: async () => {},
+    }, agent, agent.session)).rejects.toThrow('等待计划调整')
+    const candidate = new BidWorkspace(paths.root, workspace.config)
+    const planPath = join(candidate.projectRoot, 'chapters/writing-plan.json')
+    const plan = parseWritingPlan(JSON.parse(await readFile(planPath, 'utf8')))
+    await writeFile(planPath, JSON.stringify({ ...plan, plan_version: plan.plan_version + 1 }))
+    const run: BidRunData = { runId: 'candidate-catalog-run', epoch: 1, baseProjectRevision: 1,
+      work, startedAt: Date.now(), updatedAt: Date.now() }
+    const suspended = { ...run, cause: 'executor_error' as const, error: { message: '等待计划调整' } }
+    await checkpointStoredBidProjectState(workspace, { stage: 'chapter_writing', status: 'suspended', run: suspended })
+    agent.session.append('bid.run.started', { run })
+    agent.session.append('bid.run.suspended', { run: suspended })
+    const query = await ctx.tools.execute({ agent, name: 'bid_project_inspect', arguments: {
+      query: { object: 'writing_plan', source: 'candidate' },
+    }, callId: CallId('candidate-catalog-inspect'), signal: new AbortController().signal })
+    expect(query).toMatchObject({ isError: false, value: { available: true, data: { plan_version: plan.plan_version + 1 } } })
+    const args = { edit: 'replace_pending', steps: [{ description: '更新写作要求', scope: { source: 'task' },
+      call: { capability: 'writing.plan', input: { update_kind: 'patch', user_message_positions: [0],
+        summary: '补充写作要求', affected_section_positions: [], sections: [], global_instructions: ['保持真实资料边界。'] } } }] }
+    const patched = await ctx.tools.execute({ agent, name: 'bid_plan_task', arguments: args,
+      callId: CallId('candidate-catalog-patch'), signal: new AbortController().signal })
+    expect(patched, JSON.stringify(patched)).toMatchObject({ isError: false, value: { accepted: true } })
+    const checkpoint = JSON.parse(await readFile(join(workspace.projectRoot, 'runs', work.workId,
+      'task-checkpoint.json'), 'utf8')) as { steps: Array<{ step: { call: { input: { base_plan_version: number } } } }> }
+    expect(checkpoint.steps[0]?.step.call.input.base_plan_version).toBe(plan.plan_version + 1)
+    expect(parseWritingPlan(JSON.parse(await readFile(join(workspace.projectRoot, 'chapters/writing-plan.json'), 'utf8'))).plan_version)
+      .toBe(plan.plan_version)
+    await rm(join(paths.root, 'work-identity.json'))
+    const missing = await ctx.tools.execute({ agent, name: 'bid_project_inspect', arguments: {
+      query: { object: 'writing_plan', source: 'candidate' },
+    }, callId: CallId('candidate-catalog-missing'), signal: new AbortController().signal })
+    expect(missing).toMatchObject({ isError: false, value: { available: false } })
+    const stale = await ctx.tools.execute({ agent, name: 'bid_plan_task', arguments: args,
+      callId: CallId('candidate-catalog-stale'), signal: new AbortController().signal })
+    expect(stale).toMatchObject({ isError: true })
+    expect(JSON.stringify(stale)).toContain('BID_MODEL_TASK_INSPECT_REQUIRED')
   })
 
   it('旧目录工具在 S5 完成后使用能力 Work，并保留 CAS 冲突保护', async () => {
