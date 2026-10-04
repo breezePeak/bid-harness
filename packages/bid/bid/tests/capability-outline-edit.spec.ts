@@ -28,6 +28,7 @@ import { parseChapterMetadata, parseChapterWritingManifest } from '../src/chapte
 import { parseWritingPlan } from '../src/writing-requirements.ts'
 import { parseEvidenceMapArtifact } from '../src/evidence-mapping-artifacts.ts'
 import { seedCapabilityProject } from './capability-fixture.ts'
+import { executeWritingCapability } from '../src/bid-writing-capability.ts'
 import { applyOutlineBusinessBindings } from '../src/outline-confirmation-edits.ts'
 import { parseTenderRequirementsArtifact, parseTenderScoringArtifact,
   parseTenderComplianceArtifact } from '../src/tender-analysis-artifacts.ts'
@@ -327,7 +328,7 @@ describe('目录能力候选', () => {
     expect(outline.sections.find(section => section.id === 'SEC-1')).toMatchObject({
       requirement_ids: ['REQ-1', 'REQ-2'], scoring_response_point_ids: ['RP-000001', 'RP-000002'],
     })
-    expect(await readFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), 'utf8')).toBe(first + second)
+    expect(await readFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), 'utf8')).toBe(first + '\n' + second)
     expect(seeds.seeds[0]?.source_section_ids).toEqual(['SEC-1', 'SEC-2'])
     expect(reassignment.retired_sections[0]).toMatchObject({ source_section_id: 'SEC-2',
       target_section_ids: ['SEC-1'], writing_task: { acceptance_criteria: [{ id: 'AC-000003' }] } })
@@ -400,44 +401,143 @@ describe('目录能力候选', () => {
       .toBe(original)
   })
 
-  it('原文迁移子会话只返回块分配，由 Host 验证并落盘', async () => {
+  it('修复迁移经模型工具与原生提交合并粘连和同源原文副本，保留新增正文及正式来源', async () => {
+    const canonical = (await fixture()).workspace
     const { workspace, context, stepId } = await fixture()
+    const original = await readFile(join(canonical.projectRoot, 'chapters/sections/0001.md'), 'utf8')
+    const scoped = { ...context, canonical, preserveMigratedContent: true }
     const prefix = createHash('sha256').update(stepId).digest('hex').slice(0, 12)
     const children = [1, 2].map(index => `SEC-${prefix}-${String(index)}`)
-    await executeCapabilityOutlineUpdate(context, {
-      operations: [{ type: 'split_section', section_id: 'SEC-1', children: [
-        { title: '准备', purpose: '准备', must_answer: ['准备'] },
-        { title: '实施', purpose: '实施', must_answer: ['实施'] },
-      ] }],
-      business_bindings: [{ section_id: children[0]!, requirement_ids: ['REQ-1'],
+    await executeCapabilityOutlineUpdate(scoped, {
+      operations: [{ type: 'split_section', section_id: 'SEC-1', children: children.map((_id, index) => ({
+        title: `阶段${index + 1}`, purpose: `阶段${index + 1}`, must_answer: [`阶段${index + 1}`],
+      })) }], business_bindings: [{ section_id: children[0]!, requirement_ids: ['REQ-1'],
         scoring_ids: ['SCORE-1'], scoring_response_point_ids: ['RP-000001'], compliance_ids: [] }],
-      content_assignments: [], allow_content_deletion: false, defer_content_migration: true,
+      content_assignments: [], allow_content_deletion: false,
+      defer_content_migration: true,
     })
-    const original = await readFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), 'utf8')
     const blocks = indexChapterContentBlocks('SEC-1', original)
-    const assignments = blocks.map((block, index) => ({
-      block_id: block.block_id, source_section_id: block.source_section_id,
-      source_sha256: block.source_sha256, block_sha256: block.sha256,
-      target_section_ids: [children[Math.min(Math.floor(index / 3), 1)]!], disposition: 'move' as const,
-    }))
-    const output = JSON.stringify(assignments.map(assignment => ({ disposition: assignment.disposition,
-      target_positions: assignment.target_section_ids.map(id => children.indexOf(id)) })))
-    const prompt = vi.fn(async () => ({ result: Promise.resolve({ stopReason: 'completed',
-      output: [{ type: 'text', text: output }] }), dispose: async () => {} }))
-    const agent = { ctx: { get: () => ({ getProvider: () => ({ inheritsParentContext: false }), start: prompt }) } } as unknown as BidCapabilityExecutionContext['agent']
+    const sectionIds = new Set(['SEC-1', ...children])
+    await executeCapabilityChapterReorganize({ ...scoped, sectionIds }, {
+      instruction: '完整迁入第一子章', source_section_ids: ['SEC-1'], allow_content_deletion: false,
+      assignments: blocks.map(block => ({ block_id: block.block_id, source_section_id: block.source_section_id,
+        source_sha256: block.source_sha256, block_sha256: block.sha256,
+        target_section_ids: [children[0]!], disposition: 'move' as const })),
+    })
+    const seeds = chapterReuseSeedsSchema.parse(await readJson(workspace, 'chapters/reuse-seeds.json'))
+    const contentPath = seeds.seeds[0]!.content_path
+    const added = '\n\n本次新增说明必须保留。\n'
+    const originalTexts = new Set(blocks.filter(block => block.type !== 'heading').map(block => block.markdown.trim()))
+    const candidate = blocks.map(block => block.markdown + (block.type === 'table' ? '# 粘连标题' : '')).join('')
+      + '\n\n' + blocks.filter(block => block.type !== 'heading' && !block.markdown.includes('{{flowchart:'))
+      .map(block => block.markdown).join('') + added
+    await writeFile(join(workspace.projectRoot, contentPath), candidate)
+    const allBlocks = [...blocks, ...indexChapterContentBlocks(children[0]!, candidate, originalTexts)]
+    const prompt = vi.fn(async () => ({ result: Promise.resolve({ stopReason: 'completed', output: [],
+      structured: { assignments: Object.fromEntries(allBlocks.map((_block, position) => [String(position), {
+        disposition: 'move', target_positions: [0],
+      }])) } }), dispose: async () => {} }))
+    const agent = { ctx: { on: () => () => {}, get: () => ({
+      getProvider: () => ({ inheritsParentContext: false }), start: prompt,
+    }) } } as unknown as BidCapabilityExecutionContext['agent']
     const call = bidCapabilityInputSchema.parse({ capability: 'chapter.reorganize', input: {
-      instruction: '按准备和实施分配原文', source_section_ids: ['SEC-1'], allow_content_deletion: false,
+      instruction: '原父章与子章同一原文合并一次，保留全部新增内容',
+      source_section_ids: ['SEC-1', children[0]!], allow_content_deletion: false,
     } })
     if (call.capability !== 'chapter.reorganize') throw new Error('test call mismatch')
-    const scoped = { ...context, agent, sectionIds: new Set(['SEC-1', ...children]),
-      allowedWrites: await allowedOutlineCapabilityWrites(call, workspace, stepId, new Set(['SEC-1', ...children])) }
-    const { result } = await executeOutlineCapability(call, scoped)
+    const recovery = { ...scoped, agent, sectionIds,
+      allowedWrites: await allowedOutlineCapabilityWrites(call, workspace, stepId, sectionIds) }
+    await expect(executeCapabilityChapterReorganize(recovery, { ...call.input,
+      assignments: allBlocks.map(block => ({ block_id: block.block_id, source_section_id: block.source_section_id,
+        source_sha256: block.source_sha256, block_sha256: block.sha256,
+        target_section_ids: children, disposition: 'share' as const })),
+    })).rejects.toThrow('BID_CHAPTER_REUSE_ORIGINAL_TARGET_NOT_UNIQUE')
+    const { result } = await executeOutlineCapability(call, recovery)
+    await expect(validateOutlineCapability(recovery, result)).resolves.toBeUndefined()
+    const merged = await readFile(join(workspace.projectRoot, contentPath), 'utf8')
+    for (const block of blocks.filter(block => block.type !== 'heading')) {
+      expect(merged.split(block.markdown.trim())).toHaveLength(2)
+    }
+    expect(merged).toContain(added.trim())
+    expect(indexChapterContentBlocks('merged', merged).some(block => block.type === 'heading'
+      && block.markdown.trim() === '# 粘连标题')).toBe(true)
+    expect(await readFile(join(canonical.projectRoot, 'chapters/sections/0001.md'), 'utf8')).toBe(original)
+    const metadata = parseChapterMetadata(await readJson(workspace, seeds.seeds[0]!.metadata_path))
+    expect(metadata.flowcharts.map(chart => chart.key)).toEqual(['process-flow'])
     expect(prompt).toHaveBeenCalledOnce()
-    expect(result.changed_artifacts.every(path => scoped.allowedWrites.has(path))).toBe(true)
-    await expect(validateOutlineCapability(scoped, result)).resolves.toBeUndefined()
-    expect(await readJson(workspace, 'chapters/pending-reorganization.json'))
-      .toMatchObject({ pending_source_section_ids: [] })
   })
+
+  it.each(['complete', 'missing_block', 'foreign_block', 'unknown_target'] as const)(
+    '六子章的稀疏原文分配按块位置绑定，并拒绝不完整结果（%s）', async (variant) => {
+      const { workspace, context, stepId } = await fixture()
+      const prefix = createHash('sha256').update(stepId).digest('hex').slice(0, 12)
+      const children = [1, 2, 3, 4, 5, 6].map(index => `SEC-${prefix}-${String(index)}`)
+      await executeCapabilityOutlineUpdate(context, {
+        operations: [{ type: 'split_section', section_id: 'SEC-1', children: children.map((_id, index) => ({
+          title: `阶段${index + 1}`, purpose: `阶段${index + 1}`, must_answer: [`阶段${index + 1}`],
+        })) }],
+        business_bindings: [{ section_id: children[0]!, requirement_ids: ['REQ-1'],
+          scoring_ids: ['SCORE-1'], scoring_response_point_ids: ['RP-000001'], compliance_ids: [] }],
+        content_assignments: [], allow_content_deletion: false, defer_content_migration: true,
+      })
+      const original = await readFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), 'utf8')
+      const blocks = indexChapterContentBlocks('SEC-1', original)
+      const assignments = blocks.map(block => ({
+        block_id: block.block_id, source_section_id: block.source_section_id,
+        source_sha256: block.source_sha256, block_sha256: block.sha256,
+        target_section_ids: [children[0]!], disposition: 'move' as const,
+      }))
+      const choices: Record<string, { disposition: 'move'; target_positions: number[] }> = {}
+      for (const [position, assignment] of [...assignments.entries()].reverse()) {
+        choices[String(position)] = {
+          disposition: assignment.disposition, target_positions: assignment.target_section_ids.map(id => children.indexOf(id)),
+        }
+      }
+      if (variant === 'missing_block') delete choices['0']
+      if (variant === 'foreign_block') choices[String(blocks.length)] = { disposition: 'move', target_positions: [0] }
+      if (variant === 'unknown_target') choices['0'] = { disposition: 'move', target_positions: [children.length] }
+      let targetView: Array<{ position: number; outline_position: number; title: string }> = []
+      const prompt = vi.fn(async (_provider: string, request: { prompt: readonly { text: string }[] }) => {
+        const line = request.prompt[0]!.text.split('\n').find(line => line.startsWith('当前可写目标章节：'))!
+        targetView = JSON.parse(line.slice('当前可写目标章节：'.length)) as typeof targetView
+        return { result: Promise.resolve({ stopReason: 'completed', structured: { assignments: choices }, output: [] }),
+          dispose: async () => {} }
+      })
+      const agent = { ctx: { on: () => () => {}, get: () => ({ getProvider: () => ({ inheritsParentContext: false }), start: prompt }) } } as unknown as BidCapabilityExecutionContext['agent']
+      const call = bidCapabilityInputSchema.parse({ capability: 'chapter.reorganize', input: {
+        instruction: '按准备和实施分配原文', source_section_ids: ['SEC-1'], allow_content_deletion: false,
+      } })
+      if (call.capability !== 'chapter.reorganize') throw new Error('test call mismatch')
+      const scoped = { ...context, agent, sectionIds: new Set(['SEC-1', ...children]),
+        allowedWrites: await allowedOutlineCapabilityWrites(call, workspace, stepId, new Set(['SEC-1', ...children])) }
+      await expect(executeWritingCapability({ capability: 'chapter.write', input: { instruction: '直接写作并在指令中保留原文' } },
+        scoped, { maxRepairAttempts: 2, maxConcurrency: 2, webSearchEnabled: false }))
+        .rejects.toThrow('BID_CHAPTER_CONTENT_MIGRATION_REQUIRED')
+      expect(prompt).not.toHaveBeenCalled()
+      if (variant !== 'complete') {
+        await expect(executeOutlineCapability(call, scoped)).rejects.toThrow()
+        expect(await readJson(workspace, 'chapters/pending-reorganization.json'))
+          .toMatchObject({ pending_source_section_ids: ['SEC-1'] })
+        await expect(readJson(workspace, 'chapters/reuse-seeds.json')).rejects.toMatchObject({ code: 'ENOENT' })
+        expect(await readFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), 'utf8')).toBe(original)
+        return
+      }
+      const { result } = await executeOutlineCapability(call, scoped)
+      expect(prompt).toHaveBeenCalledOnce()
+      const outline = parseOutlineArtifact(await readJson(workspace, 'outline/confirmed-outline.json'))
+      expect(targetView.map(({ position, outline_position, title }) => ({ position, outline_position, title })))
+        .toEqual(children.map((id, position) => ({ position, outline_position: outline.sections.findIndex(section => section.id === id),
+          title: outline.sections.find(section => section.id === id)!.title })))
+      expect(targetView[0]?.outline_position).not.toBe(targetView[0]?.position)
+      expect(result.target_section_ids).toEqual(children)
+      const seeds = chapterReuseSeedsSchema.parse(await readJson(workspace, 'chapters/reuse-seeds.json'))
+      expect(seeds.seeds).toHaveLength(1)
+      expect(await readFile(join(workspace.projectRoot, seeds.seeds[0]!.content_path), 'utf8')).toBe(original)
+      expect(result.changed_artifacts.every(path => scoped.allowedWrites.has(path))).toBe(true)
+      await expect(validateOutlineCapability(scoped, result)).resolves.toBeUndefined()
+      expect(await readJson(workspace, 'chapters/pending-reorganization.json'))
+        .toMatchObject({ pending_source_section_ids: [] })
+    })
 
   it.each([
     { name: '拒绝遗留本次未迁移正文', interrupt: 'missing_followup' },
@@ -493,13 +593,16 @@ describe('目录能力候选', () => {
           target_positions: [Math.min(Math.floor(index / 3), 1)], disposition: 'move',
         }))),
       ]
-      const start = vi.fn(async () => {
+      const start = vi.fn(async (_provider: string, request: { label: string }) => {
         const output = outputs.shift()
         if (output === undefined) throw new Error('missing model output')
-        return { result: Promise.resolve({ stopReason: 'completed', output: [{ type: 'text', text: output }] }),
-          dispose: async () => {} }
+        return { result: Promise.resolve({ stopReason: 'completed', output: [{ type: 'text', text: output }],
+          ...(request.label === '章节原文分配' ? { structured: { assignments: Object.fromEntries(
+            (JSON.parse(output) as object[]).map((choice, position) => [String(position), choice]),
+          ) } } : {}) }),
+        dispose: async () => {} }
       })
-      const agent = { ctx: { get: () => ({ getProvider: () => ({ inheritsParentContext: false }), start }) } } as unknown as BidCapabilityExecutionContext['agent']
+      const agent = { ctx: { on: () => () => {}, get: () => ({ getProvider: () => ({ inheritsParentContext: false }), start }) } } as unknown as BidCapabilityExecutionContext['agent']
       let interrupted = false
       const dispatcher: CapabilityTaskDispatcher = {
         allowedWrites: async (call, ids, working, stepId) => {

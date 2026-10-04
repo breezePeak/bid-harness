@@ -3,6 +3,34 @@ import { createHash } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import type { BidWorkspace } from './index.ts'
 import { assertNoLinkedPath, within } from './workspace-path.ts'
+import { readChapterLocation } from './chapter-storage.ts'
+import { indexChapterContentBlocks } from './chapter-content-reuse.ts'
+
+/**
+ * 读取已授权源章在正式项目中的完整原文块，供迁移识别候选里的重复副本。
+ * @param workspace 正式项目。
+ * @param sectionIds 已核对授权范围的源章身份。
+ * @param originalSectionIds 原请求接纳前已有的目录身份。
+ * @returns 非标题原文块及正式源文件中的份数；只存在于候选的新章不补造正式来源。
+ */
+export async function originalCapabilityBlockCounts(
+  workspace: BidWorkspace, sectionIds: ReadonlySet<string>, originalSectionIds?: ReadonlySet<string>,
+): Promise<ReadonlyMap<string, number>> {
+  const counts = new Map<string, number>()
+  for (const id of sectionIds) {
+    if (originalSectionIds !== undefined && !originalSectionIds.has(id)) continue
+    const location = await readChapterLocation(workspace, id)
+    if (location === null) continue
+    const path = within(workspace.projectRoot, location.contentPath)
+    await assertNoLinkedPath(workspace.root, path)
+    const markdown = await readFile(path, 'utf8')
+    for (const block of indexChapterContentBlocks(id, markdown)) if (block.type !== 'heading') {
+      const text = block.markdown.trim()
+      counts.set(text, (counts.get(text) ?? 0) + 1)
+    }
+  }
+  return counts
+}
 
 /**
  * 读取项目 JSON 文件。

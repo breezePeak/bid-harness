@@ -6,7 +6,8 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import SessionStore from '@deepseek-ai/dsh-session'
 import { afterEach, expect, it, vi } from 'vitest'
 import { BidWorkspace } from '../src/index.ts'
-import { askCapabilityTaskInput, persistCapabilityTaskRequest,
+import { askCapabilityTaskInput, isCapabilityAuthorizationRecheckFailure, persistCapabilityTaskRequest,
+  capabilityTaskCheckpointSchema,
   type CapabilityTaskDispatcher } from '../src/bid-capability-task.ts'
 import { executeTestCapabilityTask as executeCapabilityTask } from './fixtures/task-verifier.ts'
 import { createBidCapabilityDispatcher } from '../src/bid-capability-dispatcher.ts'
@@ -32,6 +33,38 @@ it('完成凭据重新读取后不重复执行已发布步骤', async () => {
   expect(second.status).toBe('completed')
   expect(execute).toHaveBeenCalledTimes(2)
   expect(await readFile(join(fixture.workspace.projectRoot, 'chapters/local-review.json'))).toEqual(before)
+})
+
+it('只允许原授权会话恢复检查项全通过的重复授权冲突，仍校验请求和检查点身份', async () => {
+  const fixture = await capabilityRecoveryFixture()
+  disposals.push(fixture.dispose)
+  const adapter = recoveryDispatcher(async (call) => {
+    if (call.capability === 'document.review') throw new Error('保留候选检查点')
+  })
+  await expect(executeCapabilityTask(fixture.workspace, fixture.run(), adapter, fixture.agent, fixture.session))
+    .rejects.toThrow('保留候选检查点')
+  const path = join(fixture.workspace.projectRoot, 'runs', fixture.work.workId, 'task-checkpoint.json')
+  const checkpoint = capabilityTaskCheckpointSchema.parse(JSON.parse(await readFile(path, 'utf8')))
+  const authorized = checkpoint.verifications?.[0]
+  if (authorized === undefined || !authorized.scope_authorized) throw new Error('缺少原授权核验')
+  const conflict = { ...authorized, scope_authorized: false, goal_met: false }
+  const persisted = { ...checkpoint, verifications: [authorized, conflict] }
+  await writeFile(path, JSON.stringify(persisted))
+  expect(await isCapabilityAuthorizationRecheckFailure(fixture.workspace, fixture.work, fixture.session)).toBe(true)
+  expect(await isCapabilityAuthorizationRecheckFailure(fixture.workspace, fixture.work, fixture.ctx.sessions.create())).toBe(false)
+  for (const verification of [
+    { ...conflict, checks: conflict.checks.map(check => ({ ...check, met: false })) },
+    { ...conflict, requirements: conflict.requirements.map(requirement => ({ ...requirement, description: '另一项要求' })) },
+    { ...conflict, unmet: ['范围外文件改变'] },
+  ]) {
+    await writeFile(path, JSON.stringify({ ...persisted, verifications: [authorized, verification] }))
+    expect(await isCapabilityAuthorizationRecheckFailure(fixture.workspace, fixture.work, fixture.session)).toBe(false)
+  }
+  await writeFile(path, JSON.stringify({ ...persisted, verifications: [conflict] }))
+  expect(await isCapabilityAuthorizationRecheckFailure(fixture.workspace, fixture.work, fixture.session)).toBe(false)
+  await writeFile(path, JSON.stringify({ ...persisted, request_sha256: 'f'.repeat(64) }))
+  await expect(isCapabilityAuthorizationRecheckFailure(fixture.workspace, fixture.work, fixture.session))
+    .rejects.toThrow('BID_CAPABILITY_CHECKPOINT_IDENTITY_MISMATCH')
 })
 
 it('原 Work 的失败步骤接收恢复指令，已完成步骤不重跑且输入身份不变', async () => {

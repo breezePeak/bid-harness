@@ -1,6 +1,6 @@
 import { modelTaskArguments } from './fixtures/model-task.ts'
 import { prepareBidWorkingTree } from '../src/working-tree.ts'
-import { executorTestVerifier, scriptedVerificationReply } from './fixtures/task-verifier.ts'
+import { executorTestVerifier, scriptedVerificationCall } from './fixtures/task-verifier.ts'
 /* oxlint-disable typescript/no-unsafe-assignment -- Vitest asymmetric matchers return any. */
 import { mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
@@ -130,8 +130,12 @@ class ProjectSessionAdapter extends LlmAdapter {
     const verification = options.messages.flatMap(message => message.content)
       .find(block => block.type === 'text' && block.text.includes('核验输入：'))
     if (verification?.type === 'text') {
-      const input = JSON.parse(verification.text.slice(verification.text.indexOf('核验输入：') + '核验输入：'.length)) as Parameters<typeof scriptedVerificationReply>[0]
-      yield* answer(JSON.stringify(scriptedVerificationReply(input)))
+      const input = JSON.parse(verification.text.slice(verification.text.indexOf('核验输入：') + '核验输入：'.length)) as Parameters<typeof scriptedVerificationCall>[0]
+      const call = scriptedVerificationCall(input, options.messages)
+      yield { type: 'block-start', index: 0, blockType: 'tool-call' }
+      yield { type: 'block-end', index: 0, block: { type: 'tool-call', id: CallId('verification'),
+        name: call.name, arguments: JSON.stringify(call.args) } }
+      yield { type: 'finish', reason: { kind: 'tool-calls' } }
       return
     }
     const lastSource = options.messages.at(-1)?.source
@@ -938,7 +942,14 @@ describe('Workspace 项目与独立 Session', () => {
     }
     const oldDirectory = join(workspace.projectRoot, 'runs', oldWork.workId)
     await mkdir(join(oldDirectory, 'candidate'), { recursive: true })
-    await writeFile(join(oldDirectory, 'task-checkpoint.json'), '旧检查点\n')
+    const oldTask = capabilityTaskRequestSchema.parse(oldRequest).task
+    const oldCheckpoint = JSON.stringify({ schema_version: 1, work_id: oldWork.workId,
+      request_sha256: oldWork.requestSha256, plan_patches: [], steps: oldTask.steps.map((step, index) => ({
+        step_id: `step-${createHash('sha256').update(oldWork.workId).digest('hex').slice(0, 24)}-${String(index + 1).padStart(4, '0')}`,
+        step, status: 'pending', authorization: oldAuthorization,
+      })),
+    }) + '\n'
+    await writeFile(join(oldDirectory, 'task-checkpoint.json'), oldCheckpoint)
     await writeFile(join(oldDirectory, 'candidate', 'outline.json'), '旧候选\n')
     await writeFile(join(oldDirectory, 'step-receipt.json'), '旧步骤凭据\n')
     const newTask = { goal: '修正评分点目录层级，首个细粒度评分点不作大标题',
@@ -985,7 +996,7 @@ describe('Workspace 项目与独立 Session', () => {
     expect(capabilityTaskRequestSchema.parse(await readBidWorkRequest(workspace, newRun.work)).authorization.message_id)
       .toBe(String(newMessage.id))
     expect(await readBidWorkRequest(workspace, oldWork)).toEqual(oldRequest)
-    expect(await readFile(join(oldDirectory, 'task-checkpoint.json'), 'utf8')).toBe('旧检查点\n')
+    expect(await readFile(join(oldDirectory, 'task-checkpoint.json'), 'utf8')).toBe(oldCheckpoint)
     expect(await readFile(join(oldDirectory, 'candidate', 'outline.json'), 'utf8')).toBe('旧候选\n')
     expect(await readFile(join(oldDirectory, 'step-receipt.json'), 'utf8')).toBe('旧步骤凭据\n')
     const published = parseOutlineArtifact(JSON.parse(await readFile(
@@ -1032,7 +1043,8 @@ describe('Workspace 项目与独立 Session', () => {
     expect(result.isError, JSON.stringify(result)).toBe(false)
     expect(result.value).toMatchObject({ accepted: true, execution_status: 'started', completed: false })
     await settleCapabilityOperations(ctx)
-    expect(agent.session.events.findLast(event => event.type === 'bid.run.notice' && event.data.kind === 'completed'))
+    expect(agent.session.events.findLast(event => event.type === 'bid.run.notice' && event.data.kind === 'completed'),
+      JSON.stringify(await readBidProjectState(workspace)))
       .toBeDefined()
     const plan = await ctx.bid.getCapabilityTaskPlan(agent.session)
     expect(plan).toMatchObject({ status: 'completed', steps: [

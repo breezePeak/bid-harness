@@ -671,7 +671,7 @@ function fixtureAgent(
   const agent = {
     id: 'parent',
     options: {},
-    session: { header: { cwd: workspace.root }, events: [] },
+    session: { header: { cwd: workspace.root }, events: [], requestHeader: () => undefined },
     inbox: {
       nextStep,
       nextTurn,
@@ -886,6 +886,38 @@ describe('chapter-writing executor', () => {
       scoped: { targetSectionIds: ['SEC-2'], mode: 'review', instruction: '复核第二章的交付措施。' },
     })
     expect(changed.subagents.start).toHaveBeenCalledOnce()
+  })
+
+  it('局部审核中断后恢复已接纳正文，仅继续未完成的 Reviewer', async () => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-s5-review-interrupted-')))
+    const outline = await writeInputs(workspace)
+    await executeChapterWriting(fixtureAgent(workspace, outline).agent, workspace, buildBidStageTask('chapter_writing'))
+    const bodies = await Promise.all([1, 2, 3].map(index => readFile(
+      join(workspace.projectRoot, `chapters/sections/000${index}.md`), 'utf8')))
+    const controller = new AbortController()
+    const interrupted = fixtureAgent(workspace, outline)
+    interrupted.reviewerResult.mockImplementationOnce(request => reviewFrom(request))
+      .mockImplementationOnce(() => {
+        controller.abort(new Error('审核中断'))
+        throw controller.signal.reason
+      })
+    const scoped = { targetSectionIds: ['SEC-1', 'SEC-2', 'SEC-3'], mode: 'review', instruction: '核对各章实施措施。' }
+    await expect(executeChapterWriting(interrupted.agent, workspace, buildBidStageTask('chapter_writing'), {
+      maxConcurrency: 1, scoped, signal: controller.signal,
+    })).rejects.toThrow('审核中断')
+    const suspended = parseChapterExecutionLog(JSON.parse(await readFile(
+      join(workspace.projectRoot, 'chapters/execution-log.json'), 'utf8')))
+    expect(suspended.sections.find(section => section.section_id === 'SEC-3')).toMatchObject({ status: 'pending' })
+    expect(suspended.sections.every(section => section.final_writer_child_session_id !== null)).toBe(true)
+    const resumed = fixtureAgent(workspace, outline)
+    await executeChapterWriting(resumed.agent, workspace, buildBidStageTask('chapter_writing'), {
+      maxConcurrency: 1, scoped, resumeCandidate: true,
+    })
+    expect(resumed.starts).toHaveLength(0)
+    expect(resumed.subagents.start).toHaveBeenCalledTimes(2)
+    expect(await Promise.all([1, 2, 3].map(index => readFile(
+      join(workspace.projectRoot, `chapters/sections/000${index}.md`), 'utf8')))).toEqual(bodies)
+    await expect(validateWritingCapability({ working: workspace }, scoped.targetSectionIds)).resolves.toBeUndefined()
   })
 
   it.each(['repair', 'attention'] as const)('局部审核结论为 %s 时完成报告，不启动 Writer 或阻塞后续任务', async (verdict) => {
@@ -1727,6 +1759,96 @@ describe('chapter-writing executor', () => {
     expect(await readFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), 'utf8')).toBe(retained)
     expect(parseChapterWritingManifest(JSON.parse(await readFile(join(workspace.projectRoot,
       'chapters/manifest.json'), 'utf8'))).chapters.map(item => item.section_id)).toEqual(['SEC-1', 'SEC-2'])
+  })
+
+  it('恢复已提交但审核要求整改的章节时续写原 Writer，通过章节正文和审核逐字保留', async () => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-s5-completed-repair-resume-')))
+    const outline = await writeInputs(workspace)
+    const first = fixtureAgent(workspace, outline)
+    first.reviewerResult.mockImplementation((request) => {
+      const review = reviewFrom(request)
+      return review.section_id === 'SEC-2' ? { ...review, verdict: 'repair', blocking_issues: ['合并重复的实施措施。'] } : review
+    })
+    await executeChapterWriting(first.agent, workspace, buildBidStageTask('chapter_writing'), {
+      maxRepairAttempts: 0, scoped: { targetSectionIds: ['SEC-1', 'SEC-2', 'SEC-3'], mode: 'write', instruction: '完成三个章节。' },
+    })
+    const logPath = join(workspace.projectRoot, 'chapters/execution-log.json')
+    const beforeLog = parseChapterExecutionLog(JSON.parse(await readFile(logPath, 'utf8')))
+    expect(beforeLog.sections.every(section => section.status === 'completed')).toBe(true)
+    const retainedPaths = ['sections/0001.md', 'reviews/0001.json', 'sections/0003.md', 'reviews/0003.json']
+    const retained = await Promise.all(retainedPaths.map(path => readFile(join(workspace.projectRoot, 'chapters', path), 'utf8')))
+    const resumed = fixtureAgent(workspace, outline)
+    resumed.reviewerResult.mockImplementationOnce(request => ({ ...reviewFrom(request), verdict: 'repair',
+      blocking_issues: ['合并重复的实施措施。'] }))
+    await executeChapterWriting(resumed.agent, workspace, buildBidStageTask('chapter_writing'), {
+      maxRepairAttempts: 1, resumeCandidate: true,
+      scoped: { targetSectionIds: ['SEC-1', 'SEC-2', 'SEC-3'], mode: 'write', instruction: '完成三个章节，整改重复内容。' },
+    })
+    expect(resumed.starts).toHaveLength(1)
+    expect(String(resumed.starts[0]!.run.id)).toBe(beforeLog.sections[1]!.final_writer_child_session_id)
+    expect(promptText(resumed.starts[0]!.request)).toContain('合并重复的实施措施。')
+    expect(await Promise.all(retainedPaths.map(path => readFile(join(workspace.projectRoot, 'chapters', path), 'utf8')))).toEqual(retained)
+    expect(parseChapterReviewArtifact(JSON.parse(await readFile(join(workspace.projectRoot,
+      'chapters/reviews/0002.json'), 'utf8'))).verdict).toBe('pass')
+    const afterLog = parseChapterExecutionLog(JSON.parse(await readFile(logPath, 'utf8')))
+    expect([afterLog.sections[0], afterLog.sections[2]]).toEqual([beforeLog.sections[0], beforeLog.sections[2]])
+  })
+
+  it('恢复整改改变交接时仅重新编写强依赖下游，无关通过章节保持不变', async () => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-s5-repair-handoff-resume-')))
+    const outline = await writeInputs(workspace)
+    const dependencies = { 'SEC-3': ['SEC-2'] }
+    const first = fixtureAgent(workspace, outline, dependencies)
+    first.reviewerResult.mockImplementation((request) => {
+      const review = reviewFrom(request)
+      return review.section_id === 'SEC-2' ? { ...review, verdict: 'repair', blocking_issues: ['修正交接决策。'] } : review
+    })
+    const scoped = { targetSectionIds: ['SEC-1', 'SEC-2', 'SEC-3'], mode: 'write' as const, instruction: '完成三个章节。' }
+    await executeChapterWriting(first.agent, workspace, buildBidStageTask('chapter_writing'), {
+      maxRepairAttempts: 0, maxConcurrency: 1, scoped,
+    })
+    const retained = await readFile(join(workspace.projectRoot, 'chapters/reviews/0001.json'), 'utf8')
+    const resumed = fixtureAgent(workspace, outline, dependencies, true, () => true, (_attempt, request) => ({
+      stopReason: 'completed', output: [], structured: { ...candidateFrom(request),
+        metadata: { handoff: { decisions: request.label?.includes('章节2') ? ['已修正交接决策'] : [] } } },
+    }))
+    resumed.reviewerResult.mockImplementationOnce(request => ({ ...reviewFrom(request), verdict: 'repair', blocking_issues: ['修正交接决策。'] }))
+    await executeChapterWriting(resumed.agent, workspace, buildBidStageTask('chapter_writing'), {
+      maxRepairAttempts: 1, maxConcurrency: 1, resumeCandidate: true, scoped,
+    })
+    expect(resumed.starts).toHaveLength(2)
+    expect(resumed.starts[0]!.request.label).toContain('章节2')
+    expect(resumed.starts[1]!.request.label).toContain('章节3')
+    expect(promptText(resumed.starts[1]!.request)).toContain('已修正交接决策')
+    expect(await readFile(join(workspace.projectRoot, 'chapters/reviews/0001.json'), 'utf8')).toBe(retained)
+  })
+
+  it('恢复已完成的职责冲突报告时按当前计划重新审核，真实外部缺口仍不会触发 Writer', async () => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-s5-completed-attention-resume-')))
+    const outline = await writeInputs(workspace)
+    const first = fixtureAgent(workspace, outline)
+    first.reviewerResult.mockImplementation(request => ({ ...reviewFrom(request), verdict: 'attention',
+      assignment_conflicts: [{ task: '只写另一章', basis: '步骤与当前职责冲突。', related_section_ids: ['SEC-2'] }] }))
+    await executeChapterWriting(first.agent, workspace, buildBidStageTask('chapter_writing'), {
+      scoped: { targetSectionIds: ['SEC-2'], mode: 'write', instruction: '只写另一章。' },
+    })
+    const resumed = fixtureAgent(workspace, outline)
+    resumed.reviewerResult.mockImplementation((request) => {
+      const review = reviewFrom(request)
+      return { ...review, verdict: 'attention', must_answer_coverage: review.must_answer_coverage.map(item => ({ ...item,
+        status: 'missing', evidence_quotes: [], issue: '企业证书尚未提供。' })),
+      external_input_gaps: [{ item_ref: 'R1', required_material: '企业证书', reason: '必须由用户提供。' }],
+      external_input_only: true }
+    })
+    await executeChapterWriting(resumed.agent, workspace, buildBidStageTask('chapter_writing'), {
+      resumeCandidate: true, scoped: { targetSectionIds: ['SEC-2'], mode: 'write', instruction: '编写当前章节。' },
+    })
+    expect(resumed.starts).toHaveLength(0)
+    expect(resumed.subagents.start).toHaveBeenCalledOnce()
+    const review = parseChapterReviewArtifact(JSON.parse(await readFile(join(workspace.projectRoot,
+      'chapters/reviews/0002.json'), 'utf8')))
+    expect(review.assignment_conflicts).toEqual([])
+    expect(review.external_input_gaps[0]?.required_material).toBe('企业证书')
   })
 
   it('required 动态验收失败只回到原 Writer，并把具体条件带入修复轮次', async () => {

@@ -99,7 +99,7 @@ import {
   type WebEvidenceMaterial,
   webMaterialIdentity,
 } from './evidence-mapping-artifacts.ts'
-import { validateFlowchartAnchors } from './flowchart.ts'
+import { validateFlowchartAnchors, type FlowchartSpec } from './flowchart.ts'
 import { renderFlowchartImage, type RenderedFlowchartImage } from './flowchart-image.ts'
 import { missingTableCaptionLines } from './docx-numbering.ts'
 import {
@@ -206,6 +206,11 @@ export interface ScopedChapterWritingInput {
   readonly seedFlowchartsBySectionId?: ReadonlyMap<string, ReturnType<typeof parseChapterMetadata>['flowcharts']>
   /** 原图须保留时，Host 绑定 seed 定义，Writer 只保留正文锚点。 */
   readonly preserveSeedFlowcharts?: boolean
+  /** 原授权正式正文的保留块；候选草稿新增内容不据此冻结。 */
+  readonly preservedContentBySectionId?: ReadonlyMap<string, {
+    readonly markdown: string
+    readonly flowcharts: readonly FlowchartSpec[]
+  }>
   /** 既有 Writer 保持原父会话；由当前操作共享恢复器并负责释放。 */
   readonly writerParentFor?: (writerId: string) => Promise<Agent>
   readonly affectedDependentIds?: Set<string>
@@ -1056,7 +1061,7 @@ function renderChapterReviewerTask(
     ...revisionPromptLines,
     ...(paragraphRevision ? ['本次只授权段落选区。只判断用户意见是否在授权段落内完成以及本次修改是否破坏章节合法性；选区外原本存在的问题不得成为 blocking issue，也不得要求 Writer 修改选区外正文。本次新增或改写的事实性声明仍须逐条核查来源，不能因选区范围而放行。'] : []),
     '正文是直接交付采购方的技术标。bidder_response_voice 仅在正文以投标人的方案、措施、成果和承诺直接作答时为 true；若正文主要复述“采购文件提出”“甲方要求”、解释资格条件，或写成需求分析与审查报告，则设为 false 并指出需要改写的段落。必要的一句要求背景不影响通过。',
-    '先按 Current Chapter Path 和 Confirmed Outline Responsibilities 核对每段正文与当前、祖先和同级节点的主题关系及展开程度，再检查清单覆盖。structure_complete 同时要求本节承担正确职责、没有自创目录或侵入其他章节。结合证据原文语境判断内容是否适合当前任务，不凭标题或材料关键词判定归属。发现越界时将 structure_complete 设为 false，并在 blocking_issues 指出具体段落和应归属的章节；资料确有依据或清单已覆盖不能抵消放错章节的问题。',
+    '先按 Current Chapter Path 和 Confirmed Outline Responsibilities 核对每段正文与当前、祖先和同级节点的主题关系及展开程度，再检查清单覆盖。structure_complete 同时要求本节承担正确职责、没有自创目录或侵入其他章节。结合证据原文语境判断内容是否适合当前任务，不凭标题或材料关键词判定归属。Host 明确列出的必须保留原文载体可完整展示跨节点整体关系，不能仅因原图、原表含有后续节点就判定 structure_complete=false 或要求删改原载体；范围检查针对其周围新增或可改内容。若原载体与当前任务确有无法同时满足的业务冲突，记录 assignment_conflicts，由 Main 调整分配。其他正文发现越界时将 structure_complete 设为 false，并在 blocking_issues 指出具体段落和应归属的章节；资料确有依据或清单已覆盖不能抵消放错章节的问题。',
     '若 must_answer、Writing Brief 或其他既定任务与目录职责冲突，明确记录该任务冲突，不要求 Writer 按错误位置扩写。允许本节概述相关主题并说明其与本节任务的关系；属于其他节点的内容由对应章节展开。',
     '全局要求不属于 R 覆盖项，不要求本章复述。逐项判断 conforms、violates 或 not_applicable：conforms/violates 引用适用正文，not_applicable 说明本章为何不适用且不代表整份文档已经满足。只有当前正文真实违反全局约束时才形成可执行修复意见。',
     '逐项审查 Review Checklist 的固定 R；covered 必须至少引用一个当前 Q 且 issue=null，missing 不得引用 Q且必须说明具体 issue。Semantic Acceptance 逐项提交 criterion_position、met/unmet、reason 和可选 evidence_quote_refs；全局约束使用 compliance_position，任务冲突使用 related_section_positions；程序绑定实际身份。负向条件未满足时可引用违规句，全文性条件不因缺少单句引文而失效。',
@@ -1285,7 +1290,7 @@ async function loadChapterCheckpoint(
   maxConcurrency: number,
   writingPlanInvalidations: ReadonlySet<string>,
   writingPlanVersion: number,
-  recoverCompletedRevisionArtifacts: boolean,
+  recoverAcceptedArtifacts: boolean,
   activeSectionIds?: ReadonlySet<string>,
 ): Promise<ChapterCheckpoint | undefined> {
   try {
@@ -1313,7 +1318,7 @@ async function loadChapterCheckpoint(
         return undefined
       }
       // 修订失败不撤销此前已提交的章节；只有修订恢复路径可通过下方完整产物校验恢复完成状态。
-      if (log.status !== 'completed' && !recoverCompletedRevisionArtifacts) {
+      if (log.status !== 'completed' && !recoverAcceptedArtifacts) {
         log.status = 'pending'
         log.phase = 'queued'
         log.failure_phase = null
@@ -2167,14 +2172,16 @@ async function runChapterWriting(
   const activeSectionIds = scoped === undefined && revision === undefined && revisionBatch === undefined ? undefined
     : new Set(scoped?.targetSectionIds ?? (revision === undefined ? undefined : [revision.request.reference.section_id])
       ?? revisionBatch?.tasks.map(task => task.section_id))
+  const recoverAcceptedArtifacts = revision !== undefined || revisionBatch !== undefined
+    || scoped?.mode === 'review' && options.resumeCandidate === true
   let checkpoint = await loadChapterCheckpoint(
     workspace, outline, outlineHash, contexts, options.maxConcurrency, writingPlanInvalidations, checkpointVersion,
-    revision !== undefined || revisionBatch !== undefined, activeSectionIds,
+    recoverAcceptedArtifacts, activeSectionIds,
   )
   if (checkpoint === undefined && checkpointVersion !== writingPlan.plan_version) {
     checkpoint = await loadChapterCheckpoint(
       workspace, outline, outlineHash, contexts, options.maxConcurrency, new Set(), writingPlan.plan_version,
-      revision !== undefined || revisionBatch !== undefined, activeSectionIds,
+      recoverAcceptedArtifacts, activeSectionIds,
     )
   }
   const originalWriterId = revision === undefined ? undefined
@@ -2478,16 +2485,19 @@ async function runChapterWriting(
 
   if (scoped !== undefined) {
     for (const sectionId of scopedIds ?? []) {
-      if (scoped.mode === 'review') {
+      if (scoped.mode === 'review' || options.resumeCandidate === true) {
         const accepted = completed.get(sectionId)
         const log = executionLog.sections.find(item => item.section_id === sectionId)
         const context = contexts.get(sectionId)
         if (accepted !== undefined && log !== undefined && context !== undefined) {
-          const identity = scopedReviewRequestSha256(sectionId, accepted.candidate)
           const saved = parseChapterReviewArtifact(await readJson(workspace, context.reviewPath))
-          if (saved.request_sha256 !== identity) {
+          const retained = scoped.mode === 'review'
+            ? saved.request_sha256 === scopedReviewRequestSha256(sectionId, accepted.candidate)
+            : saved.verdict === 'pass'
+          if (!retained) {
             const writerChildSessionId = log.final_writer_child_session_id
             if (writerChildSessionId === null) throw new Error(`BID_CHAPTER_REVIEW_BODY_UNAVAILABLE: ${sectionId}`)
+            if (scoped.mode === 'write') priorHandoffs.set(sectionId, JSON.stringify(accepted.candidate.metadata.handoff))
             checkpoint?.drafts.set(sectionId, { candidate: accepted.candidate, writerChildSessionId })
             completed.delete(sectionId)
             pending.add(sectionId)
@@ -2498,12 +2508,12 @@ async function runChapterWriting(
             log.final_reviewer_child_session_id = null
           }
         }
-        if (!completed.has(sectionId) && !checkpoint?.drafts.has(sectionId)) {
+        if (scoped.mode === 'review' && !completed.has(sectionId) && !checkpoint?.drafts.has(sectionId)) {
           throw new Error(`BID_CHAPTER_REVIEW_BODY_UNAVAILABLE: ${sectionId}`)
         }
         continue
       }
-      if (!completed.has(sectionId) || options.resumeCandidate === true) continue
+      if (!completed.has(sectionId)) continue
       const context = contexts.get(sectionId)
       if (context === undefined) throw new Error(`BID_CHAPTER_WRITING_SCOPE_INVALID: ${sectionId}`)
       const markdown = await readFile(join(workspace.projectRoot, context.contentPath), 'utf8')
@@ -2890,14 +2900,22 @@ async function runChapterWriting(
                 revisionOriginal === undefined || !revisionOriginal.split('\n').some(original => original.trim() === line))),
             )
           })
-          const assignedSeed = scoped?.seedBySectionId?.get(sectionId)
+          const assignedOriginal = scoped?.preservedContentBySectionId?.get(sectionId)
+          const assignedSeed = assignedOriginal?.markdown ?? scoped?.seedBySectionId?.get(sectionId)
           const reviewer = await subagents.start('spawn', {
             label: reviewLabel,
             parent: agent,
             prompt: [{ type: 'text', text: [renderChapterReviewerTask(context, candidate, dependencies, quotes, evidencePack, hostAcceptanceResults, revisionReviewIssues, paragraphRevision),
               ...(scoped === undefined ? [] : [
                 '本次局部任务由多个叶节共同完成。你只审核当前叶节的职责和分配原文；未分配表格或流程图的叶节，不承担保留其他叶节载体的义务。整项任务的原文、表格和流程图完整保留由 Host 跨节核验，不得要求每个子章重复全部原文载体。',
-                ...(assignedSeed === undefined ? [] : ['当前叶节分配的原文载体：\n' + assignedSeed]),
+                ...(assignedSeed === undefined ? [] : ['当前叶节必须逐字保留的原正式正文载体：\n' + assignedSeed,
+                  '这些原文载体的完整保留是用户要求，整体流程表和流程图可以作为交接索引承载相邻节点；审查本节新增正文的职责、重复和自洽性。不能要求 Writer 删除或改写这些原块；分配冲突须具体说明。候选草稿新增段落和新增图形仍须按当前职责整改。']),
+                ...(assignedOriginal === undefined || assignedOriginal.flowcharts.length === 0 ? [] : [
+                  '当前必须原貌保留的原图：' + JSON.stringify(assignedOriginal.flowcharts.map(chart => ({
+                    key: chart.key, title: chart.title,
+                  }))),
+                  '这些图的节点和连线由 Host 按正式来源保留。既有汇聚或交接节点可由相邻正文说明其与主流程的接口，不要求 Writer 在原图增加节点或连线。若原图与当前分配存在新增接口说明无法解决的业务冲突，记录 assignment_conflicts，由 Main 调整分配；不能向 Writer 下达修改只读原图的 blocking_issues。候选新增图仍完整审查。',
+                ]),
               ]),
               ...(scoped?.mode === 'review' ? [`本次审核重点：${scoped.instruction}`] : []),
               options.recovery !== undefined && (options.recovery.unit === sectionId
@@ -3014,18 +3032,23 @@ async function runChapterWriting(
         )
         const seed = scoped?.seedBySectionId?.get(sectionId)
         const seedFlowcharts = scoped?.seedFlowchartsBySectionId?.get(sectionId)
+        const preservedContent = scoped?.preservedContentBySectionId?.get(sectionId)
+        const preservedMarkdown = preservedContent?.markdown ?? seed
+        const preservedFlowcharts = preservedContent?.flowcharts ?? seedFlowcharts ?? []
         const freshPrompt = scoped === undefined ? contextPrompt : [contextPrompt,
           `本次局部写作要求：${scoped.instruction}`,
           ...(seed === undefined ? [] : ['原文草稿的保留、改写和补充以本次原始任务为准。用户要求保留原文时，保留已分配的原句、完整表格和流程图锚点，在其周围补充；不得用概括、同义改写或新绘流程图替代原文载体。',
             scoped.preserveSeedFlowcharts === true ? [
-              '原文保留块：' + JSON.stringify(indexChapterContentBlocks(sectionId, seed)
+              '原文保留块：' + JSON.stringify(indexChapterContentBlocks(sectionId, preservedMarkdown ?? '')
                 .filter(block => block.type !== 'heading' && block.markdown.trim() !== '')
                 .map((block, position) => ({ position, type: block.type, readonly_markdown: block.markdown.trim() }))),
               '你负责组织正文和补充写作。在 markdown 中用 {{reuse:位置}} 放置每个分配原块，Host 按真实原文展开；不抄写原块载荷、不改写或丢弃它们。在原块周围增补内容，原章标题用当前章节标题替代。',
+              ...(preservedContent === undefined ? [] : ['当前候选草稿（其中新增段落可以按审核意见改写、合并或删除，不能将其全部当作保留原文再次重复补写）：\n' + seed]),
             ].join('\n') : `已分配给本节的原文草稿：\n${seed}`]),
           ...(seedFlowcharts === undefined || seedFlowcharts.length === 0 ? [] : [
             scoped.preserveSeedFlowcharts === true
-              ? '原流程图定义由 Host 复用；你只保留已分配原文中的图锚点，不重新提交这些图的 metadata 定义。'
+              ? '原正式正文的流程图定义由 Host 复用；只保留对应原文锚点。候选新增图形仍可整改，需重新提交其完整定义：'
+                + JSON.stringify(seedFlowcharts.filter(chart => !preservedFlowcharts.some(original => original.key === chart.key)))
               : '本节迁移原文的流程图定义；按真实任务判断是否调整：' + JSON.stringify(seedFlowcharts),
           ]),
         ].join('\n\n')
@@ -3079,8 +3102,8 @@ async function runChapterWriting(
           const snapshots = buildWebEvidenceSnapshots(capturedByChild.get(String(child.id))?.values() ?? [])
           const parsed = preserveParagraphRevisionMetadata(await bindChapterWriterInput(
             workspace, manifest, context, references, value, snapshots,
-            scoped?.preserveSeedFlowcharts === true ? scoped.seedFlowchartsBySectionId?.get(sectionId) ?? [] : [],
-            scoped?.preserveSeedFlowcharts === true ? scoped.seedBySectionId?.get(sectionId) : undefined,
+            scoped?.preserveSeedFlowcharts === true ? preservedFlowcharts : [],
+            scoped?.preserveSeedFlowcharts === true ? preservedMarkdown : undefined,
           ), revisionMetadata)
           const customerFacingIssues = chapterInternalIdentifierIssues(context, parsed.markdown)
           const tableCaptionIssues = missingTableCaptionLines(parsed.markdown)
@@ -3107,7 +3130,7 @@ async function runChapterWriting(
             )
           }
         }, signal, reusableWriterId === undefined ? undefined : SessionId(reusableWriterId), context.section.title,
-        webSearchEnabled)
+        webSearchEnabled, agent)
         const run = writer
         if (!readableWebPathsByChild.has(String(run.id))) {
           readableWebPathsByChild.set(String(run.id), mappedWebPaths(context))
@@ -3136,8 +3159,8 @@ async function runChapterWriting(
             try {
               const parsed = preserveParagraphRevisionMetadata(await bindChapterWriterInput(
                 workspace, manifest, context, references, result.structured, attemptSnapshots,
-                scoped?.preserveSeedFlowcharts === true ? scoped.seedFlowchartsBySectionId?.get(sectionId) ?? [] : [],
-                scoped?.preserveSeedFlowcharts === true ? scoped.seedBySectionId?.get(sectionId) : undefined,
+                scoped?.preserveSeedFlowcharts === true ? preservedFlowcharts : [],
+                scoped?.preserveSeedFlowcharts === true ? preservedMarkdown : undefined,
               ), revisionMetadata)
               const validated = await validateAndBindChapterCandidate(
                 workspace, manifest, context, parsed, [...durableWebSources.values()], attemptSnapshots,

@@ -10,6 +10,7 @@ import { bidCapabilityInputSchema, bidCapabilityScopeSchema, bidCapabilityTaskSc
 import { BID_CAPABILITIES, resolveCapabilityStepScope, validateCapabilityResult,
   verifyCapabilityTaskScope } from '../src/bid-capability-registry.ts'
 import { seedCapabilityProject } from './capability-fixture.ts'
+import { resolveBidTaskSections } from '../src/bid-task-sections.ts'
 
 const roots: string[] = []
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))) })
@@ -39,6 +40,8 @@ describe('公共能力契约', () => {
       input: { instruction: '分配原文', source_section_ids: ['A'] } } }
     const review = { description: '复核拆分结果', scope: { source: 'previous_targets' }, call: { capability: 'chapter.review',
       input: { reason: '复核拆分结果' } } }
+    const write = { description: '编写拆分结果', scope: { source: 'previous_targets' }, call: { capability: 'chapter.write',
+      input: { instruction: '编写拆分结果' } } }
     const task = { goal: '拆分为背景与目标并完成正文', scope: { kind: 'sections', section_ids: ['A'] },
       steps: [outlineStep] }
     const validate = (input: unknown) => {
@@ -53,6 +56,11 @@ describe('公共能力契约', () => {
     expect(() => validate({ ...task, steps: [outlineStep, review, reorganize] }))
       .toThrow('BID_CAPABILITY_CONTENT_FOLLOWUP_REQUIRED')
     expect(() => validate({ ...task, steps: [outlineStep, reorganize, review] })).not.toThrow()
+    expect(() => validate({ ...task, steps: [outlineStep, write, reorganize, review] }))
+      .toThrow('BID_CAPABILITY_CONTENT_FOLLOWUP_REQUIRED')
+    expect(() => validate({ ...task, steps: [outlineStep, reorganize, write] })).not.toThrow()
+    expect(() => { validateCapabilityTaskContentFollowup(bidCapabilityTaskSchema.parse({ ...task,
+      steps: [outlineStep, write, reorganize, review] }), false, 2) }).not.toThrow()
     expect(() => validate({ ...task, allow_pending_content: true })).not.toThrow()
   })
 
@@ -81,6 +89,38 @@ describe('公共能力契约', () => {
     expect(() => bidCapabilityTaskSchema.parse({ goal: '细化 A', scope: { kind: 'sections', section_ids: ['A'] },
       steps: [{ description: '细化 A', scope: { source: 'task' }, call: { capability: 'outline.refine', input: { feedback: '细化 A' } },
         step_id: 'model-owned' }] })).toThrow()
+  })
+
+  it('恢复来源接受原授权子树内新子章，拒绝新建范围外章节和未知身份', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-capability-current-scope-'))
+    roots.push(root)
+    await Promise.all(['canonical', 'candidate'].map(name => mkdir(join(root, name))))
+    const canonical = new BidWorkspace(join(root, 'canonical'))
+    const working = new BidWorkspace(join(root, 'candidate'))
+    const { outline: before } = await seedCapabilityProject(canonical, 'complete')
+    await seedCapabilityProject(working, 'complete')
+    const source = before.sections.find(section => section.id === 'SEC-1')!
+    const outside = before.sections.find(section => section.id === 'SEC-2')!
+    const after = { ...before, sections: [...before.sections,
+      { ...source, id: 'NEW-IN', parent_id: source.id, level: source.level + 1 },
+      { ...outside, id: 'NEW-OUT', parent_id: outside.id, level: outside.level + 1 },
+    ] }
+    await writeFile(join(working.projectRoot, 'outline/confirmed-outline.json'), JSON.stringify(after))
+    const task = bidCapabilityTaskSchema.parse({ goal: '迁移本章及其新子章原文',
+      scope: { kind: 'sections', section_ids: [source.id] }, steps: [{ description: '保留当前候选',
+        scope: { source: 'task' }, call: { capability: 'chapter.reorganize', input: {
+          instruction: '保留当前候选', source_section_ids: [source.id, 'NEW-IN'],
+        } } }],
+    })
+    await expect(resolveBidTaskSections(canonical, working, task, ['NEW-IN'])).resolves.toEqual(new Set(['NEW-IN']))
+    await expect(resolveBidTaskSections(canonical, working, task, [source.id, 'NEW-IN']))
+      .resolves.toEqual(new Set([source.id, 'NEW-IN']))
+    await expect(resolveBidTaskSections(canonical, working, task, ['NEW-OUT']))
+      .rejects.toThrow('BID_SECTION_SCOPE_INVALID')
+    await expect(resolveBidTaskSections(canonical, working, task, ['UNKNOWN']))
+      .rejects.toThrow('BID_SECTION_SCOPE_INVALID')
+    await expect(resolveBidTaskSections(canonical, working, task, [outside.id]))
+      .rejects.toThrow('BID_CAPABILITY_SCOPE_ESCALATION')
   })
 
   it('空章节范围不退化成全书，段落范围沿用真实正文引用', () => {

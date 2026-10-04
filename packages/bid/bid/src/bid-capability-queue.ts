@@ -168,6 +168,29 @@ export async function markCapabilityRequestAppliedWithLease(
   await writeBidChapterCommandJournal(workspace, originWorkId, next, lease)
 }
 
+/**
+ * 原 Work 的计划修正接纳同一条用户消息后，取消该消息先前排队的替代任务。
+ * @param workspace 当前正式项目。
+ * @param originWorkId 原 Work 身份。
+ * @param authorization 已接纳计划补丁的用户消息身份。
+ * @param lease 当前项目写入租约。
+ * @returns 取消的待执行请求数；其他消息的任务保持排队。
+ */
+export async function cancelCapabilityRequestsForPlanPatch(
+  workspace: BidWorkspace, originWorkId: string, authorization: z.infer<typeof identity>, lease: BidCommitLease,
+): Promise<number> {
+  return withBidCommandJournalLock(workspace, originWorkId, async () => {
+    const pending = await readPendingCapabilityRequests(workspace, originWorkId)
+    const replaced = new Set(pending.filter(({ request }) => request.authorization.session_id === authorization.session_id
+      && request.authorization.message_id === authorization.message_id).map(item => item.recordId))
+    if (replaced.size === 0) return 0
+    const records = await readBidChapterCommandJournal(workspace, originWorkId)
+    await writeBidChapterCommandJournal(workspace, originWorkId, records.map(record => replaced.has(record.id)
+      ? { ...record, status: 'canceled' as const } : record), lease)
+    return replaced.size
+  })
+}
+
 /** 重置时取消依赖已删除输入的排队任务，并保留日志中的取消证据。
  * @param workspace 当前项目。
  * @param removedPaths 重置删除的真实路径。

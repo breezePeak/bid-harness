@@ -21,7 +21,8 @@ export async function resolveBidTaskSections(canonical: BidWorkspace, working: B
   const before = (await readCapabilityOutlineBaseline(canonical)).outline
   const after = (await readCapabilityOutlineBaseline(working)).outline
   const beforeIds = new Set(before.sections.map(section => section.id))
-  const original = outlineSectionScope(before, roots.filter(id => beforeIds.has(id)))
+  const originalRoots = roots.filter(id => beforeIds.has(id))
+  const original = originalRoots.length === 0 ? new Set<string>() : outlineSectionScope(before, originalRoots)
   const allowed = task.scope.kind === 'project' ? new Set(before.sections.map(section => section.id))
     : outlineSectionScope(before, task.scope.kind === 'sections' ? task.scope.section_ids : [task.scope.reference.section_id])
   if ([...original].some(id => !allowed.has(id))) throw new Error('BID_CAPABILITY_SCOPE_ESCALATION')

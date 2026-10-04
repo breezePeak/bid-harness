@@ -1,27 +1,43 @@
 /** 执行器回归显式注入的语义替身；不用于证明真实 Main 或模型理解。 */
 import { executeCapabilityTask as executeProductionCapabilityTask } from '../../src/bid-capability-task.ts'
 import type { BidTaskVerifier } from '../../src/bid-task-verification.ts'
+import { CallId, type GenerateOptions } from '@deepseek-ai/dsh-llm'
 
 /**
  * 应用回放的语义替身，只输出模型协议允许的判断。
  * @param input 隔离核验子会话中的语义输入。
- * @returns 不包含身份、编号或证据摘要的可控模型回复。
+ * @param messages 核验会话已收到的工具读取结果。
+ * @returns 先完整读取证据，再提交不包含身份或摘要的可控工具调用。
  */
-export function scriptedVerificationReply(input: {
+export function scriptedVerificationCall(input: {
   requirements?: readonly object[]
   sources: readonly { selected: boolean; text?: string }[]
   task: { steps: readonly { call: { capability: string } }[] }
-}): object {
-  const check = { met: true, reason: '测试指定的执行器校验已通过' }
-  if (input.requirements !== undefined) return { scope_authorized: true, checks: input.requirements.map(() => check) }
+  evidence: readonly { evidence_position: number; total_characters: number }[]
+}, messages: GenerateOptions['messages']): { name: string; args: object } {
+  const file = input.evidence[0]
+  if (file === undefined) throw new Error('执行器核验回放缺少证据文件')
+  const reads = messages.flatMap(message => message.content).filter(block => block.type === 'tool-result')
+    .filter(block => block.toolCallId === CallId('verification')).flatMap(block => block.content)
+    .filter(block => block.type === 'text').map(block => JSON.parse(block.text) as {
+      evidence_position?: number
+      end?: number
+      next_start?: number | null
+    }).filter(read => read.evidence_position === file.evidence_position)
+  const previous = reads.at(-1)
+  if (previous?.end !== file.total_characters) return { name: 'read_task_evidence', args: {
+    evidence_position: file.evidence_position, start: previous?.next_start ?? 0, length: 12_000,
+  } }
+  const check = { met: true, reason: '测试指定的执行器校验已通过', evidence_positions: [file.evidence_position] }
+  if (input.requirements !== undefined) return { name: 'structured_output', args: { checks: input.requirements.map(() => check) } }
   const requirement = { description: '执行器测试指定的业务产物', object: 'review',
     new_children: false, completed_content: false, repair: false, preserve_migrated_content: false, check }
-  return { scope_authorized: true, sources: input.sources.map((source, index) => ({
+  return { name: 'structured_output', args: { scope_authorized: true, sources: input.sources.map((source, index) => ({
     relevant: source.selected, requirements: !source.selected ? [] : [requirement,
       ...index === 0 && (input.task.steps.some(step => step.call.capability === 'docx.export')
         || input.sources[0]?.text === '更正要求并导出 Word。')
         ? [{ ...requirement, description: '执行器测试的独立导出尾步骤', object: 'export' }] : []],
-  })) }
+  })) } }
 }
 
 /** 可控验收只验证既有执行器，任务规划反例单独提供错误或结构结论。 */

@@ -1,4 +1,4 @@
-import { scriptedVerificationReply } from './task-verifier.ts'
+import { scriptedVerificationCall } from './task-verifier.ts'
 import { mappingModelReply } from './mapping-model-positions.ts'
 /** S4/S5 真实工具循环与 Loader 回放共用的外部结果和输入资料。 */
 import { lstat, mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises'
@@ -80,8 +80,9 @@ class ScriptedAdapter extends LlmAdapter {
     const verification = options.messages.flatMap(message => message.content)
       .find(block => block.type === 'text' && block.text.includes('核验输入：'))
     if (verification?.type === 'text') {
-      const input = JSON.parse(verification.text.slice(verification.text.indexOf('核验输入：') + '核验输入：'.length)) as Parameters<typeof scriptedVerificationReply>[0]
-      yield* finalText(JSON.stringify(scriptedVerificationReply(input)))
+      const input = JSON.parse(verification.text.slice(verification.text.indexOf('核验输入：') + '核验输入：'.length)) as Parameters<typeof scriptedVerificationCall>[0]
+      const call = scriptedVerificationCall(input, options.messages)
+      yield* toolCall('verification', call.name, call.args)
       return
     }
     if (!this.interactive && options.sessionId === this.parentId && options.messages.at(-1)?.source.kind === 'subagent-settled') {

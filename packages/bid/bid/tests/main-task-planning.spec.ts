@@ -6,7 +6,8 @@ import { Context } from '@deepseek-ai/cordis'
 import SessionStore from '@deepseek-ai/dsh-session'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { afterEach, expect, it } from 'vitest'
-import { BidWorkspace } from '../src/index.ts'
+import { BidWorkspace, type BidRunData } from '../src/index.ts'
+import { bindBidTaskSourceContext, bidTaskSourceSnapshotSchema, freezeBidTaskSource } from '../src/bid-task-source.ts'
 import { inspectBidProject } from '../src/bid-project-inspect.ts'
 import { persistCapabilityTaskRequest } from '../src/bid-capability-task.ts'
 import { readBidWorkRequest } from '../src/work-descriptor.ts'
@@ -57,7 +58,7 @@ async function fixture() {
   const issue = queue.issues[0]!
   const reference = { scope: 'paragraphs' as const, section_id: issue.section_id,
     content_sha256: chapterContentSha256(markdown), start, end: start + text.length, text }
-  return { workspace, session, message, issue, reference }
+  return { ctx, workspace, session, message, issue, reference }
 }
 
 it('冻结真实意见原话及选区，目标摘要不能替代来源', async () => {
@@ -72,6 +73,47 @@ it('冻结真实意见原话及选区，目标摘要不能替代来源', async (
     message: { text: '开始处理当前全部待处理审批意见。' }, issues: [{ instruction: issue.instruction,
       scope: 'paragraphs', reference: issue.reference }],
   } })
+})
+
+it('章节名称澄清保留前一句真实拆章要求，持久化和旧请求恢复取得相同上下文', async () => {
+  const { ctx, workspace, session } = await fixture()
+  const request = createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: '第5章也需要小章节。' }] })
+  const clarification = createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: '工作流程' }] })
+  session.append('user/message', request, { surfaceOp: 'append' })
+  session.append('user/message', clarification, { surfaceOp: 'append' })
+  const task = bidCapabilityTaskSchema.parse({ goal: '拆分工作流程', scope: { kind: 'sections', section_ids: ['SEC-1'] },
+    steps: [{ description: '审核本章', scope: { source: 'task' }, call: { capability: 'chapter.review', input: { reason: '审核本章' } } }] })
+  const source = await freezeBidTaskSource(workspace, session, task,
+    { session_id: String(session.id), message_id: String(clarification.id) })
+  expect(source.message.text).toBe('工作流程')
+  expect(source.context_messages?.at(-1)).toMatchObject({ message_id: String(request.id), text: '第5章也需要小章节。' })
+  const persisted = bidTaskSourceSnapshotSchema.parse(JSON.parse(JSON.stringify(source)))
+  expect(bindBidTaskSourceContext(session, persisted)).toEqual(source)
+  const { context_messages: _context, ...historical } = persisted
+  session.append('user/message', createUserMessage({ source: { kind: 'user' },
+    content: [{ type: 'text', text: '把范围扩大到整本标书。' }] }), { surfaceOp: 'append' })
+  expect(bindBidTaskSourceContext(session, historical)).toEqual(source)
+  expect(() => bindBidTaskSourceContext(session, { ...source,
+    context_messages: [{ ...source.message, text: '整本标书都授权修改。' }] })).toThrow('BID_TASK_VERIFICATION_SOURCE_INVALID')
+  const otherSession = ctx.sessions.create()
+  expect(() => bindBidTaskSourceContext(otherSession, source)).toThrow('BID_TASK_VERIFICATION_SOURCE_INVALID')
+})
+
+it.each(['bid.run.started', 'bid.run.completed'] as const)('澄清上下文不携带 %s 之前已接纳任务的要求', async (type) => {
+  const { workspace, session, message } = await fixture()
+  const task = bidCapabilityTaskSchema.parse({ goal: '审核第一章', scope: { kind: 'sections', section_ids: ['SEC-1'] },
+    steps: [{ description: '审核第一章', scope: { source: 'task' }, call: { capability: 'chapter.review', input: { reason: '审核第一章' } } }] })
+  const work = await persistCapabilityTaskRequest(workspace, session, 'chapter_writing', task,
+    { session_id: String(session.id), message_id: String(message.id) }, [], { stage: 'chapter_writing', status: 'completed', run: null })
+  const run: BidRunData = { runId: 'previous-run', epoch: 1, baseProjectRevision: 1, work, startedAt: 1, updatedAt: 2 }
+  session.append(type, { run })
+  const request = createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: '第5章也需要小章节。' }] })
+  const clarification = createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: '工作流程' }] })
+  session.append('user/message', request, { surfaceOp: 'append' })
+  session.append('user/message', clarification, { surfaceOp: 'append' })
+  const source = await freezeBidTaskSource(workspace, session, task,
+    { session_id: String(session.id), message_id: String(clarification.id) })
+  expect(source.context_messages?.map(item => item.text)).toEqual(['第5章也需要小章节。'])
 })
 
 it('S3 没有确认目录时返回真实草稿及 artifact', async () => {
@@ -209,7 +251,7 @@ const structureVerifier: BidTaskVerifier = async input => ({
   })),
 })
 
-it.each(['表1 校验产物', '流程一：收集输入。', '流程图定义'])('原文保留要求不接受语义核验漏掉的原块改写：%s', async (changed) => {
+it.each(['表1 校验产物', '流程一：收集输入。', '流程图定义', '重复正文', '重复流程图'])('原文保留要求不接受语义核验漏掉的改写或重复：%s', async (changed) => {
   const { workspace, session } = await fixture()
   const sourcePath = join(workspace.projectRoot, 'chapters/sections/0001.md')
   const original = (await readFile(sourcePath, 'utf8')) + '\n\n表1 校验产物\n\n| 步骤 | 产物 |\n| --- | --- |\n| 校验 | 报告 |\n'
@@ -231,16 +273,20 @@ it.each(['表1 校验产物', '流程一：收集输入。', '流程图定义'])
   }
   expect(await verify()).toMatchObject({ goal_met: true })
   expect(await collectBidTaskPreservationEvidence(workspace, working, task)).toEqual({ retained: true, missing: [] })
-  if (changed === '流程图定义') {
+  if (changed === '流程图定义' || changed === '重复流程图') {
     const metadataPath = join(working.projectRoot, 'chapters/meta/0001.json')
     const metadata = JSON.parse(await readFile(metadataPath, 'utf8')) as { flowcharts: Array<{ nodes: Array<{ text: string }> }> }
-    metadata.flowcharts[0]!.nodes[0]!.text = '改变后的流程节点'
+    if (changed === '流程图定义') metadata.flowcharts[0]!.nodes[0]!.text = '改变后的流程节点'
+    else metadata.flowcharts.push(metadata.flowcharts[0]!)
     await writeFile(metadataPath, JSON.stringify(metadata))
-  } else await writeFile(join(working.projectRoot, 'chapters/sections/0001.md'), original.replace(changed, '改写后的内容'))
+  } else await writeFile(join(working.projectRoot, 'chapters/sections/0001.md'), changed === '重复正文'
+    ? original + '\n\n流程一：收集输入。\n' : original.replace(changed, '改写后的内容'))
   const rejected = await verify()
   expect(await collectBidTaskPreservationEvidence(workspace, working, task)).toMatchObject({ retained: false })
   expect(rejected.goal_met).toBe(false)
-  expect(rejected.unmet.some(message => message.startsWith(changed === '流程图定义' ? '迁移流程图定义未保留' : '迁移原文块未逐字保留'))).toBe(true)
+  const expected = changed === '重复流程图' ? '迁移流程图定义重复出现' : changed === '重复正文' ? '迁移原文块重复出现'
+    : changed === '流程图定义' ? '迁移流程图定义未保留' : '迁移原文块未逐字保留'
+  expect(rejected.unmet.some(message => message.startsWith(expected))).toBe(true)
 })
 
 it('历史段落小章节意见即使核验器给 satisfied 也不越权、不执行、不关闭', async () => {
@@ -477,7 +523,7 @@ it('局部合并保留原文与退役来源意见，当前目标解析为合并�
   expect(outcome).toMatchObject({ status: 'completed', receipt: { goal_met: true,
     issue_results: [{ issue_id: selected.issue_id, target_section_ids: ['SEC-1'] }] } })
   expect((await readRevisionQueue(workspace)).issues.at(-1)?.status).toBe('completed')
-  expect(await readFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), 'utf8')).toBe(first + second)
+  expect(await readFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), 'utf8')).toBe(first + '\n' + second)
   expect(await readFile(join(workspace.projectRoot, 'chapters/sections/0003.md'), 'utf8')).toBe(outside)
   const { resolveBidTaskSections } = await import('../src/bid-task-sections.ts')
   await expect(resolveBidTaskSections(workspace, workspace, task, ['UNKNOWN'])).rejects.toThrow('BID_SECTION_SCOPE_INVALID')

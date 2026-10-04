@@ -36,6 +36,8 @@ const model = process.env.DSH_BID_EVAL_MODEL ?? 'deepseek-v4-flash'
 const split = '只修改本章 S2.3，把三个阶段拆成真实目录子章节，保留原文、表格和流程图并完成正文和审核。不要改其他章节。'
 const cases = [
   { id: 'A02-1', text: split }, { id: 'A02-2', text: split }, { id: 'A02-3', text: split },
+  { id: 'A02-six', text: '只修改本章 S2.3，拆成收集输入、边界确认、校验结果、内业处理、复核整改、交付成果六个真实目录子章节。完整迁移原文，每个原文块唯一归属，表题和完整表格同章，流程图完整保留；原文不必分到每个子章，但所有六章都必须完成正文和独立审核，未分配原文的子章也要写完。不改其他章节，不虚构资料、人员、设备、标准或固定格式。' },
+  { id: 'A02-clarification', text: 'S2.3', clarification: '本章也需要小章节。把三个阶段拆成真实目录子章节，保留原文、表格和流程图，并完成正文和审核。不要改其他章节；具体是哪章等我确认后再执行。' },
   { id: 'A03', text: '只修改 S2.3 中“流程一：收集输入。”这一个选区，将“收集输入”改为“收集并登记输入”，完成本次修订和审核。选区外所有字节、空白、锚点及目录均保持不变。' },
   { id: 'A04', text: split + '这是隔离测试项目中的授权故障注入验收：请提交第一份仅含正文修订、缺少目录修改的计划，验证 Host 必须据实拒绝；随后立即在同一 Work 自行修正计划并完成上述全部要求。不要直接提交完整计划跳过故障注入，不需要我继续催促。' },
   { id: 'A14', text: '更正第一条招标要求，将 REQ-1 的要求改为“回答主题1并保持可追踪交付”，只修改这条需求，不修改正文和目录。在当前阶段运行中登记排队，完成后主动报告实际结果。' },
@@ -47,6 +49,8 @@ const evaluationSources = Object.fromEntries(await Promise.all([
   'packages/bid/bid/src/bid-capability-task.ts', 'packages/bid/bid/src/bid-task-verification.ts',
   'packages/bid/bid/src/bid-task-source.ts', 'packages/bid/bid/src/stage-interaction.ts',
   'packages/bid/bid/src/chapter-writing-executor.ts', 'packages/bid/bid/src/chapter-writing-writer.ts',
+  'packages/bid/bid/src/bid-outline-capabilities.ts', 'packages/bid/bid/src/outline-capability-update.ts',
+  'packages/bid/bid/src/bid-writing-capability.ts',
   'examples/headless-agent/tests/bid-main-task-planning.e2e.ts',
 ].map(async (path) => {
   const content = await readFile(new URL('../../../' + path, import.meta.url), 'utf8')
@@ -54,7 +58,7 @@ const evaluationSources = Object.fromEntries(await Promise.all([
 })))
 
 describe.skipIf(!process.env.DEEPSEEK_API_KEY && !process.env.DSH_BID_EVAL_PROVIDER)('真实模型 Main 自主任务规划', () => {
-  for (const scenario of cases) it(scenario.id, { timeout: 900_000, retry: 0 }, async () => {
+  for (const scenario of cases) it(scenario.id, { timeout: scenario.id === 'A02-six' ? 1_860_000 : 900_000, retry: 0 }, async () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-bid-main-' + scenario.id + '-'))
     const ctx = new Context()
     const report: Record<string, unknown> = { scenario: scenario.id, provider, model, root,
@@ -63,7 +67,8 @@ describe.skipIf(!process.env.DEEPSEEK_API_KEY && !process.env.DSH_BID_EVAL_PROVI
       fixture: '已完成五章的确定性历史项目，工作流程使用完整虚构采购条款及评分来源；历史完成态不是实际模型写作证明。全部本次规划、执行和核验调用使用真实 Provider。' }
     const reportPath = join(root, '验收记录.json')
     const save = () => writeFile(reportPath, JSON.stringify(report, null, 2) + '\n')
-    const deadline = AbortSignal.timeout(840_000)
+    // 六章包含独立写作、审核及全任务核验，保留语义整改所需的真实模型调用时间。
+    const deadline = AbortSignal.timeout(scenario.id === 'A02-six' ? 1_800_000 : 840_000)
     try {
       await ctx.plugin(LlmRuntime)
       await ctx.plugin(FileSettingsProvider, { dshHome: home, watch: false })
@@ -145,6 +150,13 @@ describe.skipIf(!process.env.DEEPSEEK_API_KEY && !process.env.DSH_BID_EVAL_PROVI
         agent.cancel({ kind: 'user' })
         reject(new Error('真实模型验收超时，保留全部运行证据。'))
       }, { once: true }) })
+      if ('clarification' in scenario && scenario.clarification !== undefined) {
+        report.prior_input = scenario.clarification
+        agent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: scenario.clarification }] }))
+        await Promise.race([agent.whenIdle(), aborted])
+        expect(agent.session.events.some(event => event.type === 'bid.run.started')).toBe(false)
+        expect(await readFile(join(workspace.projectRoot, 'outline/confirmed-outline.json'), 'utf8')).toBe(outlineBefore)
+      }
       if (scenario.id === 'A14') {
         const priorText = '仅审查当前 S2.3（章节1），交付实际审查报告。发现问题也只记录在报告中，不修复正文、不修改目录。'
         report.prior_input = priorText
@@ -205,6 +217,16 @@ describe.skipIf(!process.env.DEEPSEEK_API_KEY && !process.env.DSH_BID_EVAL_PROVI
         catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null; throw error }
       }))
       report.receipts = receipts
+      if ('clarification' in scenario && scenario.clarification !== undefined) {
+        const start = events.find(event => event.type === 'bid.run.started')
+        if (start?.type !== 'bid.run.started') throw new Error('澄清任务没有已接纳 Work')
+        const { capabilityTaskRequestSchema } = await import('../../../packages/bid/bid/src/bid-capability-task.ts')
+        const { readBidWorkRequest } = await import('../../../packages/bid/bid/src/work-descriptor.ts')
+        const source = capabilityTaskRequestSchema.parse(await readBidWorkRequest(workspace, start.data.run.work)).source_snapshot
+        report.source_snapshot = source
+        expect(source?.message.text).toBe('S2.3')
+        expect(source?.context_messages?.map(item => item.text)).toEqual([scenario.clarification])
+      }
       report.after = { outline_sha256: sha256(outlineAfter), outline, children,
         source_body_markdown: await readFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), 'utf8'),
         children_bodies: bodies, body_sha256: await Promise.all(children.map(async (section) => {
@@ -219,9 +241,13 @@ describe.skipIf(!process.env.DEEPSEEK_API_KEY && !process.env.DSH_BID_EVAL_PROVI
         expect(await readFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), 'utf8'))
           .toBe(bodyBefore.replace('流程一：收集输入。', '流程一：收集并登记输入。'))
       } else if (scenario.id !== 'A14') {
-        expect(children).toHaveLength(3)
+        expect(children).toHaveLength(scenario.id === 'A02-six' ? 6 : 3)
         expect(['流程一：收集输入。', '流程二：校验结果。', '流程三：交付成果。', '表1 校验产物', '| 校验 | 报告 |', '{{flowchart:process-flow}}']
           .every(text => bodies.some(body => body.includes(text)))).toBe(true)
+        if (scenario.id === 'A02-six') {
+          expect(['流程一：收集输入。', '流程二：校验结果。', '流程三：交付成果。', '表1 校验产物', '| 校验 | 报告 |', '{{flowchart:process-flow}}']
+            .every(text => bodies.reduce((count, body) => count + body.split(text).length - 1, 0) === 1)).toBe(true)
+        }
         const snapshot = await collectDocxExportSnapshot(workspace)
         expect(children.every(section => snapshot.markdown.includes(section.title))).toBe(true)
         const workbench = await ctx.bid.getReviewWorkbench(agent.session)

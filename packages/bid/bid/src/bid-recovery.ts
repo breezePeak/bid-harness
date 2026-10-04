@@ -10,6 +10,23 @@ import { safeBidRunError, sanitizeBidErrorText } from './safe-error.ts'
 type Recovery = NonNullable<BidTaskFailure['recovery']>
 
 /**
+ * 读取当前完成通知对应的原能力 Run，供原会话追加纠正步骤。
+ * @param session 保存该 Work 的公开 Main 会话。
+ * @param task 已核对的当前项目状态。
+ * @returns 与当前完成通知对应的原 Run；其他状态或任务返回 undefined。
+ */
+export function bidCompletedCapabilityRun(session: Session, task: BidTaskState): BidRunData | undefined {
+  if (task.status !== 'completed') return
+  const started = session.events.findLast(event => event.type === 'bid.run.started')
+  const notice = session.events.findLast(event => event.type === 'bid.run.notice')
+  if (started?.type !== 'bid.run.started' || notice?.type !== 'bid.run.notice'
+    || started.data.run.work.kind !== 'capability_task' || started.data.run.work.stage !== task.stage
+    || notice.data.kind !== 'completed' || notice.data.runId !== started.data.run.runId
+    || notice.data.workId !== started.data.run.work.workId) return
+  return started.data.run
+}
+
+/**
  * 查找当前可由新用户目标接管的能力 Run；不授予恢复或消息权限。
  * @param session 拥有原 Run 记录的 Main 会话。
  * @param task 项目锁内读取或会话投影的当前状态。

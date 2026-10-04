@@ -9,9 +9,11 @@ import type { BidTaskVerificationInput } from './bid-task-verification.ts'
  * 在唯一核验 Agent 上注册按字符窗口读取冻结证据的工具。
  * @param agent 本次核验会话。
  * @param evidence Host 已读取并绑定摘要的完整文件。
+ * @param onRead 成功读取的文件位置及字符区间，供核验器核对引用。
  * @returns 工具注册的释放函数。
  */
-export function attachBidTaskEvidenceReader(agent: Agent, evidence: BidTaskVerificationInput['evidence']): () => void {
+export function attachBidTaskEvidenceReader(agent: Agent, evidence: BidTaskVerificationInput['evidence'],
+  onRead?: (position: number, start: number, end: number) => void): () => void {
   return agent.ctx.tools.register({
     name: 'read_task_evidence',
     description: '按 evidence_position 分段读取本次任务的完整只读证据；返回下一段起点，不能修改文件。',
@@ -39,6 +41,7 @@ export function attachBidTaskEvidenceReader(agent: Agent, evidence: BidTaskVerif
       }
       const text = file.text.slice(input.start, input.start + input.length)
       const end = input.start + text.length
+      onRead?.(input.evidence_position, input.start, end)
       return Promise.resolve({ evidence_position: input.evidence_position, path: file.path, sha256: file.sha256,
         start: input.start, end, total_characters: file.text.length, text,
         next_start: end < file.text.length ? end : null })

@@ -21,6 +21,11 @@ import { parseWebEvidenceSourcesArtifact } from '../../src/web-evidence-source-a
 import { parseOrMigrateChapterExecutionLog } from '../../src/chapter-writing-plan-artifacts.ts'
 import { createBidCapabilityDispatcher } from '../../src/bid-capability-dispatcher.ts'
 import { modelBidTaskVerifier } from '../../src/bid-task-verification.ts'
+import { capabilityTaskCheckpointSchema, capabilityTaskRequestSchema } from '../../src/bid-capability-task.ts'
+import { enqueueCapabilityRequest } from '../../src/bid-capability-queue.ts'
+import { readBidChapterCommandJournal } from '../../src/chapter-command-journal.ts'
+import type { BidRunContext } from '../../src/run-coordinator.ts'
+import { readBidWorkRequest } from '../../src/work-descriptor.ts'
 import { seedCapabilityProject } from '../capability-fixture.ts'
 import { ChapterAdapter } from './chapter-writing-adapter.ts'
 import IntegrationFileSystem, { registerIntegrationTools } from './evidence-mapping-loop.ts'
@@ -43,17 +48,33 @@ function inputJson<T>(prompt: string, prefix: string): T {
   return JSON.parse(line.slice(prefix.length)) as T
 }
 
+const clarificationRequest = '本章也需要小章节。把三个阶段拆成真实目录子章节，保留原文、表格和流程图，并完成正文和审核。不要改其他章节；具体是哪章等我确认后再执行。'
+
 class PlanningAdapter extends ChapterAdapter {
   constructor(private readonly recoveryWorkspace?: BidWorkspace, private readonly repeatCompletedWriting = false,
-    private readonly structure: 'split' | 'add' = 'split') { super() }
+    private readonly structure: 'split' | 'add' = 'split', private partialFailure = false,
+    private readonly clarify = false, private readonly sixSparse = false,
+    private assignmentConflict = false, private readonly completedRepair = false,
+    private readonly bindingRepair = false, private unreadVerification = false, private readonly publishedCorrection = false,
+    private readonly migrationRestart = false) { super() }
+  onRecovery?: () => void
+  readonly resumedWriterTitles = new Set<string>()
+  private replanned = false
+  private bindingInspected = false
+  private clarificationAnswered = false
   override resolveModel(provider: string, model: string) {
     return Promise.resolve({ provider, id: model, name: model, inputModalities: ['text', 'image'] as const })
   }
   readonly inputs: GenerateOptions[] = []
   readonly errors: string[] = []
+  unreadVerificationRejected = false
   private mainStep = 0
   private recoveryAttempts = 0
   private readonly mappingSteps = new Map<string, number>()
+  private migrationSubmissions = 0
+  private completedRepairReviews = 0
+  private correctionStep = 0
+  private readonly draftWrites = new Map<string, number>()
   override async * stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
     this.inputs.push(options)
     const prompt = options.messages.flatMap(message => message.content)
@@ -69,33 +90,63 @@ class PlanningAdapter extends ChapterAdapter {
       if (!prompt.includes('result 核验在正式发布之前执行')) throw new Error('任务产物核验混淆候选检查与正式发布')
       if (!prompt.includes('以这些原始绑定为准')) throw new Error('任务核验缺少原始目录绑定的归属依据')
       const input = inputJson<{
+        phase: 'plan' | 'result'
         requirements?: readonly object[]
-        sources: readonly object[]
+        sources: readonly { text?: string; context_messages?: string[] }[]
         evidence: readonly { evidence_position: number; path: string; total_characters: number; text?: string }[]
       }>(prompt, '核验输入：')
+      if (this.clarify && (input.sources[0]?.text !== 'S2.3'
+        || JSON.stringify(input.sources[0]?.context_messages) !== JSON.stringify([clarificationRequest]))) {
+        throw new Error('任务核验丢失原拆章要求或没有绑定最新章节澄清')
+      }
       if (input.evidence.some(file => file.text !== undefined)) throw new Error('任务核验首次输入不得内联完整文件')
       if (!options.tools?.some(tool => tool.name === 'read_task_evidence')) throw new Error('核验会话缺少冻结证据只读工具')
-      const file = input.evidence.find(file => file.total_characters > 0)
-      if (file === undefined) throw new Error('核验没有真实文件证据')
-      const read = options.messages.flatMap(message => message.content)
-        .filter(block => block.type === 'tool-result').flatMap(block => block.content)
-        .filter(block => block.type === 'text').map(block => JSON.parse(block.text) as { path?: string; text?: string })
-        .find(item => item.path === file.path)
-      if (read === undefined) {
-        yield* call('read_task_evidence', { evidence_position: file.evidence_position, start: 0, length: 12_000 })
+      const toolResults = options.messages.flatMap(message => message.content).filter(block => block.type === 'tool-result')
+      if (toolResults.some(block => block.content.some(content => content.type === 'text'
+        && content.text.includes('BID_TASK_VERIFICATION_EVIDENCE_UNREAD') && content.text.includes('start=1')))) this.unreadVerificationRejected = true
+      if (input.phase === 'result' && this.unreadVerification) {
+        const partial = input.evidence.find(file => file.path.startsWith('chapters/sections/'))!
+        if (!toolResults.some(block => block.toolCallId === CallId('read_task_evidence'))) {
+          yield* call('read_task_evidence', { evidence_position: partial.evidence_position, start: 0, length: 1 })
+          return
+        }
+        this.unreadVerification = false
+        yield* call('structured_output', { checks: input.requirements!.map(() => ({ met: true,
+          reason: '故障注入：只读首字符就引用全部证据', evidence_positions: [partial.evidence_position,
+            ...input.evidence.filter(file => file !== partial).map(file => file.evidence_position)] })) })
         return
       }
-      if (read.text === undefined || read.text.length === 0 || read.text.length > 12_000) throw new Error('核验只读工具没有返回有界原文')
+      const reads = options.messages.flatMap(message => message.content)
+        .filter(block => block.type === 'tool-result').filter(block => block.toolCallId === CallId('read_task_evidence')).flatMap(block => block.content)
+        .filter(block => block.type === 'text').map(block => JSON.parse(block.text) as {
+          evidence_position?: number
+          text?: string
+          end?: number
+          next_start?: number | null
+        })
+      const required = input.phase === 'result' ? input.evidence
+        .filter(file => /^chapters\/(?:sections|meta|reviews)\//u.test(file.path))
+        : input.evidence.filter(file => file.total_characters > 0).slice(0, 1)
+      if (required.length === 0) throw new Error('核验没有真实文件证据')
+      const file = required.find(file => !reads.some(read => read.evidence_position === file.evidence_position
+        && read.end === file.total_characters))
+      if (file !== undefined) {
+        const start = reads.findLast(read => read.evidence_position === file.evidence_position)?.next_start ?? 0
+        yield* call('read_task_evidence', { evidence_position: file.evidence_position, start, length: 12_000 })
+        return
+      }
+      if (reads.some(read => read.text === undefined || read.text.length > 12_000)) throw new Error('核验只读工具没有返回有界原文')
       const array = schema.properties[input.requirements === undefined ? 'sources' : 'checks']
       const count = input.requirements?.length ?? input.sources.length
       if (array?.minItems !== count || array.maxItems !== count) throw new Error('任务核验未约束完整来源或检查项数量')
-      const check = { met: true, reason: '脚本要求 Host 另行校验真实新节点及全部新叶节的当前审核' }
+      const check = { met: true, reason: '脚本要求 Host 另行校验真实新节点及全部新叶节的当前审核',
+        evidence_positions: required.map(file => file.evidence_position) }
       const requirements = [{
-        description: '本章建立三个真实目录子节并保留原文、完成正文和审核', object: 'outline' as const,
+        description: `本章建立${this.sixSparse ? '六个' : '三个'}真实目录子节并保留原文、完成正文和审核`, object: 'outline' as const,
         new_children: true, completed_content: true, repair: false, preserve_migrated_content: true, check }]
-      yield* answer(JSON.stringify(input.requirements === undefined
+      yield* call('structured_output', input.requirements === undefined
         ? { scope_authorized: true, sources: input.sources.map(() => ({ relevant: true, requirements })) }
-        : { scope_authorized: true, checks: input.requirements.map(() => check) }))
+        : { checks: input.requirements.map(() => check) })
       return
     }
     if (prompt.includes('当前候选目录：') && !prompt.includes('Current Chapter Blueprint：')) {
@@ -105,9 +156,27 @@ class PlanningAdapter extends ChapterAdapter {
       return
     }
     if (prompt.includes('源正文完整 Markdown 块：')) {
-      const blocks = inputJson<object[]>(prompt, '源正文完整 Markdown 块：')
-      yield* answer(JSON.stringify(blocks.map((_, index) => ({
-        disposition: 'move', target_positions: [Math.min(Math.floor(index / 2), 2)] }))))
+      const targets = inputJson<Array<{ position: number; outline_position: number; title: string }>>(prompt, '当前可写目标章节：')
+      if (targets.some((target, index) => target.position !== index || target.outline_position === undefined)
+        || targets[0]?.position === targets[0]?.outline_position) throw new Error('原文分配缺少目录位置与局部目标位置的明确对应')
+      const blocks = inputJson<Array<{ position: number; type: string; markdown: string }>>(prompt, '源正文完整 Markdown 块：')
+      const submission = this.migrationSubmissions++
+      if (submission > 4) throw new Error('原文迁移回放的分配未收敛：' + JSON.stringify(options.messages.at(-1)?.content))
+      const linked = inputJson<number[][]>(prompt, '必须分配到相同目标的关联块位置：')
+      const assignments = Object.fromEntries(blocks.filter(block => !this.sixSparse || submission !== 0
+        || block.position < blocks.length - 2).map(block => [String(block.position), {
+        disposition: this.sixSparse && submission === 2 ? 'share' : 'move', target_positions: this.sixSparse && submission === 2
+          ? [0, 1, 2, 5] : [this.sixSparse
+            ? block.type === 'table' || submission > 1 && linked.some(group => group.includes(block.position)
+              && group.some(position => blocks[position]?.type === 'table')) ? 2 : block.position === blocks.length - 1 ? 5 : 0
+            : Math.min(Math.floor(block.position / 2), 2)],
+      }]))
+      if (!this.sixSparse) for (const group of linked) {
+        const target = group.some(position => blocks[position]?.type === 'table') ? 1
+          : assignments[String(Math.min(...group))]?.target_positions[0] ?? 0
+        for (const position of group) assignments[String(position)] = { disposition: 'move', target_positions: [target] }
+      }
+      yield* call('structured_output', { assignments })
       return
     }
     if (options.tools?.some(tool => tool.name === 'finish_mapping_task')) {
@@ -155,8 +224,76 @@ class PlanningAdapter extends ChapterAdapter {
       return
     }
     if (String(options.sessionId) === 'task-planning-main') {
+      if (this.clarify && !this.clarificationAnswered) {
+        this.clarificationAnswered = true
+        yield* answer('请确认要拆分的章节。')
+        return
+      }
       const state = this.recoveryWorkspace === undefined ? null : await readBidProjectState(this.recoveryWorkspace)
+      if (this.publishedCorrection && this.correctionStep < 2 && state?.status === 'completed' && prompt.includes('纠正刚才已发布结果')) {
+        if (this.correctionStep++ === 0) {
+          yield* call('bid_project_inspect', { query: { object: 'task' } })
+          return
+        }
+        yield* call('bid_plan_task', { edit: 'append', steps: [{ description: '在原 Work 复核已发布子章并重新验收',
+          scope: { source: 'task' }, call: { capability: 'chapter.review', input: { reason: '按用户纠正要求核对全部新子章。' } } }] })
+        return
+      }
       if (state?.status === 'suspended') {
+        this.onRecovery?.()
+        if (this.migrationRestart && !prompt.includes('重新迁移未完成写作')) {
+          yield* answer('已保存候选；原文归属需要重新迁移，等待新的用户执行指令。')
+          return
+        }
+        if (this.migrationRestart && !this.replanned) {
+          if (!this.bindingInspected) {
+            this.bindingInspected = true
+            yield* call('bid_project_inspect', { query: { object: 'outline', source: 'candidate' } })
+            return
+          }
+          this.replanned = true
+          const outline = parseOutlineArtifact(JSON.parse(await readFile(join(this.recoveryWorkspace!.projectRoot, 'runs',
+            state.run.work.workId, 'work/.bid-harness/outline/confirmed-outline.json'), 'utf8')))
+          const sources = outline.sections.flatMap((section, index) => section.id === 'S2.3' || section.parent_id === 'S2.3' ? [index] : [])
+          yield* call('bid_plan_task', { edit: 'restart_pending', steps: [
+            { description: '从已接纳结果重新迁移全部原文', scope: { source: 'task' }, call: { capability: 'chapter.reorganize',
+              input: { instruction: '重新迁移全部原文，保留完整且唯一的原文块及表格流程图。', source_section_positions: sources } } },
+            { description: '重新完成全部子章正文与独立审核', scope: { source: 'task' }, call: { capability: 'chapter.write',
+              input: { instruction: '按重新迁移结果完成全部子章正文与独立审核。' } } },
+          ] })
+          return
+        }
+        if (this.bindingRepair && this.replanned) {
+          const result = options.messages.flatMap(message => message.content)
+            .findLast(block => block.type === 'tool-result' && block.toolCallId === CallId('bid_plan_task'))
+          if (result?.type === 'tool-result'
+            && !result.content.some(block => block.type === 'text' && block.text.includes('"accepted":true'))) {
+            const error = '业务绑定恢复计划未接纳：' + JSON.stringify(result.content)
+            this.errors.push(error)
+            throw new Error(error)
+          }
+        }
+        if (this.partialFailure || this.completedRepair && !this.replanned) {
+          if (this.bindingRepair && !this.bindingInspected) {
+            this.bindingInspected = true
+            yield* call('bid_project_inspect', { query: { object: 'outline', source: 'candidate' } })
+            return
+          }
+          this.partialFailure = false
+          this.replanned = true
+          const outline = parseOutlineArtifact(JSON.parse(await readFile(join(this.recoveryWorkspace!.projectRoot, 'runs',
+            state.run.work.workId, 'work/.bid-harness/outline/confirmed-outline.json'), 'utf8')))
+          const sectionPosition = outline.sections.findIndex(section => section.title === '校验结果')
+          yield* call('bid_plan_task', { edit: 'replace_pending',
+            steps: [...this.bindingRepair ? [{ description: '纠正校验结果的需求归属', scope: { source: 'task' }, call: {
+              capability: 'outline.update', input: { operations: [], business_bindings: [{ section_position: sectionPosition,
+                requirement_positions: [0], scoring_positions: [], response_point_positions: [], compliance_positions: [] }],
+              } } }] : [], { description: '恢复全部新叶节，复用已完成正文审核', scope: { source: 'task' },
+              call: { capability: 'chapter.write', input: { instruction: '保留所有迁移原文与已完成结果，仅补未完成章节。' } } },
+            { description: '审核全部新叶节的当前正文', scope: { source: 'previous_targets' },
+              call: { capability: 'chapter.review', input: { reason: '核对所有新叶节完成正文和审核。' } } }] })
+          return
+        }
         if (this.recoveryAttempts++ >= 3) {
           const error = '故障恢复脚本未收敛：' + JSON.stringify(options.messages.at(-1)?.content)
           this.errors.push(error)
@@ -181,11 +318,13 @@ class PlanningAdapter extends ChapterAdapter {
         case 2: yield* call('bid_run_task', { task: { goal: '本章三个阶段建立真实子章并完成正文',
           scope: { kind: 'sections', section_positions: [2] }, steps: [
             { description: '将本章三个阶段拆成真实目录子章', scope: { source: 'task' }, call: { capability: 'outline.update', input: {
-              operations: this.structure === 'split' ? [{ type: 'split_section', section_position: 2, children: [
-                { title: '收集输入', purpose: '收集输入并回答主题1', must_answer: ['回答主题1', '收集输入'] },
-                { title: '校验结果', purpose: '校验结果', must_answer: ['校验结果'] },
-                { title: '交付成果', purpose: '交付成果', must_answer: ['交付成果'] },
-              ] }] : [
+              operations: this.structure === 'split' ? [{ type: 'split_section', section_position: 2, children: this.sixSparse
+                ? ['收集输入', '边界确认', '校验结果', '内业处理', '复核整改', '交付成果'].map(title => ({ title,
+                  purpose: title, must_answer: [title] })) : [
+                  { title: '收集输入', purpose: '收集输入并回答主题1', must_answer: ['回答主题1', '收集输入'] },
+                  { title: '校验结果', purpose: '校验结果', must_answer: ['校验结果'] },
+                  { title: '交付成果', purpose: '交付成果', must_answer: ['交付成果'] },
+                ] }] : [
                 { type: 'add_section', parent_position: 2, order: 1, writable: true,
                   title: '收集输入', purpose: '收集输入并回答主题1', must_answer: ['回答主题1', '收集输入'] },
                 { type: 'add_section', parent_position: 2, order: 2, writable: true,
@@ -208,6 +347,16 @@ class PlanningAdapter extends ChapterAdapter {
       }
     }
     if (options.tools?.some(tool => tool.name === 'submit_chapter')) {
+      const blueprint = inputJson<{ title: string }>(prompt, 'Current Chapter Blueprint：')
+      if (this.partialFailure && blueprint.title === '交付成果') {
+        yield { type: 'finish', reason: { kind: 'error', failure: { code: 'ETIMEDOUT', message: '部分正文完成后的可恢复模型中断' } } }
+        return
+      }
+      if (this.completedRepair && this.completedRepairReviews > 0 && !this.replanned && blueprint.title === '校验结果') {
+        yield { type: 'finish', reason: { kind: 'error', failure: { code: 'ETIMEDOUT', message: '整改流断开，保留已审核候选' } } }
+        return
+      }
+      if (this.replanned) this.resumedWriterTitles.add(blueprint.title)
       const id = String(options.sessionId)
       const step = this.mappingSteps.get(id) ?? 0
       this.mappingSteps.set(id, step + 1)
@@ -219,13 +368,18 @@ class PlanningAdapter extends ChapterAdapter {
       const marker = '已分配给本节的原文草稿：\n'
       const start = prompt.lastIndexOf(marker)
       const blockLine = prompt.split('\n').find(line => line.startsWith('原文保留块：'))
-      if (start < 0 && blockLine === undefined) throw new Error('新叶节 Writer 没有收到迁移 seed')
-      const seed = blockLine === undefined ? prompt.slice(start + marker.length).split('\n\n这是同一章节 Writer 的修复轮次。')[0]!
-        .split('\n\n能力执行要求：')[0]!.split('\n\n本节迁移原文的流程图定义；')[0]!.replace(/^#+ .*\n/um, '').trim()
-        : (JSON.parse(blockLine.slice('原文保留块：'.length)) as Array<{ position: number }>).
-          map(block => '{{reuse:' + String(block.position) + '}}').join('\n\n')
-      const blueprint = inputJson<{ title: string }>(prompt, 'Current Chapter Blueprint：')
-      const markdown = '# ' + blueprint.title + '\n\n' + seed
+      if (start < 0 && blockLine === undefined && !this.sixSparse) throw new Error('新叶节 Writer 没有收到迁移 seed')
+      const seed = start < 0 && blockLine === undefined ? `${blueprint.title}：核对本阶段输入，执行处理并登记结果，完成交接确认。`
+        : blockLine === undefined ? prompt.slice(start + marker.length).split('\n\n这是同一章节 Writer 的修复轮次。')[0]!
+          .split('\n\n能力执行要求：')[0]!.split('\n\n本节迁移原文的流程图定义；')[0]!.replace(/^#+ .*\n/um, '').trim()
+          : (JSON.parse(blockLine.slice('原文保留块：'.length)) as Array<{ position: number }>).
+            map(block => '{{reuse:' + String(block.position) + '}}').join('\n\n')
+      const draftWrite = this.draftWrites.get(blueprint.title) ?? 0
+      this.draftWrites.set(blueprint.title, draftWrite + 1)
+      if (this.sixSparse && draftWrite > 0 && (!prompt.includes('需要整改的候选新增说明。')
+        || blockLine?.includes('需要整改的候选新增说明。'))) throw new Error('候选新增正文被误锁为原文或没有进入修订输入')
+      const markdown = '# ' + blueprint.title + '\n\n' + seed + (this.sixSparse
+        ? '\n\n' + (draftWrite === 0 ? '需要整改的候选新增说明。' : '整改后的候选新增说明。') : '')
       yield* call('submit_chapter', { markdown, metadata: blockLine === undefined && seed.includes('{{flowchart:process-flow}}') ? {
         flowcharts: [{ key: 'process-flow', title: '流程关系', direction: 'TB',
           nodes: [{ key: 'start', type: 'start', text: '启动' }, { key: 'finish', type: 'end', text: '完成' }],
@@ -233,7 +387,32 @@ class PlanningAdapter extends ChapterAdapter {
       } : {} })
       return
     }
-    try { yield* super.stream(options) } catch (error) {
+    if (this.sixSparse && options.tools?.some(tool => tool.name === 'finish_chapter_review')
+      && prompt.includes('{{flowchart:process-flow}}') && !prompt.includes('当前必须原貌保留的原图：')) {
+      throw new Error('独立 Reviewer 没有收到正式原图的只读身份')
+    }
+    try {
+      for await (const chunk of super.stream(options)) {
+        if (this.completedRepair && this.completedRepairReviews < 2 && chunk.type === 'block-end' && chunk.block.type === 'tool-call'
+          && chunk.block.name === 'set_review_summary'
+          && inputJson<{ title: string }>(prompt, 'Current Chapter Blueprint：').title === '校验结果') {
+          this.completedRepairReviews += 1
+          const args = JSON.parse(chunk.block.arguments) as object
+          yield { ...chunk, block: { ...chunk.block, arguments: JSON.stringify({ ...args,
+            blocking_issues: ['合并当前候选新增的重复说明，保留所有分配原文。'],
+          }) } }
+        } else if (this.assignmentConflict && chunk.type === 'block-end' && chunk.block.type === 'tool-call'
+          && chunk.block.name === 'set_review_summary') {
+          this.assignmentConflict = false
+          const section = inputJson<{ id: string }>(prompt, 'Current Chapter Blueprint：')
+          const args = JSON.parse(chunk.block.arguments) as object
+          yield { ...chunk, block: { ...chunk.block, arguments: JSON.stringify({ ...args,
+            assignment_conflicts: [{ task: '步骤只要求另一节正文', basis: '步骤指令与当前章节职责冲突，须由 Main 调整能力计划。',
+              related_section_ids: [section.id] }],
+          }) } }
+        } else yield chunk
+      }
+    } catch (error) {
       const message = '模型脚本协议不匹配：' + JSON.stringify({ tools: options.tools?.map(tool => tool.name), prompt: prompt.slice(-1800) })
       this.errors.push(message)
       throw new Error(message, { cause: error })
@@ -392,17 +571,25 @@ export async function seedMainTaskPlanningProject(root: string, completeSourceFa
  * @param fault 故障位置或对已完成新叶节的重复写作。
  * @param structure 在原章下新增子章或一次拆分。
  * @param selectedRoute 是否通过会话模型选择覆盖启动时的路由。
+ * @param clarify 是否用第二条章节名称消息澄清第一条拆章要求。
+ * @param sixSparse 是否拆为六个叶节并模拟漏块、表题分离及原文共享；部分叶节没有迁移草稿。
  * @returns 工具序列和正式产物事实。
  */
 export async function runMainTaskPlanningLoop(ctx: Context, root: string,
-  fault?: 'after_split' | 'after_migration' | 'writing' | 'before_verification' | 'repeat_completed',
-  structure: 'split' | 'add' = 'split', selectedRoute = false) {
+  fault?: 'after_split' | 'after_migration' | 'writing' | 'reviewing' | 'before_verification' | 'unread_verification' | 'published_correction' | 'migration_restart' | 'repeat_completed' | 'partial_replan' | 'authorization_recheck' | 'assignment_conflict' | 'completed_repair' | 'binding_repair',
+  structure: 'split' | 'add' = 'split', selectedRoute = false, clarify = false, sixSparse = false) {
   const workspace = await seedMainTaskPlanningProject(root)
   const outside = await readFile(join(workspace.projectRoot, 'chapters/sections/0002.md'), 'utf8')
   const canonicalBody = await readFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), 'utf8')
-  const adapter = new PlanningAdapter(fault === undefined ? undefined : workspace, fault === 'repeat_completed', structure)
+  const adapter = new PlanningAdapter(fault === undefined ? undefined : workspace, fault === 'repeat_completed' || sixSparse, structure,
+    fault === 'partial_replan' || fault === 'assignment_conflict', clarify, sixSparse, fault === 'assignment_conflict',
+    fault === 'completed_repair' || fault === 'binding_repair', fault === 'binding_repair', fault === 'unread_verification', fault === 'published_correction', fault === 'migration_restart')
   const executions: string[] = []
   let interrupted = false
+  let reviewRecoveryInputStart: number | undefined
+  let unreadVerificationRejected = false
+  let queuedReplacement: string | undefined
+  if (fault === 'assignment_conflict' || fault === 'completed_repair' || fault === 'binding_repair') adapter.onRecovery = () => { interrupted = true }
   if (fault !== undefined) {
     const dispatcher = createBidCapabilityDispatcher({ modelStageRepairAttempts: 2,
       evidenceMappingMaxConcurrency: 2, chapterWritingMaxConcurrency: 2, webSearchEnabled: false })
@@ -418,16 +605,54 @@ export async function runMainTaskPlanningLoop(ctx: Context, root: string,
       },
       execute: async (...args) => {
         executions.push(args[0].capability)
+        if (!interrupted && fault === 'reviewing' && args[0].capability === 'chapter.review') {
+          const controller = new AbortController()
+          const originalRun = args[1].run
+          let reviewStarts = 0
+          return dispatcher.execute(args[0], { ...args[1], run: { ...originalRun,
+            signal: AbortSignal.any([originalRun.signal, controller.signal]),
+            reportProgress(progress) {
+              originalRun.reportProgress(progress)
+              if (progress.phase !== 'reviewing' || reviewStarts++ !== 1) return
+              interrupted = true
+              reviewRecoveryInputStart = adapter.inputs.length
+              controller.abort(Object.assign(new Error('审核部分完成后中断'), { code: 'ETIMEDOUT' }))
+            },
+          } })
+        }
+        if (fault === 'binding_repair' && args[0].capability === 'chapter.write' && queuedReplacement === undefined) {
+          const host = ctx.bid as unknown as { readonly inFlight: Map<string, { readonly runs: { readonly current?: BidRunContext } }> }
+          const run = [...host.inFlight.values()][0]?.runs.current
+          if (run === undefined) throw new Error('缺少持有正式项目的原 Run')
+          const request = capabilityTaskRequestSchema.parse(await readBidWorkRequest(workspace, run.work))
+          queuedReplacement = (await enqueueCapabilityRequest(workspace, run, request.task, request.authorization)).queue_id
+        }
         const outcome = await dispatcher.execute(...args)
         if (canonicalBody !== await readFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), 'utf8')) {
           throw new Error('候选步骤在最终核验前改写了正式正文。')
         }
-        if (!interrupted && fault === 'writing' && args[0].capability === 'chapter.write') interrupt()
+        if (!interrupted && (fault === 'writing' || fault === 'migration_restart') && args[0].capability === 'chapter.write') interrupt()
         return outcome
       },
-      verifyTask: (...args) => {
+      verifyTask: async (...args) => {
         if (!interrupted && fault === 'before_verification' && args[0].phase === 'result') interrupt()
-        return modelBidTaskVerifier(...args)
+        const decision = await modelBidTaskVerifier(...args)
+        if (fault === 'unread_verification' && adapter.unreadVerificationRejected) {
+          const host = ctx.bid as unknown as { readonly inFlight: Map<string, { readonly runs: { readonly current?: BidRunContext } }> }
+          const started = [...host.inFlight.values()][0]?.runs.current
+          if (started === undefined) throw new Error('核验失败时缺少原 Work')
+          const resultPath = join(workspace.projectRoot, 'requests', started.work.workId, 'result.json')
+          try { await readFile(resultPath) } catch (missing) {
+            if ((missing as NodeJS.ErrnoException).code !== 'ENOENT') throw missing
+            unreadVerificationRejected = true
+          }
+          if (!unreadVerificationRejected) throw new Error('未读证据拒绝前已经发布正式凭据')
+        }
+        if (!interrupted && fault === 'authorization_recheck' && args[0].phase === 'result') {
+          interrupted = true
+          return { ...decision, scope_authorized: false }
+        }
+        return decision
       },
     }))
   }
@@ -437,16 +662,45 @@ export async function runMainTaskPlanningLoop(ctx: Context, root: string,
   const handle = await ctx.agentLoop.createAgent(ctx, { sessionId: SessionId('task-planning-main'),
     agentOptions: { provider: 'planning-mock', model: 'planning-mock' }, meta: { cwd: root, agentPreset: 'bid' } })
   const agent = handle.agent
-  if (selectedRoute) ctx.effect(() => installModelSelection(agent.ctx, {
-    current: { provider: 'planning-selected', model: 'selected-model' }, assembled: undefined,
-  }))
-  const text = '只修改本章 S2.3，把三个阶段拆成真实目录子章节，保留原文并完成正文和审核。不要改其他章节。'
+  let migrationRestartRequested = false
+  if (fault === 'migration_restart') adapter.onRecovery = () => {
+    if (migrationRestartRequested) return
+    migrationRestartRequested = true
+    agent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text',
+      text: '重新迁移未完成写作：保留已接纳步骤和旧候选历史，从已接纳结果重新迁移完整原文，完成全部子章写作与审核。不要改目录或范围外成果。' }] }))
+  }
+  const selection = { current: { provider: 'planning-selected', model: 'selected-model' }, assembled: undefined }
+  let recoveryInputStart: number | undefined
+  if (selectedRoute && fault !== 'partial_replan') ctx.effect(() => installModelSelection(agent.ctx, selection))
+  if (fault === 'partial_replan') adapter.onRecovery = () => {
+    if (recoveryInputStart !== undefined) return
+    interrupted = true
+    recoveryInputStart = adapter.inputs.length
+    ctx.effect(() => installModelSelection(agent.ctx, selection))
+  }
+  if (clarify) {
+    agent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: clarificationRequest }] }))
+    await agent.whenIdle()
+    if (agent.session.events.some(event => event.type === 'bid.run.started')) throw new Error('章节澄清前已越权启动任务')
+  }
+  const text = clarify ? 'S2.3' : sixSparse
+    ? '只修改本章 S2.3，拆成收集输入、边界确认、校验结果、内业处理、复核整改、交付成果六个真实子章节，原文完整且唯一，完成全部子章正文和审核。不要改其他章节。'
+    : '只修改本章 S2.3，把三个阶段拆成真实目录子章节，保留原文并完成正文和审核。不要改其他章节。'
   agent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text }] }))
   await agent.whenIdle()
   const host = ctx.bid as unknown as { readonly inFlight: Map<string, { readonly done: Promise<unknown> }> }
-  while (host.inFlight.size > 0) {
-    await Promise.all([...host.inFlight.values()].map(operation => operation.done))
+  const settle = async () => {
+    while (host.inFlight.size > 0) {
+      await Promise.all([...host.inFlight.values()].map(operation => operation.done))
+      await agent.whenIdle()
+    }
+  }
+  await settle()
+  if (fault === 'published_correction') {
+    agent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text',
+      text: '纠正刚才已发布结果：在原 Work 复核全部新子章，保留目录、原文及范围外成果，重新验收发布。' }] }))
     await agent.whenIdle()
+    await settle()
   }
   const state = await readBidProjectState(workspace)
   if (state?.status !== 'completed') throw new Error('真实任务链路未完成：' + JSON.stringify({ state, errors: adapter.errors }))
@@ -463,9 +717,39 @@ export async function runMainTaskPlanningLoop(ctx: Context, root: string,
   await ctx.sessions.flush(agent.session)
   const executionParents = new Set(agent.session.events.flatMap(event => event.type === 'bid.run.started'
     && event.data.run.executionSessionId !== undefined ? [event.data.run.executionSessionId] : []))
+  const start = agent.session.events.find(event => event.type === 'bid.run.started')
+  if (start?.type !== 'bid.run.started') throw new Error('任务没有已接纳 Work')
+  const source = capabilityTaskRequestSchema.parse(await readBidWorkRequest(workspace, start.data.run.work)).source_snapshot
+  const checkpoint = capabilityTaskCheckpointSchema.parse(JSON.parse(await readFile(join(workspace.projectRoot, 'runs', start.data.run.work.workId,
+    'task-checkpoint.json'), 'utf8')))
   return { state: state?.status, source: text, children: children.map(section => section.title),
+    ...sixSparse ? { migrationSubmissions: adapter.inputs.filter(input => input.messages.some(message => message.content.some(block =>
+      block.type === 'text' && block.text.includes('源正文完整 Markdown 块：')))).length,
+    generatedDraftRepaired: bodies.every(body => body.includes('整改后的候选新增说明。') && !body.includes('需要整改的候选新增说明。')),
+    originalUnique: ['流程一：收集输入。', '流程二：校验结果。', '流程三：交付成果。', '表1 校验产物', '| 校验 | 报告 |', '{{flowchart:process-flow}}']
+      .every(text => bodies.reduce((count, body) => count + body.split(text).length - 1, 0) === 1) } : {},
+    ...clarify ? { sourceContext: source?.context_messages?.map(message => message.text) } : {},
     ...selectedRoute ? { selectedRouteInherited: adapter.inputs.length > 0
-      && adapter.inputs.every(input => input.provider === 'planning-selected' && input.model === 'selected-model') } : {},
+      && adapter.inputs.slice(recoveryInputStart ?? 0)
+        .every(input => input.provider === 'planning-selected' && input.model === 'selected-model') } : {},
+    ...fault === 'partial_replan' || fault === 'completed_repair' || fault === 'binding_repair'
+      ? { resumedWriterTitles: [...adapter.resumedWriterTitles], planPatchCount: checkpoint.plan_patches.length } : {},
+    ...fault === 'binding_repair' ? { bindingRepaired: children.find(section => section.title === '校验结果')
+      ?.requirement_ids.includes('REQ-1'),
+    queuedReplacementCanceled: (await readBidChapterCommandJournal(workspace, start.data.run.work.workId))
+      .some(record => record.status === 'canceled' && typeof record.command === 'object' && record.command !== null
+        && 'queue_id' in record.command && record.command.queue_id === queuedReplacement) } : {},
+    ...fault === 'reviewing' ? { reviewResumeNoWriter: reviewRecoveryInputStart !== undefined
+      && adapter.inputs.slice(reviewRecoveryInputStart).every(input =>
+        !input.tools?.some(tool => tool.name === 'submit_chapter')) } : {},
+    ...fault === 'unread_verification' ? { unreadVerificationRejected } : {},
+    ...fault === 'migration_restart' ? { migrationRestarted: checkpoint.plan_patches.at(-1)?.restart_pending === true
+      && checkpoint.plan_patches.at(-1)?.writing_resume_seed === undefined, planPatchCount: checkpoint.plan_patches.length } : {},
+    ...fault === 'published_correction' ? { priorPublicationPreserved: checkpoint.publications?.length === 1
+      && checkpoint.publications[0]?.receipt.goal_met === true, planPatchCount: checkpoint.plan_patches.length,
+    publicationNotices: agent.session.events.filter(event => event.type === 'bid.run.notice' && event.data.kind === 'completed').length,
+    correctionNoticeMatchesRun: agent.session.events.findLast(event => event.type === 'bid.run.notice')?.data.runId
+      === agent.session.events.findLast(event => event.type === 'bid.run.started')?.data.run.runId } : {},
     executionParentModelTurns: adapter.inputs.filter(input => input.sessionId !== undefined
       && executionParents.has(input.sessionId)).length,
     workbench: workbench.outline.filter(section => children.some(child => child.id === section.section_id))

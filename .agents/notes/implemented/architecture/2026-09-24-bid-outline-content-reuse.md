@@ -12,7 +12,7 @@ Status: implemented
 
 `add_section` 在可写叶节下插入子章时，原章保留 ID 并成为不可写目录节点，清空其必答项与响应点；原招标要求和评分引用保持可追踪，新叶节的业务归属从修改前目录读取父章义务。该操作和 `split_section` 使用同一叶节规则，已有原文由后续迁移处理；需要保留总述时，将其分配到显式可写子章。结构操作不扩大授权子树。
 
-`chapter.reorganize` 读取原章节 Markdown 和 metadata，将顶层 Markdown 块连同原偏移、源正文 SHA 与块 SHA 提供给独立子会话。Host 要求每个块恰好分配一次，只有明确授权才接受删除，共享须显式标记；表格、代码和流程图 anchor 保持整块。迁移后的 metadata 保留来源资料与流程图规范，正文作为待复核草稿写入固定存储序号和 `chapters/reuse-seeds.json`，不继承旧 Writer 或 Reviewer 的完成身份。未分配原文和退役章节的旧任务、资料及 Manifest 归属分别保存在 `chapters/pending-reorganization.json` 和 `outline/reassignment.json`。
+`chapter.reorganize` 读取原章节 Markdown 和 metadata，将顶层 Markdown 块连同原偏移、源正文 SHA 与块 SHA 提供给独立子会话。Host 要求每个块恰好分配一次，只有明确授权才接受删除，候选新增内容的共享须显式标记；正式原文按[单一目标及发布次数核验](../bug-fix/2026-10-04-bid-original-content-target-uniqueness.md)处理。表格、代码和流程图 anchor 保持整块。迁移后的 metadata 保留来源资料与流程图规范，正文作为待复核草稿写入固定存储序号和 `chapters/reuse-seeds.json`，不继承旧 Writer 或 Reviewer 的完成身份。未分配原文和退役章节的旧任务、资料及 Manifest 归属分别保存在 `chapters/pending-reorganization.json` 和 `outline/reassignment.json`。
 
 目录改变时，同一步候选同步当前目录、Draft、confirmation、Evidence Map、Writing Plan、执行计划和日志、当前 Manifest。confirmation 的 `user_task` 来源绑定真实 Work 与用户消息；旧 confirmation 缺少来源字段仍可读取。新章及内容职责改变的章节待写、待审；未变章节的正文、存储路径、验收条件 ID 和有效审核保持原样。执行计划和日志同步移除退役叶节的依赖及关联，未变章的完成身份和尝试记录仍保留；二者关系不一致会使写作检查点整体失效。能力步骤只申报实际改变的文件，由同一 Work 精确发布。
 

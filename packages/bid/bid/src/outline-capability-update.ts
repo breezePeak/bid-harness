@@ -12,7 +12,7 @@ import { generateScopedOutlineBusinessBindings } from './outline-generation-exec
 import { parseTenderComplianceArtifact, parseTenderRequirementsArtifact, parseTenderScoringArtifact } from './tender-analysis-artifacts.ts'
 import { parseScoringResponsePointCatalog } from './scoring-response-point-artifacts.ts'
 import { parseEvidenceMapArtifact, sectionEvidenceMappingSchema, type EvidenceMapArtifact } from './evidence-mapping-artifacts.ts'
-import { changedWritableSectionIds, reconcileSectionEvidence, buildWritableSectionWorklist } from './section-evidence-context.ts'
+import { changedWritableSectionIds, reconcileSectionEvidence, buildWritableSectionWorklist, outlineSectionScope } from './section-evidence-context.ts'
 import { nextCriterionId, parseWritingPlan, writingPlanSchema, type WritingPlan } from './writing-requirements.ts'
 import { parseChapterExecutionPlan, parseOrMigrateChapterExecutionLog } from './chapter-writing-plan-artifacts.ts'
 import { chapterWritingManifestSchema, parseChapterWritingManifest, parseChapterMetadata } from './chapter-writing-artifacts.ts'
@@ -20,6 +20,7 @@ import { planChapterLocations, readChapterLocation } from './chapter-storage.ts'
 import { assignChapterContentBlocks, chapterReuseSeedsSchema, indexChapterContentBlocks, reuseChapterMetadata,
   type ChapterContentBlock } from './chapter-content-reuse.ts'
 import { assertNoLinkedPath, within } from './workspace-path.ts'
+import { originalCapabilityBlockCounts } from './bid-capability-files.ts'
 import { z } from 'zod'
 
 type OutlineUpdate = Extract<BidCapabilityCall, { capability: 'outline.update' }>['input']
@@ -258,6 +259,8 @@ async function coordinateCapabilityOutline(
       id => !context.sectionIds?.has(id) && !newIds.has(id),
     ))) throw new Error('BID_CHAPTER_REUSE_TARGET_SCOPE_INVALID')
     const sourceIds = new Set(input.content_assignments.map(item => item.source_section_id))
+    const originals = context.preserveMigratedContent === true
+      ? await originalCapabilityBlockCounts(context.canonical, sourceIds, context.originalSectionIds) : undefined
     const sourceBlocks: ChapterContentBlock[] = []
     const sourceMetadata = new Map<string, ReturnType<typeof parseChapterMetadata>>()
     for (const sourceId of sourceIds) {
@@ -265,11 +268,12 @@ async function coordinateCapabilityOutline(
       const location = await readChapterLocation(workspace, sourceId)
       if (location === null) throw new Error(`BID_CHAPTER_REUSE_SOURCE_MISSING: ${sourceId}`)
       const markdown = await readFile(within(workspace.projectRoot, location.contentPath), 'utf8')
-      sourceBlocks.push(...indexChapterContentBlocks(sourceId, markdown))
+      sourceBlocks.push(...indexChapterContentBlocks(sourceId, markdown,
+        originals === undefined ? undefined : new Set(originals.keys())))
       sourceMetadata.set(sourceId, parseChapterMetadata(await requiredJson(workspace, location.metadataPath)))
     }
     const distribution = assignChapterContentBlocks(sourceBlocks, input.content_assignments,
-      newLeafIds, input.allow_content_deletion)
+      newLeafIds, input.allow_content_deletion, originals)
     deletedBlockIds = distribution.deletedBlockIds
     for (const sourceId of sourceIds) {
       if (newLeafIds.has(sourceId) && !distribution.markdownBySectionId.has(sourceId)) {
@@ -491,7 +495,7 @@ async function coordinateCapabilityOutline(
  * 在不改目录结构时重新分配已有章节的完整原文块。
  * @param context 当前步骤候选项目。
  * @param input 真实源章节、原文块分配和删减授权。
- * @returns 精确变更文件和待复核章节。
+ * @returns 精确变更文件及源章子树内全部待写、待复核叶节，包括没有分配原文的叶节。
  */
 export async function executeCapabilityChapterReorganize(
   context: BidCapabilityExecutionContext, input: ChapterReorganize & { assignments: NonNullable<ChapterReorganize['assignments']> },
@@ -502,10 +506,16 @@ export async function executeCapabilityChapterReorganize(
       || context.sectionIds !== null && !context.sectionIds.has(id))) {
     throw new Error('BID_CHAPTER_REUSE_SOURCE_SCOPE_INVALID')
   }
-  return executeCapabilityOutlineUpdate(context, {
+  const outcome = await executeCapabilityOutlineUpdate(context, {
     operations: [], business_bindings: [], content_assignments: input.assignments,
     allow_content_deletion: input.allow_content_deletion, defer_content_migration: false,
   })
+  const outline = (await readCapabilityOutlineBaseline(context.working)).outline
+  const scope = outlineSectionScope(outline, input.source_section_ids)
+  return { ...outcome, targetSectionIds: [...new Set([...outcome.targetSectionIds,
+    ...buildWritableSectionWorklist(outline).filter(section => scope.has(section.id)
+      && (context.sectionIds === null || context.sectionIds.has(section.id))).map(section => section.id),
+  ])] }
 }
 
 /**

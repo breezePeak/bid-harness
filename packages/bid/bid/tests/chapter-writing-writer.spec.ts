@@ -11,6 +11,7 @@ import { webEvidenceContentSha256, webEvidenceSourceId } from '../src/web-eviden
 import { buildWebEvidenceChunkIndex, webEvidenceChunkIndexPath } from '../src/web-evidence-chunks.ts'
 import type { WebEvidenceSnapshot } from '../src/web-evidence-snapshot.ts'
 import { normalizeFlowchartInputs } from '../src/flowchart.ts'
+import { selectOriginalChapterContent } from '../src/chapter-content-reuse.ts'
 import { emptyChapterContext, outlineFixture } from './fixtures/chapter-writing-inputs.ts'
 
 vi.mock('node:fs/promises', async (importOriginal) => {
@@ -90,6 +91,29 @@ describe('S5 Writer 短引用与语义输入', () => {
     await expect(bindChapterWriterInput(workspace, manifest, context, refs, {
       markdown: `# ${context.section.title}\n\n{{reuse:999}}`, metadata: {},
     }, [], [], seed)).rejects.toThrow('未知原文块位置')
+  })
+
+  it('候选新增正文和图形可以修订，提交仍拒绝遗漏原正式正文', async () => {
+    const { workspace, manifest, context, refs } = await fixture()
+    const original = '原文段落。\n\n{{flowchart:original}}'
+    const charts = normalizeFlowchartInputs('old', [{ key: 'original', title: '原流程', direction: 'TB',
+      nodes: [{ key: 'start', type: 'start', text: '开始' }, { key: 'end', type: 'end', text: '完成' }],
+      edges: [{ from: 'start', to: 'end' }] }])
+    const added = { key: 'added', title: '新增流程', direction: 'TB' as const,
+      nodes: [{ key: 'start', type: 'start' as const, text: '开始' }, { key: 'end', type: 'end' as const, text: '完成' }],
+      edges: [{ from: 'start', to: 'end' }] }
+    const preserved = selectOriginalChapterContent(original + '\n\n重复草稿。\n\n{{flowchart:added}}',
+      [...charts, ...normalizeFlowchartInputs('new', [added])], [{ markdown: original, flowcharts: charts }])
+    const candidate = await bindChapterWriterInput(workspace, manifest, context, refs, {
+      markdown: `# ${context.section.title}\n\n{{reuse:0}}\n\n{{reuse:1}}\n\n已整改正文。\n\n{{flowchart:added}}`,
+      metadata: { flowcharts: [{ ...added, title: '整改后的流程' }] },
+    }, [], preserved.flowcharts, preserved.markdown)
+    expect(candidate.markdown).toContain(original)
+    expect(candidate.markdown).not.toContain('重复草稿')
+    expect(candidate.metadata.flowcharts.map(chart => chart.title)).toEqual(['原流程', '整改后的流程'])
+    await expect(bindChapterWriterInput(workspace, manifest, context, refs, {
+      markdown: `# ${context.section.title}\n\n{{reuse:1}}\n\n已整改正文。`, metadata: {},
+    }, [], preserved.flowcharts, preserved.markdown)).rejects.toThrow('缺少须原样保留的原文块位置')
   })
 
   it('共同提交路径拒绝新增 ATX 和 Setext 标题，允许修正为叶节正文', async () => {

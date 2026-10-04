@@ -10,7 +10,8 @@ import { chapterCandidateSha256, parseChapterReviewArtifact } from './chapter-wr
 import { resolveSemanticRevisionPath } from './chapter-revision-lineage.ts'
 import { parseChapterExecutionPlan, parseOrMigrateChapterExecutionLog,
   validateChapterExecutionPlan } from './chapter-writing-plan-artifacts.ts'
-import { planChapterLocations } from './chapter-storage.ts'
+import { planChapterLocations, readChapterLocations } from './chapter-storage.ts'
+import { selectOriginalChapterContent } from './chapter-content-reuse.ts'
 import { parseConfirmedOutlineArtifact, outlineArtifactSha256 } from './outline-confirmation-artifacts.ts'
 import { parseWritingPlan, validateWritingPlan } from './writing-requirements.ts'
 import { parseWebEvidenceSourcesArtifact } from './web-evidence-source-artifacts.ts'
@@ -20,6 +21,8 @@ import { assertNoLinkedPath, within } from './workspace-path.ts'
 import { assertChapterRevisionScope, renderChapterRevisionTask,
   validateChapterRevisionReference } from './chapter-revision.ts'
 import { BidStageAttentionRequiredError, BidStageExecutionError } from './control-plane-contract.ts'
+import { readPendingChapterReorganization } from './outline-capability-update.ts'
+import { outlineSectionScope } from './section-evidence-context.ts'
 
 type WritingCall = Extract<BidCapabilityCall, { capability: 'chapter.write' | 'chapter.revise' | 'chapter.review' }>
 
@@ -103,6 +106,14 @@ export async function executeWritingCapability(
   }
   const { ids, paths } = await selectedLocations(workspace, revisionId === undefined
     ? context.sectionIds : new Set([revisionId]))
+  if (call.capability === 'chapter.write') {
+    const outline = parseConfirmedOutlineArtifact(await readJson(workspace, 'outline/confirmed-outline.json'))
+    const pending = (await readPendingChapterReorganization(workspace)).filter(source =>
+      outline.sections.some(section => section.id === source)
+      && ids.some(id => outlineSectionScope(outline, [source]).has(id)))
+    if (pending.length > 0) throw new Error('BID_CHAPTER_CONTENT_MIGRATION_REQUIRED: '
+      + pending.join(', ') + ' 的原文尚未迁移。先用 chapter.reorganize 完整分配原文，再写作全部新子章；写作指令不能代替原文迁移。')
+  }
   let revisionOriginal: string | undefined
   if (call.capability === 'chapter.revise') {
     const location = await planChapterLocations(workspace, buildChapterWorklist(
@@ -118,7 +129,7 @@ export async function executeWritingCapability(
   const before = new Map(await Promise.all([...beforePaths].map(async path => [path, await capabilityFileHash(workspace, path)] as const)))
   const seedBySectionId = new Map<string, string>()
   const seedFlowchartsBySectionId = new Map<string, ReturnType<typeof parseChapterMetadata>['flowcharts']>()
-  if (call.capability !== 'chapter.review') {
+  if (call.capability !== 'chapter.review' || context.preserveMigratedContent === true) {
     const log = before.get('chapters/execution-log.json') === undefined ? undefined
       : parseOrMigrateChapterExecutionLog(await readJson(workspace, 'chapters/execution-log.json'))
     const outline = parseConfirmedOutlineArtifact(await readJson(workspace, 'outline/confirmed-outline.json'))
@@ -133,6 +144,25 @@ export async function executeWritingCapability(
     }
   }
   const affected = new Set<string>()
+  const preservedContentBySectionId = new Map<string, ReturnType<typeof selectOriginalChapterContent>>()
+  if (context.preserveMigratedContent === true) {
+    const originalOutline = parseConfirmedOutlineArtifact(await readJson(context.canonical, 'outline/confirmed-outline.json'))
+    const scope = context.sourceSnapshot?.root_scope
+    const roots = scope?.kind === 'sections' ? scope.section_ids : scope?.kind === 'paragraphs'
+      ? [scope.reference.section_id] : scope?.kind === 'project' || context.sectionIds === null
+        ? originalOutline.sections.map(section => section.id)
+        : originalOutline.sections.filter(section => context.sectionIds?.has(section.id)).map(section => section.id)
+    const originalIds = roots.length === 0 ? new Set<string>() : outlineSectionScope(originalOutline, roots)
+    const originals: Array<{ markdown: string; flowcharts: ReturnType<typeof parseChapterMetadata>['flowcharts'] }> = []
+    for (const [id, location] of await readChapterLocations(context.canonical)) {
+      if (!originalIds.has(id) || !(context.originalSectionIds?.has(id)
+        ?? originalOutline.sections.some(section => section.id === id && section.writable))) continue
+      originals.push({ markdown: await readFile(within(context.canonical.projectRoot, location.contentPath), 'utf8'),
+        flowcharts: parseChapterMetadata(await readJson(context.canonical, location.metadataPath)).flowcharts })
+    }
+    for (const [id, seed] of seedBySectionId) preservedContentBySectionId.set(id,
+      selectOriginalChapterContent(seed, seedFlowchartsBySectionId.get(id) ?? [], originals))
+  }
   let instruction: string
   if (call.capability === 'chapter.revise') {
     if (revisionOriginal === undefined) throw new Error('BID_CHAPTER_REVISION_BODY_MISSING')
@@ -151,7 +181,7 @@ export async function executeWritingCapability(
     scoped: { targetSectionIds: ids, mode: call.capability === 'chapter.review' ? 'review' : 'write',
       instruction,
       seedBySectionId, seedFlowchartsBySectionId, affectedDependentIds: affected,
-      ...(context.preserveMigratedContent === true ? { preserveSeedFlowcharts: true } : {}),
+      ...(context.preserveMigratedContent === true ? { preserveSeedFlowcharts: true, preservedContentBySectionId } : {}),
       writerParentFor: writerId => writerParents.resolve(writerId) },
   }) } catch (error) {
     if (!(error instanceof BidStageAttentionRequiredError)) throw error
@@ -194,6 +224,15 @@ export async function executeWritingCapability(
   if (repairs.length > 0 && call.capability !== 'chapter.review') {
     throw new BidStageExecutionError(repairs.map(item => ({ code: 'CHAPTER_WRITING_REPAIR_REQUIRED',
       artifact: item.sectionId, message: `${item.sectionId}：${item.review.blocking_issues.join('；')}` })))
+  }
+  const conflicts = reviews.flatMap(item => item.review.assignment_conflicts.map(conflict => ({
+    code: 'CHAPTER_WRITING_ASSIGNMENT_CONFLICT', artifact: item.sectionId,
+    message: `${item.sectionId}：${conflict.task}；${conflict.basis}`,
+  })))
+  if (call.capability !== 'chapter.review' && conflicts.length > 0 && attention === undefined
+    && reviews.every(item => item.review.external_input_gaps.length === 0
+      && !item.review.revision_issue_checks?.some(check => check.status === 'needs_input'))) {
+    throw new BidStageExecutionError(conflicts)
   }
   const reviewConcerns = reviews.filter(item => item.review.verdict !== 'pass').map(item =>
     `${item.sectionId}: ${item.review.blocking_issues.join('；') || item.review.verdict}`)

@@ -93,16 +93,19 @@ import {
   activeCapabilityMappingWorkspace, askCapabilityTaskInput, executeCapabilityTask, patchCapabilityTaskSteps,
   readCapabilityAwaitingInput, persistCapabilityTaskRequest, findCapabilityTaskRequest, readCapabilityTaskCheckpoint,
   capabilityTaskRequestSchema, capabilityTaskCheckpointSchema, collectCapabilityTaskVerificationInput,
+  isCapabilityAuthorizationRecheckFailure, hasPendingCapabilityCorrection,
   type CapabilityTaskDispatcher, type CapabilityTaskRequest,
 } from './bid-capability-task.ts'
-import { capabilityPublicationReceiptSchema, readCapabilityPublicationReceipt, readCapabilityPublicationRecord } from './bid-capability-changes.ts'
+import { capabilityPublicationReceiptSchema, readCapabilityPublicationReceipt, readCapabilityPublicationRecord,
+  type CapabilityPublicationReceipt } from './bid-capability-changes.ts'
 import {
   bidCapabilityTaskSchema, validateCapabilityTaskContentFollowup, type BidCapabilityTask,
 } from './bid-capability-contract.ts'
 import { readBidWorkDescriptor, bidWorkRoot } from './work-descriptor.ts'
-import { freezeBidTaskSource } from './bid-task-source.ts'
+import { bindBidTaskSourceContext, freezeBidTaskSource } from './bid-task-source.ts'
 import { createBidCapabilityDispatcher, type BidCapabilityDispatcher } from './bid-capability-dispatcher.ts'
-import { cancelCapabilityRequestsForReset, enqueueCapabilityRequest, markCapabilityRequestApplied, markCapabilityRequestAppliedWithLease,
+import { cancelCapabilityRequestsForPlanPatch, cancelCapabilityRequestsForReset, enqueueCapabilityRequest,
+  markCapabilityRequestApplied, markCapabilityRequestAppliedWithLease,
   pendingCapabilityWorkIds, readPendingCapabilityRequests } from './bid-capability-queue.ts'
 import { inspectBidProject } from './bid-project-inspect.ts'
 import { renderFlowchartSvg, validateFlowchartSpec } from './flowchart.ts'
@@ -172,7 +175,7 @@ import { BID_STAGES, BidStageExecutionError, isBidDocumentRole } from './control
 import { BID_BINARY_UPLOAD_PATH, BID_UPLOAD_FILES_HEADER, BID_UPLOAD_SESSION_HEADER } from './control-plane-contract.ts'
 import { appendBidSchemaWarning, createBidSchemaWarning } from './bid-events.ts'
 import type {} from '@deepseek-ai/dsh-goal-round-driver'
-import { bidCapabilityTakeoverRun, bidRecoveryInstructionRepeated, bidRunRecoveryEligibility, bidWritingPlanRecoveryEligibility, safeRecoverableBidFailure } from './bid-recovery.ts'
+import { bidCapabilityTakeoverRun, bidCompletedCapabilityRun, bidRecoveryInstructionRepeated, bidRunRecoveryEligibility, bidWritingPlanRecoveryEligibility, safeRecoverableBidFailure } from './bid-recovery.ts'
 import { resolveBidToolAuthorization, withBidNativeTaskAuthorization } from './bid-tool-authorization.ts'
 import type { BidSessionEventMap } from './bid-events.ts'
 import {
@@ -2064,7 +2067,7 @@ export class BidHostRuntime extends TypertRemoteService {
           operation.session.append('bid.run.completed', { run: { ...unfinished, updatedAt: Date.now() } })
         }
         const receipt = await readCapabilityPublicationReceipt(operation.workspace, unfinished.work.workId, unfinished.work.requestSha256)
-        if (receipt?.goal_met !== false) this.appendCapabilityCompletionNotice(operation.session, unfinished)
+        if (receipt !== null && receipt.goal_met !== false) this.appendCapabilityCompletionNotice(operation.session, unfinished, receipt)
         else operation.lastAdmittedWorkId = unfinished.work.workId
       } else {
         const interruptedState = suspendForHostRestart(state)
@@ -2089,16 +2092,29 @@ export class BidHostRuntime extends TypertRemoteService {
         })
       }
     }
+    if (state.status === 'failed' && state.failure.code === 'BID_TASK_SCOPE_AUTHORIZATION_REQUIRED') {
+      const failedRun = bidCapabilityTakeoverRun(operation.session, bidProjectTaskState(state))
+      if (failedRun !== undefined && await isCapabilityAuthorizationRecheckFailure(
+        operation.workspace, failedRun.work, operation.session)) {
+        const error = safeRecoverableBidFailure(failedRun.work, Object.assign(
+          new Error('同一不可变请求的授权已通过；模型重复授权结论冲突，继续原 Work 核验剩余成果。'),
+          { code: 'BID_TASK_AUTHORIZATION_RECHECK_CONFLICT' }))
+        state = await checkpointBidProjectState(operation.workspace, { stage: state.stage, status: 'suspended',
+          run: { ...failedRun, cause: 'retry_exhausted', error, updatedAt: Date.now() } })
+      }
+    }
     const lastStarted = operation.session.events.findLast(event => event.type === 'bid.run.started')
     if (state.status !== 'running' && state.status !== 'suspended'
       && lastStarted?.type === 'bid.run.started' && lastStarted.data.run.work.kind === 'capability_task'
       && !operation.session.events.some(event => event.type === 'bid.run.notice'
-        && event.data.noticeId === `work:${lastStarted.data.run.work.workId}:completed`)) {
+        && event.data.kind === 'completed' && event.data.runId === lastStarted.data.run.runId)) {
       const request = await this.readCommittedCapabilityTask(operation.workspace, lastStarted.data.run.work)
       if (request !== null && isDeepStrictEqual(request.return_state, bidProjectTaskState(state))) {
         const receipt = await readCapabilityPublicationReceipt(operation.workspace, lastStarted.data.run.work.workId,
           lastStarted.data.run.work.requestSha256)
-        if (receipt?.goal_met !== false) this.appendCapabilityCompletionNotice(operation.session, lastStarted.data.run)
+        if (receipt !== null && receipt.goal_met !== false) {
+          this.appendCapabilityCompletionNotice(operation.session, lastStarted.data.run, receipt)
+        }
         else operation.lastAdmittedWorkId = lastStarted.data.run.work.workId
       }
     }
@@ -2113,6 +2129,7 @@ export class BidHostRuntime extends TypertRemoteService {
     workspace: BidWorkspace, work: BidWorkDescriptor,
   ): Promise<CapabilityTaskRequest | null> {
     await reconcileBidPublications(workspace.root, workspace.projectRoot)
+    if (await hasPendingCapabilityCorrection(workspace, work)) return null
     const receipt = await readCapabilityPublicationReceipt(workspace, work.workId, work.requestSha256)
     return receipt === null ? null : capabilityTaskRequestSchema.parse(await readBidWorkRequest(workspace, work))
   }
@@ -3337,21 +3354,31 @@ export class BidHostRuntime extends TypertRemoteService {
       const operation = this.beginOperation(session)
       try {
         const state = await this.prepareOperation(operation)
-        if (state.status !== 'suspended' || state.run.work.kind !== 'capability_task'
-          || state.run.work.workId !== request.work_id || state.run.cause === 'awaiting_input') {
+        const completed = bidCompletedCapabilityRun(session, state)
+        const current = state.status === 'suspended' && state.run.cause !== 'awaiting_input' ? state.run : completed
+        if (current === undefined || current.work.kind !== 'capability_task' || current.work.workId !== request.work_id) {
           throw new Error('BID_CAPABILITY_PLAN_PATCH_NOT_READY')
         }
-        const saved = capabilityTaskRequestSchema.parse(await readBidWorkRequest(operation.workspace, state.run.work))
+        const saved = capabilityTaskRequestSchema.parse(await readBidWorkRequest(operation.workspace, current.work))
+        const published = completed === undefined ? undefined
+          : await readCapabilityPublicationReceipt(operation.workspace, current.work.workId, current.work.requestSha256)
+        if (completed !== undefined && published === null) throw new Error('BID_CAPABILITY_PLAN_PATCH_NOT_READY')
         const authorization = resolveBidToolAuthorization(agent) ?? saved.authorization
-        const workingPaths = await prepareBidWorkingTree(operation.workspace, state.run.work)
+        const workingPaths = await prepareBidWorkingTree(operation.workspace, current.work)
         const working = new BidWorkspace(workingPaths.root, operation.workspace.config)
+        const updatedState: BidTaskState = completed === undefined ? state : { stage: state.stage, status: 'suspended',
+          run: { ...completed, updatedAt: Date.now(), cause: 'executor_error',
+            error: { code: 'BID_TASK_RESULT_UNMET', message: '用户要求纠正已发布结果；原 Work 已保留，待追加步骤完成后重新核验发布。',
+              recovery: { kind: 'repair', unit: current.work.workId, reason: '执行已授权的结果纠正步骤。' } } } }
         let stepCount = 0
         await this.mutateProject(operation, async (lease) => {
-          const checkpoint = await patchCapabilityTaskSteps({ work: state.run.work,
+          const checkpoint = await patchCapabilityTaskSteps({ work: current.work,
             commits: { writeJson: (path, value) => lease.writeJson(path, value) } },
-          operation.workspace, working, saved, session, authorization, request.from_index, request.steps, agent)
+          operation.workspace, working, saved, session, authorization, request.from_index, request.steps, agent,
+          this.capabilityTaskDispatcher ?? this.builtInCapabilityDispatcher, published ?? undefined, request.restart_pending)
+          await cancelCapabilityRequestsForPlanPatch(operation.workspace, current.work.workId, authorization, lease)
           stepCount = checkpoint.steps.length
-        }, state)
+        }, updatedState)
         return { accepted: true, work_id: request.work_id, steps: stepCount,
           message: '已保存未完成步骤；当前任务仍挂起。可恢复失败请调用 bid_recover_task 继续，用户停止的任务须等用户明确恢复。' }
       } finally { await this.finishOperation(session, operation) }
@@ -5211,8 +5238,12 @@ export class BidHostRuntime extends TypertRemoteService {
         }, state)
       }
       const event = session.events.findLast(item => item.type === 'bid.run.completed' && item.data.run.work.workId === workId)
-      if (event?.type === 'bid.run.completed') this.appendCapabilityCompletionNotice(session, event.data.run,
-        '内容已发布，Word 已导出至 ' + exported.value.path + '；')
+      if (event?.type === 'bid.run.completed') {
+        const published = await readCapabilityPublicationReceipt(workspace, work.workId, work.requestSha256)
+        if (published === null) throw new Error('BID_CAPABILITY_COMPLETED_RECEIPT_MISSING')
+        this.appendCapabilityCompletionNotice(session, event.data.run, published,
+          '内容已发布，Word 已导出至 ' + exported.value.path + '；')
+      }
       await this.ctx.sessions.flush(session)
       return true
     } finally { await this.finishOperation(session, operation) }
@@ -5250,6 +5281,24 @@ export class BidHostRuntime extends TypertRemoteService {
         || state.status === 'failed') return
       const agent = this.ctx.agents.get(session.id)
       if (agent?.session !== session || pending.request.authorization.session_id !== String(session.id)) return
+      const checkpointPath = within(workspace.projectRoot, `runs/${originWorkId}/task-checkpoint.json`)
+      await assertNoLinkedPath(workspace.root, checkpointPath)
+      let checkpoint: ReturnType<typeof capabilityTaskCheckpointSchema.parse> | undefined
+      try { checkpoint = capabilityTaskCheckpointSchema.parse(JSON.parse(await readFile(checkpointPath, 'utf8'))) } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+      }
+      if (checkpoint !== undefined && checkpoint.work_id !== originWorkId) throw new Error('BID_CAPABILITY_CHECKPOINT_IDENTITY_MISMATCH')
+      if (checkpoint?.plan_patches.some(patch => patch.authorization.session_id === pending.request.authorization.session_id
+        && patch.authorization.message_id === pending.request.authorization.message_id)) {
+        const operation = this.beginOperation(session)
+        try {
+          const current = await this.prepareOperation(operation)
+          await this.mutateProject(operation, async (lease) => {
+            await cancelCapabilityRequestsForPlanPatch(workspace, originWorkId, pending.request.authorization, lease)
+          }, current)
+        } finally { await this.finishOperation(session, operation) }
+        continue
+      }
       const first = pending.request.task.steps[0]
       if (first === undefined) throw new Error('BID_CAPABILITY_QUEUE_EMPTY_TASK')
       const exportStep = this.capabilityExportStep(pending.request.task)
@@ -5441,7 +5490,7 @@ export class BidHostRuntime extends TypertRemoteService {
         return bidSessionTaskState(operation.session)
       }
       await operation.runs.complete(run, () => {
-        if (outcome.receipt.goal_met === true) this.appendCapabilityCompletionNotice(operation.session, run,
+        if (outcome.receipt.goal_met === true) this.appendCapabilityCompletionNotice(operation.session, run, outcome.receipt,
           outcome.results.map(result => result.change_summary).join('；'))
         operation.session.append('bid.task.changed', { state: request.return_state })
       })
@@ -5456,9 +5505,10 @@ export class BidHostRuntime extends TypertRemoteService {
     }
   }
 
-  private appendCapabilityCompletionNotice(session: Session, run: Pick<BidRunData, 'runId' | 'work'>, summary?: string): void {
+  private appendCapabilityCompletionNotice(session: Session, run: Pick<BidRunData, 'runId' | 'work'>,
+    receipt: CapabilityPublicationReceipt, summary?: string): void {
     const workId = run.work.workId
-    const noticeId = `work:${workId}:completed`
+    const noticeId = `work:${workId}:completed:${bidInputFingerprint(receipt)}`
     if (session.events.some(event => event.type === 'bid.run.notice' && event.data.noticeId === noticeId)) return
     const resultRef = `requests/${workId}/result.json`
     session.append('bid.run.notice', {
@@ -5531,8 +5581,8 @@ export class BidHostRuntime extends TypertRemoteService {
             const paths = await readExistingBidWorkingTree(operation.workspace, suspended.work)
             if (paths === null) throw new Error('BID_WORKING_TREE_REQUIRED')
             const working = new BidWorkspace(paths.root, operation.workspace.config)
-            const source = request.source_snapshot
-              ?? await freezeBidTaskSource(operation.workspace, session, task, request.authorization)
+            const source = bindBidTaskSourceContext(session, request.source_snapshot
+              ?? await freezeBidTaskSource(operation.workspace, session, task, request.authorization))
             const input = await collectCapabilityTaskVerificationInput(operation.workspace, working, source,
               request, checkpoint, previousVerification.phase)
             if (previousVerification.input_sha256 === bidInputFingerprint(input)) {

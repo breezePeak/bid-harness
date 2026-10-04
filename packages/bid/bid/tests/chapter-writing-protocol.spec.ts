@@ -51,7 +51,9 @@ const quality = {
 it('任务核验按冻结证据分段读取，拒绝越界及超限读取并释放私有工具', async () => {
   const { ctx, agent, call } = await harness()
   const text = '范围内原文。'.repeat(100_000) + '文件末尾证据。'
-  const dispose = attachBidTaskEvidenceReader(agent, [{ path: 'chapters/current.md', sha256: 'a'.repeat(64), text }])
+  const ranges: number[][] = []
+  const dispose = attachBidTaskEvidenceReader(agent, [{ path: 'chapters/current.md', sha256: 'a'.repeat(64), text }],
+    (position, start, end) => { ranges.push([position, start, end]) })
   expect((await call('read_task_evidence', { evidence_position: 0, start: 0, length: 12_000 })).value)
     .toMatchObject({ text: text.slice(0, 12_000), end: 12_000, next_start: 12_000, total_characters: text.length })
   expect((await call('read_task_evidence', { evidence_position: 0, start: text.length - 8, length: 12_000 })).value)
@@ -67,6 +69,7 @@ it('任务核验按冻结证据分段读取，拒绝越界及超限读取并释�
   expect((await ctx.tools.execute({ agent: other, name: 'read_task_evidence',
     arguments: { evidence_position: 0, start: 0, length: 1 }, callId: CallId('foreign-read'),
     signal: new AbortController().signal })).isError).toBe(true)
+  expect(ranges).toEqual([[0, 0, 12_000], [0, text.length - 8, text.length]])
   dispose()
   expect(ctx.tools.schemas(agent).some(tool => tool.name === 'read_task_evidence')).toBe(false)
 })

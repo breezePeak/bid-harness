@@ -5,10 +5,11 @@ import { Context } from '@deepseek-ai/cordis'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import SessionStore from '@deepseek-ai/dsh-session'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { BidWorkspace, checkpointBidProjectState } from '../src/index.ts'
+import { BidWorkspace, checkpointBidProjectState, outlineArtifactSha256, parseOutlineArtifact } from '../src/index.ts'
 import { inspectBidProject } from '../src/bid-project-inspect.ts'
 import { activeCapabilityMappingWorkspace, askCapabilityTaskInput, capabilityTaskCheckpointSchema,
-  capabilityTaskRequestSchema, findCapabilityTaskRequest, patchCapabilityTaskSteps, persistCapabilityTaskRequest,
+  capabilityTaskRequestSchema, findCapabilityTaskRequest, hasPendingCapabilityCorrection,
+  patchCapabilityTaskSteps, persistCapabilityTaskRequest,
   type CapabilityTaskDispatcher } from '../src/bid-capability-task.ts'
 import { executeTestCapabilityTask as executeCapabilityTask } from './fixtures/task-verifier.ts'
 import { bidCapabilityTaskSchema, type BidCapabilityCall } from '../src/bid-capability-contract.ts'
@@ -69,6 +70,154 @@ function dispatcher(failSecond = false) {
 }
 
 describe('同一 Work 的能力序列', () => {
+  it.each(['instruction', 'same_input', 'repatch', 'tamper', 'bindings', 'bindings_repatch', 'bindings_tamper', 'restart'])('重新规划保留部分正文候选；新授权可从已接纳结果重新迁移（%s）', async (scenario) => {
+    const { ctx, workspace, session } = await fixture()
+    try {
+      await seedCapabilityProject(workspace, 'complete')
+      const message = createUserMessage({ content: [{ type: 'text', text: '完成两章正文' }], source: { kind: 'user' } })
+      session.append('turn/start', { turn: 2 })
+      session.append('user/message', message, { surfaceOp: 'append' })
+      const authorization = { session_id: String(session.id), message_id: String(message.id) }
+      const task = bidCapabilityTaskSchema.parse({ goal: '完成两章正文',
+        scope: { kind: 'sections', section_ids: ['SEC-1', 'SEC-2'] }, steps: [
+          { description: '写完两章', scope: { source: 'task' },
+            call: { capability: 'chapter.write', input: { instruction: '写完两章' } } },
+        ] })
+      const work = await persistCapabilityTaskRequest(workspace, session, 'chapter_writing', task, authorization,
+        ['outline/confirmed-outline.json'], { stage: 'chapter_writing', status: 'completed', run: null })
+      const run = createTestBidRunContext({ work })
+      const firstPath = 'chapters/sections/0001.md'
+      const secondPath = 'chapters/sections/0002.md'
+      const original = await readFile(join(workspace.projectRoot, firstPath), 'utf8')
+      let sourcePath = ''
+      let calls = 0
+      let bindings = 0
+      const adapter: CapabilityTaskDispatcher = {
+        allowedWrites: async call => new Set(call.capability === 'outline.update'
+          ? ['outline/confirmed-outline.json', 'chapters/writing-plan.json'] : [firstPath, secondPath]),
+        validate: async () => {},
+        execute: async (call, context) => {
+          if (call.capability === 'chapter.reorganize') {
+            expect(await readFile(join(context.working.projectRoot, firstPath), 'utf8')).toBe(original)
+            return { result: { target_section_ids: ['SEC-1', 'SEC-2'], changed_artifacts: [],
+              change_summary: '从已接纳正文重新迁移', warnings: [], missing_topics: [], needs_input: false } }
+          }
+          if (call.capability === 'outline.update') {
+            bindings += 1
+            const path = join(context.working.projectRoot, 'outline/confirmed-outline.json')
+            const outline = JSON.parse(await readFile(path, 'utf8')) as { sections: Array<{ id: string; requirement_ids: string[] }> }
+            outline.sections.find(section => section.id === 'SEC-2')!.requirement_ids = ['REQ-1']
+            await context.run.commits.writeJson(path, outline)
+            if (bindings === 1) {
+              const planPath = join(context.working.projectRoot, 'chapters/writing-plan.json')
+              const plan = JSON.parse(await readFile(planPath, 'utf8')) as { confirmed_outline_sha256: string; plan_version: number }
+              plan.confirmed_outline_sha256 = outlineArtifactSha256(parseOutlineArtifact(outline))
+              plan.plan_version += 1
+              await context.run.commits.writeJson(planPath, plan)
+            }
+            return { result: { target_section_ids: ['SEC-2'], changed_artifacts: bindings === 1
+              ? ['outline/confirmed-outline.json', 'chapters/writing-plan.json'] : [],
+            change_summary: '纠正第二章业务绑定', warnings: [], missing_topics: [], needs_input: false } }
+          }
+          calls += 1
+          if (calls === 1) {
+            sourcePath = join(context.working.projectRoot, firstPath)
+            await context.run.commits.writeText(sourcePath, '已完成的第一章正文\n')
+            throw new Error('第二章中断')
+          }
+          expect(context.resumeCandidate).toBe(scenario === 'restart' ? undefined : true)
+          expect(await readFile(join(context.working.projectRoot, firstPath), 'utf8'))
+            .toBe(scenario === 'restart' ? original : '已完成的第一章正文\n')
+          if (scenario.startsWith('bindings')) {
+            const outline = JSON.parse(await readFile(join(context.working.projectRoot, 'outline/confirmed-outline.json'), 'utf8')) as {
+              sections: Array<{ id: string; requirement_ids: string[] }>
+            }
+            expect(outline.sections.find(section => section.id === 'SEC-2')?.requirement_ids).toEqual(['REQ-1'])
+          }
+          await context.run.commits.writeText(join(context.working.projectRoot, secondPath), '补齐第二章正文\n')
+          return { result: { target_section_ids: ['SEC-1', 'SEC-2'], changed_artifacts: [secondPath],
+            change_summary: '保留第一章并完成第二章', warnings: [], missing_topics: [], needs_input: false } }
+        },
+      }
+      const main = { id: session.id, session, ctx: { get: (name: string) =>
+        name === 'agents' ? { get: () => main } : undefined } } as Parameters<typeof executeCapabilityTask>[3]
+      await expect(executeCapabilityTask(workspace, run, adapter, main, session)).rejects.toThrow('第二章中断')
+      session.append('bid.task.changed', { state: { stage: 'chapter_writing', status: 'suspended', run: {
+        runId: run.runId, epoch: 1, baseProjectRevision: 0, controlRevision: 0, work,
+        interactionSessionId: String(session.id), executionSessionId: 'test-execution', startedAt: 1, updatedAt: 2,
+        cause: 'retry_exhausted', error: { code: 'BID_EXECUTOR_ERROR', message: '第二章中断',
+          recovery: { kind: 'repair', unit: work.workId, reason: '补齐失败章节' } },
+      } } })
+      const working = new BidWorkspace((await prepareBidWorkingTree(workspace, work)).root, workspace.config)
+      const request = capabilityTaskRequestSchema.parse(await readBidWorkRequest(workspace, work))
+      const replacement = { ...task.steps[0]!, description: '保留第一章并补齐第二章',
+        call: { capability: 'chapter.write' as const,
+          input: { instruction: scenario === 'same_input' ? '写完两章' : '保留已完成候选，只补失败章节' } } }
+      await expect(patchCapabilityTaskSteps(run, workspace, working, request, session, authorization, 0,
+        [{ ...replacement, scope: { source: 'section_ids', section_ids: ['SEC-2'] } }], main, adapter))
+        .rejects.toThrow('BID_CAPABILITY_WRITING_RESUME_SCOPE_NARROWED')
+      const bindingStep = bidCapabilityTaskSchema.parse({ ...task, steps: [{
+        description: '纠正第二章业务绑定', scope: { source: 'task' }, call: { capability: 'outline.update', input: {
+          operations: [], business_bindings: [{ section_id: 'SEC-2', requirement_ids: ['REQ-1'], scoring_ids: ['SCORE-2'],
+            scoring_response_point_ids: ['RP-000002'], compliance_ids: [] }],
+        } } }, replacement] }).steps[0]!
+      await expect(patchCapabilityTaskSteps(run, workspace, working, request, session, authorization, 0,
+        [{ ...bindingStep, call: { capability: 'outline.update', input: {
+          operations: [{ type: 'delete_section', section_id: 'SEC-1' }], business_bindings: [], content_assignments: [],
+          allow_content_deletion: false, defer_content_migration: false,
+        } } }, replacement], main, adapter)).rejects.toThrow('BID_CAPABILITY_WRITING_RESUME_REQUIRED')
+      if (scenario === 'restart') {
+        const migration = bidCapabilityTaskSchema.parse({ ...task, steps: [{ description: '重新迁移完整原文', scope: { source: 'task' },
+          call: { capability: 'chapter.reorganize', input: { instruction: '重新迁移全部原文', source_section_ids: ['SEC-1', 'SEC-2'] } } }, replacement] }).steps[0]!
+        await expect(patchCapabilityTaskSteps(run, workspace, working, request, session, authorization, 0,
+          [migration, replacement], main, adapter, undefined, true)).rejects.toThrow('BID_CAPABILITY_CANDIDATE_RESTART_UNAUTHORIZED')
+        const restartMessage = createUserMessage({ content: [{ type: 'text', text: '保留旧候选历史，从已接纳结果重新迁移并写作。' }], source: { kind: 'user' } })
+        session.append('turn/start', { turn: 3 })
+        session.append('user/message', restartMessage, { surfaceOp: 'append' })
+        const restartAuthorization = { session_id: String(session.id), message_id: String(restartMessage.id) }
+        const narrow = { ...migration, call: { capability: 'chapter.reorganize' as const,
+          input: { instruction: '遗漏第一章', source_section_ids: ['SEC-2'], allow_content_deletion: false } } }
+        await expect(patchCapabilityTaskSteps(run, workspace, working, request, session, restartAuthorization, 0,
+          [narrow, replacement], main, adapter, undefined, true)).rejects.toThrow('BID_CAPABILITY_CANDIDATE_RESTART_SCOPE_REQUIRED')
+        const restarted = await patchCapabilityTaskSteps(run, workspace, working, request, session, restartAuthorization, 0,
+          [migration, replacement], main, adapter, undefined, true)
+        expect(restarted.plan_patches.at(-1)?.restart_pending).toBe(true)
+        expect(restarted.steps.every(step => step.writing_resume_seed === undefined)).toBe(true)
+        await expect(executeCapabilityTask(workspace, createTestBidRunContext({ work }), adapter, main, session))
+          .resolves.toMatchObject({ status: 'completed' })
+        expect(await readFile(sourcePath, 'utf8')).toBe('已完成的第一章正文\n')
+        expect(await readFile(join(workspace.projectRoot, firstPath), 'utf8')).toBe(original)
+        return
+      }
+      const prefix = scenario.startsWith('bindings') ? [bindingStep] : []
+      const patched = await patchCapabilityTaskSteps(run, workspace, working, request, session, authorization, 0,
+        [...prefix, replacement], main, adapter)
+      const seed = patched.steps[prefix.length]?.writing_resume_seed
+      expect(seed?.files.some(file => file.path === firstPath)).toBe(true)
+      if (prefix.length > 0) expect(seed?.source_step_id).toBe(patched.steps[0]?.step_id)
+      if (scenario.endsWith('repatch')) {
+        const twice = await patchCapabilityTaskSteps(run, workspace, working, request, session, authorization, 0,
+          [...prefix, ...prefix, { ...replacement,
+            call: { capability: 'chapter.write', input: { instruction: '再次明确只补失败章节' } } }], main, adapter)
+        expect(twice.steps[prefix.length * 2]?.writing_resume_seed).toEqual(seed)
+      }
+      expect(await readFile(join(workspace.projectRoot, firstPath), 'utf8')).toBe(original)
+      if (scenario.endsWith('tamper')) {
+        await writeFile(sourcePath, '哈希不匹配的候选\n')
+        await expect(executeCapabilityTask(workspace, createTestBidRunContext({ work }), adapter, main, session))
+          .rejects.toThrow('BID_CAPABILITY_WRITING_RESUME_FILE_MISMATCH')
+        expect(calls).toBe(1)
+        expect(await readFile(join(workspace.projectRoot, firstPath), 'utf8')).toBe(original)
+      } else {
+        await expect(executeCapabilityTask(workspace, createTestBidRunContext({ work }), adapter, main, session))
+          .resolves.toMatchObject({ status: 'completed' })
+        expect(calls).toBe(2)
+        expect(bindings).toBe(prefix.length * (scenario.endsWith('repatch') ? 2 : 1))
+        expect(await readFile(join(workspace.projectRoot, firstPath), 'utf8')).toBe('已完成的第一章正文\n')
+      }
+    } finally { await ctx.fiber.dispose() }
+  })
+
   it('已接纳步骤缺少展示说明时仍可读取，新的任务输入仍须提供说明', async () => {
     const { ctx, workspace, descriptor, task } = await fixture()
     try {
@@ -321,6 +470,98 @@ describe('同一 Work 的能力序列', () => {
       await expect(executeCapabilityTask(workspace, afterCommit, adapter, agent, session))
         .resolves.toMatchObject({ status: 'completed' })
       expect(adapter.execute).toHaveBeenCalledTimes(3)
+    } finally { await ctx.fiber.dispose() }
+  })
+
+  it('纠正已发布 Work 只追加新授权步骤，旧凭据不结算纠正且不重跑完成前缀', async () => {
+    const { ctx, workspace, session, descriptor, run, agent, authorization: originalAuthorization } = await fixture()
+    try {
+      const adapter = dispatcher()
+      const published = await executeCapabilityTask(workspace, run, adapter, agent, session)
+      if (published.status !== 'completed') throw new Error('测试前置任务未发布')
+      adapter.execute.mockImplementationOnce(async (call, context) => {
+        const path = 'chapters/local-review.json'
+        await context.run.commits.writeJson(join(context.working.projectRoot, path), { reviewed: call.capability, corrected: true })
+        return { result: { target_section_ids: [], changed_artifacts: [path], change_summary: '已复核纠正结果',
+          warnings: [], missing_topics: [], needs_input: false } }
+      })
+      const message = createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: '纠正当前结果并重新复核' }] })
+      session.append('turn/start', { turn: 2 })
+      session.append('user/message', message, { surfaceOp: 'append' })
+      const authorization = { session_id: String(session.id), message_id: String(message.id) }
+      const working = new BidWorkspace((await prepareBidWorkingTree(workspace, descriptor)).root, workspace.config)
+      const request = capabilityTaskRequestSchema.parse(await readBidWorkRequest(workspace, descriptor))
+      const steps = [{ description: '复核纠正结果', scope: { source: 'task' as const },
+        call: { capability: 'chapter.review' as const, input: { reason: '复核纠正结果' } } }]
+      const patch = (from: number, auth = authorization) => patchCapabilityTaskSteps(run, workspace, working, request,
+        session, auth, from, steps, undefined, adapter, published.receipt)
+      await expect(patch(2, originalAuthorization)).rejects.toThrow('BID_CAPABILITY_PLAN_PATCH_UNAUTHORIZED')
+      await expect(patch(0)).rejects.toThrow('BID_CAPABILITY_PLAN_PATCH_NOT_READY')
+      await expect(patch(2, { ...authorization, session_id: '另一会话' })).rejects.toThrow('BID_CAPABILITY_PLAN_PATCH_UNAUTHORIZED')
+      const updated = await patch(2)
+      expect(updated.publications).toEqual([{ completed_step_count: 2, receipt: published.receipt }])
+      expect(updated.steps.map(step => step.status)).toEqual(['completed', 'completed', 'pending'])
+      await expect(hasPendingCapabilityCorrection(workspace, descriptor)).resolves.toBe(true)
+      await expect(executeCapabilityTask(workspace, createTestBidRunContext({ work: descriptor }), adapter, agent, session))
+        .resolves.toMatchObject({ status: 'completed' })
+      expect(adapter.execute).toHaveBeenCalledTimes(3)
+      await expect(hasPendingCapabilityCorrection(workspace, descriptor)).resolves.toBe(false)
+    } finally { await ctx.fiber.dispose() }
+  })
+
+  it.each(['原摘要', '字节变化', '其他请求'] as const)('历史 Work 的原章节身份仅从原步骤及原目录摘要恢复：%s', async (scenario) => {
+    const { ctx, workspace, session } = await fixture()
+    try {
+      await seedCapabilityProject(workspace, 'complete')
+      const original = await readFile(join(workspace.projectRoot, 'outline/confirmed-outline.json'), 'utf8')
+      const originalIds = parseOutlineArtifact(JSON.parse(original)).sections.map(section => section.id)
+      const message = createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: '调整目录并复核' }] })
+      session.append('turn/start', { turn: 2 })
+      session.append('user/message', message, { surfaceOp: 'append' })
+      const authorization = { session_id: String(session.id), message_id: String(message.id) }
+      const task = bidCapabilityTaskSchema.parse({ goal: '调整目录并复核', scope: { kind: 'project' }, allow_pending_content: true,
+        steps: [{ description: '调整目录', scope: { source: 'task' }, call: { capability: 'outline.update',
+          input: { operations: [{ type: 'update_section', section_id: 'SEC-1', title: '流程调整' }] } } }] })
+      const descriptor = await persistCapabilityTaskRequest(workspace, session, 'chapter_writing', task, authorization,
+        ['outline/confirmed-outline.json'], { stage: 'chapter_writing', status: 'completed', run: null })
+      const run = createTestBidRunContext({ work: descriptor })
+      const agent = { id: 'execution-agent' } as Parameters<typeof executeCapabilityTask>[3]
+      const adapter: CapabilityTaskDispatcher = {
+        allowedWrites: async () => new Set(['outline/confirmed-outline.json']), validate: async () => {},
+        execute: async (_call, context) => {
+          const outline = parseOutlineArtifact(JSON.parse(original))
+          outline.sections[0]!.title = '流程调整'
+          await context.run.commits.writeJson(join(context.working.projectRoot, 'outline/confirmed-outline.json'), outline)
+          return { result: { target_section_ids: originalIds, changed_artifacts: ['outline/confirmed-outline.json'],
+            change_summary: '目录已调整', warnings: [], missing_topics: [], needs_input: false } }
+        },
+      }
+      const outcome = await executeCapabilityTask(workspace, run, adapter, agent, session)
+      if (outcome.status !== 'completed') throw new Error('测试目录未发布')
+      const checkpointPath = join(workspace.projectRoot, 'runs', descriptor.workId, 'task-checkpoint.json')
+      const checkpoint = capabilityTaskCheckpointSchema.parse(JSON.parse(await readFile(checkpointPath, 'utf8')))
+      delete checkpoint.original_section_ids
+      await writeFile(checkpointPath, JSON.stringify(checkpoint))
+      const working = new BidWorkspace((await prepareBidWorkingTree(workspace, descriptor)).root, workspace.config)
+      const stepId = checkpoint.steps[0]!.step_id
+      const fingerprint = 'a'.repeat(64)
+      const historyWork = { ...descriptor, workId: `${stepId}-${fingerprint.slice(0, 12)}`,
+        inputFingerprint: fingerprint, requestRef: `requests/${stepId}-${fingerprint.slice(0, 12)}.json` }
+      const history = await prepareBidWorkingTree(working, historyWork)
+      await writeFile(join(history.projectRoot, 'outline/confirmed-outline.json'), original + (scenario === '字节变化' ? ' ' : ''))
+      if (scenario === '其他请求') await writeFile(join(history.root, 'work-identity.json'),
+        JSON.stringify({ ...historyWork, requestSha256: 'b'.repeat(64) }))
+      const correction = createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: '纠正当前结果' }] })
+      session.append('turn/start', { turn: 3 })
+      session.append('user/message', correction, { surfaceOp: 'append' })
+      const request = capabilityTaskRequestSchema.parse(await readBidWorkRequest(workspace, descriptor))
+      const patch = patchCapabilityTaskSteps(run, workspace, working, request, session,
+        { session_id: String(session.id), message_id: String(correction.id) }, 1,
+        [{ description: '复核结果', scope: { source: 'task' }, call: { capability: 'chapter.review', input: { reason: '复核结果' } } }],
+        undefined, adapter, outcome.receipt)
+      if (scenario === '原摘要') expect((await patch).original_section_ids).toEqual(originalIds)
+      else await expect(patch).rejects.toThrow(scenario === '字节变化'
+        ? 'BID_CAPABILITY_ORIGINAL_OUTLINE_UNAVAILABLE' : 'BID_WORKING_TREE_IDENTITY_MISMATCH')
     } finally { await ctx.fiber.dispose() }
   })
 

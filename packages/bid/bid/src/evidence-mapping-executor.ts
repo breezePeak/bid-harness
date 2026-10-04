@@ -4530,6 +4530,7 @@ async function executeEvidenceMappingRun(
           `retired_section_material_candidates：${JSON.stringify(remapContext.retired)}`,
           `current_chapter_draft_context：${JSON.stringify(remapContext.drafts)}`,
           '退役章节资料仅是候选；逐一判断其对当前新章节的适用性，再检索缺口。当前正文草稿只辅助确定检索意图，不能登记为 Evidence。',
+          '保留已有原文、完整表格和流程图是产物约束，由迁移及写作校验检查。current_chapter_draft_context 已有的载体不能登记为事实 Evidence，但不能因此断言用户未提供原表或原图、要求重新提供它们或将保留要求记为 gap。正文中的项目事实仍须真实材料支持；仅当成文必须依赖尚未提供的外部事实时记录该事实缺口。',
         ]),
         `research_candidates：${JSON.stringify(researchCandidates)}`,
         '传入的 research_candidates 只是前置研究读过的候选。Candidate 不是 Evidence；必须结合当前 Section 职责、Requirement、Scoring 和 Response Point 重新读取并判断，Host 不会自动写入 local_materials 或 web_materials。',

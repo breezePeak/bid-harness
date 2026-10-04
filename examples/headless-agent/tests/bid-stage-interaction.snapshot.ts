@@ -6,6 +6,75 @@ import { LOADER_SMOKE_TEST_TIMEOUT_MS, runLoaderSmoke } from '@deepseek-ai/dsh-l
 import type { SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
 import { expect, it } from 'vitest'
 
+it('六子章稀疏迁移在同一子会话拒绝漏块、表题分离及原文共享，空草稿子章仍完成写作审核和发布', async () => {
+  const configPath = fileURLToPath(new URL('../bid-stage-interaction.cordis.snapshot.yml', import.meta.url))
+  const result = await runLoaderSmoke({
+    label: '六子章完整迁移', tempDirPrefix: 'dsh-bid-six-sparse-',
+    binScript: fileURLToPath(new URL('./fixtures/bid-stage-interaction-driver.ts', import.meta.url)),
+    configPath, binArgs: [configPath, 'six-sparse'], mode: 'src', processTimeoutMs: 120_000,
+    tsconfigPath: fileURLToPath(new URL('../../../tsconfig.json', import.meta.url)),
+  })
+  const facts = JSON.parse(result.stdout) as { workIds: string[] }
+  expect(facts.workIds).toHaveLength(1)
+  expect(facts).toMatchObject({ state: 'completed', migrationSubmissions: 4, originalUnique: true, generatedDraftRepaired: true,
+    children: ['收集输入', '边界确认', '校验结果', '内业处理', '复核整改', '交付成果'],
+    seedPreserved: true, outsidePreserved: true, outsideCompleted: true,
+    workbench: Array(6).fill({ status: 'completed', content: true }),
+    calls: ['bid_project_inspect', 'bid_project_inspect', 'bid_run_task'],
+  })
+}, 150_000)
+
+it('局部审核中断后 Main 沿用原 Work 和正文，只续剩余审核并发布', async () => {
+  const configPath = fileURLToPath(new URL('../bid-stage-interaction.cordis.snapshot.yml', import.meta.url))
+  const result = await runLoaderSmoke({
+    label: '原 Work 审核恢复', tempDirPrefix: 'dsh-bid-review-resume-',
+    binScript: fileURLToPath(new URL('./fixtures/bid-stage-interaction-driver.ts', import.meta.url)),
+    configPath, binArgs: [configPath, 'task-review-resume'], mode: 'src', processTimeoutMs: 120_000,
+    tsconfigPath: fileURLToPath(new URL('../../../tsconfig.json', import.meta.url)),
+  })
+  const facts = JSON.parse(result.stdout) as { workIds: string[] }
+  expect(facts.workIds).toHaveLength(1)
+  expect(facts).toMatchObject({ state: 'completed', interrupted: true, reviewResumeNoWriter: true,
+    children: ['收集输入', '校验结果', '交付成果'], seedPreserved: true, outsidePreserved: true,
+    outsideCompleted: true, workbench: Array(3).fill({ status: 'completed', content: true }),
+    calls: ['bid_project_inspect', 'bid_project_inspect', 'bid_run_task', 'bid_recover_task'],
+  })
+}, 150_000)
+
+it('产物核验只读首字符的完成结论在同一子会话拒绝，补读完整证据后才发布', async () => {
+  const configPath = fileURLToPath(new URL('../bid-stage-interaction.cordis.snapshot.yml', import.meta.url))
+  const result = await runLoaderSmoke({
+    label: '拒绝未读核验证据', tempDirPrefix: 'dsh-bid-unread-verification-',
+    binScript: fileURLToPath(new URL('./fixtures/bid-stage-interaction-driver.ts', import.meta.url)),
+    configPath, binArgs: [configPath, 'task-unread-verification'], mode: 'src', processTimeoutMs: 120_000,
+    tsconfigPath: fileURLToPath(new URL('../../../tsconfig.json', import.meta.url)),
+  })
+  const facts = JSON.parse(result.stdout) as { workIds: string[] }
+  expect(facts.workIds).toHaveLength(1)
+  expect(facts).toMatchObject({ state: 'completed', unreadVerificationRejected: true, seedPreserved: true,
+    outsidePreserved: true, outsideCompleted: true, workbench: Array(3).fill({ status: 'completed', content: true }),
+    calls: ['bid_project_inspect', 'bid_project_inspect', 'bid_run_task'],
+  })
+}, 150_000)
+
+it('已发布结果的用户纠正沿用原 Work，保留历史凭据并重新审核发布', async () => {
+  const configPath = fileURLToPath(new URL('../bid-stage-interaction.cordis.snapshot.yml', import.meta.url))
+  const result = await runLoaderSmoke({
+    label: '已发布 Work 纠正', tempDirPrefix: 'dsh-bid-published-correction-',
+    binScript: fileURLToPath(new URL('./fixtures/bid-stage-interaction-driver.ts', import.meta.url)),
+    configPath, binArgs: [configPath, 'task-published-correction'], mode: 'src', processTimeoutMs: 120_000,
+    tsconfigPath: fileURLToPath(new URL('../../../tsconfig.json', import.meta.url)),
+  })
+  const facts = JSON.parse(result.stdout) as { workIds: string[] }
+  expect(facts.workIds).toHaveLength(1)
+  expect(facts).toMatchObject({ state: 'completed', priorPublicationPreserved: true, planPatchCount: 1,
+    publicationNotices: 2, correctionNoticeMatchesRun: true,
+    seedPreserved: true, outsidePreserved: true, outsideCompleted: true, userMessages: 2,
+    workbench: Array(3).fill({ status: 'completed', content: true }),
+    calls: ['bid_project_inspect', 'bid_project_inspect', 'bid_run_task', 'bid_project_inspect', 'bid_plan_task', 'bid_recover_task'],
+  })
+}, 150_000)
+
 it('遗漏导出的计划拒绝后，Main 在原 Work 补齐尾步骤并完成真实 Word 导出', async () => {
   const configPath = fileURLToPath(new URL('../bid-stage-interaction.cordis.snapshot.yml', import.meta.url))
   const result = await runLoaderSmoke({
@@ -77,6 +146,24 @@ it.each(['task-planning', 'task-adding'])('完整项目通过 %s 在原章下建
   })
 }, 120_000)
 
+it('拆章要求经第二条章节名称澄清后完整冻结，并通过正文审核与发布', async () => {
+  const configPath = fileURLToPath(new URL('../bid-stage-interaction.cordis.snapshot.yml', import.meta.url))
+  const result = await runLoaderSmoke({
+    label: '连续用户消息的拆章任务', tempDirPrefix: 'dsh-bid-clarification-',
+    binScript: fileURLToPath(new URL('./fixtures/bid-stage-interaction-driver.ts', import.meta.url)),
+    configPath, binArgs: [configPath, 'task-clarification'], mode: 'src', processTimeoutMs: 90_000,
+    tsconfigPath: fileURLToPath(new URL('../../../tsconfig.json', import.meta.url)),
+  })
+  const facts = JSON.parse(result.stdout) as { workIds: string[] }
+  expect(facts.workIds).toHaveLength(1)
+  expect(facts).toMatchObject({ state: 'completed', source: 'S2.3', userMessages: 2, verifiers: 2,
+    sourceContext: ['本章也需要小章节。把三个阶段拆成真实目录子章节，保留原文、表格和流程图，并完成正文和审核。不要改其他章节；具体是哪章等我确认后再执行。'],
+    children: ['收集输入', '校验结果', '交付成果'], seedPreserved: true, outsidePreserved: true, outsideCompleted: true,
+    workbench: Array(3).fill({ status: 'completed', content: true }),
+    calls: ['bid_project_inspect', 'bid_project_inspect', 'bid_run_task'],
+  })
+}, 120_000)
+
 it('模型切换和原文迁移后中断仍以原 Work 完成资料、正文、审核与发布', async () => {
   const configPath = fileURLToPath(new URL('../bid-stage-interaction.cordis.snapshot.yml', import.meta.url))
   const result = await runLoaderSmoke({
@@ -95,6 +182,117 @@ it('模型切换和原文迁移后中断仍以原 Work 完成资料、正文、�
     executions: ['outline.update', 'chapter.reorganize', 'chapter.write', 'chapter.review'],
   })
 }, 120_000)
+
+it('已冻结授权的模型复判冲突由 Host 恢复原 Work，完成前缀不重跑', async () => {
+  const configPath = fileURLToPath(new URL('../bid-stage-interaction.cordis.snapshot.yml', import.meta.url))
+  const result = await runLoaderSmoke({
+    label: '原 Work 授权复判冲突恢复', tempDirPrefix: 'dsh-bid-auth-recheck-',
+    binScript: fileURLToPath(new URL('./fixtures/bid-stage-interaction-driver.ts', import.meta.url)),
+    configPath, binArgs: [configPath, 'task-auth-recheck'], mode: 'src', processTimeoutMs: 90_000,
+    tsconfigPath: fileURLToPath(new URL('../../../tsconfig.json', import.meta.url)),
+  })
+  expect(JSON.parse(result.stdout)).toMatchObject({
+    state: 'completed', interrupted: true, workIds: [expect.any(String)],
+    seedPreserved: true, outsidePreserved: true, outsideCompleted: true,
+    workbench: Array(3).fill({ status: 'completed', content: true }),
+    calls: ['bid_project_inspect', 'bid_project_inspect', 'bid_run_task', 'bid_recover_task'],
+    executions: ['outline.update', 'chapter.reorganize', 'chapter.write', 'chapter.review'],
+  })
+}, 120_000)
+
+it('部分新叶节完成后切换模型并重新规划，原 Work 复用正文审核且只补失败章节', async () => {
+  const configPath = fileURLToPath(new URL('../bid-stage-interaction.cordis.snapshot.yml', import.meta.url))
+  const result = await runLoaderSmoke({
+    label: '部分拆章成果恢复', tempDirPrefix: 'dsh-bid-partial-replan-',
+    binScript: fileURLToPath(new URL('./fixtures/bid-stage-interaction-driver.ts', import.meta.url)),
+    configPath, binArgs: [configPath, 'partial-replan'], mode: 'src',
+    processTimeoutMs: 120_000,
+    tsconfigPath: fileURLToPath(new URL('../../../tsconfig.json', import.meta.url)),
+  })
+  const facts = JSON.parse(result.stdout) as { workIds: string[] }
+  expect(facts.workIds).toHaveLength(1)
+  expect(facts).toMatchObject({ state: 'completed', selectedRouteInherited: true, interrupted: true,
+    children: ['收集输入', '校验结果', '交付成果'], resumedWriterTitles: ['交付成果'],
+    seedPreserved: true, outsidePreserved: true, outsideCompleted: true,
+    planPatchCount: 1,
+    workbench: Array(3).fill({ status: 'completed', content: true }),
+    calls: ['bid_project_inspect', 'bid_project_inspect', 'bid_run_task', 'bid_plan_task', 'bid_recover_task'],
+    executions: ['outline.update', 'chapter.reorganize', 'chapter.write', 'chapter.write', 'chapter.review'],
+  })
+}, 150_000)
+
+it('步骤指令与章节职责冲突时 Main 在原 Work 改计划，实际无外部缺口不向用户索要资料', async () => {
+  const configPath = fileURLToPath(new URL('../bid-stage-interaction.cordis.snapshot.yml', import.meta.url))
+  const result = await runLoaderSmoke({
+    label: '章节职责冲突恢复', tempDirPrefix: 'dsh-bid-assignment-conflict-',
+    binScript: fileURLToPath(new URL('./fixtures/bid-stage-interaction-driver.ts', import.meta.url)),
+    configPath, binArgs: [configPath, 'task-assignment-conflict'], mode: 'src', processTimeoutMs: 120_000,
+    tsconfigPath: fileURLToPath(new URL('../../../tsconfig.json', import.meta.url)),
+  })
+  expect(JSON.parse(result.stdout)).toMatchObject({
+    state: 'completed', interrupted: true, workIds: [expect.any(String)], userMessages: 1,
+    seedPreserved: true, outsidePreserved: true, outsideCompleted: true,
+    calls: ['bid_project_inspect', 'bid_project_inspect', 'bid_run_task', 'bid_plan_task', 'bid_recover_task'],
+    executions: ['outline.update', 'chapter.reorganize', 'chapter.write', 'chapter.write', 'chapter.review'],
+    workbench: Array(3).fill({ status: 'completed', content: true }),
+  })
+}, 150_000)
+
+it('章节日志已完成但审核要求整改时，原 Work 只续写失败章节并完成正式发布', async () => {
+  const configPath = fileURLToPath(new URL('../bid-stage-interaction.cordis.snapshot.yml', import.meta.url))
+  const result = await runLoaderSmoke({
+    label: '已提交失败审核恢复', tempDirPrefix: 'dsh-bid-completed-repair-',
+    binScript: fileURLToPath(new URL('./fixtures/bid-stage-interaction-driver.ts', import.meta.url)),
+    configPath, binArgs: [configPath, 'task-completed-repair'], mode: 'src', processTimeoutMs: 120_000,
+    tsconfigPath: fileURLToPath(new URL('../../../tsconfig.json', import.meta.url)),
+  })
+  expect(JSON.parse(result.stdout)).toMatchObject({
+    state: 'completed', interrupted: true, workIds: [expect.any(String)], userMessages: 1,
+    resumedWriterTitles: ['校验结果'], seedPreserved: true, outsidePreserved: true, outsideCompleted: true,
+    calls: ['bid_project_inspect', 'bid_project_inspect', 'bid_run_task', 'bid_plan_task', 'bid_recover_task'],
+    planPatchCount: 1,
+    executions: ['outline.update', 'chapter.reorganize', 'chapter.write', 'chapter.write', 'chapter.review'],
+    workbench: Array(3).fill({ status: 'completed', content: true }),
+  })
+}, 150_000)
+
+it('写作中断后先纠正业务归属，保留其他审核和原候选并完成同一 Work 发布', async () => {
+  const configPath = fileURLToPath(new URL('../bid-stage-interaction.cordis.snapshot.yml', import.meta.url))
+  const result = await runLoaderSmoke({
+    label: '业务归属修正后恢复写作', tempDirPrefix: 'dsh-bid-binding-repair-',
+    binScript: fileURLToPath(new URL('./fixtures/bid-stage-interaction-driver.ts', import.meta.url)),
+    configPath, binArgs: [configPath, 'task-binding-repair'], mode: 'src', processTimeoutMs: 120_000,
+    tsconfigPath: fileURLToPath(new URL('../../../tsconfig.json', import.meta.url)),
+  })
+  expect(JSON.parse(result.stdout)).toMatchObject({
+    state: 'completed', interrupted: true, workIds: [expect.any(String)], userMessages: 1,
+    resumedWriterTitles: ['校验结果'], seedPreserved: true, outsidePreserved: true, outsideCompleted: true,
+    calls: ['bid_project_inspect', 'bid_project_inspect', 'bid_run_task', 'bid_project_inspect', 'bid_plan_task', 'bid_recover_task'],
+    executions: ['outline.update', 'chapter.reorganize', 'chapter.write', 'outline.update', 'chapter.write', 'chapter.review'],
+    bindingRepaired: true,
+    queuedReplacementCanceled: true,
+    planPatchCount: 1,
+    workbench: Array(3).fill({ status: 'completed', content: true }),
+  })
+}, 150_000)
+
+it('用户纠正未完成写作的原文迁移时，在同一 Work 从已接纳结果重新迁移并发布', async () => {
+  const configPath = fileURLToPath(new URL('../bid-stage-interaction.cordis.snapshot.yml', import.meta.url))
+  const result = await runLoaderSmoke({
+    label: '原文迁移纠正后重新写作', tempDirPrefix: 'dsh-bid-migration-restart-',
+    binScript: fileURLToPath(new URL('./fixtures/bid-stage-interaction-driver.ts', import.meta.url)),
+    configPath, binArgs: [configPath, 'task-migration-restart'], mode: 'src', processTimeoutMs: 120_000,
+    tsconfigPath: fileURLToPath(new URL('../../../tsconfig.json', import.meta.url)),
+  })
+  expect(JSON.parse(result.stdout)).toMatchObject({
+    state: 'completed', interrupted: true, workIds: [expect.any(String)], userMessages: 2,
+    seedPreserved: true, outsidePreserved: true, outsideCompleted: true,
+    calls: ['bid_project_inspect', 'bid_project_inspect', 'bid_run_task', 'bid_project_inspect', 'bid_plan_task', 'bid_recover_task'],
+    executions: ['outline.update', 'chapter.reorganize', 'chapter.write', 'chapter.reorganize', 'chapter.write'],
+    migrationRestarted: true, planPatchCount: 1,
+    workbench: Array(3).fill({ status: 'completed', content: true }),
+  })
+}, 150_000)
 
 it('主 Agent 在原授权内换用目录编辑能力并接续后续步骤', async () => {
   const configPath = fileURLToPath(new URL('../bid-stage-interaction.cordis.snapshot.yml', import.meta.url))

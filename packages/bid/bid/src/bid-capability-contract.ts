@@ -130,6 +130,10 @@ export interface BidCapabilityExecutionContext {
   readonly sourceSnapshot?: BidTaskSourceSnapshot
   /** 冻结的语义核验要求保留迁移原文；已有载体由 Host 复用。 */
   readonly preserveMigratedContent?: boolean
+  /** 原请求接纳前已有的目录身份，后续纠正不把新叶节草稿当作原文。 */
+  readonly originalSectionIds?: ReadonlySet<string>
+  /** 已通过授权核验的原要求；能力步骤说明不能替代它们。 */
+  readonly originalTaskRequirements?: readonly string[]
   readonly run: BidRunContext
   readonly recovery?: ModelStageExecutionOptions['recovery']
   readonly sectionIds: ReadonlySet<string> | null
@@ -167,9 +171,10 @@ export type BidCapabilityTask = z.infer<typeof bidCapabilityTaskSchema>
  * 接纳新任务或修改后续计划时拒绝缺少正文迁移及复核的计划；读取历史请求不调用。
  * @param task 已解析的任务。
  * @param hasExistingContent 授权范围内已有正文；研究深化可能需要迁移时由 Host 判定。
+ * @param completedStepCount 同一 Work 已完成的前缀长度；恢复顺序只约束尚未执行的步骤。
  * @throws 未明确暂缓正文且目录步骤缺少后续迁移和复核时拒绝。
  */
-export function validateCapabilityTaskContentFollowup(task: BidCapabilityTask, hasExistingContent = false): void {
+export function validateCapabilityTaskContentFollowup(task: BidCapabilityTask, hasExistingContent = false, completedStepCount = 0): void {
   if (task.allow_pending_content === true) return
   for (const [index, step] of task.steps.entries()) {
     const needsFollowup = step.call.capability === 'outline.update' && step.call.input.defer_content_migration
@@ -178,9 +183,11 @@ export function validateCapabilityTaskContentFollowup(task: BidCapabilityTask, h
     if (!needsFollowup) continue
     const following = task.steps.slice(index + 1)
     const migration = following.findIndex(item => item.call.capability === 'chapter.reorganize')
-    if (migration >= 0 && following.slice(migration + 1).some(item =>
-      item.call.capability === 'chapter.write' || item.call.capability === 'chapter.review')) continue
-    throw new Error('BID_CAPABILITY_CONTENT_FOLLOWUP_REQUIRED: 暂缓迁移只是中间步骤；请在同一任务补齐 chapter.reorganize 和 chapter.write 或 chapter.review。只有用户明确只改目录或暂缓正文时才可设置 allow_pending_content=true。')
+    if (migration >= 0 && !following.slice(0, migration).some((item, offset) =>
+      index + offset + 1 >= completedStepCount && item.call.capability === 'chapter.write')
+      && following.slice(migration + 1).some(item =>
+        item.call.capability === 'chapter.write' || item.call.capability === 'chapter.review')) continue
+    throw new Error('BID_CAPABILITY_CONTENT_FOLLOWUP_REQUIRED: 暂缓迁移只是中间步骤；请在同一任务先执行 chapter.reorganize，再执行 chapter.write 或 chapter.review，不能先写作再补迁移。只有用户明确只改目录或暂缓正文时才可设置 allow_pending_content=true。')
   }
 }
 

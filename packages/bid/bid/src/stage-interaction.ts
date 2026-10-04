@@ -40,7 +40,7 @@ import { revisionBatchTaskInputSchema } from './chapter-revision-batch.ts'
 import { buildWritableSectionWorklist } from './section-evidence-context.ts'
 import { assertNoLinkedPath, within } from './workspace-path.ts'
 import type { BidRunData } from './control-plane-contract.ts'
-import { bidCapabilityTakeoverRun, bidRunRecoveryEligibility, bidWritingPlanRecoveryEligibility } from './bid-recovery.ts'
+import { bidCapabilityTakeoverRun, bidCompletedCapabilityRun, bidRunRecoveryEligibility, bidWritingPlanRecoveryEligibility } from './bid-recovery.ts'
 import { resolveBidToolAuthorization } from './bid-tool-authorization.ts'
 import { bidModelTaskJsonSchema, bindBidModelTask, bindBidModelSteps, bindBidModelProjectQuery,
   bindBidModelWritingPlan, bindBidModelReference, collectBidModelTaskCatalog,
@@ -60,14 +60,16 @@ const supersedeSchema = z.object({
 const runTaskParams = z.object({ task: bidCapabilityTaskSchema, supersede: supersedeSchema.optional() }).strict()
 const modelRunTaskParams = z.object({ task: bidCapabilityTaskSchema, supersede: z.boolean().optional() }).strict()
 const planTaskParams = z.object({ work_id: z.string().min(1), from_index: z.number().int().nonnegative(),
-  steps: z.array(bidCapabilityStepSchema) }).strict()
+  steps: z.array(bidCapabilityStepSchema), restart_pending: z.literal(true).optional() }).strict()
 const resumeRunParams = z.object({ run_id: z.string().min(1),
   expected_project_revision: z.number().int().nonnegative() }).strict()
 const recoverRunParams = z.object({ target: z.literal('run'), run_id: z.string().min(1), instruction: recoveryInstruction }).strict()
 const recoverWritingPlanParams = z.object({ target: z.literal('writing_plan'), writing_request_id: z.string().min(1),
   attempt_id: z.string().min(1), instruction: recoveryInstruction }).strict()
 const modelRecoverTaskParams = z.object({ target: z.enum(['run', 'writing_plan']), instruction: recoveryInstruction }).strict()
-const modelPlanTaskParams = z.object({ edit: z.enum(['replace_pending', 'append']), steps: z.array(bidCapabilityStepSchema) }).strict()
+const planEditSchema = z.enum(['replace_pending', 'append', 'restart_pending'])
+  .describe('replace_pending 保留已开始的写作候选；append 纠正已发布结果；restart_pending 须有本轮新用户授权，保留已接纳步骤，从其结果重新迁移全部原写作章节，不复用未提交写作候选。')
+const modelPlanTaskParams = z.object({ edit: planEditSchema, steps: z.array(bidCapabilityStepSchema) }).strict()
 const recoveryArtifactPaths = new Set([
   'analysis/project.json', 'analysis/scoring.json', 'analysis/scoring-origin.json',
   'analysis/tender-analysis-selection.json', 'analysis/scoring-response-points.candidate.json',
@@ -659,11 +661,14 @@ const CAPABILITY_TASK_GUIDANCE = [
   '根据用户目标、当前成果和能力的实际修改范围选择步骤，不按当前阶段或用户用词固定选路。tender.update 更正招标理解；outline.generate 首次生成目录；outline.update 编辑已有目录的层级、职责及跨分支结构；outline.refine 研究并深化各章节子树，不能调整顶层或跨分支移动；evidence.research 补充或替换资料映射；chapter.reorganize 分配旧正文；writing.plan 更新写作要求；chapter.write/revise/review 处理正文。',
   '规划前确认每项修改都由有权执行的能力承担，再按产物依赖安排后续步骤。已有资料或正文可复用时不重复生成。能力任务完成后读取实际结果，逐项核对用户目标；工具成功、资料覆盖或工作项完成不等于用户要求全部实现。',
   'bid_plan_task 替换未完成步骤时，同步给出每个新步骤的 description，使说明与实际能力、业务输入和范围一致。保留已完成步骤的说明与结果，不用执行状态或承诺完成的空话代替具体计划。',
+  '已开始写作的原文迁移结果需要纠正时，新的直接用户消息可授权 bid_plan_task(edit=restart_pending)：保留已接纳前缀和旧候选历史，用 chapter.reorganize 完整覆盖原写作章节，再 chapter.write。该模式从最后已接纳结果执行，不导入未提交写作候选；自动恢复和 replace_pending 仍保留原候选。不得缩小范围、删除原文或重复改目录。',
+  '用户要求纠正当前已发布结果时，先 inspect 原任务和当前成果，在原 Work 用 bid_plan_task(edit=append) 追加纠正步骤，再 bid_recover_task 重新核验发布。原完成步骤和发布凭据保留，不通过新 Work 重复执行原目录操作；只有独立的新目标才创建新 Work。',
+  '同一用户消息通过 bid_plan_task 修正原 Work 后，Host 取消该消息先前通过 bid_run_task 排队的替代任务；独立的新目标应来自新的用户消息。恢复同一目标时直接修改原计划并恢复，不额外排队重复任务。',
   '子任务报告超出范围或无法完成时，主 Agent 负责调整能力计划。可恢复的失败任务先用 bid_project_inspect(object=task) 读取原目标、范围和实际步骤，再用 bid_plan_task(edit=replace_pending) 替换未提交结果的步骤，并用 bid_recover_task(target=run) 继续；验收失败但步骤已完成时用 edit=append 追加纠正步骤。Host 绑定原 Work、失败 Run 和未完成起点，不抄写身份或步骤索引；保持原目标和授权范围，保留已完成步骤。能力选择错误不需要用户重复授权；用户停止、等待输入或不可恢复故障遵守对应限制。',
   '拆分或合并已有正文的章节时，先 inspect 目录、正文和写作要求，再用 bid_run_task 提交完整有序执行计划：目录调整、原文迁移、结果复核。用户明确只改目录时才可留下待迁移正文；不要把目录步骤完成说成整项任务完成。',
   '用户要求执行修改即授权在真实保存范围内完成所需步骤；审批意见的 paragraph 引用不授予整章结构修改，明确扩展范围的新用户消息才可扩大；在同一回合提交完整任务，不只回复建议、保存计划或再次询问是否开始。计划因缺少后续步骤被拒绝时，补齐步骤并重新提交，不请求重复授权。用户只讨论或明确暂缓时不执行。',
   '目录操作的迁移时序由程序从后续 chapter.reorganize 或已授权的 allow_pending_content 推导，不提交 defer_content_migration。新增叶节之后必须安排 chapter.write 完成基于 seed 的写作及审核；chapter.review 只审核已有可恢复正文；仅用户明确只改目录或暂缓正文时才设置 task.allow_pending_content=true。不得自行把正文留给用户下一次催促。',
-  'outline.update 新增或拆分章节的身份由 Host 生成；独立业务分配会话读取修改前的归属和生成后的真实叶节，按职责分配业务位置，程序绑定真实引用。Main 不提交 business_bindings，不猜新章节位置。拆分后 chapter.reorganize 使用 task 范围并选择原 source_section_positions，后续复核可使用 previous_targets；保留原文不等于重新写作。',
+  'outline.update 新增或拆分章节的身份由 Host 生成；独立业务分配会话读取修改前的归属和生成后的真实叶节，按职责分配业务位置，程序绑定真实引用。Main 不为尚未生成的章节提交 business_bindings 或猜章节位置。修正已有候选章节的职责冲突时，先 inspect 候选的最新对象表，再用 operations=[] 与完整 business_bindings 修正归属；已开始的写作候选可在这类绑定步骤后恢复完整原范围的 chapter.write，不重复拆章或迁移。拆分后 chapter.reorganize 使用 task 范围并选择原 source_section_positions，后续复核可使用 previous_targets；保留原文不等于重新写作。',
   '目录研究已经完成且资料映射可用时，不要再追加重复的 evidence.research。深化后需继续处理旧正文时，在同一授权任务安排原文迁移及写作或审核。只修改选中的一句仍用段落级 chapter.revise，不扩成目录研究或整章重写。',
   '评分响应点是章节必须回答的要求，不等于目录标题。不得机械地把每个响应点、评分项第一条或 must_answer 文本提升为章节标题；按技术方案结构、用户框架和评分覆盖组织目录，把响应点绑定到合适的可写叶节。只有响应点确实构成独立方案主题时才作为标题。',
   '资料结果区分已核验的招标、本地或 Web 依据，本次拟采用且保留条件的方案设计，以及待补的企业事实或承诺。研究有 gap 时说明“已完成研究并标明缺口”；正文候选未完整通过时说明“候选已保留，仍需补充或修复”。不要把资料条数、计划或 metadata 当成正文已经通过的证明。',
@@ -724,8 +729,8 @@ export function installStageInteractionTools(
         ...task.status === 'failed' && !takeoverAvailable || task.status === 'suspended'
           && (suspended?.work.kind !== 'capability_task' || suspended.cause === 'awaiting_input')
           ? [] : ['bid_run_task'],
-        ...task.status === 'suspended' && suspended?.work.kind === 'capability_task'
-          && suspended.cause !== 'awaiting_input' ? ['bid_plan_task'] : [],
+        ...(task.status === 'suspended' && suspended?.work.kind === 'capability_task'
+          && suspended.cause !== 'awaiting_input' || bidCompletedCapabilityRun(agent.session, task) !== undefined) ? ['bid_plan_task'] : [],
         ...task.status === 'failed' || task.status === 'suspended' ? [] : [
           'bid_outline_apply_operations', 'bid_outline_regenerate_scope', 'bid_evidence_remap',
           'bid_confirm_writing_plan', 'bid_revise_chapter',
@@ -875,7 +880,7 @@ export function installStageInteractionTools(
                 : name === 'bid_stage_inspect' ? '读取当前阶段的有界权威快照；传正文引用时校验原文身份并返回受控正文。'
                   : name === 'bid_project_inspect' ? '按真实项目对象与章节位置分页读取已保存资料；不依赖当前阶段，也不修改项目。'
                     : name === 'bid_run_task' ? '用当前用户消息或原生 Goal 轮次授权有序业务能力任务；Host 核对项目输入、范围和候选文件，再发布实际结果。提问与讨论不得调用。'
-                      : name === 'bid_plan_task' ? '调整挂起能力任务的未完成步骤后缀；可恢复失败可沿用原授权重新规划。已完成、仍在执行和等待用户输入的步骤不可改；保存后调用恢复能力继续。'
+                      : name === 'bid_plan_task' ? '调整挂起能力任务的未完成步骤；用户要求纠正当前已发布结果时可 append 追加到原 Work。保留已完成步骤与历史发布凭据，保存后调用恢复能力继续。'
                         : name === 'bid_set_flowchart_visual_review' ? '设置当前 S5 work 的流程图视觉检查策略。skip 表示后续不再启动新的流程图视觉确认；required 表示恢复正常视觉确认。设置会写入当前 work 的命令日志并在挂起恢复后继续生效。'
                           : name === 'bid_pause_stage' ? '仅在用户明确要求暂停时阻止后续阶段任务启动；已经运行的任务继续收敛。'
                             : name === 'bid_resume_stage' ? '仅在用户明确要求继续时释放当前阶段的新任务调度门。'
@@ -910,19 +915,21 @@ export function installStageInteractionTools(
                   writing_request_id: target.requestId, attempt_id: target.attemptId }, exec.signal)
               }
               if (name === 'bid_plan_task') {
-                const request = z.object({ edit: z.enum(['replace_pending', 'append']), steps: z.array(z.unknown()) }).strict().parse(args)
+                const request = z.object({ edit: planEditSchema, steps: z.array(z.unknown()) }).strict().parse(args)
                 const state = agent.session.events.reduce(reduceBidTaskState, BID_INITIAL_TASK_STATE)
                 const catalog = modelCatalogs.get(agent)
                 if (catalog === undefined) throw new Error('BID_MODEL_TASK_INSPECT_REQUIRED')
-                if (state.status !== 'suspended') throw new Error('BID_CAPABILITY_PLAN_PATCH_NOT_READY')
+                const run = state.status === 'suspended' ? state.run : bidCompletedCapabilityRun(agent.session, state)
+                if (run === undefined || state.status === 'completed' && request.edit !== 'append') throw new Error('BID_CAPABILITY_PLAN_PATCH_NOT_READY')
                 const workspace = workspaceFor(agent.session)
-                const path = within(workspace.projectRoot, `runs/${state.run.work.workId}/task-checkpoint.json`)
+                const path = within(workspace.projectRoot, `runs/${run.work.workId}/task-checkpoint.json`)
                 await assertNoLinkedPath(workspace.root, path)
                 const checkpoint = capabilityTaskCheckpointSchema.parse(JSON.parse(await readFile(path, 'utf8')))
                 const from_index = request.edit === 'append' ? checkpoint.steps.length
                   : checkpoint.steps.findIndex(step => step.status !== 'completed')
                 if (from_index < 0) throw new Error('BID_CAPABILITY_PLAN_PATCH_NOT_READY')
-                return execute(agent, { action: name, work_id: state.run.work.workId, from_index,
+                return execute(agent, { action: name, work_id: run.work.workId, from_index,
+                  ...request.edit === 'restart_pending' ? { restart_pending: true } : {},
                   steps: bindBidModelSteps(request.steps, catalog) }, exec.signal)
               }
               if (name === 'bid_run_task') {

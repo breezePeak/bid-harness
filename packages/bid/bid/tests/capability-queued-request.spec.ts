@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { expect, it } from 'vitest'
 import { BidWorkspace } from '../src/index.ts'
-import { cancelCapabilityRequestsForReset, enqueueCapabilityRequest, markCapabilityRequestApplied,
+import { cancelCapabilityRequestsForPlanPatch, cancelCapabilityRequestsForReset, enqueueCapabilityRequest, markCapabilityRequestApplied,
   pendingCapabilityWorkIds, readPendingCapabilityRequests } from '../src/bid-capability-queue.ts'
 import { readBidChapterCommandJournal, withBidCommandJournalLock,
   writeBidChapterCommandJournal } from '../src/chapter-command-journal.ts'
@@ -64,6 +64,31 @@ it('重置删除必需输入时取消已登记请求，其他请求保留', asyn
       [join(workspace.projectRoot, 'manifest.json')], lease)).toBe(1)
   })
   expect(await pendingCapabilityWorkIds(workspace)).toEqual([])
+})
+
+it('原计划接纳同一消息的修正后取消重复排队，其他消息和会话的请求保留', async () => {
+  const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-capability-replan-queue-')))
+  const run = createTestBidRunContext()
+  const task = { goal: '分析招标文件', scope: { kind: 'project' as const },
+    steps: [{ description: '读取已登记招标文件', scope: { source: 'task' as const },
+      call: { capability: 'tender.analyze' as const, input: {} } }] }
+  const authorization = { session_id: 'user-session', message_id: 'same-intent' }
+  const replaced = await enqueueCapabilityRequest(workspace, run, task, authorization)
+  await enqueueCapabilityRequest(workspace, run, task, { ...authorization, message_id: 'later-intent' })
+  await enqueueCapabilityRequest(workspace, run, task, { ...authorization, session_id: 'other-session' })
+  await run.commits.publish(async (lease) => {
+    expect(await cancelCapabilityRequestsForPlanPatch(workspace, run.work.workId, authorization, lease)).toBe(1)
+  })
+  const pending = await readPendingCapabilityRequests(workspace, run.work.workId)
+  expect(pending.map(item => item.request.authorization)).toEqual([
+    { ...authorization, message_id: 'later-intent' }, { ...authorization, session_id: 'other-session' },
+  ])
+  expect((await readBidChapterCommandJournal(workspace, run.work.workId))[0]).toMatchObject({
+    status: 'canceled', command: { queue_id: replaced.queue_id, request_ref: replaced.request_ref },
+  })
+  await run.commits.publish(async (lease) => {
+    expect(await cancelCapabilityRequestsForPlanPatch(workspace, run.work.workId, authorization, lease)).toBe(0)
+  })
 })
 
 it('同一 Work 的并发命令日志更新均保留', async () => {

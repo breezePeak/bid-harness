@@ -1,7 +1,7 @@
 /** 同一章节 Writer 的可续写会话、逐轮提交与取消清理。 */
 import { randomUUID } from 'node:crypto'
 import { resolve } from 'node:path'
-import type { Agent, AgentHandle } from '@deepseek-ai/dsh-agent'
+import { installModelSelection, type Agent, type AgentHandle, type ModelSelection } from '@deepseek-ai/dsh-agent'
 import { resolveSessionPreset } from '@deepseek-ai/dsh-agent-presets'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
@@ -103,8 +103,8 @@ function promptContent(prompt: string | readonly ContentBlock[]): ContentBlock[]
   return typeof prompt === 'string' ? [{ type: 'text', text: prompt }] : [...prompt]
 }
 
-async function assertImageInput(agent: Agent, signal: AbortSignal): Promise<void> {
-  const routed = agent.session.requestHeader()?.config
+async function assertImageInput(agent: Agent, signal: AbortSignal, selection?: ModelSelection): Promise<void> {
+  const routed = selection ?? agent.session.requestHeader()?.config
   const provider = routed?.provider ?? agent.options.provider
   const model = routed?.model ?? agent.options.model
   const llm = agent.ctx.get('llm')
@@ -158,12 +158,14 @@ async function waitForWriterTurn(parent: Agent, child: Agent, eventStart: number
  * @param existingId 已完成章节的原 Writer 身份；只恢复原会话，不能创建替代会话。
  * @param chapterTitle Writer 协议中展示的章节标题。
  * @param webSearchEnabled 是否允许此 Writer 使用 Web 工具。
+ * @param modelSource 当前执行 Agent；续写保留原父子身份，但采用当前执行模型。
  * @returns 由调用方 finally 释放的章节 Writer。
  */
 export function createChapterWriterChild(
   parent: Agent, label: string, maxContinuations: number,
   validate: (child: Agent, value: unknown) => Promise<void>, signal: AbortSignal, existingId?: SessionId,
   chapterTitle?: string, webSearchEnabled = true,
+  modelSource: Agent = parent,
 ): ChapterWriterChild {
   const subagents = parent.ctx.get('subagents')
   if (subagents === undefined) throw new Error('S5 requires subagents service')
@@ -173,9 +175,17 @@ export function createChapterWriterChild(
   let runtime: ChapterProtocol<unknown> | undefined
   let eventStart = 0
   let webGuard = () => {}
+  let modelGuard = () => {}
+  const route = modelSource.session.requestHeader()?.config
+  const provider = route?.provider ?? modelSource.options.provider
+  const model = route?.model ?? modelSource.options.model
+  const selection: ModelSelection | undefined = provider === undefined || model === undefined ? undefined
+    : { provider, model, ...(route?.reasoningEffort === undefined ? {} : { reasoningEffort: route.reasoningEffort }) }
   const install = (agent: Agent) => {
     runtime?.dispose()
     webGuard()
+    modelGuard()
+    modelGuard = installModelSelection(agent.ctx, { current: selection, assembled: undefined })
     const tools = agent.ctx.get('tools')
     if (tools === undefined) throw new Error('S5 Writer requires tools service')
     webGuard = !webSearchEnabled
@@ -221,7 +231,7 @@ export function createChapterWriterChild(
     id,
     async assertImageInput() {
       if (child === undefined) throw new ChapterWriterImageInputError('S5 Writer 会话未恢复，无法执行流程图视觉复核。')
-      await assertImageInput(child, signal)
+      await assertImageInput(child, signal, selection)
     },
     async run(prompt) {
       signal.throwIfAborted()
@@ -242,7 +252,7 @@ export function createChapterWriterChild(
       } else {
         if (content.some(block => block.type === 'image')) {
           if (child === undefined) throw new ChapterWriterImageInputError('S5 Writer 会话未恢复，无法执行流程图视觉复核。')
-          await assertImageInput(child, signal)
+          await assertImageInput(child, signal, selection)
         }
         runtime?.nextRound()
         eventStart = child?.session.events.length ?? 0
@@ -269,6 +279,7 @@ export function createChapterWriterChild(
     async dispose() {
       try { await subagents.drainContinuableChildren(parent, [id]) } finally {
         webGuard()
+        modelGuard()
         runtime?.dispose()
         liftSetup()
       }

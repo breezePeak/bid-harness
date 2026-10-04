@@ -64,6 +64,7 @@ describe('S5 reused Writer policy', () => {
     }
     const parent = {
       id: SessionId('parent'),
+      session: { requestHeader: () => undefined }, options: {},
       ctx: {
         get: (name: string) => name === 'subagents' ? subagents : undefined,
         agents: { get: (id: SessionId) => id === writerId ? child : undefined },
