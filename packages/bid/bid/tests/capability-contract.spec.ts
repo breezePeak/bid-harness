@@ -20,6 +20,22 @@ const outline = { sections: [
 ] } as OutlineArtifact
 
 describe('公共能力契约', () => {
+  it('步骤摘要接受 20 字单行文本，执行要求仍可保存详细内容', () => {
+    const description = '字'.repeat(20)
+    const instruction = '细'.repeat(4_000)
+    const task = bidCapabilityTaskSchema.parse({ goal: '修订本章', scope: { kind: 'sections', section_ids: ['A'] },
+      steps: [{ description: `  ${description}  `, scope: { source: 'task' }, call: {
+        capability: 'chapter.write', input: { instruction },
+      } }],
+    })
+    expect(task.steps[0]?.description).toBe(description)
+    expect(task.steps[0]?.call.input).toEqual({ instruction })
+    for (const description of ['字'.repeat(21), '复核正文\n补齐引用', '复核正文\r补齐引用',
+      '复核正文\u2028补齐引用', '复核正文\u2029补齐引用']) {
+      expect(() => bidCapabilityTaskSchema.parse({ ...task, steps: [{ ...task.steps[0]!, description }] })).toThrow('步骤说明')
+    }
+  })
+
   it('整书审核在接纳计划时拒绝章节根范围和前一步章节范围', () => {
     const step = { description: '核验整书实际正文', scope: { source: 'task' }, call: { capability: 'document.review', input: { reason: '核验整书' } } }
     const task = { goal: '审查整书', scope: { kind: 'project' }, steps: [step] }

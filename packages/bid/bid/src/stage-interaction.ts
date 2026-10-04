@@ -657,10 +657,10 @@ function renderCurrentRunProgress(run: BidRunData | null): string | undefined {
 
 const CAPABILITY_TASK_GUIDANCE = [
   'bid_project_inspect 返回 objects 对象选择表。bid_run_task 只选择各对象的 position，使用 section_positions、source_section_positions、issue_positions 等参数；不要抄写章节、审批意见、招标条目或模板的 ID。正文引用使用 section_position 与 start_paragraph/end_paragraph，Host 从原文绑定精确偏移及 SHA。任务与原文块身份由程序生成，正文迁移不要手工填写 assignments。',
-  '项目阶段只表示默认整本路线的进度。当前状态允许新任务且用户明确修改时，先用 bid_project_inspect 读取事实，再用 bid_run_task 提交目标、根范围和有序能力步骤；普通讨论与解释只读。每个步骤必须填写 description，明确本次处理的对象、动作和预期结果，不只写“优化目录”等能力名称；步骤按真实依赖选择，不为凑步骤重复研究。',
+  '项目阶段只表示默认整本路线的进度。当前状态允许新任务且用户明确修改时，先用 bid_project_inspect 读取事实，再用 bid_run_task 提交目标、根范围和有序能力步骤；普通讨论与解释只读。每个步骤的 description 用一句单行短摘要说明对象、动作和预期结果，最多 20 字；详细要求放在 call.input 中，不列子步骤、背景或验收细则，不只写“优化目录”等能力名称。步骤按真实依赖选择，不为凑步骤重复研究。',
   '根据用户目标、当前成果和能力的实际修改范围选择步骤，不按当前阶段或用户用词固定选路。tender.update 更正招标理解；outline.generate 首次生成目录；outline.update 编辑已有目录的层级、职责及跨分支结构；outline.refine 研究并深化各章节子树，不能调整顶层或跨分支移动；evidence.research 补充或替换资料映射；chapter.reorganize 分配旧正文；writing.plan 更新写作要求；chapter.write/revise/review 处理正文。',
   '规划前确认每项修改都由有权执行的能力承担，再按产物依赖安排后续步骤。已有资料或正文可复用时不重复生成。能力任务完成后读取实际结果，逐项核对用户目标；工具成功、资料覆盖或工作项完成不等于用户要求全部实现。',
-  'bid_plan_task 替换未完成步骤时，同步给出每个新步骤的 description，使说明与实际能力、业务输入和范围一致。保留已完成步骤的说明与结果，不用执行状态或承诺完成的空话代替具体计划。',
+  'bid_plan_task 替换未完成步骤时，每个新步骤的 description 同样使用最多 20 字的单行短摘要，与实际能力、业务输入和范围一致，详细要求放在 call.input 中。保留已完成步骤的说明与结果，不用执行状态或承诺完成的空话代替具体计划。',
   '已开始写作的原文迁移结果需要纠正时，新的直接用户消息可授权 bid_plan_task(edit=restart_pending)：保留已接纳前缀和旧候选历史，用 chapter.reorganize 完整覆盖原写作章节，再 chapter.write。该模式从最后已接纳结果执行，不导入未提交写作候选；自动恢复和 replace_pending 仍保留原候选。不得缩小范围、删除原文或重复改目录。',
   '用户要求纠正当前已发布结果时，先 inspect 原任务和当前成果，在原 Work 用 bid_plan_task(edit=append) 追加纠正步骤，再 bid_recover_task 重新核验发布。原完成步骤和发布凭据保留，不通过新 Work 重复执行原目录操作；只有独立的新目标才创建新 Work。',
   '同一用户消息通过 bid_plan_task 修正原 Work 后，Host 取消该消息先前通过 bid_run_task 排队的替代任务；独立的新目标应来自新的用户消息。恢复同一目标时直接修改原计划并恢复，不额外排队重复任务。',

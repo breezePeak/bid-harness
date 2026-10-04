@@ -954,7 +954,7 @@ describe('Workspace 项目与独立 Session', () => {
     await writeFile(join(oldDirectory, 'step-receipt.json'), '旧步骤凭据\n')
     const newTask = { goal: '修正评分点目录层级，首个细粒度评分点不作大标题',
       scope: { kind: 'project' as const }, allow_pending_content: true,
-      steps: [{ description: '把误提的评分点移回设计方案叶节并恢复自然章节标题',
+      steps: [{ description: '移回设计评分点并恢复章节标题',
         scope: { source: 'task' as const }, call: { capability: 'outline.update' as const, input: {
           operations: [{ type: 'move_section' as const, section_id: 'SEC-1', parent_id: 'GROUP-A', order: 1 },
             { type: 'update_section' as const, section_id: 'SEC-1', title: '总体实施方案',

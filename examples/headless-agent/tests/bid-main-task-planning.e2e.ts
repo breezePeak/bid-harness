@@ -235,6 +235,14 @@ describe.skipIf(!process.env.DEEPSEEK_API_KEY && !process.env.DSH_BID_EVAL_PROVI
         })) }
       expect(scenario.id === 'A14' ? ['completed', 'waiting_user'].includes(state?.status ?? '') : state?.status === 'completed').toBe(true)
       expect(receipts.some(receipt => receipt !== null && typeof receipt === 'object' && 'goal_met' in receipt && receipt.goal_met === true)).toBe(true)
+      const displayedPlan = await ctx.bid.getCapabilityTaskPlan(agent.session)
+      report.displayed_plan = displayedPlan
+      expect(displayedPlan).not.toBeNull()
+      expect(displayedPlan?.steps.length).toBeGreaterThan(0)
+      for (const step of displayedPlan?.steps ?? []) {
+        expect(step.description.length).toBeLessThanOrEqual(20)
+        expect(step.description).not.toMatch(/[\r\n\u2028\u2029]/u)
+      }
       expect(await readFile(join(workspace.projectRoot, 'chapters/sections/0002.md'), 'utf8')).toBe(outsideBefore)
       if (scenario.id === 'A03') {
         expect(outlineAfter).toBe(outlineBefore)

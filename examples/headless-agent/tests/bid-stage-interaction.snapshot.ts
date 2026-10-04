@@ -294,7 +294,7 @@ it('用户纠正未完成写作的原文迁移时，在同一 Work 从已接纳�
   })
 }, 150_000)
 
-it('主 Agent 在原授权内换用目录编辑能力并接续后续步骤', async () => {
+it('首次任务与重规划拒绝超长步骤说明，同回合改为短摘要后完成原目标', async () => {
   const configPath = fileURLToPath(new URL('../bid-stage-interaction.cordis.snapshot.yml', import.meta.url))
   const result = await runLoaderSmoke({
     label: '能力计划恢复源码装配', tempDirPrefix: 'dsh-bid-replan-snapshot-',
@@ -306,11 +306,14 @@ it('主 Agent 在原授权内换用目录编辑能力并接续后续步骤', asy
   expect(JSON.parse(result.stdout)).toEqual({
     section: { title: '独立实施方案', parent_id: null, level: 1 }, bodyPreserved: true,
     userMessages: 1, completed: 1,
+    initialDescriptionRejected: true, replacementDescriptionRejected: true,
+    descriptionSchemaChecked: true, descriptionGuidanceChecked: true, planPatchCount: 1,
     plan: { status: 'completed', steps: [
       { description: '将章节3提升到顶层并保留现有正文', status: 'completed', hasResult: true },
       { description: '将提升后的章节改名为独立实施方案', status: 'completed', hasResult: true },
     ] },
-    calls: ['bid_project_inspect', 'bid_run_task', 'bid_stage_inspect', 'bid_project_inspect', 'bid_plan_task', 'bid_recover_task'],
+    calls: ['bid_project_inspect', 'bid_run_task', 'bid_run_task', 'bid_stage_inspect', 'bid_project_inspect',
+      'bid_plan_task', 'bid_plan_task', 'bid_recover_task'],
   })
 }, 75_000)
 

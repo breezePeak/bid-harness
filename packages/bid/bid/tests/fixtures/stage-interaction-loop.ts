@@ -55,11 +55,61 @@ export async function runCapabilityReplanLoop(ctx: Context, root: string) {
       && admitted?.type === 'bid.run.started' && event.data.workId === admitted.data.run.work.workId) done.resolve(undefined)
   }, { global: true })
   let runId = ''
+  let initialDescriptionRejected = false
+  let replacementDescriptionRejected = false
+  let descriptionSchemaChecked = false
+  let descriptionGuidanceChecked = false
+  const longDescription = '说明'.repeat(10) + '长'
+  const initialTask = { goal: '把章节3提升到顶层，并改名为独立实施方案；保留正文',
+    scope: { kind: 'project' }, steps: [{ description: '生成包含独立实施方案的新目录',
+      scope: { source: 'task' }, call: { capability: 'outline.generate', input: {} } }],
+  }
+  const initialArguments = await modelTaskArguments(agent, { task: initialTask })
+  const replacementSteps = [
+    { description: '将章节3提升到顶层并保留现有正文', scope: { source: 'task' }, call: { capability: 'outline.update', input: { operations: [
+      { type: 'move_section', section_position: 4, parent_position: null, order: 3 },
+    ] } } },
+    { description: '将提升后的章节改名为独立实施方案', scope: { source: 'previous_targets' }, call: { capability: 'outline.update', input: { operations: [
+      { type: 'update_section', section_position: 4, title: '独立实施方案' },
+    ] } } },
+  ]
+  const checkDescriptionSchema = (options: GenerateOptions, name: 'bid_run_task' | 'bid_plan_task') => {
+    type StepListSchema = { items?: { properties?: { description?: { maxLength?: number; description?: string } } } }
+    const parameters = options.tools?.find(tool => tool.name === name)?.parameters as {
+      properties?: { task?: { properties?: { steps?: StepListSchema } }; steps?: StepListSchema }
+    } | undefined
+    const description = (name === 'bid_run_task' ? parameters?.properties?.task?.properties?.steps
+      : parameters?.properties?.steps)?.items?.properties?.description
+    if (description?.maxLength !== 20 || !description.description?.includes('call.input')) {
+      throw new Error(name + ' 未提供短摘要长度与详细要求位置')
+    }
+    const prompt = options.messages.flatMap(message => message.content)
+      .flatMap(block => block.type === 'text' ? [block.text] : []).join('\n')
+    if (!prompt.includes('description 用一句单行短摘要') || !prompt.includes('详细要求放在 call.input 中')) {
+      throw new Error('Main 缺少短摘要规划指导')
+    }
+  }
+  const descriptionRejected = (options: GenerateOptions, name: string) => {
+    const result = options.messages.flatMap(message => message.content).filter(block => block.type === 'tool-result')
+      .findLast(block => block.toolCallId === CallId(name))
+    return result?.isError === true && result.content.some(block => block.type === 'text'
+      && block.text.includes('description') && block.text.includes('20'))
+  }
   parentScript.push(
     call('bid_project_inspect', { query: { object: 'outline' } }),
-    call('bid_run_task', await modelTaskArguments(agent, { task: { goal: '把章节3提升到顶层，并改名为独立实施方案；保留正文',
-      scope: { kind: 'project' }, steps: [{ description: '生成包含独立实施方案的新目录', scope: { source: 'task' }, call: { capability: 'outline.generate', input: {} } }],
-    } })),
+    (options) => {
+      checkDescriptionSchema(options, 'bid_run_task')
+      return call('bid_run_task', { task: { ...initialTask,
+        steps: initialTask.steps.map(step => ({ ...step, description: longDescription })) } })
+    },
+    (options) => {
+      initialDescriptionRejected = descriptionRejected(options, 'bid_run_task')
+      if (!initialDescriptionRejected) throw new Error('首次任务接纳了超长步骤说明')
+      if (agent.session.events.slice(before).some(event => event.type === 'bid.run.started')) {
+        throw new Error('超长步骤说明拒绝前已创建执行 Run')
+      }
+      return call('bid_run_task', initialArguments)
+    },
     answer('已接纳任务，等待真实执行结果。'),
     call('bid_stage_inspect', { view: 'recovery' }),
     (options) => {
@@ -78,17 +128,19 @@ export async function runCapabilityReplanLoop(ctx: Context, root: string) {
           runId = value.data?.run?.runId ?? ''
           const failed = task.steps.find(step => step.status === 'running')
           if (failed === undefined || !runId) throw new Error('未返回实际失败步骤')
-          return call('bid_plan_task', { edit: 'replace_pending', steps: [
-            { description: '将章节3提升到顶层并保留现有正文', scope: { source: 'task' }, call: { capability: 'outline.update', input: { operations: [
-              { type: 'move_section', section_position: 4, parent_position: null, order: 3 },
-            ] } } },
-            { description: '将提升后的章节改名为独立实施方案', scope: { source: 'previous_targets' }, call: { capability: 'outline.update', input: { operations: [
-              { type: 'update_section', section_position: 4, title: '独立实施方案' },
-            ] } } },
-          ] })
+          checkDescriptionSchema(options, 'bid_plan_task')
+          descriptionSchemaChecked = true
+          descriptionGuidanceChecked = true
+          return call('bid_plan_task', { edit: 'replace_pending',
+            steps: replacementSteps.map(step => ({ ...step, description: longDescription })) })
         }
       }
       throw new Error('任务检查缺少原目标和执行步骤')
+    },
+    (options) => {
+      replacementDescriptionRejected = descriptionRejected(options, 'bid_plan_task')
+      if (!replacementDescriptionRejected) throw new Error('重规划接纳了超长步骤说明')
+      return call('bid_plan_task', { edit: 'replace_pending', steps: replacementSteps })
     },
     () => call('bid_recover_task', { target: 'run', instruction: '使用已有目录编辑能力完成原目标，按实际结果接续修改并保留正文。' }),
     answer('已调整能力计划并继续。'),
@@ -115,11 +167,16 @@ export async function runCapabilityReplanLoop(ctx: Context, root: string) {
     const events = agent.session.events.slice(before)
     await ctx.sessions.flush(agent.session)
     const plan = await ctx.bid.getCapabilityTaskPlan(agent.session)
+    if (plan === null) throw new Error('已完成任务缺少真实能力计划')
+    const checkpoint = JSON.parse(await readFile(join(workspace.projectRoot, 'runs', plan.workId,
+      'task-checkpoint.json'), 'utf8')) as { plan_patches: unknown[] }
     return { section: { title: section.title, parent_id: section.parent_id, level: section.level },
-      plan: plan === null ? null : { status: plan.status, steps: plan.steps.map(step => ({
+      plan: { status: plan.status, steps: plan.steps.map(step => ({
         description: step.description, status: step.status, hasResult: Boolean(step.detail),
       })) },
       bodyPreserved: await readFile(join(workspace.projectRoot, 'chapters/sections/0003.md'), 'utf8') === originalBody,
+      initialDescriptionRejected, replacementDescriptionRejected, descriptionSchemaChecked, descriptionGuidanceChecked,
+      planPatchCount: checkpoint.plan_patches.length,
       userMessages: events.filter(event => event.type === 'user/message' && event.data.source.kind === 'user').length,
       calls: events.filter(event => event.type === 'tool/call').map(event => event.data.name),
       completed: events.filter(event => event.type === 'bid.run.notice' && event.data.kind === 'completed').length }
@@ -167,7 +224,7 @@ export async function runCapabilitySupersedeLoop(ctx: Context, root: string, ter
     call('bid_project_inspect', { query: { object: 'task' } }),
     call('bid_run_task', await modelTaskArguments(agent, { task: { goal: '修正评分点目录层级，首个细粒度评分点不作大标题',
       scope: { kind: 'project' }, allow_pending_content: true, steps: [{
-        description: '把误提的评分点移回设计方案叶节并恢复自然章节标题', scope: { source: 'task' },
+        description: '移回设计评分点并恢复章节标题', scope: { source: 'task' },
         call: { capability: 'outline.update', input: { operations: [
           { type: 'move_section', section_id: 'SEC-1', parent_id: 'GROUP-A', order: 1 },
           { type: 'update_section', section_id: 'SEC-1', title: '总体实施方案',

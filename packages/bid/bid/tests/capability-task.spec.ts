@@ -270,6 +270,12 @@ describe('同一 Work 的能力序列', () => {
       await expect(patchCapabilityTaskSteps(run, workspace, working, request, session, authorization, 1, replacement,
         { ...main, ctx })).rejects.toThrow('BID_CAPABILITY_PLAN_PATCH_UNAUTHORIZED')
       await expect(patch(0)).rejects.toThrow('BID_CAPABILITY_PLAN_PATCH_STARTED_STEP')
+      const beforePatch = await readFile(join(workspace.projectRoot, 'runs', descriptor.workId, 'task-checkpoint.json'), 'utf8')
+      for (const description of ['字'.repeat(21), '复核正文\n补齐引用']) {
+        await expect(patchCapabilityTaskSteps(run, workspace, working, request, session, authorization, 1,
+          [{ ...replacement[0]!, description }, replacement[1]!], main)).rejects.toThrow('步骤说明')
+      }
+      expect(await readFile(join(workspace.projectRoot, 'runs', descriptor.workId, 'task-checkpoint.json'), 'utf8')).toBe(beforePatch)
       const patched = await patch()
       expect(patched.steps.map(step => step.status)).toEqual(['completed', 'pending', 'pending'])
       expect(patched.steps[0]).toMatchObject({ result: { change_summary: '完成审核' } })
@@ -286,7 +292,7 @@ describe('同一 Work 的能力序列', () => {
     } finally { await ctx.fiber.dispose() }
   })
 
-  it('步骤说明随请求保存，缺失或空白说明不能接纳为能力任务', async () => {
+  it('步骤摘要随请求保存，缺失、空白、超长或多行说明均不能接纳为能力任务', async () => {
     const { ctx, workspace, session } = await fixture()
     try {
       const message = createUserMessage({ content: [{ type: 'text', text: '重构整本评分目录' }], source: { kind: 'user' } })
@@ -297,7 +303,7 @@ describe('同一 Work 的能力序列', () => {
         scope: { source: 'task' }, call: { capability: 'outline.refine', input: { feedback: '六个评分章并列' } },
       }] })
       const returnState = { stage: 'evidence_mapping' as const, status: 'ready' as const, run: null }
-      for (const description of [undefined, '', '   ']) {
+      for (const description of [undefined, '', '   ', '字'.repeat(21), '六个评分章并列\n保留原文']) {
         await expect(persistCapabilityTaskRequest(workspace, session, 'evidence_mapping', {
           ...task, steps: [{ ...task.steps[0]!, description }],
         } as typeof task, authorization, [], returnState)).rejects.toThrow()

@@ -87,7 +87,7 @@ Main Agent 按用户目标、当前产物和能力范围规划步骤：`outline.
 
 挂起的 `capability_task` 遇到新的真实用户目标时，`bid_run_task.supersede` 以旧 Run ID 和当前项目 revision 校验接管，建立独立 Work 和无 `resumeOf` 的 Run；旧请求、检查点和候选留作审计，完成后恢复旧请求记录的稳定 `return_state`。`awaiting_input` 仍使用原生问题，`failed` 状态不开放新能力任务。工具参数从运行时 Zod Schema 生成；`accepted` 只表示接纳，`execution_status=queued/started/suspended/failed` 均不表示完成，正式发布凭据存在时才返回 `completed=true`。
 
-新提交的每个能力步骤必须携带主 Agent 编写的 `description`，说明具体对象、动作和预期结果；初始任务、排队请求和计划补丁共用此约束。`getCapabilityTaskPlan` 从持久请求及检查点读取最新步骤说明、实际状态和结果，已完成前缀在重规划后继续保留，后续默认阶段启动不会隐藏最近的能力计划。已接纳请求缺少步骤说明时，读取检查点并继续执行，计划显示通用说明。
+每个能力步骤的 `description` 是面向用户的单行短摘要，用一句话说明对象、动作和预期结果，最多 20 字；详细执行要求放在 `call.input` 中。初始任务、排队请求、计划补丁及持久记录共用此约束，超长或多行说明会被拒绝。`getCapabilityTaskPlan` 从持久请求及检查点读取最新摘要、实际状态和结果，已完成前缀在重规划后继续保留，后续默认阶段启动不会隐藏最近的能力计划。已接纳请求缺少步骤说明时，读取检查点并继续执行，计划显示通用说明。
 
 `bid-capability-contract.ts` 定义静态能力 ID、按能力区分的业务输入、项目或章节或段落任务范围，以及来源于任务、前一步真实目标或明确章节 ID 的步骤范围。段落范围只接纳引用同一选区的单步 `chapter.revise`；后续计划补丁不能扩大该范围。Host 持有 Run、输入摘要、工作副本和允许写入的文件集合；`bid-capability-registry.ts` 声明实际输入前提、核对结果引用，并将默认 S2–S5 路线映射到现有执行器与整阶段 Validator。上传后续行和恢复续行共用 `automaticOrchestrator()` 的能力分发；阶段确认、恢复和后继阶段仍由 `BidOrchestrator` 处理。主 Agent 在各阶段可用 `bid_project_inspect` 分页读取招标理解、目录、资料映射、写作计划、正文和执行记录，用 `bid_run_task` 提交授权的局部能力任务；运行中跨能力写入先持久化排队。旧 `bid_stage_inspect` 继续提供阶段快照。
 

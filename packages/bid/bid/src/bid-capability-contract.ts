@@ -82,8 +82,9 @@ export const bidCapabilityInputSchema = z.discriminatedUnion('capability', [
 
 /** 模型选择的单一步骤；身份和文件路径由 Host 填充。 */
 export const bidCapabilityStepSchema = z.object({
-  description: instruction
-    .describe('向用户说明本步骤要处理的具体对象、动作和预期结果。不要只填写能力名称；由实际任务决定，不使用固定模板步骤。'),
+  description: z.string().trim().min(1).max(20, '步骤说明最多 20 字，请用一句短摘要，详细要求放在 call.input 中。')
+    .regex(/^[^\r\n\u2028\u2029]+$/u, '步骤说明须为单行短摘要，详细要求放在 call.input 中。')
+    .describe('用一句单行短摘要说明具体对象、动作和预期结果，最多 20 字。详细要求放在 call.input 中，不列子步骤、背景或验收细则；不要只写能力名称。'),
   scope: bidCapabilityStepScopeSchema,
   call: bidCapabilityInputSchema,
 }).strict()

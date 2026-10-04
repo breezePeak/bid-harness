@@ -333,14 +333,14 @@ class PlanningAdapter extends ChapterAdapter {
                   title: '交付成果', purpose: '交付成果', must_answer: ['交付成果'] },
               ],
             } } },
-            { description: '完整迁移本章原文块到 Host 返回的新叶节', scope: { source: 'task' }, call: {
+            { description: '迁移本章原文到新叶节', scope: { source: 'task' }, call: {
               capability: 'chapter.reorganize', input: { source_section_positions: [2], instruction: '完整保留原文，按三个阶段迁移。' } } },
             { description: '使用已迁移草稿完成新叶节正文及审核', scope: { source: 'previous_targets' }, call: {
               capability: 'chapter.write', input: { instruction: '保留已分配原文，完成每个新叶节及审核；不得新增企业事实。' } } },
             ...(this.repeatCompletedWriting ? [{ description: '再次完善已完成新叶节并保留原文',
               scope: { source: 'previous_targets' as const }, call: { capability: 'chapter.write' as const,
                 input: { instruction: '保留此前正文和原始迁移内容，再次完成写作与审核。' } } }] : []),
-            { description: '按当前写作计划再次核查新叶节，复用正文而不调用 Writer', scope: { source: 'previous_targets' }, call: {
+            { description: '复用正文并复核新叶节', scope: { source: 'previous_targets' }, call: {
               capability: 'chapter.review', input: { reason: '核查拆分后的当前正文、审核和写作计划一致。' } } },
           ] } }); return
         default: yield* answer('已读取发布凭据，三个真实子章节已完成。'); return
