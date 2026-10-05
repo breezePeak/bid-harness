@@ -1247,6 +1247,49 @@ describe('Workspace 项目与独立 Session', () => {
     expect(JSON.stringify(stale)).toContain('BID_MODEL_TASK_INSPECT_REQUIRED')
   })
 
+  it.each(['阶段工具', '能力任务'] as const)('模型%s只选择同级插入位置，程序生成正式目录顺序', async (entry) => {
+    const { ctx, workspace, fresh } = await fixture()
+    await seedCapabilityProject(workspace, 'complete')
+    await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'completed' })
+    const agent = await fresh('program-bound-outline-order')
+    const message = createUserMessage({ content: [{ type: 'text', text: '把第三章移到设计分组的第一节，保留正文' }],
+      source: { kind: 'user' } })
+    agent.session.append('turn/start', { turn: 1 })
+    agent.session.append('user/message', message, { surfaceOp: 'append' })
+    await ctx.tools.execute({ agent, name: 'bid_project_inspect', arguments: { query: { object: 'outline' } },
+      callId: CallId('outline-order-inspect'), signal: new AbortController().signal })
+    const name = entry === '阶段工具' ? 'bid_outline_apply_operations' : 'bid_run_task'
+    const schema = ctx.tools.schemas(agent).find(tool => tool.name === name)?.parameters
+    expect(schema).toBeDefined()
+    expect(JSON.stringify(schema)).not.toContain('"order"')
+    expect(JSON.stringify(schema)).toContain('"sibling_position"')
+    const selection = entry === '阶段工具'
+      ? { draft_section_position: 4, draft_parent_position: 0 }
+      : { section_position: 4, parent_position: 0 }
+    const argumentsFor = (placement: object) => entry === '阶段工具'
+      ? { operations: [{ type: 'move_section', ...selection, ...placement }] }
+      : { task: { goal: '调整第三章的同级位置', scope: { kind: 'project' }, steps: [{
+        description: '把第三章移到设计分组第一节', scope: { source: 'task' },
+        call: { capability: 'outline.update', input: { operations: [{ type: 'move_section', ...selection, ...placement }] } },
+      }] } }
+    const before = await readFile(join(workspace.projectRoot, 'outline/confirmed-outline.json'), 'utf8')
+    for (const placement of [{ order: 1 }, { sibling_position: -1 }, { sibling_position: 0.5 }]) {
+      const rejected = await ctx.tools.execute({ agent, name, arguments: argumentsFor(placement),
+        callId: CallId('outline-order-rejected'), signal: new AbortController().signal })
+      expect(rejected.isError, JSON.stringify(rejected)).toBe(true)
+      expect(await readFile(join(workspace.projectRoot, 'outline/confirmed-outline.json'), 'utf8')).toBe(before)
+      expect(agent.session.events.filter(event => event.type === 'bid.run.started')).toHaveLength(0)
+    }
+    const accepted = await ctx.tools.execute({ agent, name, arguments: argumentsFor({ sibling_position: 0 }),
+      callId: CallId('outline-order-program-bound'), signal: new AbortController().signal })
+    expect(accepted, JSON.stringify(accepted)).toMatchObject({ isError: false, value: { accepted: true } })
+    await settleCapabilityOperations(ctx)
+    const outline = parseOutlineArtifact(JSON.parse(await readFile(join(workspace.projectRoot, 'outline/confirmed-outline.json'), 'utf8')))
+    expect(outline.sections.filter(section => section.parent_id === 'GROUP-A')
+      .sort((left, right) => left.order - right.order).map(section => [section.id, section.order]))
+      .toEqual([['SEC-3', 1], ['SEC-1', 2], ['SEC-2', 3]])
+  })
+
   it('旧目录工具在 S5 完成后使用能力 Work，并保留 CAS 冲突保护', async () => {
     const { ctx, workspace, fresh } = await fixture()
     await seedCapabilityProject(workspace, 'complete')

@@ -9,7 +9,7 @@ import { applyTenderAnalysisEdits, createConfirmedTenderScoring, createTenderSco
   type TenderAnalysisConfirmationView } from './tender-analysis-confirmation.ts'
 import { parseTenderComplianceArtifact, parseTenderProjectArtifact, parseTenderRequirementsArtifact,
   parseTenderScoringArtifact, type TenderScoringArtifact } from './tender-analysis-artifacts.ts'
-import { catalogMatchesScoring, parseScoringResponsePointCandidate, parseScoringResponsePointCatalog,
+import { bindScoringResponsePointModelCandidate, catalogMatchesScoring, parseScoringResponsePointCatalog,
   reconcileScoringResponsePointCatalog, type ScoringResponsePointCandidate,
   type ScoringResponsePointCatalog } from './scoring-response-point-artifacts.ts'
 import { assertNoLinkedPath, within } from './workspace-path.ts'
@@ -60,15 +60,15 @@ export async function analyzeChangedScoringResponsePoints(
     parent: context.agent, signal: context.run.signal, label: '局部评分响应点分析',
     prompt: [{ type: 'text', text: [
       '只分析以下评分项，逐项按评分语义形成最小合理业务响应点。不得按标点或分值机械切分，不得补造原文没有的主题。',
-      `评分项：${JSON.stringify(scoring)}`,
-      '返回 {"schema_version":1,"points":[{"scoring_id":"原 ID","order":1,"text":"响应内容"}]}。',
-      '每个评分项至少一个响应点；同项 order 从 1 连续递增；不得返回其他评分项。',
+      `评分项：${JSON.stringify(scoring.scoring_items.map(({ id: _id, source_refs: _sources, ...item }, scoring_position) => ({ scoring_position, ...item })))}`,
+      '返回 {"points":[{"scoring_position":0,"text":"响应内容"}]}。',
+      '每个评分项至少一个响应点；scoring_position 选择上面评分项的位置，实际评分身份、响应点身份和同项顺序由程序填写，不抄写 ID 或版本。',
     ].join('\n') }],
     outputSchema: { type: 'object', properties: {
-      schema_version: { type: 'integer' }, points: { type: 'array', items: { type: 'object',
-        properties: { scoring_id: { type: 'string' }, order: { type: 'integer' }, text: { type: 'string' } },
-        required: ['scoring_id', 'order', 'text'], additionalProperties: false } },
-    }, required: ['schema_version', 'points'], additionalProperties: false },
+      points: { type: 'array', items: { type: 'object',
+        properties: { scoring_position: { type: 'integer' }, text: { type: 'string' } },
+        required: ['scoring_position', 'text'], additionalProperties: false } },
+    }, required: ['points'], additionalProperties: false },
     toolFilter: { allow: [] }, maxDepth: 1,
     persona: '你是评分响应点分析 Child。只分析 Host 提供的评分事实，不调用工具。',
   })
@@ -77,7 +77,7 @@ export async function analyzeChangedScoringResponsePoints(
     if (result.stopReason !== 'completed' || result.structured === undefined) {
       throw new Error('BID_TENDER_UPDATE_RESPONSE_POINT_CHILD_FAILED')
     }
-    return parseScoringResponsePointCandidate(result.structured)
+    return bindScoringResponsePointModelCandidate(scoring, result.structured)
   } finally { await child.dispose() }
 }
 

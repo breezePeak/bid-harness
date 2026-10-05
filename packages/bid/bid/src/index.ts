@@ -3406,7 +3406,7 @@ export class BidHostRuntime extends TypertRemoteService {
           return { ok: false, error: { code: 'BID_OUTLINE_DRAFT_CONFLICT', current: baseline } }
         }
         const task = request.action === 'bid_outline_apply_operations' ? {
-          goal: '按用户要求调整目录', scope: { kind: 'project' }, steps: [{ description: '应用当前确认的目录编辑操作并同步受影响的章节引用', scope: { source: 'task' },
+          goal: '按用户要求调整目录', scope: { kind: 'project' }, steps: [{ description: '应用目录编辑并同步章节引用', scope: { source: 'task' },
             call: { capability: 'outline.update', input: { operations: request.operations,
               business_bindings: request.business_bindings ?? [] } } }],
         } : request.action === 'bid_outline_regenerate_scope' ? {
@@ -3540,7 +3540,18 @@ export class BidHostRuntime extends TypertRemoteService {
     }
     const active = this.inFlight.get(key)
     if (request.action === 'bid_stage_inspect') {
-      const workspace = active?.workspace ?? new BidWorkspace(key, workspaceConfig(this.config))
+      let workspace: BidWorkspace | undefined = active?.workspace ?? new BidWorkspace(key, workspaceConfig(this.config))
+      if (request.view === 'recovery') {
+        const state = bidSessionTaskState(session)
+        const run = bidRecoverableRun(session, state)
+        if (run !== undefined && run.work.kind !== 'stage_execution' && run.work.kind !== 'file_intake') {
+          const paths = await readExistingBidWorkingTree(workspace, run.work)
+          workspace = paths === null ? undefined : new BidWorkspace(workspace.root, {
+            ...workspace.config,
+            projectDirectory: relative(workspace.root, paths.projectRoot),
+          })
+        } else if (run === undefined && state.status === 'failed') workspace = undefined
+      }
       return {
         ...await inspectBidStage(workspace, session, request.reference, request.view),
         scheduling_paused: active?.stageControl.paused() ?? false,

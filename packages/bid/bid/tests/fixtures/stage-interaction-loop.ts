@@ -9,7 +9,6 @@ import UserQuestionService from '@deepseek-ai/dsh-user-questions'
 import { BidHostRuntime, BidOrchestratorError, checkpointBidProjectState, getOrCreateOutlineDraft,
   parseEvidenceMapArtifact, readBidProjectState, BID_INITIAL_TASK_STATE, reduceBidTaskState } from '@deepseek-ai/dsh-bid'
 import { runEvidenceMappingLoop } from './evidence-mapping-loop.ts'
-import { outlineRegenerationChanges } from '../../src/outline-regeneration-artifacts.ts'
 import { seedCapabilityProject } from '../capability-fixture.ts'
 import { collectBidModelTaskCatalog } from '../../src/bid-model-task.ts'
 import { bidRecoverableRun } from '../../src/bid-recovery.ts'
@@ -67,7 +66,7 @@ export async function runCapabilityReplanLoop(ctx: Context, root: string) {
   const initialArguments = await modelTaskArguments(agent, { task: initialTask })
   const replacementSteps = [
     { description: '将章节3提升到顶层并保留现有正文', scope: { source: 'task' }, call: { capability: 'outline.update', input: { operations: [
-      { type: 'move_section', section_position: 4, parent_position: null, order: 3 },
+      { type: 'move_section', section_position: 4, parent_position: null, sibling_position: 2 },
     ] } } },
     { description: '将提升后的章节改名为独立实施方案', scope: { source: 'previous_targets' }, call: { capability: 'outline.update', input: { operations: [
       { type: 'update_section', section_position: 4, title: '独立实施方案' },
@@ -270,14 +269,30 @@ export async function runFullOutlineRegenerationLoop(ctx: Context, root: string)
     await [...host.inFlight.values()].find(operation => operation.session === agent.session)?.done
   }
   const draft = await getOrCreateOutlineDraft(workspace)
-  const candidate = { ...draft.outline, sections: draft.outline.sections.map(section => ({ ...section, title: `${section.title}方案` })) }
   const original = await readFile(join(workspace.projectRoot, 'outline/outline.json'), 'utf8')
-  const changeSet = { schema_version: 1, base_revision: draft.revision, base_draft_sha256: draft.draft_outline_sha256,
-    changes: outlineRegenerationChanges(draft.outline, candidate).map(change => ({ ...change, reason: '明确方案标题' })) }
   childScript.push(
-    options => call('write', { file_path: visibleTarget(options, /本轮初稿唯一输出：([^。\r\n]+)/u), content: JSON.stringify(candidate) }),
-    options => call('write', { file_path: visibleTarget(options, /同时写入 ([^，\r\n]+)/u), content: JSON.stringify(changeSet) }),
-    answer('目录已重生成。'),
+    (options) => {
+      if (options.tools?.length !== 1 || options.tools[0]?.name !== 'structured_output') {
+        throw new Error('整本重生成 Child 只能提交结构化输出。')
+      }
+      const prompt = options.messages.flatMap(message => message.content).flatMap(block => block.type === 'text' ? [block.text] : []).join('\n')
+      const line = prompt.split('\n').find(text => text.startsWith('唯一目录基线：'))
+      if (line === undefined) throw new Error('整本重生成没有注入真实目录位置表。')
+      const baseline = JSON.parse(line.slice('唯一目录基线：'.length)) as {
+        document_title: string
+        global_compliance_positions: number[]
+        sections: Array<Record<string, unknown> & { position: number; parent_position: number | null; title: string }>
+      }
+      const sections = baseline.sections.filter(section => section.title !== '技术偏离表')
+      return call('structured_output', { document_title: baseline.document_title,
+        global_compliance_positions: baseline.global_compliance_positions,
+        sections: sections.map(({ position, sibling_position: _sibling, parent_position, ...section }) => ({ ...section,
+          source_position: position, parent_position: parent_position === null ? null
+            : sections.findIndex(parent => parent.position === parent_position), title: `${section.title}方案`,
+        })),
+      })
+    },
+    answer('已提交位置候选。'),
   )
   reviewScript.push(
     call('structured_output', { operations: [], issues: [] }),
@@ -360,7 +375,8 @@ export async function runStageInteractionLoop(ctx: Context, root: string, checkR
   }), answer('已更新，请重新确认。')])
   const split = await getOrCreateOutlineDraft(workspace)
   const target = split.outline.sections.find(item => item.parent_id === sectionId)!
-  childScript.push(answer(JSON.stringify([{ type: 'update_section', section_id: target.id, title: '实施准备与资源核查' }])))
+  childScript.push(answer(JSON.stringify([{ type: 'update_section',
+    section_position: split.outline.sections.findIndex(section => section.id === target.id), title: '实施准备与资源核查' }])))
   await send('实施准备这一节重新规划一下', [call('bid_project_inspect', { query: { object: 'outline' } }), call('bid_outline_regenerate_scope', {
     draft_section_positions: [split.outline.sections.findIndex(section => section.id === target.id)], feedback: '明确资源核查' }), answer('已更新，请重新确认。')])
   if (await readFile(outlinePath, 'utf8') !== original) throw new Error('连续编辑覆盖了已完成研究的目录')

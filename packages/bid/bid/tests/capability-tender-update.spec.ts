@@ -1,11 +1,14 @@
 import { mkdtemp, readFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { expect, it } from 'vitest'
+import { expect, it, vi } from 'vitest'
 import { BidWorkspace } from '@deepseek-ai/dsh-bid'
+import type { SubagentStartRequest } from '@deepseek-ai/dsh-subagent'
+import { assertSupportedJsonSchema } from '@deepseek-ai/dsh-tools'
 import { bidCapabilityInputSchema, type BidCapabilityExecutionContext } from '../src/bid-capability-contract.ts'
-import { executeTenderUpdateCapability, validateTenderUpdateCapability } from '../src/bid-tender-update-capability.ts'
+import { analyzeChangedScoringResponsePoints, executeTenderUpdateCapability, validateTenderUpdateCapability } from '../src/bid-tender-update-capability.ts'
 import { parseScoringResponsePointCatalog } from '../src/scoring-response-point-artifacts.ts'
+import { parseTenderScoringArtifact } from '../src/tender-analysis-artifacts.ts'
 import { createTestBidRunContext } from '../src/run-coordinator.ts'
 import { seedCapabilityProject } from './capability-fixture.ts'
 
@@ -20,6 +23,59 @@ function context(workspace: BidWorkspace): BidCapabilityExecutionContext {
 async function json(workspace: BidWorkspace, path: string): Promise<unknown> {
   return JSON.parse(await readFile(join(workspace.projectRoot, path), 'utf8')) as unknown
 }
+
+async function scoringAnalysisFixture(structured: unknown) {
+  const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-tender-update-child-')))
+  await seedCapabilityProject(workspace, 'complete')
+  const input = parseTenderScoringArtifact(await json(workspace, 'analysis/scoring.json'))
+  const scoring = { ...input, scoring_items: input.scoring_items.filter((_, index) => index === 1 || index === 3) }
+  const dispose = vi.fn(async () => {})
+  const start = vi.fn(async (_provider: string, _request: SubagentStartRequest) => ({
+    result: Promise.resolve({ stopReason: 'completed', structured, output: [] }), dispose,
+  }))
+  const agent = { ctx: { get: () => ({ getProvider: () => ({ inheritsParentContext: false }), start }) } } as unknown as BidCapabilityExecutionContext['agent']
+  return { context: { ...context(workspace), agent }, scoring, start, dispose }
+}
+
+it('局部评分 Child 选择冻结位置，程序绑定非连续评分身份与同项顺序', async () => {
+  const fixture = await scoringAnalysisFixture({ points: [
+    { scoring_position: 1, text: '交付核验' },
+    { scoring_position: 0, text: '设计方案' },
+    { scoring_position: 0, text: '实施安排' },
+  ] })
+  await expect(analyzeChangedScoringResponsePoints(fixture.context, fixture.scoring)).resolves.toEqual({
+    schema_version: 1, points: [
+      { scoring_id: 'SCORE-4', order: 1, text: '交付核验' },
+      { scoring_id: 'SCORE-2', order: 1, text: '设计方案' },
+      { scoring_id: 'SCORE-2', order: 2, text: '实施安排' },
+    ],
+  })
+  expect(fixture.start).toHaveBeenCalledOnce()
+  const request = fixture.start.mock.calls[0]![1]
+  assertSupportedJsonSchema(request.outputSchema)
+  expect(request.outputSchema).toEqual({ type: 'object', properties: {
+    points: { type: 'array', items: { type: 'object', properties: {
+      scoring_position: { type: 'integer' }, text: { type: 'string' },
+    }, required: ['scoring_position', 'text'], additionalProperties: false } },
+  }, required: ['points'], additionalProperties: false })
+  const prompt = request.prompt.flatMap(block => block.type === 'text' ? [block.text] : []).join('\n')
+  expect(prompt).toContain('"scoring_position":0')
+  expect(prompt).toContain('"scoring_position":1')
+  expect(prompt).not.toContain('SCORE-2')
+  expect(prompt).not.toContain('SCORE-4')
+  expect(fixture.dispose).toHaveBeenCalledOnce()
+})
+
+it.each([
+  { name: '原始评分 ID', value: { points: [{ scoring_position: 0, scoring_id: 'SCORE-2', text: '设计' }] }, error: 'Unrecognized key' },
+  { name: '模型指定顺序', value: { points: [{ scoring_position: 0, order: 1, text: '设计' }] }, error: 'Unrecognized key' },
+  { name: '模型指定版本', value: { schema_version: 1, points: [{ scoring_position: 0, text: '设计' }] }, error: 'Unrecognized key' },
+  { name: '越界评分位置', value: { points: [{ scoring_position: 2, text: '设计' }] }, error: 'scoring-response-point-candidate-position-invalid' },
+])('局部评分 Child 拒绝 $name 并释放会话', async ({ value, error }) => {
+  const fixture = await scoringAnalysisFixture(value)
+  await expect(analyzeChangedScoringResponsePoints(fixture.context, fixture.scoring)).rejects.toThrow(error)
+  expect(fixture.dispose).toHaveBeenCalledOnce()
+})
 
 it('完成写作后修改一条规范化要求，来源与正文保持原值并标记对应章节', async () => {
   const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-tender-update-requirement-')))

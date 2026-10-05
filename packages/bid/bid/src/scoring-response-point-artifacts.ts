@@ -31,6 +31,14 @@ export const scoringResponsePointCandidateSchema = z.object({
   }).strict()),
 }).strict()
 
+/** 评分拆解与语义复核只返回输入位置及业务文本，正式身份和顺序由程序填写。 */
+export const scoringResponsePointModelCandidateSchema = z.object({
+  points: z.array(z.object({
+    scoring_position: z.number().int().nonnegative(),
+    text: z.string().trim().min(1),
+  }).strict()),
+}).strict()
+
 /** One stable response point owned by the Host. */
 export type ScoringResponsePoint = z.infer<typeof pointSchema>
 /** Stable response-point identity projected beside the S2 scoring Artifact. */
@@ -54,6 +62,29 @@ export function parseScoringResponsePointCatalog(value: unknown): ScoringRespons
  */
 export function parseScoringResponsePointCandidate(value: unknown): ScoringResponsePointCandidate {
   return scoringResponsePointCandidateSchema.parse(value)
+}
+
+/**
+ * 将模型选择绑定到本次冻结的评分输入，不接受模型提交的身份或顺序字段。
+ * @param scoring 本次提供给模型的评分项，数组顺序在调用期间固定。
+ * @param value 模型返回的位置和响应文本。
+ * @returns 程序绑定评分身份、版本和连续顺序的候选。
+ */
+export function bindScoringResponsePointModelCandidate(
+  scoring: TenderScoringArtifact, value: unknown,
+): ScoringResponsePointCandidate {
+  const sequence = new Map<string, number>()
+  const candidate = scoringResponsePointModelCandidateSchema.parse(value)
+  return {
+    schema_version: SCORING_RESPONSE_POINT_CATALOG_SCHEMA_VERSION,
+    points: candidate.points.map((point) => {
+      const item = scoring.scoring_items[point.scoring_position]
+      if (item === undefined) throw new Error('scoring-response-point-candidate-position-invalid')
+      const order = (sequence.get(item.id) ?? 0) + 1
+      sequence.set(item.id, order)
+      return { scoring_id: item.id, order, text: point.text }
+    }),
+  }
 }
 
 /**

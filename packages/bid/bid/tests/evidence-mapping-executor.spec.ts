@@ -74,7 +74,7 @@ import { executeTestCapabilityTask as executeCapabilityTask } from './fixtures/t
 import { BID_CAPABILITIES } from '../src/bid-capability-registry.ts'
 import { allowedWritingCapabilityWrites } from '../src/bid-writing-capability.ts'
 import { persistBidWorkRequest } from '../src/work-descriptor.ts'
-import { safeRecoverableBidFailure } from '../src/bid-recovery.ts'
+import { bidRecoverableRun, safeRecoverableBidFailure } from '../src/bid-recovery.ts'
 
 const executeEvidenceMapping = (
   agent: Agent,
@@ -1092,6 +1092,43 @@ function executionLogFixture(
 }
 
 describe('evidence-mapping Agent executor', () => {
+  it('模型只选择响应点时 Host 补齐所属评分项并写入研究检查点和最终目录', async () => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-response-point-scoring-binding-')))
+    const fixture = mappingFixture(workspace, await writeInputs(workspace))
+    fixture.onReply.mockImplementation((_child, result) => {
+      for (const mapping of result.section_mappings) mapping.writing_brief.scoring_ids = []
+    })
+    const execution = executeEvidenceMapping(fixture.agent, workspace, buildBidStageTask('evidence_mapping'), {
+      maxConcurrency: 2, maxRepairAttempts: 0,
+    })
+    await vi.waitFor(() => { expect(fixture.starts).toHaveLength(2) })
+    const unknownPoint = await fixture.invokeSubmissionTool(fixture.starts[0]!.request.childId!, 'update_section_task', {
+      section_id: 'SEC-1',
+      basis: { kind: 'section_responsibility', explanation: '选择当前章节的响应点。', requirement_ids: [] },
+      coverage_override: { requirement_ids: ['R-1'], scoring_ids: [], scoring_response_point_ids: ['RP-999999'] },
+    })
+    expect(unknownPoint).toMatchObject({ isError: true })
+    expect(unknownPoint.isError && unknownPoint.error.message).toContain('response_point_positions: 未知对象位置')
+    fixture.starts.forEach((start) => { start.resolve() })
+    await execution
+
+    const outline = parseOutlineArtifact(JSON.parse(await readFile(join(workspace.projectRoot, 'outline/outline.json'), 'utf8')))
+    for (const [index, section] of outline.sections.entries()) {
+      expect(section.scoring_response_point_ids).toEqual([`RP-${String(index + 1).padStart(6, '0')}`])
+      expect(section.scoring_ids).toEqual([`S-${String(index + 1)}`])
+      expect(section.scoring_response_points).toEqual([{ scoring_id: `S-${String(index + 1)}`, response_point: `响应点${String(index + 1)}` }])
+    }
+    const checkpoint = JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/evidence-mapping-checkpoint.json'), 'utf8')) as {
+      tasks: Array<{ task_id: string; result: EvidenceMappingPartialResult }>
+    }
+    for (const task of checkpoint.tasks.filter(item => item.task_id.startsWith('MAP-INIT-'))) {
+      for (const mapping of task.result.section_mappings) {
+        expect(mapping.writing_brief.scoring_ids).toEqual([mapping.section_id === 'SEC-1' ? 'S-1' : 'S-2'])
+      }
+    }
+    expect(fixture.submissionResults.filter(result => result.isError)).toEqual([unknownPoint])
+  })
+
   it('技术偏离表以全量 Requirement 研究并以空 ownership 完成 S4 Task', async () => {
     const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-technical-deviation-mapping-')))
     const material = await writeInputs(workspace, [TECHNICAL_DEVIATION_SECTION_ID, 'SEC-1', 'SEC-2'])
@@ -1712,7 +1749,7 @@ describe('evidence-mapping Agent executor', () => {
     expect(log.tasks.find(task => task.phase === 'final_check')).toMatchObject({ status: 'completed' })
   })
 
-  it('Final Check 完成后发布失败，恢复时不再启动 Child', async () => {
+  it('Final Check 完成后发布失败，恢复历史检查点的响应点评分关联且不再启动 Child', async () => {
     const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-final-review-completed-')))
     const material = await writeInputs(workspace)
     const first = mappingFixture(workspace, material)
@@ -1724,9 +1761,26 @@ describe('evidence-mapping Agent executor', () => {
     first.starts.forEach((start) => { start.resolve() })
     await rejected
     const checkpoint = JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/evidence-mapping-checkpoint.json'), 'utf8')) as {
-      tasks: Array<{ task_id: string; completed: boolean; input_fingerprint: string }>
+      tasks: Array<{
+        task_id: string
+        completed: boolean
+        input_fingerprint: string
+        result: EvidenceMappingPartialResult
+        task_operations: Array<{
+          before: EvidenceMappingPartialResult['section_mappings'][number]
+          after: EvidenceMappingPartialResult['section_mappings'][number]
+        }>
+      }>
     }
     expect(checkpoint.tasks.find(task => task.task_id === 'MAP-FINAL-CHECK')?.completed).toBe(true)
+    for (const saved of checkpoint.tasks) {
+      for (const mapping of saved.result.section_mappings) mapping.writing_brief.scoring_ids = []
+      for (const change of saved.task_operations) {
+        change.before.writing_brief.scoring_ids = []
+        change.after.writing_brief.scoring_ids = []
+      }
+    }
+    await writeFile(join(workspace.projectRoot, 'analysis/evidence-mapping-checkpoint.json'), JSON.stringify(checkpoint))
 
     const resumed = mappingFixture(workspace, material)
     await executeEvidenceMapping(resumed.agent, workspace, buildBidStageTask('evidence_mapping'), {
@@ -1739,6 +1793,8 @@ describe('evidence-mapping Agent executor', () => {
       .toBe(checkpoint.tasks.find(task => task.task_id === 'MAP-FINAL-CHECK')?.input_fingerprint)
     expect(resumed.starts).toHaveLength(0)
     expect(resumed.finalStarts).toHaveLength(0)
+    const published = parseOutlineArtifact(JSON.parse(await readFile(join(workspace.projectRoot, 'outline/outline.json'), 'utf8')))
+    expect(published.sections.map(section => section.scoring_ids)).toEqual([['S-1'], ['S-2']])
   })
 
   it('webSearchEnabled 变化会使 S4 Task 指纹失效', async () => {
@@ -3470,9 +3526,12 @@ describe('evidence-mapping Agent executor', () => {
       }
       await started
       const failed = await readBidProjectState(workspace)
-      expect(failed).toMatchObject({ stage: 'evidence_mapping', status: 'suspended',
-        run: { runId: adapter.runId, error: { issues: [{ code: 'EVIDENCE_MAPPING_INTERNAL_ID_VISIBLE' }],
-          recovery: { kind: 'repair' } } } })
+      expect(failed).toMatchObject({ stage: 'evidence_mapping', status: 'failed', run: null,
+        failure: { issues: [{ code: 'EVIDENCE_MAPPING_INTERNAL_ID_VISIBLE' }], recovery: { kind: 'repair' } } })
+      if (failed === undefined) throw new Error('missing failed project checkpoint')
+      expect(bidRecoverableRun(agent.session, failed)).toMatchObject({ runId: adapter.runId,
+        work: { workId: s4Work.workId }, error: { issues: [{ code: 'EVIDENCE_MAPPING_INTERNAL_ID_VISIBLE' }],
+          recovery: { kind: 'repair' } } })
       const checkpointPath = join(workspace.projectRoot, 'analysis/evidence-mapping-checkpoint.json')
       const checkpoint = JSON.parse(await readFile(checkpointPath, 'utf8')) as {
         tasks: Array<{ task_id: string; completed: boolean }>

@@ -216,6 +216,8 @@ export function bidModelTaskJsonSchema(schema: JsonSchemaNode): JsonSchemaNode {
           }] }]]
           if (name === 'depends_on') return [[name, { type: 'array', items: { type: 'integer', minimum: 0 },
             description: '真正依赖的任务所处理章节在对象表中的位置；任务身份由 Host 生成。' }]]
+          if (name === 'order') return [['sibling_position', { type: 'integer', minimum: 0,
+            description: '章节的同级插入位置，从 0 开始；持久顺序由程序生成。' }]]
           const field = fieldMap.get(name)
           if (field === undefined) return [[name, visit(child)]]
           const item = { type: 'integer', minimum: 0, description: `选择 objects.${field[1]} 中的 position，Host 绑定真实身份。` }
@@ -226,7 +228,7 @@ export function bidModelTaskJsonSchema(schema: JsonSchemaNode): JsonSchemaNode {
       } else if (key === 'required' && Array.isArray(value)) {
         output[key] = z.array(z.string()).parse(value)
           .filter(name => !taskProgramFields.has(name))
-          .map(name => fieldMap.get(name)?.[0] ?? name)
+          .map(name => name === 'order' ? 'sibling_position' : fieldMap.get(name)?.[0] ?? name)
       } else output[key] = visit(value)
     }
     return output
@@ -257,6 +259,11 @@ function bindModelObjects(value: unknown, catalog: BidModelTaskCatalog): unknown
     const output: Record<string, unknown> = {}
     for (const [name, child] of Object.entries(record)) {
       if (name === 'defer_content_migration') throw new Error('BID_MODEL_TASK_PROGRAM_FIELD_FORBIDDEN')
+      if (name === 'order') throw new Error('BID_MODEL_TASK_PROGRAM_FIELD_FORBIDDEN')
+      if (name === 'sibling_position') {
+        output.order = position.parse(child) + 1
+        continue
+      }
       if (name in fields || taskProgramFields.has(name)) {
         throw new Error('BID_MODEL_TASK_IDENTITY_FORBIDDEN')
       }

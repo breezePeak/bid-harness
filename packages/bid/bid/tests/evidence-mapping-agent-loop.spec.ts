@@ -17,7 +17,7 @@ import IntegrationFileSystem, { runEvidenceMappingLoop } from './fixtures/eviden
 import { runFullOutlineRegenerationLoop, runStageInteractionLoop } from './fixtures/stage-interaction-loop.ts'
 
 describe('S4 Web evidence through a real Agent Tool loop', () => {
-  it('整本重生成期间开放原有执行工具，完成后恢复等待确认', async () => {
+  it('整本重生成由无文件工具 Child 选择位置，Host 保留身份并保存 Draft 后等待确认', async () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-bid-full-regeneration-'))
     const ctx = new Context()
     await ctx.plugin(LlmRuntime)

@@ -80,13 +80,13 @@ it('S3 一次生成响应点和目录、质量复核修改后等待用户确认'
     suggested_tables: ['技术偏离表'],
   })
   expect(actual.outline.sections.filter(section => section.id === 'dsh-technical-deviation-table')).toHaveLength(1)
-  const security = actual.outline.sections.find(section => section.id === 'SEC-SECURITY')
+  const security = actual.outline.sections.find(section => section.id === 'SEC-001')
   expect(security?.title).toBe('访问控制、安全审计与追溯')
   expect(security?.scoring_response_point_ids).toHaveLength(11)
   expect(security?.scoring_response_points[10]).toEqual({ scoring_id: 'SCORE-1', response_point: '说明审计留存与追溯' })
   const report = parseOutlineQualityReport(actual.report)
   expect(report.issues).toEqual([{ code: 'OUTLINE_QUALITY_ADVISORY', severity: 'advisory', message: '请确认安全审计与追溯安排。' }])
-  expect(report.reviewed_section_ids).toEqual(['dsh-technical-deviation-table', 'SEC-SECURITY', 'SEC-SERVICE'])
+  expect(report.reviewed_section_ids).toEqual(['dsh-technical-deviation-table', 'SEC-001', 'SEC-002'])
   expect(report.checked_scoring_response_point_ids).toHaveLength(11)
 }, LOADER_SMOKE_TEST_TIMEOUT_MS)
 
@@ -169,19 +169,26 @@ it('S3 父章局部修复失败后恢复原 Work，由新叶节承接响应点�
           },
         ]
       `)
-      expect(records.filter(record => record.type === 'tool/call').map(record => record.data.name)).toEqual(['write', 'write'])
+      expect(records.filter(record => record.type === 'tool/call')).toEqual([])
       expect(records.filter(record => record.type === 'bid.user_confirmation.required')).toHaveLength(1)
       expect(records.filter(record => record.type === 'bid.task.changed' && record.data.state?.status === 'failed')).toHaveLength(1)
       expect(records.filter(record => record.type === 'bid.run.started')).toHaveLength(2)
       expect(records.filter(record => record.type === 'bid.run.notice')).toHaveLength(1)
       expect(records.some(record => record.type === 'bid.run.suspended')).toBe(false)
-      const repairCall = records.findLast(record => record.type === 'tool/call' && record.data.name === 'write')
-      const repairArgs = JSON.parse(repairCall?.data.arguments ?? 'null') as { content: string }
-      const operations = JSON.parse(repairArgs.content) as unknown[]
+      const childRecords = logs.filter(content => (JSON.parse(content.split('\n')[0]!) as SessionHeader)
+        .parentSession === 's3-outline-recovery').flatMap(log => log.trimEnd().split('\n').map(line => JSON.parse(line) as {
+        type: string
+        data: { name?: string; arguments?: string }
+      }))
+      expect(childRecords.filter(record => record.type === 'tool/call').every(record => record.data.name === 'structured_output')).toBe(true)
+      const operations = childRecords.filter(record => record.type === 'tool/call').flatMap((record) => {
+        const output = JSON.parse(record.data.arguments ?? '{}') as { operations?: Array<{ type: string }> }
+        return output.operations?.some(operation => operation.type === 'add_section') ? [output.operations] : []
+      }).at(-1)
       expect(operations).toEqual([
         { type: 'repair_structure', section_index: 1, writable: false, must_answer: [] },
-        expect.objectContaining({ type: 'add_section', parent_id: 'SEC-SECURITY', writable: true,
-          scoring_response_point_ids: Array.from({ length: 11 }, (_, index) => 'RP-' + String(index + 1).padStart(6, '0')) }),
+        expect.objectContaining({ type: 'add_section', parent_position: 1, writable: true,
+          response_point_positions: Array.from({ length: 11 }, (_, index) => index) }),
       ])
       await expect(readFile(join(cwd, '.bid-harness/outline/initial-confirmed-outline.json'))).rejects.toMatchObject({ code: 'ENOENT' })
     },
@@ -191,9 +198,9 @@ it('S3 父章局部修复失败后恢复原 Work，由新叶节承接响应点�
   expect(actual.untouchedUnchanged).toBe(true)
   expect(actual.confirmationEvents).toBe(0)
   expect(actual.recovery).toEqual({ failed: true, matched_notice: true, same_work: true, resumed_original_run: true })
-  const parent = actual.outline.sections.find(section => section.id === 'SEC-SECURITY')
+  const parent = actual.outline.sections.find(section => section.id === 'SEC-001')
   expect(parent).toMatchObject({ writable: false, must_answer: [], scoring_response_point_ids: [], scoring_response_points: [] })
-  const leaf = actual.outline.sections.find(section => section.id === 'SEC-001')
+  const leaf = actual.outline.sections.find(section => section.id === 'SEC-004')
   expect(leaf?.scoring_response_point_ids).toEqual(Array.from({ length: 11 }, (_, index) => 'RP-' + String(index + 1).padStart(6, '0')))
   expect(leaf?.scoring_response_points).toHaveLength(11)
   const report = parseOutlineQualityReport(actual.report)
@@ -231,10 +238,10 @@ it('S3 父章局部修复失败后恢复原 Work，由新叶节承接响应点�
         ],
         "reviewed_section_ids": [
           "dsh-technical-deviation-table",
-          "SEC-SECURITY",
-          "SEC-SERVICE",
-          "SEC-DETAIL",
           "SEC-001",
+          "SEC-002",
+          "SEC-003",
+          "SEC-004",
         ],
         "schema_version": 4,
         "scope": "technical_bid",
@@ -247,26 +254,26 @@ it('S3 父章局部修复失败后恢复原 Work，由新叶节承接响应点�
           "writable": true,
         },
         {
-          "id": "SEC-SECURITY",
+          "id": "SEC-001",
           "parent_id": null,
           "response_points": 0,
           "writable": false,
         },
         {
-          "id": "SEC-SERVICE",
+          "id": "SEC-002",
           "parent_id": null,
           "response_points": 0,
           "writable": true,
         },
         {
-          "id": "SEC-DETAIL",
-          "parent_id": "SEC-SECURITY",
+          "id": "SEC-003",
+          "parent_id": "SEC-001",
           "response_points": 0,
           "writable": true,
         },
         {
-          "id": "SEC-001",
-          "parent_id": "SEC-SECURITY",
+          "id": "SEC-004",
+          "parent_id": "SEC-001",
           "response_points": 11,
           "writable": true,
         },

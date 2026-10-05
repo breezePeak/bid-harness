@@ -3,6 +3,7 @@ import { mappingModelReply } from './mapping-model-positions.ts'
 /** S4/S5 真实工具循环与 Loader 回放共用的外部结果和输入资料。 */
 import { lstat, mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { join, relative, resolve } from 'node:path'
+import { isDeepStrictEqual } from 'node:util'
 import { Context } from '@deepseek-ai/cordis'
 import LocalFileSystem from '@deepseek-ai/dsh-fs-local'
 import { CallId, LlmAdapter, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
@@ -405,6 +406,7 @@ export async function runEvidenceMappingLoop(ctx: Context, root: string, repair:
       partialResult(sourceUrl).section_mappings[0]!.writing_brief,
     ),
     writing_dimensions: ['身份鉴别与访问控制', '安全审计'], missing_topics: [],
+    coverage_override: { requirement_ids: ['REQ-1'], scoring_ids: [], scoring_response_point_ids: ['RP-000001'] },
   }
   const answerPlan = {
     section_id: 'SEC-SECURITY', basis: blueprint.basis,
@@ -710,34 +712,40 @@ export async function runOutlineGenerationLoop(ctx: Context, root: string, scena
     title: '访问控制实施流程', purpose: '说明身份鉴别与权限授予流程。',
     must_answer: ['说明身份鉴别与权限授予流程。'], requirement_ids: ['REQ-1'],
   })
-  const candidate = { ...outline, sections: outline.sections.map(({ scoring_response_points: _points, ...item }) => item) }
-  const responseCandidate = { schema_version: 1, points: texts.map((text, index) => ({ scoring_id: 'SCORE-1', order: index + 1, text: '说明' + text })) }
+  const candidate = { document_title: outline.document_title, global_compliance_positions: [],
+    sections: outline.sections.map(({ id: _id, parent_id, level: _level, order: _order, requirement_ids,
+      scoring_ids, compliance_ids, scoring_response_point_ids, scoring_response_points: _points,
+      framework_refs: _frameworks, ...item }) => ({ ...item,
+      parent_position: parent_id === null ? null : outline.sections.findIndex(section => section.id === parent_id),
+      requirement_positions: requirement_ids.map(() => 0), scoring_positions: scoring_ids.map(() => 0),
+      compliance_positions: compliance_ids.map(() => 0),
+      response_point_positions: scoring_response_point_ids?.map(id => pointIds.indexOf(id)) ?? [], framework_refs: [],
+    })) }
+  const responseCandidate = { points: texts.map(text => ({ scoring_position: 0, text: '说明' + text })) }
   const sessionId = SessionId('s3-outline-recovery')
   const parentScript: ScriptStep[] = []
+  const repairScript: ScriptStep[] = []
   if (scenario === 'structural-parent') {
     const attempts = [
       [{ type: 'repair_structure', section_index: 1, writable: false }],
       [{ type: 'repair_structure', section_index: 1, writable: false, must_answer: [] },
-        { type: 'add_section', parent_id: section.id, order: 2, writable: true,
+        { type: 'add_section', parent_position: 1, sibling_position: 1, writable: true,
           title: '安全审计与追溯措施', purpose: '完整响应各项安全技术措施。',
-          must_answer: section.must_answer, requirement_ids: ['REQ-1'], scoring_ids: ['SCORE-1'],
-          scoring_response_point_ids: pointIds,
+          must_answer: section.must_answer, requirement_positions: [0], scoring_positions: [0],
+          response_point_positions: pointIds.map((_id, index) => index),
         }],
     ]
-    for (const [attempt, operations] of attempts.entries()) parentScript.push((options) => {
-      const prompt = options.messages.flatMap(message => message.content)
-        .findLast(block => block.type === 'text' && block.text.includes('唯一输出：'))
-      const output = prompt?.type === 'text' ? prompt.text.match(/唯一输出：([^\n]+)/u)?.[1] : undefined
-      if (output === undefined) throw new Error('缺少目录修复输出路径')
-      return toolCall(`repair-outline-${attempt + 1}`, 'write', { file_path: output, content: JSON.stringify(operations) })
-    }, finalText('目录局部修复操作已提交。'))
+    for (const [attempt, operations] of attempts.entries()) repairScript.push(
+      toolCall(`repair-outline-${attempt + 1}`, 'structured_output', { operations }),
+    )
   }
   const childScript = [
     toolCall('response-points-analysis', 'structured_output', responseCandidate),
     toolCall('response-points-review', 'structured_output', responseCandidate),
     toolCall('initial-outline', 'structured_output', candidate),
+    ...repairScript,
     toolCall('quality-review', 'structured_output', {
-      operations: [{ type: 'update_section', section_id: 'SEC-SECURITY', title: '访问控制、安全审计与追溯' }],
+      operations: [{ type: 'update_section', section_position: 1, title: '访问控制、安全审计与追溯' }],
       issues: [{ severity: 'advisory', message: '请确认安全审计与追溯安排。' }],
     }),
   ]
@@ -771,8 +779,8 @@ export async function runOutlineGenerationLoop(ctx: Context, root: string, scena
   if (outcome.status !== 'waiting_user') throw new Error('S3 没有进入用户确认：' + JSON.stringify(outcome))
   const result = parseOutlineArtifact(JSON.parse(await readFile(join(workspace.projectRoot, 'outline/outline.json'), 'utf8')))
   const report = JSON.parse(await readFile(join(workspace.projectRoot, 'outline/quality-report.json'), 'utf8')) as unknown
-  const untouchedUnchanged = JSON.stringify({ ...outline.sections[1], order: 3 })
-    === JSON.stringify(result.sections.find(item => item.id === 'SEC-SERVICE'))
+  const untouchedUnchanged = isDeepStrictEqual({ ...outline.sections[1], id: 'SEC-002', order: 3, framework_refs: [] },
+    result.sections.find(item => item.id === 'SEC-002'))
   if (!untouchedUnchanged) throw new Error('S3 修改了无关内容')
   return { outcome, untouchedUnchanged, outline: result, report, ...(recovery === undefined ? {} : { recovery }),
     confirmationEvents: agent.session.events.filter(event => event.type === 'bid.user_confirmation.received').length }

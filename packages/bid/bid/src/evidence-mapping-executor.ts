@@ -50,6 +50,7 @@ import {
 import { applyOutlineEdits, outlineEditOperationSchema, type OutlineEditOperation } from './outline-confirmation-edits.ts'
 import { zodJsonSchema } from './zod-json-schema.ts'
 import { createChapterObjectPositions } from './chapter-object-positions.ts'
+import { bindSectionResponsePoints } from './scoring-response-point-bindings.ts'
 import { loadOutlineFrameworkStructures, validateOutlineFrameworkRefs, type OutlineFrameworkStructure } from './outline-framework.ts'
 import { validateOutlineGenerationQuality } from './outline-generation-quality-validator.ts'
 import { validateOutlineSharedCoverage, validateOutlineSharedStructure } from './outline-shared-validator.ts'
@@ -536,6 +537,20 @@ export function parseEvidenceMappingExecutionLog(raw: unknown): EvidenceMappingE
 
 type PartialSectionMapping = EvidenceMappingPartialResult['section_mappings'][number]
 
+function bindMappingResponsePoints(
+  mapping: PartialSectionMapping, catalog: EvidenceMappingInputs['responsePoints'],
+): PartialSectionMapping {
+  const brief = mapping.writing_brief
+  const { scoring_ids } = bindSectionResponsePoints(brief.scoring_ids, brief.scoring_response_point_ids, catalog)
+  return { ...mapping, writing_brief: { ...brief, scoring_ids } }
+}
+
+function bindMappingResultResponsePoints(
+  result: EvidenceMappingPartialResult, catalog: EvidenceMappingInputs['responsePoints'],
+): EvidenceMappingPartialResult {
+  return { ...result, section_mappings: result.section_mappings.map(mapping => bindMappingResponsePoints(mapping, catalog)) }
+}
+
 interface MappingSubmission {
   result: EvidenceMappingPartialResult
   outlineOperations?: OutlineEditOperation[]
@@ -825,10 +840,10 @@ function toolIssues(issues: readonly StageValidationIssue[]): Array<{
 
 function currentSectionMapping(state: MappingSubmissionState, task: EvidenceMappingTask, sectionId: string): PartialSectionMapping {
   const mapping = state.mappings.get(sectionId) ?? state.baselineMappings.get(sectionId)
-  if (mapping !== undefined) return mapping
+  if (mapping !== undefined) return bindMappingResponsePoints(mapping, state.responsePoints)
   const empty = emptyMappingResult({ ...task, section_ids: [sectionId] }, state.stagedOutline).section_mappings[0]
   if (empty === undefined) throw new ToolArgsError([`section_id: 未知章节 ${sectionId}。`])
-  return empty
+  return bindMappingResponsePoints(empty, state.responsePoints)
 }
 
 function applySectionTaskOperation(
@@ -870,13 +885,13 @@ function applySectionTaskOperation(
     }
   }
   const before = currentSectionMapping(state, task, operation.section_id)
-  const after: PartialSectionMapping = { ...before,
+  const after = bindMappingResponsePoints({ ...before,
     writing_brief: { ...before.writing_brief, ...operation.writing_brief, ...operation.coverage_override },
     writing_dimensions: operation.writing_dimensions ?? before.writing_dimensions,
     missing_topics: operation.missing_topics ?? before.missing_topics,
     answer_plan: operation.writing_brief !== undefined || operation.coverage_override !== undefined
       ? undefined : before.answer_plan,
-  }
+  }, state.responsePoints)
   if (operation.answer_plan !== undefined) after.answer_plan = bindPlan(after, operation.answer_plan)
   const change = { operation, before: structuredClone(before), after: structuredClone(after) }
   state.mappings.set(operation.section_id, after)
@@ -1415,7 +1430,7 @@ function mappingSubmissionSnapshot(state: MappingSubmissionState, task: Evidence
     task_id: task.task_id,
     section_mappings: mappingTaskSections(state.stagedOutline, task).flatMap((section) => {
       const mapping = state.mappings.get(section.id) ?? state.baselineMappings.get(section.id)
-      return mapping === undefined ? [] : [mapping]
+      return mapping === undefined ? [] : [bindMappingResponsePoints(mapping, state.responsePoints)]
     }),
     refinement_suggestions: [...state.suggestions],
     ...(task.phase !== 'final_check' ? {} : {
@@ -1672,7 +1687,7 @@ async function completeMappingSubmission(
   }
   const result = parseEvidenceMappingPartialResult({
     task_id: task.task_id,
-    section_mappings: expected.map(id => state.mappings.get(id) ?? state.baselineMappings.get(id)),
+    section_mappings: expected.map(id => currentSectionMapping(state, task, id)),
     refinement_suggestions: [...state.suggestions],
     ...(task.phase === 'final_check' ? { branch_summaries: affectedSummarySections(state.stagedOutline, task).map(section => ({
       section_id: section.id, summary: state.branchSummaries.get(section.id),
@@ -3318,11 +3333,12 @@ function partialMappingsFromEvidence(
   outline: OutlineArtifact,
   evidence: EvidenceMapArtifact,
   sources: WebEvidenceSourcesArtifact,
+  catalog: EvidenceMappingInputs['responsePoints'],
 ): PartialSectionMapping[] {
   return evidence.section_mappings.flatMap((mapping) => {
     const section = outline.sections.find(item => item.id === mapping.section_id)
     if (section === undefined || !section.writable) return []
-    return [{
+    return [bindMappingResponsePoints({
       ...mapping,
       web_materials: mapping.web_materials.map((material) => {
         const source = sources.sources.find(item => item.source_id === material.source_id)
@@ -3339,7 +3355,7 @@ function partialMappingsFromEvidence(
         scoring_ids: section.scoring_ids,
         scoring_response_point_ids: section.scoring_response_point_ids ?? [],
       },
-    }]
+    }, catalog)]
   })
 }
 
@@ -3421,10 +3437,8 @@ function applyResearchBriefs(
   return parseOutlineArtifact({ ...outline, sections: outline.sections.map((section) => {
     const brief = section.writable ? briefs.get(section.id) : undefined
     return { ...section, ...brief,
-      ...(brief === undefined ? {} : { scoring_response_points: brief.scoring_response_point_ids.flatMap((id) => {
-        const point = catalog.points.find(point => point.id === id)
-        return point === undefined ? [] : [{ scoring_id: point.scoring_id, response_point: point.text }]
-      }) }),
+      ...bindSectionResponsePoints(brief?.scoring_ids ?? section.scoring_ids,
+        brief?.scoring_response_point_ids ?? section.scoring_response_point_ids ?? [], catalog),
       ...(!section.writable && summaries.has(section.id) ? { summary: summaries.get(section.id) } : {}),
     }
   }) })
@@ -3933,6 +3947,13 @@ async function executeEvidenceMappingRun(
       const rawCheckpoint = await readOptionalJson(workspace, CHECKPOINT_PATH)
       if (rawCheckpoint !== undefined) {
         checkpoint = evidenceMappingCheckpointSchema.parse(rawCheckpoint)
+        checkpoint.tasks = checkpoint.tasks.map(saved => ({ ...saved,
+          result: bindMappingResultResponsePoints(saved.result, inputs.responsePoints),
+          task_operations: saved.task_operations.map(change => ({ ...change,
+            before: bindMappingResponsePoints(change.before, inputs.responsePoints),
+            after: bindMappingResponsePoints(change.after, inputs.responsePoints),
+          })),
+        }))
       }
       const savedCheckpoints = new Map(checkpoint.tasks.map(item => [item.task_id, item]))
       const rawPrevious = await readOptionalJson(workspace, MAPPING_CANDIDATE_PATH)
@@ -3946,6 +3967,7 @@ async function executeEvidenceMappingRun(
         inputs.outline,
         resumeCandidateEvidence,
         previousWeb,
+        inputs.responsePoints,
       )) fingerprintMappings.set(mapping.section_id, mapping)
       const reusable = new Set<string>()
       const discarded = new Set<string>()
@@ -4105,7 +4127,7 @@ async function executeEvidenceMappingRun(
     if (currentCandidateEvidence === undefined || previousWeb === undefined) return false
     try {
       const candidate = parseOutlineArtifact(await readJson(workspace, REFINED_OUTLINE_CANDIDATE_PATH))
-      const mappings = partialMappingsFromEvidence(candidate, currentCandidateEvidence, previousWeb)
+      const mappings = partialMappingsFromEvidence(candidate, currentCandidateEvidence, previousWeb, inputs.responsePoints)
       const mapped = new Set(mappings.map(mapping => mapping.section_id))
       const sectionIds = remapWritableSectionIds(candidate)
       const sectionTasks = plan.tasks.filter(item => item.task_kind === 'final_check')
@@ -4172,7 +4194,7 @@ async function executeEvidenceMappingRun(
   }))
   const acceptedMappings = new Map<string, PartialSectionMapping>()
   if (previous !== undefined && previousWeb !== undefined) {
-    for (const mapping of partialMappingsFromEvidence(inputs.outline, previous, previousWeb)) {
+    for (const mapping of partialMappingsFromEvidence(inputs.outline, previous, previousWeb, inputs.responsePoints)) {
       acceptedMappings.set(mapping.section_id, mapping)
     }
   }
@@ -4656,7 +4678,8 @@ async function executeEvidenceMappingRun(
               const submission = submissionRequest.state.captured?.generation === submissionRequest.state.generation
                 ? submissionRequest.state.captured.value
                 : undefined
-              let partial = submission?.result
+              let partial = submission === undefined ? undefined
+                : bindMappingResultResponsePoints(submission.result, runInputs.responsePoints)
               const outlineOperations = submission?.outlineOperations
               if (partial === undefined) issues.push(...submissionRequest.state.lastIncompleteIssues.length > 0
                 ? submissionRequest.state.lastIncompleteIssues
@@ -5024,7 +5047,7 @@ async function executeEvidenceMappingRun(
         finalOutline = parseOutlineArtifact(await readJson(workspace, REFINED_OUTLINE_CANDIDATE_PATH))
         currentEvidence = currentCandidateEvidence
         if (currentEvidence !== undefined && previousWeb !== undefined) {
-          for (const mapping of partialMappingsFromEvidence(finalOutline, currentEvidence, previousWeb)) {
+          for (const mapping of partialMappingsFromEvidence(finalOutline, currentEvidence, previousWeb, inputs.responsePoints)) {
             acceptedMappings.set(mapping.section_id, mapping)
           }
         }
@@ -5052,7 +5075,7 @@ async function executeEvidenceMappingRun(
           currentEvidence = { ...previous, section_mappings: [...mappings.values()] }
           const mergedMappings = partialMappingsFromEvidence(finalOutline, currentEvidence, {
             stage: 'evidence_mapping', sources: availableSnapshots().map(snapshot => snapshot.source),
-          })
+          }, inputs.responsePoints)
           for (const mapping of mergedMappings) acceptedMappings.set(mapping.section_id, mapping)
           candidateMappings = mergedMappings
         } else {

@@ -229,7 +229,7 @@ function latestPublicEvents(session: Session): Array<{
 }
 
 async function inspectBidStageValue(
-  workspace: BidWorkspace,
+  workspace: BidWorkspace | undefined,
   session: Session,
   reference?: z.infer<typeof chapterRevisionReferenceSchema>,
   view: 'summary' | 'task_contract_context' | 'recovery' = 'summary',
@@ -245,7 +245,9 @@ async function inspectBidStageValue(
     let artifactDiagnostic: { path: string; readable: boolean; reason?: string } | undefined
     const artifact = run?.error?.issues?.map(issue => issue.artifact)
       .find(path => path !== undefined && recoveryArtifactPaths.has(path))
-    if (artifact !== undefined) {
+    if (artifact !== undefined && workspace === undefined) {
+      artifactDiagnostic = { path: artifact, readable: false, reason: '原 Work 候选不存在。' }
+    } else if (artifact !== undefined && workspace !== undefined) {
       try {
         const path = within(workspace.projectRoot, artifact)
         await assertNoLinkedPath(workspace.root, path)
@@ -261,7 +263,7 @@ async function inspectBidStageValue(
         artifactDiagnostic = { path: artifact, readable: false, reason: code }
       }
     }
-    if (task.stage === 'chapter_writing' && task.status === 'waiting_user') {
+    if (task.stage === 'chapter_writing' && task.status === 'waiting_user' && workspace !== undefined) {
       try {
         const request = await readOptionalStageJson(workspace, 'chapters/writing-request.json', value => writingRequestSchema.parse(value))
         writingPlanDiagnostic = { readable: request !== null,
@@ -284,6 +286,8 @@ async function inspectBidStageValue(
       progress_fingerprint: decision.fingerprint ?? null,
       writing_plan_diagnostic: writingPlanDiagnostic ?? null,
       artifact_diagnostic: artifactDiagnostic ?? null,
+      mapping_progress: task.stage === 'evidence_mapping' && workspace !== undefined
+        ? await readEvidenceMappingProgress(workspace) : null,
       latest_run_notice: runNotice?.type === 'bid.run.notice'
         ? { kind: runNotice.data.kind, severity: runNotice.data.severity, message: runNotice.data.message } : null,
       run_id: run?.runId ?? null,
@@ -293,6 +297,7 @@ async function inspectBidStageValue(
       unit: run?.error?.recovery?.unit ?? null,
     }
   }
+  if (workspace === undefined) throw new Error('BID_STAGE_INSPECT_WORKSPACE_REQUIRED')
   const started = task.run
   const base = {
     task,
@@ -509,14 +514,14 @@ async function inspectBidStageValue(
 
 /**
  * 从权威产物和会话日志组装当前 Bid 阶段交互快照。
- * @param workspace 会话工作区。
+ * @param workspace 真实执行工作区；恢复候选缺失时仅返回失败状态和不可读诊断。
  * @param session 读取状态的会话。
  * @param reference 可选正文引用；只影响 S5 引用上下文。
  * @param view 摘要或显式请求的完整任务契约上下文。
  * @returns 最新目录编号、CAS 与阶段资料，不从聊天历史推测。
  */
 export function inspectBidStage(
-  workspace: BidWorkspace,
+  workspace: BidWorkspace | undefined,
   session: Session,
   reference?: z.infer<typeof chapterRevisionReferenceSchema>,
   view?: 'summary' | 'task_contract_context' | 'recovery',
@@ -773,10 +778,6 @@ export function installStageInteractionTools(
             properties.instruction = text
             properties.reference = chapterReference
             required.push('instruction', 'reference')
-          }
-          if (name === 'bid_outline_apply_operations') {
-            properties.operations = { type: 'array', items: { type: 'object' }, description: '按 type 提交操作：update_section(section_id,title?,purpose?,must_answer?)；add_section(parent_id,order,writable,title,purpose,must_answer?)；delete_section(section_id)；move_section(section_id,parent_id,order)；split_section(section_id,children:[{title,purpose,must_answer}])；merge_sections(section_ids,title,purpose)。' }
-            required.push('operations')
           }
           if (name === 'bid_outline_regenerate_scope' || name === 'bid_evidence_remap') {
             properties.section_ids = strings
