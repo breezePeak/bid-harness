@@ -837,9 +837,21 @@ describe('mapStopReason / mapUsage', () => {
     'OpenAI Responses stream ended before a terminal response event',
     'openrouter stream ended without a terminal event',
     'Stream ended without finish_reason',
+    'stream disconnected before completion: stream closed before response.completed',
+    'stream error: stream disconnected before completion: stream closed before response.completed',
+    'stream closed before response.completed',
   ])('maps pi-ai transport wording %j', (errorMessage) => {
     expect(mapStopReason(assistant({ stopReason: 'error', errorMessage })))
       .toMatchObject({ kind: 'error', failure: { code: 'TRANSPORT' } })
+  })
+
+  it.each([
+    'response.completed validation failed',
+    'stream closed after response.completed',
+    'model completion rejected',
+  ])('keeps unrelated completion failures non-retryable %j', (errorMessage) => {
+    expect(mapStopReason(assistant({ stopReason: 'error', errorMessage })))
+      .toEqual({ kind: 'error', failure: { code: 'PI_AI_ERROR', message: errorMessage } })
   })
 
   it('uses pi-ai provider-specific overflow classification without losing rate-limit exclusions', () => {

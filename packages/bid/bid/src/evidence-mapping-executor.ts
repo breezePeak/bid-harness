@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-fs'
-import { CallId, CONTEXT_WINDOW_EXCEEDED_CODE } from '@deepseek-ai/dsh-llm'
+import { CallId, CONTEXT_WINDOW_EXCEEDED_CODE, EMPTY_RESPONSE_CODE } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { JsonSchemaNode, ObjectJsonSchema, ToolExecution, ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { ToolArgsError, validateJsonSchemaValue } from '@deepseek-ai/dsh-tools'
@@ -51,6 +51,7 @@ import { applyOutlineEdits, outlineEditOperationSchema, type OutlineEditOperatio
 import { deriveOutlineModelTree } from './outline-model-tree.ts'
 import { zodJsonSchema } from './zod-json-schema.ts'
 import { createChapterObjectPositions } from './chapter-object-positions.ts'
+import { createMappingReferencePositions } from './mapping-reference-positions.ts'
 import { bindSectionResponsePoints } from './scoring-response-point-bindings.ts'
 import { loadOutlineFrameworkStructures, validateOutlineFrameworkRefs, type OutlineFrameworkStructure } from './outline-framework.ts'
 import { validateOutlineGenerationQuality } from './outline-generation-quality-validator.ts'
@@ -268,10 +269,15 @@ function mappingSubagentTurnInfrastructureFailure(
 ): MappingSubagentInfrastructureError | undefined {
   const code = record(error)?.code
   const detail = error instanceof Error ? error.message : String(error)
-  if (typeof code === 'string' && ['QUOTA', 'AUTH', 'NO_ADAPTER'].includes(code)) {
+  if (typeof code === 'string' && ['QUOTA', 'AUTH', 'NO_ADAPTER', 'INVALID_REQUEST', 'PI_AI_ERROR'].includes(code)) {
     return new MappingSubagentInfrastructureError([{
       code, message: `Mapping Subagent 模型通道不可用：${detail}`,
     }], false, false, taskId, 0, 'subagent')
+  }
+  if (typeof code === 'string' && ['TRANSPORT', 'TIMEOUT', 'SERVER', EMPTY_RESPONSE_CODE].includes(code)) {
+    return new MappingSubagentInfrastructureError([{
+      code, message: `Mapping Subagent 模型通道暂时失败：${detail}`,
+    }], true, false, taskId, 0, 'subagent')
   }
   const permanent = /authentication|invalid api key|insufficient (?:balance|credit)|billing|permanent quota/iu.test(detail)
   const rateLimited = code === 'RATE_LIMIT'
@@ -1741,6 +1747,7 @@ function mappingReferenceObjects(task: EvidenceMappingTask, inputs: EvidenceMapp
     ...business.scoring.map(item => ({ ...item, kind: 'scoring' })),
     ...business.response_points.map(item => ({ ...item, kind: 'response_point' })),
     ...business.compliance.map(item => ({ ...item, kind: 'compliance' })),
+    { id: 's2:project:', text: inputs.project.project_name, kind: 'project' },
     ...inputs.frameworks.flatMap((framework, index) => framework.headings.map((heading, position) => ({
       id: userFrameworkHeadingRef(index, position), text: JSON.stringify(heading), kind: 'user_framework',
     }))),
@@ -1854,8 +1861,6 @@ function attachMappingSubmissionRuntime(
       { canonical: 'compliance_id', model: 'compliance_position', ids: compliance },
       { canonical: 'compliance_ids', model: 'compliance_positions', ids: compliance, many: true },
       { canonical: 'scoring_response_point_ids', model: 'response_point_positions', ids: responsePoints, many: true },
-      { canonical: 'ref', model: 'reference_position', ids: references },
-      { canonical: 'record_id', model: 'record_position', ids: references },
       { canonical: 'finding_refs', model: 'finding_positions',
         ids: currentFindingObjects(), many: true },
       { canonical: 'review_ref', model: 'review_position', ids: currentReviewObjects() },
@@ -1883,10 +1888,12 @@ function attachMappingSubmissionRuntime(
     answer_checklists: answerChecklists(),
   })
   const register = (definition: Parameters<typeof childCtx.tools.register>[0]): void => {
+    const referencePositions = () => createMappingReferencePositions(
+      mappingReferenceObjects(task, inputs, locations, webReferences()), topicDispositionBasisSchema.shape.kind.options)
     disposers.push(childCtx.tools.register({ ...definition,
-      parameters: createChapterObjectPositions(objectFields()).schema(definition.parameters),
+      parameters: createChapterObjectPositions(objectFields()).schema(referencePositions().schema(definition.parameters)),
       async execute(args, exec) {
-        const bound = createChapterObjectPositions(objectFields()).bind(args)
+        const bound = createChapterObjectPositions(objectFields()).bind(referencePositions().bind(args))
         const operation = record(bound)?.operation
         const input = definition.name === 'apply_section_outline_edit' && record(operation)?.type === 'add_section'
           ? { ...record(bound), operation: { ...record(operation), writable: true } } : bound
@@ -1998,7 +2005,7 @@ function attachMappingSubmissionRuntime(
   if (task.task_kind !== 'branch_summary') register({
     name: 'update_section_task',
     description: [
-      '研究充分性判断通过后，记录或修改章节 Writing Brief、展开维度、职责内缺口、覆盖关联和 answer_plan；材料仍须锁定后另行提交。修改 must_answer 或 coverage 后先读取返回的 answer_checklist，再提交完整 answer_plan；list_mapping_objects 也返回当前 answer_checklists。answer_plan 的 target_positions 使用当前 objects.targets 清单，local basis 使用本 Child 已读取的 material_position，web basis 使用已读取的 chunk_positions，Host 绑定真实身份。必须提供招标要求、用户修改或章节职责依据，资料命中本身不能扩大任务。',
+      '研究充分性判断通过后，记录或修改章节 Writing Brief、展开维度、职责内缺口、覆盖关联和 answer_plan；材料仍须锁定后另行提交。修改 must_answer 或 coverage 后先读取返回的 answer_checklist，再提交完整 answer_plan；list_mapping_objects 也返回当前 answer_checklists。answer_plan 的 target_positions 使用当前 objects.targets 清单，S2 basis 仅提交 kind=s2 与 objects.references 中的 record_position，程序派生 artifact；local basis 使用本 Child 已读取的 material_position，web basis 使用已读取的 chunk_positions，Host 绑定真实身份。必须提供招标要求、用户修改或章节职责依据，资料命中本身不能扩大任务。',
       state.assignedCoverage.requirement_ids.size === 0
         ? '当前任务 requirement_ids 可写集合为空；基于章节职责更新时使用 section_responsibility + requirement_ids=[]；Related Requirements 仅为只读上下文。'
         : `basis.requirement_ids / coverage_override.requirement_ids 只能使用：${[...state.assignedCoverage.requirement_ids].join(', ')}。`,
@@ -2777,6 +2784,7 @@ export function renderEvidenceMappingSubagentTask(
       targets: mappingAnswerTargets(answerChecklists).map((id, position) => ({ position, id })),
     })}`,
     '所有工具使用对象表中的 position 选择章节、业务条目、资料范围和回答检查项；section_position、requirement_position(s)、scoring_position(s)、compliance_position(s)、response_point_positions、source_position、scope_position、target_positions 由程序绑定实际身份。编辑同级顺序只选择 sibling_position，正式排序值由程序生成。不得回填 ID 或短引用。后续工具结果的 objects 是当前对象位置；结构变化或读取新资料后使用最新结果。',
+    '研究 basis 只提交 {reference_position}，S2 answer_plan basis 只提交 {kind:"s2",record_position}；两个位置都选择 objects.references 的统一 position，不使用 requirements、scoring 或其他业务表的位置。来源 kind、artifact、ref 与 record_id 由程序派生，禁止重复填写。研究依据可选 requirement、scoring、response_point、user_framework、reference_outline 及本 Child 已读取的 local_material/web_material；S2 记录可选 project、requirement、scoring、response_point、compliance，其他来源仍按 local/web 协议提交。',
     `answer_checklists：${JSON.stringify(answerChecklists)}`,
     `global_outline_index：${JSON.stringify((task.phase === 'final_check' ? contextSections : inputs.outline.sections)
       .map(({ id, parent_id, title, purpose, writable }) => ({ id, parent_id, title, purpose, writable })))}`,
@@ -4317,8 +4325,11 @@ async function executeEvidenceMappingRun(
         const remaining = (providerCooldownUntil.get(provider) ?? 0) - Date.now()
         return remaining > 0 ? `EVIDENCE_MAPPING_WEB_PROVIDER_BACKOFF:${provider}` : undefined
       } catch (error) {
-        guardFailures.set(String(child.session.id), error)
-        controller.abort(error)
+        const failure = new BidStageExecutionError([{
+          code: 'EVIDENCE_MAPPING_GUARD_ERROR', message: error instanceof Error ? error.message : String(error),
+        }])
+        guardFailures.set(String(child.session.id), failure)
+        controller.abort(failure)
         return 'EVIDENCE_MAPPING_GUARD_ERROR'
       }
     })
@@ -4905,7 +4916,7 @@ async function executeEvidenceMappingRun(
         const provider = error.provider === undefined || error.provider === 'subagent'
           ? 'subagent'
           : providerFor(error.provider)
-        if (provider === 'subagent') setMappingAttemptConcurrency(1)
+        if (provider === 'subagent' && error.issues.some(issue => issue.code === 'RATE_LIMIT')) setMappingAttemptConcurrency(1)
         const retryKey = infrastructureRetryKey(provider, mappingTask.task_id)
         const retries = infrastructureRetries.get(retryKey) ?? 0
         if (retries >= maxInfrastructureRetryAttempts) {

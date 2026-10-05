@@ -45,7 +45,7 @@ S4 Initial Mapping 的客户可见编号检查只归当前任务可编辑的 Sec
 
 模型工具从最近一次 inspect 的 `objects` 选择位置，Host 绑定章节、业务条目、审批意见、模板、真实消息和历史 Work 身份；原生目录编辑使用 `draft_sections`，并沿用 inspect 时的草稿 CAS。对象表按页提供全局位置和截断信息，正文块只在本次读取窗口内展示；`objects_page` 可单独选择对象表页。段落引用的偏移、原文和 SHA、批次任务 ID、迁移块身份、当前 Run、写作请求及计划版本都由程序处理，模型提供身份字段会被拒绝。`bid_plan_task` 用 `replace_pending` 或 `append` 表达调整方式，Host 定位原 Work 与可修改起点。业务归属和原文迁移子会话按输入顺序返回语义分配；段落 Writer 按输入顺序返回替换文本，Reviewer 选择意见或块的位置，程序写入持久记录的真实 ID。原生 SDK 和磁盘记录仍使用完整身份。
 
-混合审批任务的正文批次可以只处理相关意见的正文子集，完整任务仍须覆盖全部相关来源。内部 Writer 或审核失败保留原错误码、批次及成功候选，由主 Agent 在原 Work 定向恢复；只有真实缺业务输入才等待用户，冲突、凭证或输入损坏仍阻断自动恢复。历史 completed 意见保留在对象表中，显示原状态和引用；新用户授权可以绑定最新正文进行定向纠正，读取历史意见不会重开旧队列。
+混合审批任务的正文批次可以只处理相关意见的正文子集，完整任务仍须覆盖全部相关来源。内部 Writer 或审核失败保留原错误码、批次及成功候选，由主 Agent 按失败分类在原 Work 定向恢复；结构化暂时通道错误按网络重试处理，语义校验失败才进入产物修复。只有真实缺业务输入才等待用户，冲突、凭证、永久额度错误或输入损坏仍阻断自动恢复。历史 completed 意见保留在对象表中，显示原状态和引用；新用户授权可以绑定最新正文进行定向纠正，读取历史意见不会重开旧队列。
 
 导出要求须有唯一的末尾 `docx.export`，该步骤与内容步骤共同保存在有效计划中。内容执行器发布正文后，独立导出器读取补丁后的尾步骤；导出失败保留内容凭据，目标保持未完成，重试只执行导出。
 
@@ -71,7 +71,7 @@ S5 私有工具同样按本轮对象位置选择章节关系、验收条件和�
 
 局部审核中断后，恢复保留已接纳且身份与摘要有效的正文及原 Writer，只继续未完成的 Reviewer；当前目录、计划、正文或材料变化仍使对应候选失效。已发布结果的用户纠正沿用原 Work，入口及凭据规则见[控制面运行时](README.md#control-plane-runtime)。
 
-主 Agent 对挂起能力 Work 的恢复指令作为执行上下文传给失败步骤；模型适配器仅在对应失败单元的提示中使用它，不改变不可变任务、输入摘要或已完成步骤。恢复准入前核对原授权会话，其他 Main 的请求不会创建新 Run。每次后台 Run 从当前 Main 最新持久请求 Header 取得 Provider 与模型，其 Child、Writer 和 Reviewer 继承该选择；续写旧 Writer 时仍保留原父子会话身份，下一次请求采用当前执行模型。资料映射优先保留结构化额度、凭证和适配器错误，不因文本含 429 而自动重试。Provider、额度、凭证等阻断仍通知主 Agent 读取诊断并向用户说明，但不提供自动恢复工具。Host 重启续行失败保留当前 Run 的错误通知并唤醒主 Agent。
+主 Agent 对原能力 Work 的恢复指令作为执行上下文传给失败步骤；模型适配器仅在对应失败单元的提示中使用它，不改变不可变任务、输入摘要或已完成步骤。恢复准入前核对原授权会话，其他 Main 的请求不会创建新 Run。每次后台 Run 从当前 Main 最新持久请求 Header 取得 Provider 与模型，其 Child、Writer 和 Reviewer 继承该选择；续写旧 Writer 时仍保留原父子会话身份，下一次请求采用当前执行模型。结构化 `TRANSPORT`、`TIMEOUT`、`SERVER`、`EMPTY_RESPONSE` 和 `RATE_LIMIT` 按暂时通道错误分类，资料映射在有界预算内重建失败 Child；预算耗尽后保留原错误码，原 Work 恢复继续按网络重试处理。`AUTH`、`QUOTA`、`NO_ADAPTER`、`INVALID_REQUEST` 和未分类的 `PI_AI_ERROR` 保留原错误码并阻断自动恢复，不会被限流文本覆盖；主 Agent 读取诊断并向用户说明。Host 重启续行失败保留当前 Run 的错误通知并唤醒主 Agent。
 
 `bid_plan_task` 替换已经开始的 `chapter.write` 时保留原候选文件及哈希，在新步骤候选中恢复并由原执行器重验正文、审核和研究检查点。原写作范围不能缩小，已完成章节由执行器复用；`previous_targets` 只表示前一步结果的章节，迁移原文的目标集合可能少于全部新子章。改用其他能力或删除已开始的写作步骤会被拒绝，须保留写作并使用恢复指令调整未完成部分。原候选身份或文件哈希不符时拒绝恢复和发布。
 
@@ -136,7 +136,9 @@ S3 先按评分语义产生候选响应点，再由独立语义复核回看评�
 
 S3 的生成、局部字段修复和质量复核均由无文件工具的独立 Child 返回结构化语义内容，Host 绑定对象并写入候选与操作记录。字段修复只修改定位范围，未知 RP 或评分由模型重新选择合法对象位置；损坏的持久 JSON 保留原文并拒绝读取，不交给模型重写。RP 覆盖、需求/合规/框架引用与结构问题使用有相应字段权限的局部操作，非法操作不覆盖候选。质量复核在同轮提交全部必要修改、自检修改后的目录并返回非阻断建议；Host 应用操作并通过确定性校验后发布质量报告及待确认草稿。可选润色只作为建议，合法修改不会触发新一轮完整复核。模型调用使用独立的 `maxRepairAttempts` 重试预算，耗尽后保留候选；正式输入损坏或版本变化要求通过阶段重置处理。S3 与 S4 目录复核的模型输出不包含问题代码或编号：建议只返回 `message`，程序填写固定 advisory 严重级别，S4 阻断问题只返回职责索引中的 `section_position` 与 `reason`；程序分别填写固定诊断类别 `OUTLINE_QUALITY_ADVISORY` 和 `OUTLINE_STRUCTURE_REVIEW`。
 
-S4 按目录业务分支分批映射，Evidence 以 Section ID 保存。模型工具使用目录、业务对象、研究依据、材料、来源导航和复核条目的位置；程序绑定身份并生成覆盖记录、来源引用和固定技术标范围。章节选择响应点后，Host 自动补齐其所属评分项并生成文字快照；研究提交、检查点恢复和最终发布采用相同派生规则，未知响应点仍拒绝处理。结构或材料变化后用 `list_mapping_objects` 获取最新位置表。Initial Child 逐次编辑并锁定自己的业务分支，再用 `submit_section_mapping` 按章 upsert；Host 当场校验章节及材料位置、usage、Web 正文和 coverage，并由 `finish_mapping_task` 返回缺失章节。未完成时，修复轮次同时接收 Host 根据当前研究、Blueprint、结构判断、锁定、映射和复核状态生成的顺序清单，避免仅凭错误文本猜测下一项工具调用。Final Check 以既有 Mapping 为 baseline，只提交替换章和结构节点摘要；摘要以我方方案、措施和成果直接作答，不复述采购要求，也不显示项目内部追踪 ID。目录深化与用户编辑只对齐 Evidence，空材料由 S5 按缺口继续研究。单个 Mapping Task 只对显式的子任务物化、恢复和结果通道故障做固定有界重试；429、Provider 文本和 retry-after 不在 S4 内解释或退避，由统一 Run 挂起与恢复边界处理。最终 Evidence Map 格式与 S5 输入保持不变。详见 [S4–S5 资料映射规则](README.md#s2s5-quality-control)。
+S4 按目录业务分支分批映射，Evidence 以 Section ID 保存。模型工具使用目录、业务对象、研究依据、材料、来源导航和复核条目的位置；程序绑定身份并生成覆盖记录、来源引用和固定技术标范围。章节选择响应点后，Host 自动补齐其所属评分项并生成文字快照；研究提交、检查点恢复和最终发布采用相同派生规则，未知响应点仍拒绝处理。结构或材料变化后用 `list_mapping_objects` 获取最新位置表。Initial Child 逐次编辑并锁定自己的业务分支，再用 `submit_section_mapping` 按章 upsert；Host 当场校验章节及材料位置、usage、Web 正文和 coverage，并由 `finish_mapping_task` 返回缺失章节。未完成时，修复轮次同时接收 Host 根据当前研究、Blueprint、结构判断、锁定、映射和复核状态生成的顺序清单，避免仅凭错误文本猜测下一项工具调用。Final Check 以既有 Mapping 为 baseline，只提交替换章和结构节点摘要；摘要以我方方案、措施和成果直接作答，不复述采购要求，也不显示项目内部追踪 ID。目录深化与用户编辑只对齐 Evidence，空材料由 S5 按缺口继续研究。单个 Mapping Task 对显式的子任务物化、恢复、结果通道故障及 Provider 的 `TRANSPORT`、`TIMEOUT`、`SERVER`、`EMPTY_RESPONSE`、`RATE_LIMIT` 做有界退避重试，默认最多两次新 Child；已完成兄弟章节和检查点保留。限流会降低后续并发，普通传输故障保留配置并发。认证、永久额度、缺失 Provider、无效模型请求、未分类模型错误和程序 Guard 故障不重试；`EVIDENCE_MAPPING_GUARD_ERROR` 阻断原 Work 恢复，取消立即终止等待。联网 Provider 的结构化限流和暂时故障使用已有冷却与重试预算。预算耗尽后保留原故障类别，模型传输故障的人工恢复仍按网络重试处理，不转为目录语义修复。最终 Evidence Map 格式与 S5 输入保持不变。详见 [S4–S5 资料映射规则](README.md#s2s5-quality-control)。
+
+研究发现与主题依据只提交 `reference_position`，S2 作答依据只提交 `kind="s2"` 与 `record_position`；两者均选择 `objects.references` 的统一位置，不使用 `requirements`、`scoring` 等业务表的位置。Host 从所选对象派生来源类别与正式身份；研究依据拒绝模型填写 `kind` 或 `ref`，S2 依据拒绝模型填写 `artifact` 或 `record_id`，`kind="s2"` 仅区分来源协议。项目事实也在统一表中选择，正式保存时保持 `artifact="project"` 且不填写 `record_id`。研究依据仍须属于本任务可见业务对象或当前 Child 已实际读取的资料，S2 依据仍须属于该章节已确认的输入。
 
 S5 的首次整体要求由 Host 使用 Interaction Session 的原生 `ask_user_question` 询问，并将回答保存到 `chapters/writing-request.json`；Main Agent 从 `task_contract_context.writing_request` 读取回答。自定义回答由 Host 原样加入首次 Writing Plan 顶层 `user_requirements`，原生回答不伪造 `user_message_refs`；Main Agent 选择真实用户消息的位置，Host 绑定 Session、Message 和 Seq 并回查原文。首次提交包含完整 Task Contract；后续提交 patch，Host 绑定当前版本，分别更新全书指令、document acceptance、section task、section acceptance 和删除项。Host 保留未修改章节及其 `AC-*`，把实际提交 section patch 自动并入影响范围，并校验 AC 全局唯一及 scope 与容器一致。普通进度询问可以不引用，因此不会修改 Task Contract 或停止 Writer；没有额外动态要求时 section 和 document criteria 可以为空。
 

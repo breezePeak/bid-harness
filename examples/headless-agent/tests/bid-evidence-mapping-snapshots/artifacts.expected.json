@@ -81,6 +81,16 @@
             "content": "拟采用身份鉴别、分级授权和可追溯审计方法。",
             "basis": [
               {
+                "kind": "s2",
+                "artifact": "requirement",
+                "record_id": "REQ-1"
+              },
+              {
+                "kind": "s2",
+                "artifact": "scoring",
+                "record_id": "SCORE-1"
+              },
+              {
                 "kind": "section_responsibility",
                 "section_id": "SEC-SECURITY"
               }
@@ -98,6 +108,16 @@
             "content": "拟采用身份鉴别、分级授权和可追溯审计方法。",
             "basis": [
               {
+                "kind": "s2",
+                "artifact": "requirement",
+                "record_id": "REQ-1"
+              },
+              {
+                "kind": "s2",
+                "artifact": "scoring",
+                "record_id": "SCORE-1"
+              },
+              {
                 "kind": "section_responsibility",
                 "section_id": "SEC-SECURITY"
               }
@@ -114,6 +134,16 @@
             "mode": "proposal",
             "content": "拟采用身份鉴别、分级授权和可追溯审计方法。",
             "basis": [
+              {
+                "kind": "s2",
+                "artifact": "requirement",
+                "record_id": "REQ-1"
+              },
+              {
+                "kind": "s2",
+                "artifact": "scoring",
+                "record_id": "SCORE-1"
+              },
               {
                 "kind": "section_responsibility",
                 "section_id": "SEC-SECURITY"

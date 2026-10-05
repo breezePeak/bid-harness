@@ -18,6 +18,7 @@ import { DEFAULT_MAX_REQUEST_IMAGE_BYTES, resolveProfiles } from '../src/config.
 import { memoryAuth } from './auth-double.ts'
 import { assemble } from './assemble.ts'
 import { closeMockServers, mockServer, textEvents } from './mock-server.ts'
+import { responsesDisconnectMessage, responsesRetryEvents } from '../../../../scripts/test-fixtures/responses-retry.ts'
 
 afterEach(async () => {
   vi.unstubAllEnvs()
@@ -223,6 +224,22 @@ describe('PiAiAdapter provider routing', () => {
     })
     const result = await assemble(ctx, { provider: 'openai', model: 'gpt-4.1', messages: [] })
     expect(result.finish.kind).toBe('error')
+    expect(server.paths).toEqual(['/v1/responses'])
+  })
+
+  it('classifies an unfinished Responses SSE failure as TRANSPORT without an SDK retry', async () => {
+    const server = await mockServer([{ events: responsesRetryEvents(true) }])
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    await ctx.plugin(LlmPiAi, {
+      providers: { openai: { apiKeyEnv: 'PI_TEST_KEY', baseURL: `${server.url}/v1` } },
+    })
+    const result = await assemble(ctx, { provider: 'openai', model: 'gpt-4.1', messages: [] })
+
+    expect(result.finish).toMatchObject({
+      kind: 'error',
+      failure: { code: 'TRANSPORT', message: expect.stringContaining(responsesDisconnectMessage) as string },
+    })
     expect(server.paths).toEqual(['/v1/responses'])
   })
 

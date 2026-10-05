@@ -40,6 +40,23 @@ it('corrects S4 tool arguments in one Child turn through the headless Loader', a
       expect(childLog).toContain('read_source')
       expect(childLog).toContain('update_section_task')
       expect(childLog).toContain('submit_section_research_assessment')
+      const researchCalls = events.filter(event => event.type === 'tool/call'
+        && event.data.name === 'submit_section_research_assessment')
+      expect(researchCalls.length).toBeGreaterThan(0)
+      for (const event of researchCalls) {
+        if (event.type !== 'tool/call') continue
+        const input = JSON.parse(event.data.arguments) as { key_findings: Array<{ basis: object[] }> }
+        for (const finding of input.key_findings) for (const basis of finding.basis) {
+          expect(Object.keys(basis)).toEqual(['reference_position'])
+        }
+      }
+      const s2Bases = events.flatMap((event) => {
+        if (event.type !== 'tool/call' || event.data.name !== 'update_section_task') return []
+        const input = JSON.parse(event.data.arguments) as { answer_plan?: Array<{ basis: Array<{ kind: string }> }> }
+        return input.answer_plan?.flatMap(item => item.basis.filter(basis => basis.kind === 's2')) ?? []
+      })
+      expect(s2Bases.length).toBeGreaterThan(0)
+      for (const basis of s2Bases) expect(Object.keys(basis)).toEqual(['kind', 'record_position'])
       expect(childLog).toContain('lock_section_outline')
       expect(childLog).toContain('lock-before-research-ready')
       expect(childLog).toContain('research-not-ready')
@@ -114,6 +131,11 @@ it('corrects S4 tool arguments in one Child turn through the headless Loader', a
         suggested_tables: ['角色权限与审计记录对照表'],
       })
       const map = parseEvidenceMapArtifact(JSON.parse(await readFile(join(projectRoot, 'analysis/evidence-map.json'), 'utf8')))
+      expect(map.section_mappings[0]!.answer_plan?.[0]?.basis).toEqual([
+        { kind: 's2', artifact: 'requirement', record_id: 'REQ-1' },
+        { kind: 's2', artifact: 'scoring', record_id: 'SCORE-1' },
+        { kind: 'section_responsibility', section_id: 'SEC-SECURITY' },
+      ])
       const checkpoint = JSON.parse(await readFile(join(projectRoot, 'analysis/evidence-mapping-checkpoint.json'), 'utf8')) as {
         tasks: Array<{
           task_id: string

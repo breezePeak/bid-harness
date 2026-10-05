@@ -1039,6 +1039,15 @@ function mappingFixture(
 
 const webUrl = 'https://official.example/a'
 
+function failMappingChildTurn(fixture: ReturnType<typeof mappingFixture>, index: number, code: string, message: string): void {
+  const start = fixture.starts[index]!
+  const child = fixture.children.get(String(start.request.childId))!
+  ;(child.session.events as unknown[]).push({
+    type: 'turn/end', data: { reason: { kind: 'error', error: { code, message } } },
+  })
+  start.complete()
+}
+
 function webMaterial(url = webUrl) {
   return { url, chunk_refs: [], usage: 'reference' as const, summary: '官方技术依据。', supports: '支持技术响应。' }
 }
@@ -4520,6 +4529,158 @@ describe('S4 Host 准入与最终确认', () => {
     expect(log.tasks.some(task => task.status === 'failed')).toBe(true)
   })
 
+  it.each(['TRANSPORT', 'TIMEOUT', 'SERVER', 'EMPTY_RESPONSE'])
+  ('Child %s 失败后重建当前 Child，已完成 sibling 与检查点不重跑', async (code) => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-task-transient-retry-')))
+    const fixture = mappingFixture(workspace, await writeInputs(workspace))
+    const execution = executeEvidenceMapping(fixture.agent, workspace, buildBidStageTask('evidence_mapping'), {
+      maxRepairAttempts: 0, maxConcurrency: 1,
+    })
+    await vi.waitFor(() => { expect(fixture.starts).toHaveLength(1) })
+    fixture.starts[0]!.resolve()
+    await vi.waitFor(() => { expect(fixture.starts).toHaveLength(2) })
+    const completedChildId = String(fixture.starts[0]!.request.childId)
+    const failedChildId = String(fixture.starts[1]!.request.childId)
+    const checkpoint = JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/evidence-mapping-checkpoint.json'), 'utf8')) as {
+      tasks: Array<{ task_id: string; completed: boolean }>
+    }
+    expect(checkpoint.tasks.find(task => task.task_id === 'MAP-INIT-SEC-1')?.completed).toBe(true)
+    failMappingChildTurn(fixture, 1, code, 'stream disconnected before completion: stream closed before response.completed')
+    await vi.waitFor(() => { expect(fixture.starts).toHaveLength(3) }, { timeout: 5_000 })
+    expect(String(fixture.starts[2]!.request.childId)).not.toBe(failedChildId)
+    expect(mappingTaskId(fixture.starts[2]!.request.request)).toBe('MAP-INIT-SEC-2')
+    fixture.starts[2]!.resolve()
+    await execution
+    const log = parseEvidenceMappingExecutionLog(JSON.parse(
+      await readFile(join(workspace.projectRoot, 'analysis/evidence-mapping-log.json'), 'utf8'),
+    ))
+    expect(log.tasks.find(task => task.task_id === 'MAP-INIT-SEC-1')?.attempts).toEqual([
+      expect.objectContaining({ child_session_id: completedChildId, accepted: true }),
+    ])
+    expect(log.tasks.find(task => task.task_id === 'MAP-INIT-SEC-2')?.attempts).toEqual([
+      expect.objectContaining({ child_session_id: failedChildId, accepted: false,
+        stop_reason: 'infrastructure-error', issues: [expect.objectContaining({ code })] }),
+      expect.objectContaining({ child_session_id: String(fixture.starts[2]!.request.childId), accepted: true }),
+    ])
+    expect(fixture.disposed).toContain(failedChildId)
+    expect(fixture.subagents.followup).not.toHaveBeenCalled()
+    expect(fixture.taskAttempts.get('MAP-INIT-SEC-1')).toBe(1)
+    expect(fixture.taskAttempts.get('MAP-INIT-SEC-2')).toBe(1)
+  })
+
+  it('并发 Child TRANSPORT 恢复后保留配置并发，不永久串行化', async () => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-task-transport-concurrent-')))
+    const fixture = mappingFixture(workspace, await writeInputs(workspace))
+    const execution = executeEvidenceMapping(fixture.agent, workspace, buildBidStageTask('evidence_mapping'), {
+      maxRepairAttempts: 0, maxConcurrency: 2,
+    })
+    await vi.waitFor(() => { expect(fixture.starts).toHaveLength(2) })
+    failMappingChildTurn(fixture, 0, 'TRANSPORT', 'stream disconnected before completion')
+    failMappingChildTurn(fixture, 1, 'TRANSPORT', 'stream disconnected before completion')
+    await vi.waitFor(() => { expect(fixture.starts).toHaveLength(4) }, { timeout: 5_000 })
+    expect(fixture.starts.slice(2).map(start => mappingTaskId(start.request.request)).sort())
+      .toEqual(['MAP-INIT-SEC-1', 'MAP-INIT-SEC-2'])
+    fixture.starts.slice(2).forEach((start) => { start.resolve() })
+    await execution
+    const log = parseEvidenceMappingExecutionLog(JSON.parse(
+      await readFile(join(workspace.projectRoot, 'analysis/evidence-mapping-log.json'), 'utf8'),
+    ))
+    for (const task of log.tasks.filter(task => task.phase === 'initial')) {
+      expect(task.attempts).toEqual([
+        expect.objectContaining({ accepted: false, issues: [expect.objectContaining({ code: 'TRANSPORT' })] }),
+        expect.objectContaining({ accepted: true }),
+      ])
+    }
+    expect(fixture.subagents.followup).not.toHaveBeenCalled()
+  })
+
+  it('Child TRANSPORT 持续断流只重建两次，保留根因和已完成 sibling', async () => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-task-transport-exhausted-')))
+    const fixture = mappingFixture(workspace, await writeInputs(workspace))
+    const execution = executeEvidenceMapping(fixture.agent, workspace, buildBidStageTask('evidence_mapping'), {
+      maxRepairAttempts: 0, maxConcurrency: 1,
+    })
+    const rejection = expect(execution).rejects.toMatchObject({
+      issues: [{ code: 'TRANSPORT', message: expect.stringContaining('stream disconnected') }],
+    })
+    await vi.waitFor(() => { expect(fixture.starts).toHaveLength(1) })
+    fixture.starts[0]!.resolve()
+    for (let index = 1; index <= 3; index++) {
+      await vi.waitFor(() => { expect(fixture.starts).toHaveLength(index + 1) }, { timeout: 5_000 })
+      expect(mappingTaskId(fixture.starts[index]!.request.request)).toBe('MAP-INIT-SEC-2')
+      failMappingChildTurn(fixture, index, 'TRANSPORT', 'stream disconnected before completion')
+    }
+    await rejection
+    expect(fixture.starts).toHaveLength(4)
+    expect(new Set(fixture.starts.map(start => String(start.request.childId))).size).toBe(4)
+    const log = parseEvidenceMappingExecutionLog(JSON.parse(
+      await readFile(join(workspace.projectRoot, 'analysis/evidence-mapping-log.json'), 'utf8'),
+    ))
+    expect(log.tasks.find(task => task.task_id === 'MAP-INIT-SEC-1')).toMatchObject({ status: 'completed', attempts: [
+      expect.objectContaining({ accepted: true }),
+    ] })
+    expect(log.tasks.find(task => task.task_id === 'MAP-INIT-SEC-2')).toMatchObject({ status: 'failed', attempts: [
+      expect.objectContaining({ accepted: false, issues: [expect.objectContaining({ code: 'TRANSPORT' })] }),
+      expect.objectContaining({ accepted: false, issues: [expect.objectContaining({ code: 'TRANSPORT' })] }),
+      expect.objectContaining({ accepted: false, issues: [expect.objectContaining({ code: 'TRANSPORT' })] }),
+    ] })
+    const checkpoint = JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/evidence-mapping-checkpoint.json'), 'utf8')) as {
+      tasks: Array<{ task_id: string; completed: boolean }>
+    }
+    expect(checkpoint.tasks.find(task => task.task_id === 'MAP-INIT-SEC-1')?.completed).toBe(true)
+    expect(fixture.subagents.followup).not.toHaveBeenCalled()
+  })
+
+  it('取消 TRANSPORT 退避等待后不再创建 Child', async () => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-task-transport-cancel-')))
+    const fixture = mappingFixture(workspace, await writeInputs(workspace))
+    const controller = new AbortController()
+    const cancelled = new Error('用户取消资料映射')
+    const run = createTestBidRunContext({
+      signal: controller.signal,
+      reportProgress: (progress) => {
+        if (progress.summary === '正在等待重试章节资料映射任务') controller.abort(cancelled)
+      },
+    })
+    const execution = executeEvidenceMapping(fixture.agent, workspace, buildBidStageTask('evidence_mapping'), {
+      run, maxRepairAttempts: 0, maxConcurrency: 1,
+    })
+    const rejection = expect(execution).rejects.toBe(cancelled)
+    await vi.waitFor(() => { expect(fixture.starts).toHaveLength(1) })
+    failMappingChildTurn(fixture, 0, 'TRANSPORT', 'stream disconnected before completion')
+    await rejection
+    expect(controller.signal.aborted).toBe(true)
+    expect(fixture.starts).toHaveLength(1)
+    expect(fixture.disposed).toContain(String(fixture.starts[0]!.request.childId))
+    expect(fixture.subagents.followup).not.toHaveBeenCalled()
+  })
+
+  it('程序 Guard 异常即使携带 TRANSPORT 错误码也不重建 Child', async () => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-task-guard-error-')))
+    const fixture = mappingFixture(workspace, await writeInputs(workspace))
+    const run = createTestBidRunContext({ work: {
+      kind: 'stage_execution', stage: 'evidence_mapping', workId: 's4-work',
+      requestRef: 'requests/s4-work.json', requestSha256: '0'.repeat(64), inputFingerprint: '1'.repeat(64),
+    } })
+    const execution = executeEvidenceMapping(fixture.agent, workspace, buildBidStageTask('evidence_mapping'), {
+      run, maxRepairAttempts: 0, maxConcurrency: 1,
+    })
+    const failure = Object.assign(new Error('程序 Guard 失败'), { code: 'TRANSPORT' })
+    const completion = execution.catch((error: unknown) => error)
+    await vi.waitFor(() => { expect(fixture.starts).toHaveLength(1) })
+    const start = fixture.starts[0]!
+    const child = fixture.children.get(String(start.request.childId))!
+    const guard = fixture.childGuards.get(String(start.request.childId))!.at(-1)!
+    expect(guard({ agent: child, get name() { throw failure } } as unknown as ToolExecution))
+      .toBe('EVIDENCE_MAPPING_GUARD_ERROR')
+    start.complete()
+    const error = await completion
+    expect(error).toMatchObject({ issues: [{ code: 'EVIDENCE_MAPPING_GUARD_ERROR', message: '程序 Guard 失败' }] })
+    expect(safeRecoverableBidFailure(run.work, error).recovery).toMatchObject({ kind: 'blocked', reason: '程序 Guard 失败' })
+    expect(fixture.starts).toHaveLength(1)
+    expect(fixture.subagents.followup).not.toHaveBeenCalled()
+  })
+
   it('Child RATE_LIMIT 共享冷却后重试当前任务，已完成 sibling 不重跑', async () => {
     vi.useFakeTimers()
     try {
@@ -4648,7 +4809,8 @@ describe('S4 Host 准入与最终确认', () => {
     }
   })
 
-  it.each(['QUOTA', 'AUTH', 'NO_ADAPTER'])('Child %s 保留模型错误码且不进入限流重试', async (code) => {
+  it.each(['QUOTA', 'AUTH', 'NO_ADAPTER', 'INVALID_REQUEST', 'PI_AI_ERROR'])
+  ('Child %s 保留模型错误码且不进入基础设施重试或自动恢复', async (code) => {
     const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-task-provider-blocked-')))
     const fixture = mappingFixture(workspace, await writeInputs(workspace))
     const execution = executeEvidenceMapping(fixture.agent, workspace, buildBidStageTask('evidence_mapping'), {
@@ -4668,6 +4830,18 @@ describe('S4 Host 准入与最终确认', () => {
     expect(fixture.starts).toHaveLength(1)
     expect((await readEvidenceMappingProgress(workspace))?.tasks[0])
       .toMatchObject({ status: 'failed', latest_issue: expect.stringContaining('tpm/rpm') })
+    const log = parseEvidenceMappingExecutionLog(JSON.parse(
+      await readFile(join(workspace.projectRoot, 'analysis/evidence-mapping-log.json'), 'utf8'),
+    ))
+    expect(log.tasks[0]?.attempts).toEqual([
+      expect.objectContaining({ accepted: false, issues: [expect.objectContaining({ code })] }),
+    ])
+    const work = createTestBidRunContext({ work: {
+      kind: 'stage_execution', stage: 'evidence_mapping', workId: 's4-work',
+      requestRef: 'requests/s4-work.json', requestSha256: '0'.repeat(64), inputFingerprint: '1'.repeat(64),
+    } }).work
+    expect(safeRecoverableBidFailure(work, new Error('模型通道不可用'), [{ code, message: '模型通道不可用' }]).recovery)
+      .toMatchObject({ kind: 'blocked' })
   })
 
   it('Child RATE_LIMIT 耗尽共享预算时保留限流根因', async () => {
@@ -4876,5 +5050,92 @@ describe('S4 / S5 共用 fetch 正文快照', () => {
   })
   it('忽略 fetch 工具错误', () => {
     expect(buildWebEvidenceSnapshots([captured(value, true)])).toEqual([])
+  })
+})
+
+describe('S4 实际工具统一依据对象表', () => {
+  it('研究及 S2 计划只选择 references，Host 派生类别并拒绝模型重复标签和未读材料', async () => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-s4-reference-binding-')))
+    const material = await writeInputs(workspace)
+    const requirementsPath = join(workspace.projectRoot, 'analysis/requirements.json')
+    const requirements = parseTenderRequirementsArtifact(JSON.parse(await readFile(requirementsPath, 'utf8')))
+    const [first, second] = requirements.requirements
+    if (first === undefined || second === undefined) throw new Error('缺少测试需求')
+    const additional = Array.from({ length: 5 }, (_, index) => ({ ...second, id: `R-${index + 3}`,
+      raw_text: `附加技术要求${index + 3}`, normalized_requirement: `核验附加技术要求${index + 3}` }))
+    requirements.requirements = [...additional, second, first]
+    await writeFile(requirementsPath, JSON.stringify(requirements))
+    const outlinePath = join(workspace.projectRoot, 'outline/initial-confirmed-outline.json')
+    const outline = parseOutlineArtifact(JSON.parse(await readFile(outlinePath, 'utf8')))
+    outline.sections[1]!.requirement_ids = [second.id, ...additional.map(item => item.id)]
+    await writeFile(outlinePath, JSON.stringify(outline))
+    const fixture = mappingFixture(workspace, material)
+    const execution = executeEvidenceMapping(fixture.agent, workspace, buildBidStageTask('evidence_mapping'))
+    await vi.waitFor(() => { expect(fixture.starts).toHaveLength(2) })
+    const id = fixture.starts[0]!.request.childId!
+    const child = fixture.children.get(String(id))!
+    const exec = { agent: child, signal: new AbortController().signal } as ToolRunContext
+    const research = fixture.submissionTool(id, 'submit_section_research_assessment')
+    const task = fixture.submissionTool(id, 'update_section_task')
+    const objects = (await fixture.invokeSubmissionTool(id, 'list_mapping_objects', {})).value as {
+      objects: {
+        references: Array<{ id: string; kind: string; position: number }>
+        requirements: Array<{ id: string; position: number }>
+        scoring: Array<{ id: string; position: number }>
+      }
+    }
+    expect(objects.objects.requirements).toMatchObject([{ id: 'R-1', position: 6 }])
+    expect(objects.objects.scoring).toMatchObject([{ id: 'S-1', position: 0 }])
+    const reference = (kind: string) => objects.objects.references.find(item => item.kind === kind)!.position
+    expect(reference('requirement')).toBe(0)
+    expect(reference('scoring')).toBe(1)
+    const assessment = branchResearchAssessment()
+    const wire = { ...assessment, key_findings: assessment.key_findings.map(finding => ({ ...finding,
+      basis: [{ reference_position: reference('requirement') }, { reference_position: reference('scoring') }] })) }
+    expect(JSON.stringify(research.parameters)).not.toContain('"ref"')
+    expect(JSON.stringify(task.parameters)).not.toContain('"artifact"')
+    const bound = await research.execute(wire, exec) as {
+      key_findings: Array<{ basis: Array<{ kind: string; ref: string }> }>
+    }
+    expect(bound.key_findings[0]!.basis).toEqual([
+      { kind: 'requirement', ref: 'R-1' }, { kind: 'scoring', ref: 'S-1' },
+    ])
+    const findings = wire.key_findings
+    await expect(research.execute({ ...wire, key_findings: [{ ...findings[0],
+      basis: [{ kind: 'scoring', reference_position: 0 }] }] }, exec)).rejects.toThrow('Unrecognized key')
+    await expect(research.execute(assessment, exec)).rejects.toThrow('实际身份由程序绑定')
+    const unread = objects.objects.references.find(item => item.id.includes(':chunk_'))!
+    await expect(research.execute({ ...wire, key_findings: [{ ...findings[0],
+      basis: [{ reference_position: unread.position }] }] }, exec)).rejects.toThrow('不是当前运行中已验证的 local_material')
+    const result = await fixture.invokeSubmissionTool(id, 'update_section_task', {
+      section_id: 'SEC-1', basis: { kind: 'section_responsibility', explanation: '按当前任务组织方案。', requirement_ids: [] },
+      writing_dimensions: ['技术响应'], missing_topics: [],
+    })
+    expect(result.isError).toBe(false)
+    const checklist = (result.value as {
+      answer_checklist: Array<{ item_ref: string; text: string }>
+      objects: { targets: Array<{ id: string; position: number }> }
+    })
+    const plan = checklist.answer_checklist.map(item => ({
+      target_positions: [checklist.objects.targets.find(target => target.id === item.item_ref)!.position],
+      mode: 'proposal', content: `拟回应${item.text}。`, boundary: '方案设计不证明未经确认的能力。',
+      basis: [{ kind: 's2', record_position: 0 }, { kind: 's2', record_position: 1 },
+        { kind: 's2', record_position: reference('project') }],
+    }))
+    const input = { section_position: 0, basis: { kind: 'section_responsibility',
+      explanation: '逐项说明已有输入与方案。', requirement_positions: [] }, answer_plan: plan }
+    await expect(task.execute({ ...input, answer_plan: [{ ...plan[0],
+      basis: [{ kind: 's2', artifact: 'scoring', record_position: 0 }] }] }, exec)).rejects.toThrow('Unrecognized key')
+    await expect(task.execute({ ...input, answer_plan: [{ ...plan[0],
+      basis: [{ kind: 's2', record_position: unread.position }] }] }, exec)).rejects.toThrow('不是 S2 记录')
+    const applied = await task.execute(input, exec) as { applied: boolean; after: { answer_plan: Array<{ basis: unknown }> } }
+    expect(applied.applied).toBe(true)
+    for (const item of applied.after.answer_plan) expect(item.basis).toEqual([
+      { kind: 's2', artifact: 'requirement', record_id: 'R-1' },
+      { kind: 's2', artifact: 'scoring', record_id: 'S-1' }, { kind: 's2', artifact: 'project' },
+    ])
+    expect(promptText(fixture.starts[0]!.request.request)).toContain('两个位置都选择 objects.references 的统一 position')
+    fixture.starts.forEach((start) => { start.resolve() })
+    await execution
   })
 })

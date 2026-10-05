@@ -34,10 +34,33 @@ it('keeps repairable candidate issues distinct from provider and input faults', 
   }]).recovery?.kind).toBe('blocked')
 })
 
-it.each(['QUOTA', 'AUTH', 'NO_ADAPTER'])('模型通道 %s 阻断自动恢复且保留真实原因', (code) => {
+it.each(['QUOTA', 'AUTH', 'NO_ADAPTER', 'INVALID_REQUEST', 'PI_AI_ERROR'])('模型通道 %s 阻断自动恢复且保留真实原因', (code) => {
   const issues = [{ code, message: '模型通道不可用' }]
   expect(safeRecoverableBidFailure(work, new BidStageExecutionError(issues)))
     .toMatchObject({ issues, recovery: { kind: 'blocked', reason: '模型通道不可用' } })
+})
+
+it.each(['TRANSPORT', 'TIMEOUT', 'SERVER', 'EMPTY_RESPONSE', 'RATE_LIMIT'])
+('模型通道 %s 预算耗尽后按原错误码恢复网络请求', (code) => {
+  const mappingWork: BidWorkDescriptor = { ...work, stage: 'evidence_mapping' }
+  const issues = [{ code, artifact: 'MAP-INIT-SEC-009', message: '模型响应通道暂时失败' }]
+  expect(safeRecoverableBidFailure(mappingWork, new BidStageExecutionError(issues)))
+    .toMatchObject({ issues, recovery: { kind: 'retry', unit: 'MAP-INIT-SEC-009', reason: '模型响应通道暂时失败' } })
+})
+
+it.each(['QUOTA', 'AUTH', 'NO_ADAPTER', 'INVALID_REQUEST', 'PI_AI_ERROR'])('可重试传输错误不能覆盖 %s 永久阻断', (code) => {
+  const issues = [
+    { code: 'TRANSPORT', artifact: 'MAP-INIT-SEC-009', message: '流中断' },
+    { code, artifact: 'MAP-INIT-SEC-010', message: '模型通道不可用' },
+  ]
+  expect(safeRecoverableBidFailure(work, new BidStageExecutionError(issues)))
+    .toMatchObject({ issues, recovery: { kind: 'blocked', unit: 'MAP-INIT-SEC-010', reason: '模型通道不可用' } })
+})
+
+it('程序 Guard 故障阻断恢复，不按模型传输错误重试', () => {
+  const issues = [{ code: 'EVIDENCE_MAPPING_GUARD_ERROR', artifact: 'MAP-INIT-SEC-009', message: '程序 Guard 失败' }]
+  expect(safeRecoverableBidFailure(work, new BidStageExecutionError(issues)))
+    .toMatchObject({ issues, recovery: { kind: 'blocked', unit: 'MAP-INIT-SEC-009', reason: '程序 Guard 失败' } })
 })
 
 it('相同指纹与方案只在同一 Work 内视为重复', async () => {

@@ -415,7 +415,9 @@ export async function runEvidenceMappingLoop(ctx: Context, root: string, repair:
     section_id: 'SEC-SECURITY', basis: blueprint.basis,
     answer_plan: ['R1', 'R2', 'R3'].map(ref => ({ target_refs: [ref], mode: 'proposal',
       content: '拟采用身份鉴别、分级授权和可追溯审计方法。',
-      basis: [{ kind: 'section_responsibility' }], boundary: '具体既有能力与指标须以本项目核实资料为准。' })),
+      basis: [{ kind: 's2', artifact: 'requirement', record_id: 'REQ-1' },
+        { kind: 's2', artifact: 'scoring', record_id: 'SCORE-1' }, { kind: 'section_responsibility' }],
+      boundary: '具体既有能力与指标须以本项目核实资料为准。' })),
   }
   const structure = { decision: 'keep', reason: '本章聚焦权限执行与追溯验证，不同操作通过同一权限记录闭环说明。',
     navigation_analysis: '读者通过访问控制与安全审计标题可定位本项安全任务；账号核验、授权、记录属于同一方法的普通步骤，无需独立成果章节。',

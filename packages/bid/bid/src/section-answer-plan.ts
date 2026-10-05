@@ -3,6 +3,9 @@ import { z } from 'zod'
 
 const text = z.string().trim().min(1)
 
+/** 已确认 S2 事实的正式来源类别，模型引用位置由 Host 绑定到其中一类。 */
+export const s2AnswerArtifactSchema = z.enum(['project', 'requirement', 'scoring', 'response_point', 'compliance'])
+
 /** Host 绑定的业务目标；must_answer 的位置与原文同时保存以识别职责变化。 */
 export const answerTargetSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('must_answer'), position: z.number().int().nonnegative(), text }).strict(),
@@ -11,7 +14,7 @@ export const answerTargetSchema = z.discriminatedUnion('kind', [
 
 /** 依据的来源身份，不把章节职责或模型结论当作现实事实证明。 */
 export const answerBasisSchema = z.discriminatedUnion('kind', [
-  z.object({ kind: z.literal('s2'), artifact: z.enum(['project', 'requirement', 'scoring', 'response_point', 'compliance']), record_id: text.optional() }).strict(),
+  z.object({ kind: z.literal('s2'), artifact: s2AnswerArtifactSchema, record_id: text.optional() }).strict(),
   z.object({ kind: z.literal('local'), file_id: text, chunk: z.string().regex(/^chunk_\d{4}$/u) }).strict(),
   z.object({ kind: z.literal('web'), source_id: z.string().regex(/^WEB-[a-f0-9]{16}$/u), chunk_refs: z.array(z.string().regex(/^W:WEB-[a-f0-9]{16}:C\d{4}$/u)).min(1) }).strict(),
   z.object({ kind: z.literal('section_responsibility'), section_id: text }).strict(),
@@ -44,13 +47,13 @@ export type SectionAnswerPlan = z.infer<typeof sectionAnswerPlanSchema>
 /** 章节必答项或适用 S2 记录的业务目标。 */
 export type AnswerTarget = z.infer<typeof answerTargetSchema>
 
-/** Child 使用短引用，来源身份和目标身份均由 Host 在接受时绑定。 */
+/** Host 已从模型位置恢复短引用及 S2 类别，接受工具与正式计划绑定共用此结构。 */
 export const sectionAnswerPlanInputSchema = z.array(z.object({
   target_refs: z.array(z.string().regex(/^R\d+$/u)).min(1),
   mode: z.enum(['supported', 'proposal', 'gap']),
   content: text,
   basis: z.array(z.discriminatedUnion('kind', [
-    z.object({ kind: z.literal('s2'), artifact: z.enum(['project', 'requirement', 'scoring', 'response_point', 'compliance']), record_id: text.optional() }).strict(),
+    z.object({ kind: z.literal('s2'), artifact: s2AnswerArtifactSchema, record_id: text.optional() }).strict(),
     z.object({ kind: z.literal('local'), material_ref: z.string().regex(/^M\d+:chunk_\d{4}$/u) }).strict(),
     z.object({ kind: z.literal('web'), chunk_refs: z.array(z.string().regex(/^W:WEB-[a-f0-9]{16}:C\d{4}$/u)).min(1) }).strict(),
     z.object({ kind: z.literal('section_responsibility') }).strict(),
@@ -58,7 +61,7 @@ export const sectionAnswerPlanInputSchema = z.array(z.object({
   boundary: text,
   required_input: text.optional(),
 }).strict())
-/** Child 使用短引用提交、待 Host 绑定的章节回应计划。 */
+/** Host 从模型位置恢复引用及 S2 类别、待绑定正式目标的章节回应计划。 */
 export type SectionAnswerPlanInput = z.infer<typeof sectionAnswerPlanInputSchema>
 
 /** 章节规范任务列表中的单项及其业务目标。 */

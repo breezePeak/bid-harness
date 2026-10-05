@@ -20,6 +20,7 @@ import {
   scanZstdFrames,
 } from '@deepseek-ai/dsh-session-persistence-jsonl/src/zstd.ts'
 import { describe, expect, it } from 'vitest'
+import { responsesDisconnectMessage, responsesRetryServer } from '../../../scripts/test-fixtures/responses-retry.ts'
 
 const snapshotsDir = join(dirname(fileURLToPath(import.meta.url)), 'snapshots')
 const advancedScenarioDir = join(snapshotsDir, 'advanced-toolchain')
@@ -34,6 +35,8 @@ const goalScenarioDir = join(snapshotsDir, 'goal-tools')
 const goalConfigPath = fileURLToPath(new URL('../goal.cordis.snapshot.yml', import.meta.url))
 const retryScenarioDir = join(snapshotsDir, 'provider-retry')
 const retryConfigPath = fileURLToPath(new URL('../retry.cordis.snapshot.yml', import.meta.url))
+const responsesRetryConfigPath = fileURLToPath(new URL('./fixtures/responses-retry.cordis.yml', import.meta.url))
+const responsesRetryExpected = join(snapshotsDir, 'responses-provider-retry', 'stream-json.expected.jsonl')
 const compactionScenarioDir = join(snapshotsDir, 'compaction-recovery')
 const compactionSessionFixture = join(compactionScenarioDir, 'session.jsonl')
 const compactionStreamExpected = join(compactionScenarioDir, 'stream-json.expected.jsonl')
@@ -351,6 +354,56 @@ describe('headless stream-json snapshots', () => {
     const normalized = normalizeHeadlessStream(result.stdout, runCwd)
     if (refreshing) await writeFile(streamExpected, normalized)
     expect(normalized).toBe(await readFile(streamExpected, 'utf8'))
+  }, LOADER_SMOKE_TEST_TIMEOUT_MS)
+
+  it('recovers an unfinished Responses stream through the default retry policy', async () => {
+    const server = await responsesRetryServer()
+    let runCwd = ''
+    try {
+      const result = await runLoaderSmoke({
+        label: 'Responses transport retry headless snapshot',
+        tempDirPrefix: 'headless-snapshot-responses-retry-',
+        binScript,
+        libBinScript: binScript,
+        configPath: responsesRetryConfigPath,
+        binArgs: [responsesRetryConfigPath, '验证合成 Responses 断流恢复。'],
+        tsconfigPath,
+        env: {
+          DSH_SNAPSHOT: 'replay',
+          DSH_SNAPSHOT_BASE_URL: `${server.url}/v1`,
+          PI_RESPONSES_SNAPSHOT_KEY: 'synthetic-key',
+          NODE_OPTIONS: [process.env.NODE_OPTIONS, '--disable-warning=ExperimentalWarning'].filter(Boolean).join(' '),
+        },
+        prepare: (cwd) => { runCwd = cwd },
+        inspect: async (cwd) => {
+          const logs = await persistedLogs(cwd)
+          expect(logs).toHaveLength(1)
+          const records = parseJsonl(logs[0]?.content ?? '')
+          const retries = records.filter(record => record.type === 'llm/retry')
+          expect(retries).toHaveLength(1)
+          expect(retries[0]?.data).toMatchObject({
+            provider: 'openai', mode: 'normal', retry: 1, maxRetries: 5,
+            failure: { code: 'TRANSPORT', message: expect.stringContaining(responsesDisconnectMessage) as string },
+          })
+          expect(records.filter(record => record.type === 'step/start')).toHaveLength(1)
+          expect(records.filter(record => record.type === 'assistant/message')).toHaveLength(1)
+          expect(records.some(record => record.type === 'tool/call')).toBe(false)
+          await expect(readFile(join(cwd, 'failed-response.txt'))).rejects.toMatchObject({ code: 'ENOENT' })
+        },
+      })
+      expect(server.paths).toEqual(['/v1/responses', '/v1/responses'])
+      expect(server.requests[0]).toEqual(server.requests[1])
+      expect(result.stderr).toBe('')
+      expect(parseJsonl(result.stdout).at(-1)).toMatchObject({ output: 'RESPONSES_RETRY_OK' })
+      const normalized = normalizeHeadlessStream(result.stdout, runCwd)
+      if (refreshing) {
+        await mkdir(dirname(responsesRetryExpected), { recursive: true })
+        await writeFile(responsesRetryExpected, normalized)
+      }
+      expect(normalized).toBe(await readFile(responsesRetryExpected, 'utf8'))
+    } finally {
+      await server.close()
+    }
   }, LOADER_SMOKE_TEST_TIMEOUT_MS)
 
   it('recovers from context overflow through an assembled compaction', async () => {

@@ -1,7 +1,7 @@
 /** 可控 Provider 夹具从实际模型输入编译位置参数；不参与真实 Provider 验收。 */
 import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
 
-type Objects = Record<string, Array<{ id: string; position: number }>>
+type Objects = Record<string, Array<{ id: string; position: number; kind?: string }>>
 
 /**
  * 从当前职责索引编译可控目录复核回复；覆盖对象由生产 Host 绑定。
@@ -49,6 +49,17 @@ const fields: Record<string, [string, string]> = {
 export function mappingModelArguments(value: unknown, objects: Objects): unknown {
   if (Array.isArray(value)) return (value as unknown[]).map(item => mappingModelArguments(item, objects))
   if (value === null || typeof value !== 'object') return value
+  const input = value as Record<string, unknown>
+  if (typeof input.ref === 'string' && typeof input.kind === 'string') {
+    const { kind: _kind, ref, ...rest } = input
+    return { ...rest, reference_position: objects.references?.find(item => item.id === ref)?.position ?? 999_999 }
+  }
+  if (input.kind === 's2' && (Object.hasOwn(input, 'artifact') || Object.hasOwn(input, 'record_id'))) {
+    const { artifact, record_id, ...rest } = input
+    const reference = objects.references?.find(item => artifact === 'project'
+      ? item.kind === 'project' : item.id === record_id)
+    return { ...rest, record_position: reference?.position ?? 999_999 }
+  }
   return Object.fromEntries(Object.entries(value).filter(([name]) => name !== 'writable').map(([name, child]) => {
     if (name === 'order') return ['sibling_position', Number(child) - 1]
     const field = fields[name]
