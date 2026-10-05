@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises'
 import type { BidWorkspace } from './index.ts'
 import type { BidCapabilityCall, BidCapabilityExecutionContext, BidCapabilityResult } from './bid-capability-contract.ts'
 import { capabilityFileHash } from './bid-capability-files.ts'
-import { buildChapterWorklist, executeChapterWriting } from './chapter-writing-executor.ts'
+import { buildChapterWorklist, executeChapterWriting, type ChapterContentPreservationInput } from './chapter-writing-executor.ts'
 import { createChapterWriterParentResolver } from './chapter-writing-child.ts'
 import { parseChapterWritingManifest, parseChapterMetadata } from './chapter-writing-artifacts.ts'
 import { chapterCandidateSha256, parseChapterReviewArtifact } from './chapter-writing-review-artifacts.ts'
@@ -90,6 +90,56 @@ export function allowedWritingCapabilitySourceWrites(workspace: BidWorkspace): P
 }
 
 /**
+ * 解析本步骤原文引用和原图，普通写作、审核及修订使用相同输入。
+ * @param context 当前步骤及冻结原始任务。
+ * @param ids 本次写作或修订的叶节。
+ * @param includeSeeds 是否读取未完成草稿；保留原文任务始终读取当前正文。
+ * @returns Writer 和 Reviewer 共用的原文及流程图。
+ */
+export async function prepareWritingCapabilityPreservation(
+  context: BidCapabilityExecutionContext, ids: readonly string[], includeSeeds: boolean,
+): Promise<ChapterContentPreservationInput> {
+  const workspace = context.working
+  const seedBySectionId = new Map<string, string>()
+  const seedFlowchartsBySectionId = new Map<string, ReturnType<typeof parseChapterMetadata>['flowcharts']>()
+  if (includeSeeds || context.preserveMigratedContent === true) {
+    const log = await capabilityFileHash(workspace, 'chapters/execution-log.json') === undefined ? undefined
+      : parseOrMigrateChapterExecutionLog(await readJson(workspace, 'chapters/execution-log.json'))
+    const outline = parseConfirmedOutlineArtifact(await readJson(workspace, 'outline/confirmed-outline.json'))
+    const storage = await planChapterLocations(workspace, buildChapterWorklist(outline).map(section => section.id))
+    for (const id of ids) {
+      if (context.preserveMigratedContent !== true
+        && log?.sections.find(section => section.section_id === id)?.status === 'completed') continue
+      const location = storage.locations.get(id)
+      if (location === undefined || await capabilityFileHash(workspace, location.contentPath) === undefined) continue
+      seedBySectionId.set(id, await readFile(within(workspace.projectRoot, location.contentPath), 'utf8'))
+      seedFlowchartsBySectionId.set(id, parseChapterMetadata(await readJson(workspace, location.metadataPath)).flowcharts)
+    }
+  }
+  const preservedContentBySectionId = new Map<string, ReturnType<typeof selectOriginalChapterContent>>()
+  if (context.preserveMigratedContent === true) {
+    const originalOutline = parseConfirmedOutlineArtifact(await readJson(context.canonical, 'outline/confirmed-outline.json'))
+    const scope = context.sourceSnapshot?.root_scope
+    const roots = scope?.kind === 'sections' ? scope.section_ids : scope?.kind === 'paragraphs'
+      ? [scope.reference.section_id] : scope?.kind === 'project' || context.sectionIds === null
+        ? originalOutline.sections.map(section => section.id)
+        : originalOutline.sections.filter(section => context.sectionIds?.has(section.id)).map(section => section.id)
+    const originalIds = roots.length === 0 ? new Set<string>() : outlineSectionScope(originalOutline, roots)
+    const originals: Array<{ markdown: string; flowcharts: ReturnType<typeof parseChapterMetadata>['flowcharts'] }> = []
+    for (const [id, location] of await readChapterLocations(context.canonical)) {
+      if (!originalIds.has(id) || !(context.originalSectionIds?.has(id)
+        ?? originalOutline.sections.some(section => section.id === id && section.writable))) continue
+      originals.push({ markdown: await readFile(within(context.canonical.projectRoot, location.contentPath), 'utf8'),
+        flowcharts: parseChapterMetadata(await readJson(context.canonical, location.metadataPath)).flowcharts })
+    }
+    for (const [id, seed] of seedBySectionId) preservedContentBySectionId.set(id,
+      selectOriginalChapterContent(seed, seedFlowchartsBySectionId.get(id) ?? [], originals))
+  }
+  return { seedBySectionId, seedFlowchartsBySectionId,
+    ...(context.preserveMigratedContent === true ? { preserveSeedFlowcharts: true, preservedContentBySectionId } : {}) }
+}
+
+/**
  * 对授权章节写作或只审核，返回与执行前哈希不同的真实文件。
  * @param call 已解析的写作或审核调用。
  * @param context Host 步骤身份。
@@ -127,42 +177,8 @@ export async function executeWritingCapability(
     'chapters/manifest.json', 'analysis/evidence-map.json', 'analysis/web-evidence-sources.json',
     'outline/quality-report.json', ...await sourcePaths(workspace)])
   const before = new Map(await Promise.all([...beforePaths].map(async path => [path, await capabilityFileHash(workspace, path)] as const)))
-  const seedBySectionId = new Map<string, string>()
-  const seedFlowchartsBySectionId = new Map<string, ReturnType<typeof parseChapterMetadata>['flowcharts']>()
-  if (call.capability !== 'chapter.review' || context.preserveMigratedContent === true) {
-    const log = before.get('chapters/execution-log.json') === undefined ? undefined
-      : parseOrMigrateChapterExecutionLog(await readJson(workspace, 'chapters/execution-log.json'))
-    const outline = parseConfirmedOutlineArtifact(await readJson(workspace, 'outline/confirmed-outline.json'))
-    const storage = await planChapterLocations(workspace, buildChapterWorklist(outline).map(section => section.id))
-    for (const id of ids) {
-      if (context.preserveMigratedContent !== true
-        && log?.sections.find(section => section.section_id === id)?.status === 'completed') continue
-      const location = storage.locations.get(id)
-      if (location === undefined || await capabilityFileHash(workspace, location.contentPath) === undefined) continue
-      seedBySectionId.set(id, await readFile(within(workspace.projectRoot, location.contentPath), 'utf8'))
-      seedFlowchartsBySectionId.set(id, parseChapterMetadata(await readJson(workspace, location.metadataPath)).flowcharts)
-    }
-  }
+  const preservation = await prepareWritingCapabilityPreservation(context, ids, call.capability !== 'chapter.review')
   const affected = new Set<string>()
-  const preservedContentBySectionId = new Map<string, ReturnType<typeof selectOriginalChapterContent>>()
-  if (context.preserveMigratedContent === true) {
-    const originalOutline = parseConfirmedOutlineArtifact(await readJson(context.canonical, 'outline/confirmed-outline.json'))
-    const scope = context.sourceSnapshot?.root_scope
-    const roots = scope?.kind === 'sections' ? scope.section_ids : scope?.kind === 'paragraphs'
-      ? [scope.reference.section_id] : scope?.kind === 'project' || context.sectionIds === null
-        ? originalOutline.sections.map(section => section.id)
-        : originalOutline.sections.filter(section => context.sectionIds?.has(section.id)).map(section => section.id)
-    const originalIds = roots.length === 0 ? new Set<string>() : outlineSectionScope(originalOutline, roots)
-    const originals: Array<{ markdown: string; flowcharts: ReturnType<typeof parseChapterMetadata>['flowcharts'] }> = []
-    for (const [id, location] of await readChapterLocations(context.canonical)) {
-      if (!originalIds.has(id) || !(context.originalSectionIds?.has(id)
-        ?? originalOutline.sections.some(section => section.id === id && section.writable))) continue
-      originals.push({ markdown: await readFile(within(context.canonical.projectRoot, location.contentPath), 'utf8'),
-        flowcharts: parseChapterMetadata(await readJson(context.canonical, location.metadataPath)).flowcharts })
-    }
-    for (const [id, seed] of seedBySectionId) preservedContentBySectionId.set(id,
-      selectOriginalChapterContent(seed, seedFlowchartsBySectionId.get(id) ?? [], originals))
-  }
   let instruction: string
   if (call.capability === 'chapter.revise') {
     if (revisionOriginal === undefined) throw new Error('BID_CHAPTER_REVISION_BODY_MISSING')
@@ -179,9 +195,9 @@ export async function executeWritingCapability(
     ...(context.inputAnswer?.custom === undefined ? {} : { inputAnswer: context.inputAnswer.custom }),
     ...(context.resumeCandidate === undefined ? {} : { resumeCandidate: context.resumeCandidate }),
     scoped: { targetSectionIds: ids, mode: call.capability === 'chapter.review' ? 'review' : 'write',
+      ...(context.checkpointWorkspace === undefined ? {} : { checkpointWorkspace: context.checkpointWorkspace }),
       instruction,
-      seedBySectionId, seedFlowchartsBySectionId, affectedDependentIds: affected,
-      ...(context.preserveMigratedContent === true ? { preserveSeedFlowcharts: true, preservedContentBySectionId } : {}),
+      ...preservation, affectedDependentIds: affected,
       writerParentFor: writerId => writerParents.resolve(writerId) },
   }) } catch (error) {
     if (!(error instanceof BidStageAttentionRequiredError)) throw error

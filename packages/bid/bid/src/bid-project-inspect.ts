@@ -19,6 +19,7 @@ import { parseTenderComplianceArtifact, parseTenderProjectArtifact, parseTenderR
 import { parseTenderScoringSelection } from './tender-analysis-confirmation.ts'
 import { parseWritingPlan } from './writing-requirements.ts'
 import { assertNoLinkedPath, within } from './workspace-path.ts'
+import type { BidWorkDescriptor } from './control-plane-contract.ts'
 
 const page = { page: z.number().int().nonnegative().default(0), page_size: z.number().int().min(1).max(50).default(20) }
 const source = { source: z.enum(['committed', 'candidate']).default('committed') }
@@ -78,16 +79,17 @@ function paginated<T>(items: readonly T[], pageNumber: number, pageSize: number)
  * @param canonical 正式项目。
  * @param request 已解析的查询来源和 Work 身份。
  * @param candidate 当前任务的候选项目，若存在。
+ * @param recoveryWork Host 从原会话失败通知核对的 Work，仅用于 failed 状态。
  * @returns 已核对身份的查询工作区；候选不存在时返回 undefined。
  */
 export async function resolveBidProjectInspectWorkspace(
-  canonical: BidWorkspace, request: BidProjectInspectRequest, candidate?: BidWorkspace,
+  canonical: BidWorkspace, request: BidProjectInspectRequest, candidate?: BidWorkspace, recoveryWork?: BidWorkDescriptor,
 ): Promise<BidWorkspace | undefined> {
   let workspace = request.source === 'candidate' ? candidate : canonical
   if (request.source === 'candidate' && (workspace === undefined || workspace.root === canonical.root)) {
     const state = await readBidProjectState(canonical)
     const work = request.object === 'task' && request.work_id !== undefined
-      ? await readBidWorkDescriptor(canonical, request.work_id) : state?.run?.work
+      ? await readBidWorkDescriptor(canonical, request.work_id) : state?.run?.work ?? (state?.status === 'failed' ? recoveryWork : undefined)
     const paths = work == null ? null : await readExistingBidWorkingTree(canonical, work)
     workspace = paths === null ? undefined : new BidWorkspace(paths.root, canonical.config)
   }
@@ -99,13 +101,14 @@ export async function resolveBidProjectInspectWorkspace(
  * @param canonical 正式项目。
  * @param input 对象、实际章节 ID 和分页请求。
  * @param candidate 当前任务的候选项目，若存在。
+ * @param recoveryWork Host 从原会话失败通知核对的 Work，仅用于 failed 状态。
  * @returns 带可用性、来源与分页信息的只读结果。
  */
 export async function inspectBidProject(
-  canonical: BidWorkspace, input: BidProjectInspectRequest, candidate?: BidWorkspace,
+  canonical: BidWorkspace, input: BidProjectInspectRequest, candidate?: BidWorkspace, recoveryWork?: BidWorkDescriptor,
 ): Promise<BidProjectInspectResult> {
   const request = bidProjectInspectSchema.parse(input)
-  const workspace = await resolveBidProjectInspectWorkspace(canonical, request, candidate)
+  const workspace = await resolveBidProjectInspectWorkspace(canonical, request, candidate, recoveryWork)
   const tenderArtifact = request.object === 'tender' ? `analysis/${request.part === 'scoring_origin' ? 'scoring-origin'
     : request.part === 'selection' ? 'tender-analysis-selection'
       : request.part === 'impact' ? 'tender-update-impact' : request.part}.json` : undefined
@@ -134,7 +137,7 @@ export async function inspectBidProject(
     if (raw === undefined) return { ...base, available: false, missing: 'project-state.json' }
     const state = parseBidProjectState(JSON.parse(raw))
     const work = request.object === 'task' && request.work_id !== undefined
-      ? await readBidWorkDescriptor(canonical, request.work_id) : state.run?.work
+      ? await readBidWorkDescriptor(canonical, request.work_id) : state.run?.work ?? (state.status === 'failed' ? recoveryWork : undefined)
     if (request.object === 'task' && request.work_id !== undefined && work == null) {
       return { ...base, available: false, missing: 'BID_WORK_REQUEST_NOT_FOUND' }
     }

@@ -43,6 +43,16 @@ for line in sys.stdin:
         print(json.dumps({"jsonrpc": "2.0", "method": "session.status", "params": {"sessionId": params["sessionId"], "status": "running"}}), flush=True)
         print(json.dumps({"jsonrpc": "2.0", "id": msg["id"], "result": {"messageId": "message-1"}}), flush=True)
         print(json.dumps({"jsonrpc": "2.0", "method": "session.event", "params": {
+            "sessionId": params["sessionId"], "event": {"type": "bid.task.changed", "data": {
+                "state": {"stage": "chapter_writing", "status": "failed", "run": None,
+                    "failure": {"code": "BID_TASK_RESULT_UNMET", "message": "当前章节尚需修复。"}},
+            }}}}), flush=True)
+        print(json.dumps({"jsonrpc": "2.0", "method": "session.event", "params": {
+            "sessionId": params["sessionId"], "event": {"type": "bid.run.notice", "data": {
+                "noticeId": "run:run-1:failed", "runId": "run-1", "stage": "chapter_writing",
+                "supersedesTurn": None, "kind": "interrupted", "severity": "error", "message": "当前章节尚需修复。",
+            }}}}), flush=True)
+        print(json.dumps({"jsonrpc": "2.0", "method": "session.event", "params": {
             "sessionId": params["sessionId"], "event": {"type": "bid.recovery.requested", "data": {
                 "ownerSessionId": params["sessionId"], "target": {"kind": "run", "workId": "work-1", "runId": "run-1"},
                 "unit": "outline/outline.json", "instruction": "核对原文并修正当前章节。", "progressFingerprint": "a" * 64,
@@ -116,6 +126,12 @@ for line in sys.stdin:
     assert result.final_response == "hello from runtime"
     assert result.finish_reason == "max-tokens"
     assert result.events[-1]["type"] == "turn/end"
+    assert not any(event["type"] == "bid.run.suspended" for event in result.events)
+    assert next(event["data"] for event in result.events if event["type"] == "bid.task.changed") == {
+        "state": {"stage": "chapter_writing", "status": "failed", "run": None,
+            "failure": {"code": "BID_TASK_RESULT_UNMET", "message": "当前章节尚需修复。"}},
+    }
+    assert next(event["data"] for event in result.events if event["type"] == "bid.run.notice")["noticeId"] == "run:run-1:failed"
     assert next(event["data"] for event in result.events if event["type"] == "bid.recovery.requested") == {
         "ownerSessionId": "main", "target": {"kind": "run", "workId": "work-1", "runId": "run-1"},
         "unit": "outline/outline.json", "instruction": "核对原文并修正当前章节。", "progressFingerprint": "a" * 64,

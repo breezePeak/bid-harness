@@ -12,6 +12,8 @@ const sourceMessageSchema = z.object({ session_id: z.string().min(1), message_id
 export const bidTaskSourceSnapshotSchema = z.object({
   message: sourceMessageSchema,
   context_messages: z.array(sourceMessageSchema).optional(),
+  clarification_dialogue: z.array(z.object({ role: z.enum(['user', 'assistant']),
+    text: z.string(), seq: z.number().int().nonnegative() }).strict()).optional(),
   issues: z.array(revisionIssueSchema),
   observed_issues: z.array(revisionIssueSchema),
   queue_revision: z.number().int().nonnegative(),
@@ -22,10 +24,10 @@ export const bidTaskSourceSnapshotSchema = z.object({
 export type BidTaskSourceSnapshot = z.infer<typeof bidTaskSourceSnapshotSchema>
 
 /**
- * 从原消息之前、上次 Run 接纳或完成之后的真实用户消息绑定本次澄清上下文。
+ * 从原消息之前、上次 Run 接纳或完成之后绑定真实用户消息及助手公开澄清文本。
  * @param session 原授权会话，后续消息不能补充旧任务的授权。
  * @param source 原任务来源；已保存的上下文须与原会话相符。
- * @returns 带持久消息身份和原文的来源，不改变原任务消息或审批意见。
+ * @returns 带持久消息身份及澄清对话的来源；助手文本不授予权限，不改变原消息或意见。
  */
 export function bindBidTaskSourceContext(session: Session, source: BidTaskSourceSnapshot): BidTaskSourceSnapshot {
   const prior = session.events.filter(event => event.seq < source.message.seq)
@@ -33,11 +35,22 @@ export function bindBidTaskSourceContext(session: Session, source: BidTaskSource
   const context = prior.flatMap(event => event.seq > boundary && event.type === 'user/message'
     && event.data.source.kind === 'user' ? [{ session_id: String(session.id), message_id: String(event.data.id),
       text: event.data.content.flatMap(block => block.type === 'text' ? [block.text] : []).join('\n'), seq: event.seq }] : [])
+  const dialogue = prior.flatMap<NonNullable<BidTaskSourceSnapshot['clarification_dialogue']>[number]>((event) => {
+    if (event.seq <= boundary) return []
+    if (event.type === 'user/message' && event.data.source.kind === 'user') {
+      return [{ role: 'user' as const, text: event.data.content.flatMap(block => block.type === 'text'
+        ? [block.text] : []).join('\n'), seq: event.seq }]
+    }
+    if (event.type !== 'assistant/message') return []
+    const text = event.data.message.content.flatMap(block => block.type === 'text' ? [block.text] : []).join('\n')
+    return text.trim() === '' ? [] : [{ role: 'assistant' as const, text, seq: event.seq }]
+  })
   if (source.message.session_id !== String(session.id)
-    || source.context_messages !== undefined && JSON.stringify(source.context_messages) !== JSON.stringify(context)) {
+    || source.context_messages !== undefined && JSON.stringify(source.context_messages) !== JSON.stringify(context)
+    || source.clarification_dialogue !== undefined && JSON.stringify(source.clarification_dialogue) !== JSON.stringify(dialogue)) {
     throw new Error('BID_TASK_VERIFICATION_SOURCE_INVALID')
   }
-  return { ...source, context_messages: context }
+  return { ...source, context_messages: context, clarification_dialogue: dialogue }
 }
 
 /**

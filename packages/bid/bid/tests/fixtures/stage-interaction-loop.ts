@@ -12,6 +12,7 @@ import { runEvidenceMappingLoop } from './evidence-mapping-loop.ts'
 import { outlineRegenerationChanges } from '../../src/outline-regeneration-artifacts.ts'
 import { seedCapabilityProject } from '../capability-fixture.ts'
 import { collectBidModelTaskCatalog } from '../../src/bid-model-task.ts'
+import { bidRecoverableRun } from '../../src/bid-recovery.ts'
 
 function call(name: string, args: object): StreamChunk[] {
   return [{ type: 'block-start', index: 0, blockType: 'tool-call' }, { type: 'block-end', index: 0, block: { type: 'tool-call', id: CallId(name), name, arguments: JSON.stringify(args) } }, { type: 'finish', reason: { kind: 'tool-calls' } }]
@@ -54,7 +55,6 @@ export async function runCapabilityReplanLoop(ctx: Context, root: string) {
     if (session === agent.session && event.type === 'bid.run.notice' && event.data.kind === 'completed'
       && admitted?.type === 'bid.run.started' && event.data.workId === admitted.data.run.work.workId) done.resolve(undefined)
   }, { global: true })
-  let runId = ''
   let initialDescriptionRejected = false
   let replacementDescriptionRejected = false
   let descriptionSchemaChecked = false
@@ -121,13 +121,12 @@ export async function runCapabilityReplanLoop(ctx: Context, root: string) {
         if (block.type !== 'tool-result') continue
         for (const content of block.content) {
           if (content.type !== 'text') continue
-          const value = JSON.parse(content.text) as { data?: { run?: { runId: string }
+          const value = JSON.parse(content.text) as { data?: {
             capability_task?: { work_id: string; steps: Array<{ index: number; status: string }> } } }
           const task = value.data?.capability_task
           if (task === undefined) continue
-          runId = value.data?.run?.runId ?? ''
           const failed = task.steps.find(step => step.status === 'running')
-          if (failed === undefined || !runId) throw new Error('未返回实际失败步骤')
+          if (failed === undefined) throw new Error('未返回实际失败步骤')
           checkDescriptionSchema(options, 'bid_plan_task')
           descriptionSchemaChecked = true
           descriptionGuidanceChecked = true
@@ -183,7 +182,7 @@ export async function runCapabilityReplanLoop(ctx: Context, root: string) {
   } finally { release() }
 }
 
-/** @param ctx 源码 Loader 装配。 @param root 临时项目。 @param terminal 是否模拟旧任务已终止的持久边界。 @returns 新用户任务接管旧 Work 后的正式目录身份。 */
+/** @param ctx 源码 Loader 装配。 @param root 临时项目。 @param terminal 是否模拟旧任务的授权阻断。 @returns 新用户任务接管旧 Work 后的正式目录身份。 */
 export async function runCapabilitySupersedeLoop(ctx: Context, root: string, terminal = false) {
   const { agent, workspace, parentScript } = await runEvidenceMappingLoop(ctx, root, false, true)
   const seeded = await seedCapabilityProject(workspace, 'complete')
@@ -202,22 +201,24 @@ export async function runCapabilitySupersedeLoop(ctx: Context, root: string, ter
     call('bid_run_task', await modelTaskArguments(agent, { task: { goal: '完成 S4 资料映射', scope: { kind: 'project' }, steps: [{
       description: '重新生成已有目录', scope: { source: 'task' }, call: { capability: 'outline.generate', input: {} },
     }] } })),
-    answer('旧任务已挂起。'),
+    answer('旧任务执行失败。'),
   )
   agent.followup(createUserMessage({ content: [{ type: 'text', text: '完成 S4 资料映射' }], source: { kind: 'user' } }))
   await agent.whenIdle()
   await waitCapabilityOperations(ctx)
   await agent.whenIdle()
   const old = await readBidProjectState(workspace)
-  if (old?.status !== 'suspended' || old.run.work.kind !== 'capability_task') throw new Error('旧能力任务未挂起')
-  const oldWorkId = old.run.work.workId
+  if (old?.status !== 'failed') throw new Error('旧能力任务未保存失败状态')
+  const oldRun = bidRecoverableRun(agent.session, old)
+  if (oldRun?.work.kind !== 'capability_task') throw new Error('旧能力任务缺少原 Run 身份')
+  const oldWorkId = oldRun.work.workId
   if (terminal) {
     const failed = { stage: old.stage, status: 'failed' as const, run: null,
       failure: { code: 'BID_TASK_SCOPE_AUTHORIZATION_REQUIRED', message: '旧任务授权范围需要新用户消息澄清',
         recovery: { kind: 'blocked' as const, unit: oldWorkId, reason: '旧任务授权范围需要新用户消息澄清' } } }
     agent.session.append('bid.task.changed', { state: failed })
-    agent.session.append('bid.run.notice', { noticeId: `run:${old.run.runId}:failed`, supersedesTurn: null,
-      runId: old.run.runId, stage: old.stage, kind: 'interrupted', severity: 'error', message: failed.failure.message })
+    agent.session.append('bid.run.notice', { noticeId: `run:${oldRun.runId}:failed`, supersedesTurn: null,
+      runId: oldRun.runId, stage: old.stage, kind: 'interrupted', severity: 'error', message: failed.failure.message })
     await checkpointBidProjectState(workspace, failed)
   }
   parentScript.push(
@@ -230,7 +231,7 @@ export async function runCapabilitySupersedeLoop(ctx: Context, root: string, ter
           { type: 'update_section', section_id: 'SEC-1', title: '总体实施方案',
             must_answer: ['回答评分1，说明实施方案的范围和方法'] },
         ] } },
-      }] }, supersede: { run_id: old.run.runId, expected_project_revision: old.revision } })),
+      }] }, supersede: { run_id: oldRun.runId, expected_project_revision: old.revision } })),
     answer('已接纳新任务，等待真实结果。'),
   )
   agent.followup(createUserMessage({ content: [{ type: 'text', text: '修正评分点目录层级，首个细粒度评分点不作大标题' }],
@@ -252,7 +253,7 @@ export async function runCapabilitySupersedeLoop(ctx: Context, root: string, ter
     resumedOldWork: runs[1]?.data.run.resumeOf !== undefined,
     calls: events.filter(event => event.type === 'tool/call').map(event => event.data.name),
     supersededNotice: events.some(event => event.type === 'bid.run.notice'
-      && event.data.noticeId === `run:${old.run.runId}:superseded`),
+      && event.data.noticeId === `run:${oldRun.runId}:superseded`),
   }
 }
 

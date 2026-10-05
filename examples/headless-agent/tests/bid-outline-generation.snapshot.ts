@@ -89,3 +89,188 @@ it('S3 一次生成响应点和目录、质量复核修改后等待用户确认'
   expect(report.reviewed_section_ids).toEqual(['dsh-technical-deviation-table', 'SEC-SECURITY', 'SEC-SERVICE'])
   expect(report.checked_scoring_response_point_ids).toHaveLength(11)
 }, LOADER_SMOKE_TEST_TIMEOUT_MS)
+
+it('S3 父章局部修复失败后恢复原 Work，由新叶节承接响应点并等待用户确认', async () => {
+  const configPath = fileURLToPath(new URL('../bid-evidence-mapping.cordis.snapshot.yml', import.meta.url))
+  const result = await runLoaderSmoke({
+    label: 'S3 父章响应点迁移', tempDirPrefix: 'dsh-s3-parent-repair-snapshot-',
+    binScript: fileURLToPath(new URL('./fixtures/bid-outline-generation-driver.ts', import.meta.url)),
+    configPath, binArgs: [configPath, 'structural-parent'],
+    mode: 'src', tsconfigPath: fileURLToPath(new URL('../../../tsconfig.json', import.meta.url)),
+    inspect: async (cwd) => {
+      const store = join(cwd, '.session-store')
+      const paths = (await readdir(store, { recursive: true })).filter(path => path.endsWith('.jsonl'))
+      const logs = await Promise.all(paths.map(async path => readFile(join(store, path), 'utf8')))
+      const log = logs.find(content => (JSON.parse(content.split('\n')[0]!) as SessionHeader).id === 's3-outline-recovery')
+      if (log === undefined) throw new Error('缺少 S3 持久化会话')
+      const records = log.trimEnd().split('\n').map(line => JSON.parse(line) as {
+        type: string
+        data: {
+          progress?: { phase: string; summary: string; details?: string[] }
+          name?: string
+          arguments?: string
+          state?: { status: string }
+        }
+      })
+      const progress = records.flatMap(record => record.type === 'bid.run.progress' ? [record.data.progress!] : [])
+      expect(progress.find(item => item.phase === 'repairing')?.details).toEqual(expect.arrayContaining([
+        'OUTLINE_SHARED_WRITABLE_NOT_LEAF：A writable section must be a leaf.',
+        expect.stringContaining('OUTLINE_SHARED_RESPONSE_POINT_MISSING'),
+      ]))
+      expect(progress.map(({ phase, summary }) => ({ phase, summary }))).toMatchInlineSnapshot(`
+        [
+          {
+            "phase": "starting",
+            "summary": "正在开始 outline_generation 阶段",
+          },
+          {
+            "phase": "analyzing",
+            "summary": "正在拆解评分响应点",
+          },
+          {
+            "phase": "analyzing",
+            "summary": "正在复核评分响应点",
+          },
+          {
+            "phase": "generating",
+            "summary": "正在生成初步技术标目录",
+          },
+          {
+            "phase": "validating",
+            "summary": "正在校验目录结构与响应覆盖",
+          },
+          {
+            "phase": "repairing",
+            "summary": "正在修正目录确定性问题",
+          },
+          {
+            "phase": "starting",
+            "summary": "正在开始 outline_generation 阶段",
+          },
+          {
+            "phase": "analyzing",
+            "summary": "已恢复正式评分响应点清单",
+          },
+          {
+            "phase": "validating",
+            "summary": "已恢复 S3，目录候选已保存，继续进行确定性校验",
+          },
+          {
+            "phase": "repairing",
+            "summary": "正在修正目录确定性问题",
+          },
+          {
+            "phase": "reviewing",
+            "summary": "已恢复目录候选，继续质量复核",
+          },
+          {
+            "phase": "finalizing",
+            "summary": "正在执行最终目录校验",
+          },
+        ]
+      `)
+      expect(records.filter(record => record.type === 'tool/call').map(record => record.data.name)).toEqual(['write', 'write'])
+      expect(records.filter(record => record.type === 'bid.user_confirmation.required')).toHaveLength(1)
+      expect(records.filter(record => record.type === 'bid.task.changed' && record.data.state?.status === 'failed')).toHaveLength(1)
+      expect(records.filter(record => record.type === 'bid.run.started')).toHaveLength(2)
+      expect(records.filter(record => record.type === 'bid.run.notice')).toHaveLength(1)
+      expect(records.some(record => record.type === 'bid.run.suspended')).toBe(false)
+      const repairCall = records.findLast(record => record.type === 'tool/call' && record.data.name === 'write')
+      const repairArgs = JSON.parse(repairCall?.data.arguments ?? 'null') as { content: string }
+      const operations = JSON.parse(repairArgs.content) as unknown[]
+      expect(operations).toEqual([
+        { type: 'repair_structure', section_index: 1, writable: false, must_answer: [] },
+        expect.objectContaining({ type: 'add_section', parent_id: 'SEC-SECURITY', writable: true,
+          scoring_response_point_ids: Array.from({ length: 11 }, (_, index) => 'RP-' + String(index + 1).padStart(6, '0')) }),
+      ])
+      await expect(readFile(join(cwd, '.bid-harness/outline/initial-confirmed-outline.json'))).rejects.toMatchObject({ code: 'ENOENT' })
+    },
+  })
+  const actual = JSON.parse(result.stdout) as Awaited<ReturnType<typeof runOutlineGenerationLoop>>
+  expect(actual.outcome).toMatchObject({ stage: 'outline_generation', status: 'waiting_user' })
+  expect(actual.untouchedUnchanged).toBe(true)
+  expect(actual.confirmationEvents).toBe(0)
+  expect(actual.recovery).toEqual({ failed: true, matched_notice: true, same_work: true, resumed_original_run: true })
+  const parent = actual.outline.sections.find(section => section.id === 'SEC-SECURITY')
+  expect(parent).toMatchObject({ writable: false, must_answer: [], scoring_response_point_ids: [], scoring_response_points: [] })
+  const leaf = actual.outline.sections.find(section => section.id === 'SEC-001')
+  expect(leaf?.scoring_response_point_ids).toEqual(Array.from({ length: 11 }, (_, index) => 'RP-' + String(index + 1).padStart(6, '0')))
+  expect(leaf?.scoring_response_points).toHaveLength(11)
+  const report = parseOutlineQualityReport(actual.report)
+  expect(report.checked_scoring_response_point_ids).toEqual(leaf?.scoring_response_point_ids)
+  expect({ sections: actual.outline.sections.map(section => ({ id: section.id, parent_id: section.parent_id,
+    writable: section.writable, response_points: section.scoring_response_point_ids?.length ?? 0 })),
+  report }).toMatchInlineSnapshot(`
+    {
+      "report": {
+        "checked_requirement_ids": [
+          "REQ-1",
+        ],
+        "checked_scoring_ids": [
+          "SCORE-1",
+        ],
+        "checked_scoring_response_point_ids": [
+          "RP-000001",
+          "RP-000002",
+          "RP-000003",
+          "RP-000004",
+          "RP-000005",
+          "RP-000006",
+          "RP-000007",
+          "RP-000008",
+          "RP-000009",
+          "RP-000010",
+          "RP-000011",
+        ],
+        "issues": [
+          {
+            "code": "OUTLINE_QUALITY_ADVISORY",
+            "message": "请确认安全审计与追溯安排。",
+            "severity": "advisory",
+          },
+        ],
+        "reviewed_section_ids": [
+          "dsh-technical-deviation-table",
+          "SEC-SECURITY",
+          "SEC-SERVICE",
+          "SEC-DETAIL",
+          "SEC-001",
+        ],
+        "schema_version": 4,
+        "scope": "technical_bid",
+      },
+      "sections": [
+        {
+          "id": "dsh-technical-deviation-table",
+          "parent_id": null,
+          "response_points": 0,
+          "writable": true,
+        },
+        {
+          "id": "SEC-SECURITY",
+          "parent_id": null,
+          "response_points": 0,
+          "writable": false,
+        },
+        {
+          "id": "SEC-SERVICE",
+          "parent_id": null,
+          "response_points": 0,
+          "writable": true,
+        },
+        {
+          "id": "SEC-DETAIL",
+          "parent_id": "SEC-SECURITY",
+          "response_points": 0,
+          "writable": true,
+        },
+        {
+          "id": "SEC-001",
+          "parent_id": "SEC-SECURITY",
+          "response_points": 11,
+          "writable": true,
+        },
+      ],
+    }
+  `)
+}, LOADER_SMOKE_TEST_TIMEOUT_MS)

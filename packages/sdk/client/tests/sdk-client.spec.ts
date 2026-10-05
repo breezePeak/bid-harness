@@ -526,9 +526,17 @@ describe('pure helpers', () => {
   })
 })
 
-it('保留不含 Goal 的 Bid 恢复审计事件及 Main Agent 指令', async () => {
+it('保留 Bid 内部失败、原 Run 通知及 Main Agent 恢复指令，不产生挂起事件', async () => {
   const harness = harnessWith({ FAKE_BID_RECOVERY: '1' })
   const result = await harness.run('核对恢复记录')
+  expect(result.events.some(event => event.type === 'bid.run.suspended')).toBe(false)
+  expect(result.events.find(event => event.type === 'bid.task.changed')?.data).toEqual({
+    state: { stage: 'chapter_writing', status: 'failed', run: null,
+      failure: { code: 'BID_TASK_RESULT_UNMET', message: '当前章节尚需修复。' } },
+  })
+  expect(result.events.find(event => event.type === 'bid.run.notice')?.data).toMatchObject({
+    noticeId: 'run:run-1:failed', runId: 'run-1', stage: 'chapter_writing',
+  })
   expect(result.events.find(event => event.type === 'bid.recovery.requested')?.data).toEqual({
     ownerSessionId: result.sessionId, target: { kind: 'run', workId: 'work-1', runId: 'run-1' },
     unit: 'outline/outline.json', instruction: '核对原文并修正当前章节。', progressFingerprint: 'a'.repeat(64),

@@ -104,6 +104,7 @@ import {
 import { readBidWorkDescriptor, bidWorkRoot } from './work-descriptor.ts'
 import { bindBidTaskSourceContext, freezeBidTaskSource } from './bid-task-source.ts'
 import { createBidCapabilityDispatcher, type BidCapabilityDispatcher } from './bid-capability-dispatcher.ts'
+import { prepareWritingCapabilityPreservation } from './bid-writing-capability.ts'
 import { cancelCapabilityRequestsForPlanPatch, cancelCapabilityRequestsForReset, enqueueCapabilityRequest,
   markCapabilityRequestApplied, markCapabilityRequestAppliedWithLease,
   pendingCapabilityWorkIds, readPendingCapabilityRequests } from './bid-capability-queue.ts'
@@ -175,7 +176,7 @@ import { BID_STAGES, BidStageExecutionError, isBidDocumentRole } from './control
 import { BID_BINARY_UPLOAD_PATH, BID_UPLOAD_FILES_HEADER, BID_UPLOAD_SESSION_HEADER } from './control-plane-contract.ts'
 import { appendBidSchemaWarning, createBidSchemaWarning } from './bid-events.ts'
 import type {} from '@deepseek-ai/dsh-goal-round-driver'
-import { bidCapabilityTakeoverRun, bidCompletedCapabilityRun, bidRecoveryInstructionRepeated, bidRunRecoveryEligibility, bidWritingPlanRecoveryEligibility, safeRecoverableBidFailure } from './bid-recovery.ts'
+import { bidCapabilityTakeoverRun, bidCompletedCapabilityRun, bidRecoverableRun, bidRecoveryInstructionRepeated, bidRunRecoveryEligibility, bidWritingPlanRecoveryEligibility, safeRecoverableBidFailure } from './bid-recovery.ts'
 import { resolveBidToolAuthorization, withBidNativeTaskAuthorization } from './bid-tool-authorization.ts'
 import type { BidSessionEventMap } from './bid-events.ts'
 import {
@@ -1860,7 +1861,7 @@ export class BidHostRuntime extends TypertRemoteService {
       (notice, run) => {
         this.injectHostExecutionUpdate(session, {
           stage: run.work.stage,
-          status: run.cause === 'executor_error' ? 'failed' : 'suspended',
+          status: bidSessionTaskState(session).status === 'failed' ? 'failed' : 'suspended',
           cause: run.cause,
           code: run.error?.code,
           message: run.error?.message ?? notice.message,
@@ -2016,7 +2017,7 @@ export class BidHostRuntime extends TypertRemoteService {
         if (this.inFlight.get(key) === operation) this.inFlight.delete(key)
         operation.settle()
         const settledTask = bidSessionTaskState(operation.session)
-        if (operation.lastAdmittedWorkId !== undefined && settledTask.status !== 'suspended') {
+        if (operation.lastAdmittedWorkId !== undefined && settledTask.status !== 'suspended' && settledTask.status !== 'failed') {
           void this.continueCapabilityExport(operation.session, operation.lastAdmittedWorkId)
             .then(completed => completed ? this.drainPersistedCapabilityRequests(operation.session) : undefined)
             .catch((error: unknown) => {
@@ -2099,8 +2100,8 @@ export class BidHostRuntime extends TypertRemoteService {
         const error = safeRecoverableBidFailure(failedRun.work, Object.assign(
           new Error('同一不可变请求的授权已通过；模型重复授权结论冲突，继续原 Work 核验剩余成果。'),
           { code: 'BID_TASK_AUTHORIZATION_RECHECK_CONFLICT' }))
-        state = await checkpointBidProjectState(operation.workspace, { stage: state.stage, status: 'suspended',
-          run: { ...failedRun, cause: 'retry_exhausted', error, updatedAt: Date.now() } })
+        state = await checkpointBidProjectState(operation.workspace, { stage: state.stage, status: 'failed',
+          run: null, failure: error })
       }
     }
     const lastStarted = operation.session.events.findLast(event => event.type === 'bid.run.started')
@@ -2981,9 +2982,10 @@ export class BidHostRuntime extends TypertRemoteService {
   constructor(ctx: Context, config: Config = DEFAULT_HOST_RUNTIME_CONFIG) {
     super(ctx, 'bid')
     this.config = config
-    this.builtInCapabilityDispatcher = createBidCapabilityDispatcher(config, (input, context) =>
+    this.builtInCapabilityDispatcher = createBidCapabilityDispatcher(config, async (input, context) =>
       this.executeChapterRevisionBatchCandidate(context.sourceSession as Session, context.agent,
-        context.canonical, input, context.run, { workspace: context.working, run: context.run }))
+        context.canonical, input, context.run, { workspace: context.working, run: context.run,
+          preservation: await prepareWritingCapabilityPreservation(context, input.tasks.map(task => task.section_id), true) }))
     for (const authority of config.trustedHosts) assertBidUploadTrustedAuthority(authority)
     ctx.effect(
       () => registerBidRuntimeProjection(ctx.sessionProjections, config),
@@ -3344,7 +3346,8 @@ export class BidHostRuntime extends TypertRemoteService {
     const key = projectKey(session)
     if (request.action === 'bid_project_inspect') {
       const canonical = new BidWorkspace(key, workspaceConfig(this.config))
-      return inspectBidProject(canonical, request.query, this.inFlight.get(key)?.workspace)
+      return inspectBidProject(canonical, request.query, this.inFlight.get(key)?.workspace,
+        bidRecoverableRun(session, bidSessionTaskState(session))?.work)
     }
     if (request.action === 'bid_run_task') {
       return this.runCapabilityTaskFromTool(agent, request.task, request.supersede)
@@ -3355,7 +3358,8 @@ export class BidHostRuntime extends TypertRemoteService {
       try {
         const state = await this.prepareOperation(operation)
         const completed = bidCompletedCapabilityRun(session, state)
-        const current = state.status === 'suspended' && state.run.cause !== 'awaiting_input' ? state.run : completed
+        const interrupted = bidRecoverableRun(session, state)
+        const current = interrupted?.cause !== 'awaiting_input' ? interrupted ?? completed : completed
         if (current === undefined || current.work.kind !== 'capability_task' || current.work.workId !== request.work_id) {
           throw new Error('BID_CAPABILITY_PLAN_PATCH_NOT_READY')
         }
@@ -3366,10 +3370,10 @@ export class BidHostRuntime extends TypertRemoteService {
         const authorization = resolveBidToolAuthorization(agent) ?? saved.authorization
         const workingPaths = await prepareBidWorkingTree(operation.workspace, current.work)
         const working = new BidWorkspace(workingPaths.root, operation.workspace.config)
-        const updatedState: BidTaskState = completed === undefined ? state : { stage: state.stage, status: 'suspended',
-          run: { ...completed, updatedAt: Date.now(), cause: 'executor_error',
-            error: { code: 'BID_TASK_RESULT_UNMET', message: '用户要求纠正已发布结果；原 Work 已保留，待追加步骤完成后重新核验发布。',
-              recovery: { kind: 'repair', unit: current.work.workId, reason: '执行已授权的结果纠正步骤。' } } } }
+        const correctionFailure = { code: 'BID_TASK_RESULT_UNMET', message: '用户要求纠正已发布结果；原 Work 已保留，待追加步骤完成后重新核验发布。',
+          recovery: { kind: 'repair' as const, unit: current.work.workId, reason: '执行已授权的结果纠正步骤。' } }
+        const updatedState: BidTaskState = completed === undefined ? state : { stage: state.stage, status: 'failed',
+          run: null, failure: correctionFailure }
         let stepCount = 0
         await this.mutateProject(operation, async (lease) => {
           const checkpoint = await patchCapabilityTaskSteps({ work: current.work,
@@ -3379,8 +3383,12 @@ export class BidHostRuntime extends TypertRemoteService {
           await cancelCapabilityRequestsForPlanPatch(operation.workspace, current.work.workId, authorization, lease)
           stepCount = checkpoint.steps.length
         }, updatedState)
+        if (completed !== undefined) session.append('bid.run.notice', {
+          noticeId: `run:${completed.runId}:failed`, supersedesTurn: null, runId: completed.runId,
+          stage: state.stage, kind: 'interrupted', severity: 'info', message: correctionFailure.message,
+        })
         return { accepted: true, work_id: request.work_id, steps: stepCount,
-          message: '已保存未完成步骤；当前任务仍挂起。可恢复失败请调用 bid_recover_task 继续，用户停止的任务须等用户明确恢复。' }
+          message: '已保存未完成步骤；可修复的执行问题请调用 bid_recover_task 在原 Work 继续，用户停止的任务须等用户明确恢复。' }
       } finally { await this.finishOperation(session, operation) }
     }
     if (request.action === 'bid_outline_apply_operations'
@@ -3934,7 +3942,7 @@ export class BidHostRuntime extends TypertRemoteService {
       if (operation.controller.signal.aborted || this.writingEntryStops.has(key)) return false
       const task = operation.session.events.reduce(reduceBidTaskState, BID_INITIAL_TASK_STATE)
       if (resumeOf !== undefined) {
-        return task.status === 'suspended' && task.run.runId === resumeOf.runId
+        return bidRecoverableRun(operation.session, task)?.runId === resumeOf.runId
       }
       try {
         const stop = await readWritingEntryStop(workspace)
@@ -5514,7 +5522,9 @@ export class BidHostRuntime extends TypertRemoteService {
     session.append('bid.run.notice', {
       noticeId, supersedesTurn: null, runId: run.runId, stage: run.work.stage,
       kind: 'completed', severity: 'info', workId, resultRef,
-      message: '能力任务交付结果；' + (summary ?? '历史执行记录，未有本次任务核验证据；') + '结果凭据：' + resultRef,
+      message: '能力任务交付结果；' + (receipt.goal_met === true
+        ? '本次任务范围内目标已通过核验并正式发布，goal_met=true；'
+        : summary ?? '历史执行记录，未有本次任务核验证据；') + '结果凭据：' + resultRef,
     })
   }
 
@@ -5546,9 +5556,11 @@ export class BidHostRuntime extends TypertRemoteService {
     let admitted = false
     try {
       const task = await this.prepareOperation(operation)
-      if (operation.projectRevision !== expectedProjectRevision || task.status !== 'suspended'
-        || task.run.runId !== suspendedRunId) throw new BidOrchestratorError('BID_RESUME_NOT_ALLOWED', 'The suspended Bid Run changed before resume.')
-      const suspended = task.run
+      const suspended = bidRecoverableRun(session, task)
+      if (operation.projectRevision !== expectedProjectRevision || suspended?.runId !== suspendedRunId
+        || task.status !== 'suspended' && (recovery === undefined || task.status !== 'failed')) {
+        throw new BidOrchestratorError('BID_RESUME_NOT_ALLOWED', '原 Run 或项目状态已改变，不能恢复。')
+      }
       if (suspended.work.kind === 'file_intake') await readFileIntakeWork(operation.workspace, suspended.work)
       else {
         const payload = await readHostWork(operation.workspace, suspended.work)
@@ -6215,7 +6227,11 @@ export class BidHostRuntime extends TypertRemoteService {
     canonical: BidWorkspace,
     batchExecutionInput: RevisionBatchExecutionInput,
     run: BidRunContext,
-    admittedCandidate?: { readonly workspace: BidWorkspace; readonly run: BidRunContext },
+    admittedCandidate?: {
+      readonly workspace: BidWorkspace
+      readonly run: BidRunContext
+      readonly preservation?: Awaited<ReturnType<typeof prepareWritingCapabilityPreservation>>
+    },
   ): Promise<void> {
     const candidate = admittedCandidate ?? await prepareWorkingWorkspace(canonical, run)
     const logPath = within(candidate.workspace.projectRoot, 'chapters/execution-log.json')
@@ -6310,13 +6326,15 @@ export class BidHostRuntime extends TypertRemoteService {
         ],
       }
       const fallback = async (item: typeof scheduled[number]): Promise<ParagraphRevisionTaskResult> => {
-        try { await executeChapterWriting(parentFor(item.value.writerId), candidate.workspace, buildBidStageTask('chapter_writing'), {
+        try { await executeChapterWriting(executionAgent, candidate.workspace, buildBidStageTask('chapter_writing'), {
           maxRepairAttempts: this.config.modelStageRepairAttempts,
           maxConcurrency: 1,
           maxCompletionRepairRounds: this.config.chapterWritingCompletionRepairRounds,
           webSearchEnabled: this.config.webSearchEnabled,
           run: candidate.run,
           documentReview: 'defer',
+          writerParentFor: writerId => Promise.resolve(parentFor(writerId)),
+          ...(admittedCandidate?.preservation === undefined ? {} : { preservation: admittedCandidate.preservation }),
           revisionBatch: {
             batchId: batchExecutionInput.batchId,
             tasks: [{ ...item.task, depends_on: [] }],

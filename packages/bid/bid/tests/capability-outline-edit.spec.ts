@@ -28,7 +28,7 @@ import { parseChapterMetadata, parseChapterWritingManifest } from '../src/chapte
 import { parseWritingPlan } from '../src/writing-requirements.ts'
 import { parseEvidenceMapArtifact } from '../src/evidence-mapping-artifacts.ts'
 import { seedCapabilityProject } from './capability-fixture.ts'
-import { executeWritingCapability } from '../src/bid-writing-capability.ts'
+import { executeWritingCapability, validateWritingCapability } from '../src/bid-writing-capability.ts'
 import { applyOutlineBusinessBindings } from '../src/outline-confirmation-edits.ts'
 import { parseTenderRequirementsArtifact, parseTenderScoringArtifact,
   parseTenderComplianceArtifact } from '../src/tender-analysis-artifacts.ts'
@@ -59,6 +59,42 @@ async function fixture() {
 }
 
 describe('目录能力候选', () => {
+  it('写作规则更新后无变更业务绑定可接纳，执行关系留待写作重规划', async () => {
+    const { workspace, context } = await fixture()
+    const path = join(workspace.projectRoot, 'chapters/writing-plan.json')
+    const plan = parseWritingPlan(await readJson(workspace, 'chapters/writing-plan.json'))
+    const outline = parseOutlineArtifact(await readJson(workspace, 'outline/confirmed-outline.json'))
+    await writeFile(join(workspace.projectRoot, 'chapters/execution-plan.json'), JSON.stringify({
+      schema_version: 3, scope: 'technical_bid', confirmed_outline_sha256: outlineArtifactSha256(outline),
+      writing_plan_version: plan.plan_version, global_consistency_notes: ['保持当前章节责任。'],
+      sections: outline.sections.filter(section => section.writable).map(section => ({
+        section_id: section.id, depends_on: [], related_sections: [], planning_notes: [],
+      })),
+    }))
+    plan.plan_version += 1
+    plan.revision = { summary: '补充局部规则。', base_plan_version: plan.plan_version - 1, affected_section_ids: ['SEC-1'] }
+    await writeFile(path, JSON.stringify(plan))
+    const section = parseOutlineArtifact(await readJson(workspace, 'outline/confirmed-outline.json')).sections.find(item => item.id === 'SEC-1')!
+    const call = bidCapabilityInputSchema.parse({ capability: 'outline.update', input: { operations: [], business_bindings: [{
+      section_id: section.id, requirement_ids: section.requirement_ids, scoring_ids: section.scoring_ids,
+      scoring_response_point_ids: section.scoring_response_point_ids, compliance_ids: section.compliance_ids,
+    }] } })
+    if (call.capability !== 'outline.update') throw new Error('test call mismatch')
+    const before = await readFile(join(workspace.projectRoot, 'chapters/execution-plan.json'), 'utf8')
+    const { result } = await executeOutlineCapability(call, context)
+    await expect(validateOutlineCapability(context, result)).resolves.toBeUndefined()
+    await expect(validateWritingCapability(context, ['SEC-1'])).rejects.toThrow('BID_CHAPTER_WRITING_EXECUTION_PLAN_INVALID')
+    expect(await readFile(join(workspace.projectRoot, 'chapters/execution-plan.json'), 'utf8')).toBe(before)
+    const execution = parseChapterExecutionPlan(await readJson(workspace, 'chapters/execution-plan.json'))
+    execution.writing_plan_version = plan.plan_version + 1
+    await writeFile(join(workspace.projectRoot, 'chapters/execution-plan.json'), JSON.stringify(execution))
+    await expect(validateOutlineCapability(context, result)).rejects.toThrow('BID_OUTLINE_CAPABILITY_EXECUTION_PLAN_INVALID')
+    execution.writing_plan_version = plan.plan_version - 1
+    execution.sections[0]!.depends_on = [{ section_id: 'missing', reason: '非法依赖。' }]
+    await writeFile(join(workspace.projectRoot, 'chapters/execution-plan.json'), JSON.stringify(execution))
+    await expect(validateOutlineCapability(context, result)).rejects.toThrow('BID_OUTLINE_CAPABILITY_EXECUTION_PLAN_INVALID')
+  })
+
   it('结构父节点可清空遗留叶节覆盖，但不能接纳非空业务归属', async () => {
     const { workspace } = await fixture()
     const prior = parseOutlineArtifact(await readJson(workspace, 'outline/confirmed-outline.json'))
@@ -78,7 +114,9 @@ describe('目录能力候选', () => {
     expect(() => applyOutlineBusinessBindings(source, [{ ...empty, requirement_ids: [requirements.requirements[0]!.id] }],
       requirements, scoring, compliance, points)).toThrow('BID_OUTLINE_BINDING_SECTION_INVALID')
   })
-  it.each(['completed', 'pending'] as const)('再次改目录时仅清理已完成章节的迁移种子（%s）', async (status) => {
+  it.each([
+    ['completed', true], ['pending', true], ['completed', false], ['pending', false],
+  ] as const)('目录协调仅清理已完成章节的迁移种子（%s，目录变更=%s）', async (status, changed) => {
     const { workspace, context } = await fixture()
     const outline = parseOutlineArtifact(await readJson(workspace, 'outline/confirmed-outline.json'))
     const log = parseOrMigrateChapterExecutionLog(await readJson(workspace, 'chapters/execution-log.json'))
@@ -101,7 +139,7 @@ describe('目录能力候选', () => {
     }))
     const body = await readFile(join(workspace.projectRoot, `chapters/sections/${serial}.md`), 'utf8')
     const call = bidCapabilityInputSchema.parse({ capability: 'outline.update', input: {
-      operations: [{ type: 'update_section', section_id: 'SEC-1', title: '流程检查' }],
+      operations: [{ type: 'update_section', section_id: 'SEC-1', title: changed ? '流程检查' : outline.sections.find(section => section.id === 'SEC-1')!.title }],
     } })
     if (call.capability !== 'outline.update') throw new Error('test call mismatch')
     const { result } = await executeOutlineCapability(call, context)

@@ -10,6 +10,24 @@ import { safeBidRunError, sanitizeBidErrorText } from './safe-error.ts'
 type Recovery = NonNullable<BidTaskFailure['recovery']>
 
 /**
+ * 从当前失败通知恢复原 Run 身份；自动修复保留同一 Work，不把执行故障保存成挂起。
+ * @param session 保存 Run 和失败通知的原会话。
+ * @param task 当前项目状态。
+ * @returns 当前挂起 Run 或与失败通知严格对应的原 Run，其他状态不授予恢复。
+ */
+export function bidRecoverableRun(session: Session, task: BidTaskState):
+  Extract<BidTaskState, { status: 'suspended' }>['run'] | undefined {
+  if (task.status === 'suspended') return task.run
+  if (task.status !== 'failed') return
+  const started = session.events.findLast(event => event.type === 'bid.run.started')
+  const notice = session.events.findLast(event => event.type === 'bid.run.notice')
+  if (started?.type !== 'bid.run.started' || notice?.type !== 'bid.run.notice'
+    || started.data.run.work.stage !== task.stage
+    || notice.data.noticeId !== `run:${started.data.run.runId}:failed` || notice.data.stage !== task.stage) return
+  return { ...started.data.run, cause: 'executor_error', error: task.failure }
+}
+
+/**
  * 读取当前完成通知对应的原能力 Run，供原会话追加纠正步骤。
  * @param session 保存该 Work 的公开 Main 会话。
  * @param task 已核对的当前项目状态。
@@ -144,12 +162,12 @@ export function bidRunRecoveryEligibility(session: Session): {
   fingerprint?: string
 } {
   const task = session.events.reduce(reduceBidTaskState, BID_INITIAL_TASK_STATE)
-  const taskProblem = task.status === 'suspended' && task.run.work.kind === 'capability_task'
-    && ['BID_TASK_PLAN_MISMATCH', 'BID_TASK_RESULT_UNMET'].includes(task.run.error?.code ?? '')
-  if (task.status !== 'suspended' || !STAGES.has(task.stage) && !taskProblem || task.run.work.kind === 'file_intake') {
-    return { eligible: false, reason: '当前没有 S2～S5 挂起 Run。', attempts: 0, sameProblemCount: 0, previousInstructions: [], requiresStrategyChange: false }
+  const run = bidRecoverableRun(session, task)
+  const taskProblem = run?.work.kind === 'capability_task'
+    && ['BID_TASK_PLAN_MISMATCH', 'BID_TASK_RESULT_UNMET'].includes(run.error?.code ?? '')
+  if (run === undefined || !STAGES.has(task.stage) && !taskProblem || run.work.kind === 'file_intake') {
+    return { eligible: false, reason: '当前没有可修复的原 Run。', attempts: 0, sameProblemCount: 0, previousInstructions: [], requiresStrategyChange: false }
   }
-  const { run } = task
   const history = session.events.flatMap(event => event.type === 'bid.recovery.requested'
     && event.data.target.kind === 'run'
     && event.data.target.workId === run.work.workId ? [event.data] : [])

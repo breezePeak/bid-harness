@@ -81,7 +81,7 @@ it('保留能力步骤的 Mapping 模型错误码，允许主 Agent 定向修复
   }])).recovery?.kind).toBe('repair')
 })
 
-it('可修复执行器失败保留挂起 Run 和诊断', async () => {
+it('可修复执行器问题保留原 Work 和诊断，自动修复无需挂起状态', async () => {
   const root = await mkdtemp(join(tmpdir(), 'dsh-bid-executor-failure-'))
   cleanup.push(() => rm(root, { recursive: true, force: true }))
   const workspace = new BidWorkspace(root)
@@ -95,9 +95,9 @@ it('可修复执行器失败保留挂起 Run 和诊断', async () => {
     { drain: async () => {} }, () => 0)
   await coordinator.start(work)
   await coordinator.suspend('executor_error', safeRecoverableBidFailure(work, new Error('BID_MIDDLEWARE_INVALID')))
-  expect(session.events.some(event => event.type === 'bid.run.suspended')).toBe(true)
+  expect(session.events.some(event => event.type === 'bid.run.suspended')).toBe(false)
   expect(await inspectBidStage(workspace, session, undefined, 'recovery')).toMatchObject({
-    task: { status: 'suspended' }, eligible: true, failure: { message: 'BID_MIDDLEWARE_INVALID' },
+    task: { status: 'failed' }, eligible: true, failure: { message: 'BID_MIDDLEWARE_INVALID' },
   })
 })
 

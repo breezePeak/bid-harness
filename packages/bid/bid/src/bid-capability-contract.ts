@@ -124,6 +124,8 @@ export const bidCapabilityResultSchema = z.object({
 export interface BidCapabilityExecutionContext {
   readonly canonical: BidWorkspace
   readonly working: BidWorkspace
+  /** 当前 Work 已接纳前缀的只读检查点；步骤候选不能撤销其完成身份。 */
+  readonly checkpointWorkspace?: BidWorkspace
   readonly agent: Agent
   /** 保存用户原话与能力授权的 Interaction Session。 */
   readonly sourceSession?: WritingMessageSession

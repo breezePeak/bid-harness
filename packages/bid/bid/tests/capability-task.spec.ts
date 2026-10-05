@@ -70,7 +70,7 @@ function dispatcher(failSecond = false) {
 }
 
 describe('同一 Work 的能力序列', () => {
-  it.each(['instruction', 'same_input', 'repatch', 'tamper', 'bindings', 'bindings_repatch', 'bindings_tamper', 'restart'])('重新规划保留部分正文候选；新授权可从已接纳结果重新迁移（%s）', async (scenario) => {
+  it.each(['instruction', 'same_input', 'repatch', 'tamper', 'bindings', 'bindings_repatch', 'bindings_tamper', 'restart'])('重新规划保留候选和重启授权，最终拒绝无当前审核身份的正文（%s）', async (scenario) => {
     const { ctx, workspace, session } = await fixture()
     try {
       await seedCapabilityProject(workspace, 'complete')
@@ -184,7 +184,7 @@ describe('同一 Work 的能力序列', () => {
         expect(restarted.plan_patches.at(-1)?.restart_pending).toBe(true)
         expect(restarted.steps.every(step => step.writing_resume_seed === undefined)).toBe(true)
         await expect(executeCapabilityTask(workspace, createTestBidRunContext({ work }), adapter, main, session))
-          .resolves.toMatchObject({ status: 'completed' })
+          .rejects.toThrow('计划内写作成果不满足当前写作规则')
         expect(await readFile(sourcePath, 'utf8')).toBe('已完成的第一章正文\n')
         expect(await readFile(join(workspace.projectRoot, firstPath), 'utf8')).toBe(original)
         return
@@ -210,10 +210,10 @@ describe('同一 Work 的能力序列', () => {
         expect(await readFile(join(workspace.projectRoot, firstPath), 'utf8')).toBe(original)
       } else {
         await expect(executeCapabilityTask(workspace, createTestBidRunContext({ work }), adapter, main, session))
-          .resolves.toMatchObject({ status: 'completed' })
+          .rejects.toThrow('计划内写作成果不满足当前写作规则')
         expect(calls).toBe(2)
         expect(bindings).toBe(prefix.length * (scenario.endsWith('repatch') ? 2 : 1))
-        expect(await readFile(join(workspace.projectRoot, firstPath), 'utf8')).toBe('已完成的第一章正文\n')
+        expect(await readFile(join(workspace.projectRoot, firstPath), 'utf8')).toBe(original)
       }
     } finally { await ctx.fiber.dispose() }
   })
@@ -230,6 +230,37 @@ describe('同一 Work 的能力序列', () => {
         steps: steps.map((step, index) => ({ step_id: `step-${index}`, step, status: 'pending',
           authorization: restored.authorization })) })
       expect(checkpoint.steps.map(record => record.step)).toEqual(restored.task.steps)
+    } finally { await ctx.fiber.dispose() }
+  })
+
+  it('摘要字数约束不撤销已接纳任务；恢复保留请求哈希、完成前缀和业务校验', async () => {
+    const { ctx, workspace, session, descriptor, run, agent } = await fixture()
+    try {
+      const request = capabilityTaskRequestSchema.parse(await readBidWorkRequest(workspace, descriptor))
+      const steps = request.task.steps.map(step => ({ ...step, description: '按原授权核对选中章节的完整正文并完成独立审核' }))
+      const accepted = { ...request, task: { ...request.task, steps }, complete_task: { ...request.task, steps } }
+      expect(bidCapabilityTaskSchema.safeParse(accepted.task).success).toBe(false)
+      const work = await persistBidWorkRequest(workspace, descriptor.kind, descriptor.stage, accepted,
+        request.input_sources, descriptor.workId)
+      const resumedRun = { ...run, work }
+      const requestPath = join(workspace.projectRoot, work.requestRef)
+      const originalRequest = await readFile(requestPath, 'utf8')
+      const adapter = dispatcher(true)
+      await expect(executeCapabilityTask(workspace, resumedRun, adapter, agent, session)).rejects.toThrow('第二步暂时失败')
+      const checkpointPath = join(workspace.projectRoot, 'runs', work.workId, 'task-checkpoint.json')
+      const before = capabilityTaskCheckpointSchema.parse(JSON.parse(await readFile(checkpointPath, 'utf8')))
+      await expect(executeCapabilityTask(workspace, resumedRun, adapter, agent, session)).resolves.toMatchObject({ status: 'completed' })
+      const after = capabilityTaskCheckpointSchema.parse(JSON.parse(await readFile(checkpointPath, 'utf8')))
+      expect(after.steps[0]).toEqual(before.steps[0])
+      expect(adapter.execute).toHaveBeenCalledTimes(3)
+      expect(after.request_sha256).toBe(work.requestSha256)
+      expect(await readFile(requestPath, 'utf8')).toBe(originalRequest)
+      expect(capabilityTaskRequestSchema.safeParse({ ...accepted, task: { ...accepted.task, scope: {
+        kind: 'sections', section_ids: ['SEC-1'],
+      } } }).success).toBe(false)
+      expect(capabilityTaskRequestSchema.safeParse({ ...accepted, task: { ...accepted.task, steps: [{
+        ...steps[0], call: { capability: 'chapter.review', input: { reason: '' } },
+      }] } }).success).toBe(false)
     } finally { await ctx.fiber.dispose() }
   })
 

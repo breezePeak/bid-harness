@@ -511,7 +511,7 @@ export function renderOutlineGenerationRepairTask(
     ...(context.associations === undefined ? [] : [
       '权威需求原文、合规规则、合法框架文件与标题路径（只读）：' + JSON.stringify(context.associations),
       '全部正式评分原文（只读）：' + JSON.stringify(context.scoring),
-      '按问题选择 requirement_ids、scoring_ids、compliance_ids、framework_refs、origin 或 global_compliance_ids 的局部操作；新增或拆分章节时明确分配必要关联。已有全局覆盖的投标资格、企业证书等材料核验 Compliance 不分配给技术叶子。结构错误使用 move/add/delete/split/merge 或 repair_structure；level 由 Host 根据 parent_id 派生，不用操作修复；把有子节的父节改为不可写时，同一 repair_structure 操作须提交 writable=false 和 must_answer=[]，并确认原有作答要求已由子节承担；只有重复 ID 才能换编号。',
+      '按问题选择 requirement_ids、scoring_ids、compliance_ids、framework_refs、origin 或 global_compliance_ids 的局部操作；新增或拆分章节时明确分配必要关联。已有全局覆盖的投标资格、企业证书等材料核验 Compliance 不分配给技术叶子。结构错误使用 move/add/delete/split/merge 或 repair_structure；level 由 Host 根据 parent_id 派生，不用操作修复；把有子节的父节改为不可写时，同一 repair_structure 操作须提交 writable=false 和 must_answer=[]，Host 同步清空该父节的响应点编号与快照，必须在同批操作中将原有作答要求及响应点分配给合适的可写叶节；只有重复 ID 才能换编号。',
     ]),
     ...renderStageRepairIssues(issues), context.failure ?? '',
     '判断已有章节能否承担：能则补充关联并完善具体 must_answer；update_section 修改 scoring_response_point_ids 时，同一操作必须提交该可写章节完整且具体的 must_answer。确实缺少内容时新增章节或局部拆分。保留未涉及章节的 ID、内容和相对顺序。不得默认挂到第一章、结构父节点或集中放入索引附录。只补编号没有实际写作指导不算修复。',

@@ -4,8 +4,10 @@ import { runOutlineGenerationLoop } from '../../../../packages/bid/bid/tests/fix
 
 const configPath = process.argv[2]
 if (configPath === undefined) throw new Error('缺少 S3 回放配置路径')
+const scenario = process.argv[3] ?? 'normal'
+if (scenario !== 'normal' && scenario !== 'structural-parent') throw new Error('未知 S3 回放场景')
 const ctx = await boot('bid-outline-generation-snapshot', configPath)
 try {
-  const result = await runOutlineGenerationLoop(ctx, process.cwd())
+  const result = await runOutlineGenerationLoop(ctx, process.cwd(), scenario)
   process.stdout.write(JSON.stringify(result) + '\n')
 } finally { await ctx.fiber.dispose() }

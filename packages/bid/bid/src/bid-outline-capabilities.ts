@@ -219,9 +219,14 @@ export async function validateOutlineCapability(
       throw new Error('BID_OUTLINE_CAPABILITY_WRITING_PLAN_INVALID')
     }
     const executionPlanRaw = await optionalJson(workspace, 'chapters/execution-plan.json')
-    if (executionPlanRaw !== undefined && validateChapterExecutionPlan(
-      parseChapterExecutionPlan(executionPlanRaw), outline, hash, plan.plan_version,
-    ).length > 0) throw new Error('BID_OUTLINE_CAPABILITY_EXECUTION_PLAN_INVALID')
+    if (executionPlanRaw !== undefined) {
+      const executionPlan = parseChapterExecutionPlan(executionPlanRaw)
+      // 写作规则是唯一验收来源；历史关系计划在下一次写作时重规划，目录步骤只核对关系合法性。
+      const issues = validateChapterExecutionPlan(executionPlan, outline, hash,
+        Math.min(executionPlan.writing_plan_version, plan.plan_version))
+      if (issues.length > 0) throw new Error('BID_OUTLINE_CAPABILITY_EXECUTION_PLAN_INVALID: '
+        + issues.map(issue => `${issue.code}: ${issue.message}`).join('；'))
+    }
   }
   const logRaw = await optionalJson(workspace, 'chapters/execution-log.json')
   if (logRaw !== undefined) {

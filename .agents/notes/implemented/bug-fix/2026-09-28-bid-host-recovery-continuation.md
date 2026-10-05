@@ -8,6 +8,8 @@ S2～S5 的内部错误可能没有恢复元数据，或在 Run 收尾时直接�
 
 ## Decision
 
+内部执行问题的结算状态由[规划与产物核验共用真实授权](2026-10-05-bid-plan-result-authorization-consistency.md)部分替代；原 Run 失败通知保留恢复身份，以下候选、来源、权限及持续接管规则继续适用。
+
 Host 在 Run 收尾时用完整错误码集合识别确定的输入、权限、模型服务和数据安全阻断；其他 S2～S5 内部失败保留 `suspended` Run 与恢复诊断。短暂连接错误可以重试。资料映射优先保留结构化 `QUOTA`、`AUTH` 与 `NO_ADAPTER`，不因错误文本含 429 而降为可重试限流；限流任务共用 Provider 冷却截止时间，仍分别计算重试预算，持久化失败记录后只等待该截止时间。失败由[主 Agent 恢复工具](../architecture/2026-09-29-bid-goal-decoupling.md)分析和处理；Host 不代替主 Agent 决定修复方案。
 
 Host 把遗留 running Run 持久化为 `suspended(host_restart)`，释放启动操作后按精确 Run ID 与项目 revision 调用原恢复入口，不依赖 Goal。能力 Work 在恢复准入前核对不可变请求的授权会话；其他会话的恢复被拒绝，不创建新 Run，也不改变原 Work。原 Executor 的检查点、输入指纹与提交栅栏决定能否续行；用户停止、等待输入和 S5 明确停止的写作入口不自动恢复。Goal 重激活由上述解耦决策替代；重复指令检查使用独立的 bid.recovery.requested 事件。

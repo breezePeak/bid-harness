@@ -682,9 +682,10 @@ export async function runChapterWritingLoop(ctx: Context, root: string) {
  * 通过真实工具循环验证 S3 初稿遗漏后的局部续修与用户确认停点。
  * @param ctx Loader 组装的 Agent、工具及持久化服务。
  * @param root 场景隔离工作区。
+ * @param scenario 可写父章首次修复失败后，是否恢复原 Work 并迁移响应点。
  * @returns 阶段失败与重试结果、正式产物及实际模型任务数。
  */
-export async function runOutlineGenerationLoop(ctx: Context, root: string) {
+export async function runOutlineGenerationLoop(ctx: Context, root: string, scenario: 'normal' | 'structural-parent' = 'normal') {
   const workspace = new BidWorkspace(root)
   await prepareS2(workspace)
   const outline = parseOutlineArtifact(JSON.parse(await readFile(join(workspace.projectRoot, 'outline/initial-confirmed-outline.json'), 'utf8')))
@@ -704,10 +705,33 @@ export async function runOutlineGenerationLoop(ctx: Context, root: string) {
   const untouched = { ...section, id: 'SEC-SERVICE', order: 2, title: '服务组织', purpose: '说明服务组织与协同安排。',
     must_answer: ['说明服务岗位与协调流程。'], requirement_ids: [], scoring_ids: [], scoring_response_point_ids: [], scoring_response_points: [] }
   outline.sections.push(untouched)
+  if (scenario === 'structural-parent') outline.sections.push({ ...untouched,
+    id: 'SEC-DETAIL', parent_id: section.id, order: 1, level: 2,
+    title: '访问控制实施流程', purpose: '说明身份鉴别与权限授予流程。',
+    must_answer: ['说明身份鉴别与权限授予流程。'], requirement_ids: ['REQ-1'],
+  })
   const candidate = { ...outline, sections: outline.sections.map(({ scoring_response_points: _points, ...item }) => item) }
   const responseCandidate = { schema_version: 1, points: texts.map((text, index) => ({ scoring_id: 'SCORE-1', order: index + 1, text: '说明' + text })) }
   const sessionId = SessionId('s3-outline-recovery')
   const parentScript: ScriptStep[] = []
+  if (scenario === 'structural-parent') {
+    const attempts = [
+      [{ type: 'repair_structure', section_index: 1, writable: false }],
+      [{ type: 'repair_structure', section_index: 1, writable: false, must_answer: [] },
+        { type: 'add_section', parent_id: section.id, order: 2, writable: true,
+          title: '安全审计与追溯措施', purpose: '完整响应各项安全技术措施。',
+          must_answer: section.must_answer, requirement_ids: ['REQ-1'], scoring_ids: ['SCORE-1'],
+          scoring_response_point_ids: pointIds,
+        }],
+    ]
+    for (const [attempt, operations] of attempts.entries()) parentScript.push((options) => {
+      const prompt = options.messages.flatMap(message => message.content)
+        .findLast(block => block.type === 'text' && block.text.includes('唯一输出：'))
+      const output = prompt?.type === 'text' ? prompt.text.match(/唯一输出：([^\n]+)/u)?.[1] : undefined
+      if (output === undefined) throw new Error('缺少目录修复输出路径')
+      return toolCall(`repair-outline-${attempt + 1}`, 'write', { file_path: output, content: JSON.stringify(operations) })
+    }, finalText('目录局部修复操作已提交。'))
+  }
   const childScript = [
     toolCall('response-points-analysis', 'structured_output', responseCandidate),
     toolCall('response-points-review', 'structured_output', responseCandidate),
@@ -728,13 +752,28 @@ export async function runOutlineGenerationLoop(ctx: Context, root: string) {
   const orchestrator = new BidOrchestrator(agent.session,
     { canExecute: stage => stage === 'outline_generation', execute: (task, run) => executeOutlineGeneration(agent, workspace, task, { maxRepairAttempts: 0, run }) },
     { validate: (stage, artifacts) => validateOutlineGeneration(workspace, stage, artifacts) })
-  const outcome = await orchestrator.runCurrentAutomaticStage()
+  let outcome = await orchestrator.runCurrentAutomaticStage()
+  let recovery: { failed: boolean; matched_notice: boolean; same_work: boolean; resumed_original_run: boolean } | undefined
+  if (scenario === 'structural-parent') {
+    const failed = outcome.status === 'failed'
+    const started = agent.session.events.findLast(event => event.type === 'bid.run.started')
+    const notice = agent.session.events.findLast(event => event.type === 'bid.run.notice')
+    if (started?.type !== 'bid.run.started' || notice?.type !== 'bid.run.notice') throw new Error('缺少原失败 Run 和通知')
+    const original = started.data.run
+    const matchedNotice = notice.data.noticeId === `run:${original.runId}:failed` && notice.data.runId === original.runId
+    outcome = await orchestrator.resume(original.runId)
+    const resumed = agent.session.events.findLast(event => event.type === 'bid.run.started')
+    recovery = { failed, matched_notice: matchedNotice,
+      same_work: resumed?.type === 'bid.run.started' && JSON.stringify(resumed.data.run.work) === JSON.stringify(original.work),
+      resumed_original_run: resumed?.type === 'bid.run.started' && resumed.data.run.resumeOf?.runId === original.runId,
+    }
+  }
   if (outcome.status !== 'waiting_user') throw new Error('S3 没有进入用户确认：' + JSON.stringify(outcome))
   const result = parseOutlineArtifact(JSON.parse(await readFile(join(workspace.projectRoot, 'outline/outline.json'), 'utf8')))
   const report = JSON.parse(await readFile(join(workspace.projectRoot, 'outline/quality-report.json'), 'utf8')) as unknown
   const untouchedUnchanged = JSON.stringify({ ...outline.sections[1], order: 3 })
     === JSON.stringify(result.sections.find(item => item.id === 'SEC-SERVICE'))
   if (!untouchedUnchanged) throw new Error('S3 修改了无关内容')
-  return { outcome, untouchedUnchanged, outline: result, report,
+  return { outcome, untouchedUnchanged, outline: result, report, ...(recovery === undefined ? {} : { recovery }),
     confirmationEvents: agent.session.events.filter(event => event.type === 'bid.user_confirmation.received').length }
 }

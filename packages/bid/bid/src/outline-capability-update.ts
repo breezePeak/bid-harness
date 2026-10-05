@@ -412,7 +412,8 @@ async function coordinateCapabilityOutline(
     }),
   }))
   const priorSeedsRaw = await optionalJson(workspace, 'chapters/reuse-seeds.json')
-  const priorSeeds = priorSeedsRaw === undefined ? [] : chapterReuseSeedsSchema.parse(priorSeedsRaw).seeds
+  const storedSeeds = priorSeedsRaw === undefined ? undefined : chapterReuseSeedsSchema.parse(priorSeedsRaw)
+  const priorSeeds = storedSeeds === undefined ? [] : storedSeeds.seeds
     .filter(seed => newLeafIds.has(seed.section_id) && !staleReview.has(seed.section_id)
       && oldLogSections.get(seed.section_id)?.status !== 'completed')
   const hasConfirmedOutline = await optionalJson(workspace, 'outline/confirmed-outline.json') !== undefined
@@ -466,7 +467,7 @@ async function coordinateCapabilityOutline(
       }
       await write(location.metadataPath, value.metadata)
     }
-    if (migrated.size > 0 || outlineChanged && priorSeedsRaw !== undefined) {
+    if (migrated.size > 0 || storedSeeds !== undefined && (outlineChanged || priorSeeds.length !== storedSeeds.seeds.length)) {
       await write('chapters/reuse-seeds.json', chapterReuseSeedsSchema.parse({
         schema_version: 1, confirmed_outline_sha256: hash,
         seeds: [...priorSeeds, ...[...migrated].map(([id, value]) => {

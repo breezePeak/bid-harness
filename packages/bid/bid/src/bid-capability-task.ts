@@ -43,12 +43,20 @@ import { resolveBidTaskSections } from './bid-task-sections.ts'
 const sha256Schema = z.string().regex(/^[a-f0-9]{64}$/u)
 const messageReferenceSchema = z.object({ session_id: z.string().min(1), message_id: z.string().min(1) }).strict()
 const outputFileSchema = z.object({ path: z.string().min(1), sha256: sha256Schema }).strict()
-// 步骤说明只供展示；已接纳请求缺少说明时仍须按原授权和输入摘要续行。
+// 摘要长度约束新计划提交；持久请求的展示文字不能撤销已冻结的授权和输入身份。
 const storedStepSchema = bidCapabilityStepSchema.extend({
-  description: bidCapabilityStepSchema.shape.description.default('继续执行已接纳的任务步骤'),
+  description: bidCapabilityTaskSchema.shape.goal.default('继续执行已接纳的任务步骤'),
 })
-const storedTaskSchema = z.object({ ...bidCapabilityTaskSchema.shape, steps: z.array(storedStepSchema).min(1) })
-  .strict().transform(task => bidCapabilityTaskSchema.parse(task))
+const storedTaskScopeSchema = bidCapabilityTaskSchema.safeExtend({
+  steps: z.array(storedStepSchema.extend({ description: bidCapabilityTaskSchema.shape.goal })).min(1),
+})
+const storedTaskSchema = z.object({
+  ...bidCapabilityTaskSchema.shape, steps: z.array(storedStepSchema).min(1),
+})
+  .strict().superRefine((task, ctx) => {
+    const result = storedTaskScopeSchema.safeParse(task)
+    if (!result.success) for (const issue of result.error.issues) ctx.addIssue({ ...issue })
+  })
 const writingResumeSeedSchema = z.object({
   input_sha256: sha256Schema,
   source_step_id: z.string().min(1).optional(),
@@ -850,7 +858,7 @@ export async function patchCapabilityTaskSteps(
     ...originalIds === undefined ? {} : { original_section_ids: originalIds },
     ...published === undefined ? {} : { publications: [...checkpoint.publications ?? [],
       { completed_step_count: checkpoint.steps.length, receipt: published }] } })
-  const updatedTask = bidCapabilityTaskSchema.parse({ ...request.task,
+  const updatedTask = storedTaskSchema.parse({ ...request.task,
     steps: updated.steps.map(record => record.step) })
   const unfinishedIndex = updated.steps.findIndex(record => record.status !== 'completed')
   validateCapabilityTaskContentFollowup(updatedTask, await hasScopedChapterContent(working, updatedTask, canonical),
@@ -882,18 +890,33 @@ export async function collectCapabilityTaskVerificationInput(
     }
   }
   const task = { ...request.task, steps: checkpoint.steps.map(record => record.step) }
-  const requirements = checkpoint.verifications?.find(record => record.scope_authorized && record.unmet.length === 0)?.requirements
+  const preserveOriginal = task.steps.some(step => step.call.capability === 'chapter.reorganize'
+    && !step.call.input.allow_content_deletion)
+  const authorized = checkpoint.verifications?.find(record => record.scope_authorized && record.unmet.length === 0
+    && record.source_sha256 === bidInputFingerprint(source)
+    && record.requirements.every(requirement => requirement.source_quote !== undefined))
+  const requirements = authorized?.requirements
+  const acceptedPlan = checkpoint.verifications?.findLast(record => record.phase === 'plan' && record.scope_authorized
+    && record.unmet.length === 0 && record.source_sha256 === bidInputFingerprint(source)
+    && record.requirements.every(requirement => requirement.source_quote !== undefined)
+    && record.plan_sha256 === bidInputFingerprint(task))
   return { phase, source, task,
+    ...(phase !== 'result' ? {} : { written_section_ids: [...new Set(checkpoint.steps.flatMap(record =>
+      record.status === 'completed' && (record.step.call.capability === 'chapter.write'
+        || record.step.call.capability === 'chapter.revise') ? record.result.target_section_ids : []))] }),
     ...checkpoint.original_section_ids === undefined ? {} : { original_section_ids: checkpoint.original_section_ids },
     execution_history: {
-      prior_plan_rejections: (checkpoint.verifications ?? []).filter(record => record.phase === 'plan' && record.unmet.length > 0)
+      prior_plan_rejections: (checkpoint.verifications ?? []).filter(record => record.phase === 'plan' && record.unmet.length > 0
+        && record.source_sha256 === bidInputFingerprint(source)
+        && record.requirements.every(requirement => requirement.source_quote !== undefined))
         .map(record => ({ scope_authorized: record.scope_authorized, unmet: record.unmet })),
       plan_patch_count: checkpoint.plan_patches.length,
       completed_steps: checkpoint.steps.filter(record => record.status === 'completed')
         .map(record => ({ description: record.step.description, capability: record.step.call.capability })),
     },
-    ...(requirements === undefined ? {} : { requirements }),
-    ...(phase === 'result' && requirements?.some(requirement => requirement.preserve_migrated_content) === true
+    ...(requirements === undefined ? {} : { requirements, scope_constraints: authorized?.scope_constraints ?? [] }),
+    ...(acceptedPlan === undefined ? {} : { accepted_plan_sha256: acceptedPlan.plan_sha256 }),
+    ...(phase === 'result' && (preserveOriginal || requirements?.some(requirement => requirement.preserve_migrated_content) === true)
       ? { preservation_evidence: await collectBidTaskPreservationEvidence(canonical, working, task,
         checkpoint.original_section_ids) } : {}),
     evidence: await collectBidTaskEvidence(working, task, [...changed], canonical),
@@ -941,6 +964,8 @@ export async function executeCapabilityTask(
     const input = await collectCapabilityTaskVerificationInput(canonical, working, source, request, checkpoint, phase)
     const identity = bidInputFingerprint(input)
     let verification = checkpoint.verifications?.find(record => record.phase === phase && record.input_sha256 === identity
+      && record.source_sha256 === bidInputFingerprint(source)
+      && record.requirements.every(requirement => requirement.source_quote !== undefined)
       && (record.scope_authorized || input.requirements === undefined))
     if (verification === undefined) {
       const decision = await (dispatcher.verifyTask ?? modelBidTaskVerifier)(input, agent, run.signal)
@@ -1175,12 +1200,17 @@ export async function executeCapabilityTask(
     }
     const authorizedNewDescendants = new Set<string>()
     const context: BidCapabilityExecutionContext = {
-      canonical, working: stepWorking, agent, sourceSession: session, sourceSnapshot: source,
+      canonical, working: stepWorking, checkpointWorkspace: working, agent, sourceSession: session, sourceSnapshot: source,
       originalSectionIds: new Set(checkpoint.original_section_ids),
-      originalTaskRequirements: checkpoint.verifications?.find(record => record.scope_authorized && record.unmet.length === 0)
+      originalTaskRequirements: checkpoint.verifications?.find(record => record.scope_authorized && record.unmet.length === 0
+        && record.source_sha256 === bidInputFingerprint(source)
+        && record.requirements.every(requirement => requirement.source_quote !== undefined))
         ?.requirements.map(requirement => requirement.description) ?? [],
-      ...(checkpoint.verifications?.find(record => record.scope_authorized && record.unmet.length === 0)
-        ?.requirements.some(requirement => requirement.preserve_migrated_content) === true ? { preserveMigratedContent: true } : {}),
+      ...(effectiveTask.steps.some(step => step.call.capability === 'chapter.reorganize' && !step.call.input.allow_content_deletion)
+        || checkpoint.verifications?.find(record => record.scope_authorized && record.unmet.length === 0
+        && record.source_sha256 === bidInputFingerprint(source)
+        && record.requirements.every(requirement => requirement.source_quote !== undefined))
+          ?.requirements.some(requirement => requirement.preserve_migrated_content) === true ? { preserveMigratedContent: true } : {}),
       run: candidateRun, sectionIds: scope.sectionIds,
       ...(recovery === undefined ? {} : { recovery }),
       ...(sectionScopeRoots === undefined ? {} : { sectionScopeRoots }),

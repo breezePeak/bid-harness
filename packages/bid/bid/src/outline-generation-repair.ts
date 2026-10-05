@@ -50,7 +50,7 @@ function applyReferences(section: OutlineSection, input: z.infer<typeof referenc
  * @param value 模型返回的局部操作数组。
  * @param catalog 只读正式响应点。
  * @param scoring 正式评分项。
- * @returns 应用局部编辑并规范化的候选，不改动其他章节内容。
+ * @returns 应用局部编辑并规范化的候选；显式转为结构章时清空其响应点，叶节覆盖由调用方校验。
  */
 export function applyOutlineRepair(
   outline: OutlineArtifact, value: unknown, catalog: ScoringResponsePointCatalog, scoring: TenderScoringArtifact,
@@ -69,6 +69,10 @@ export function applyOutlineRepair(
       if (operation.id !== undefined && candidate.sections.filter(item => item.id === section.id).length < 2) throw new Error('只能为重复 ID 的节点分配新标识，不能改写已有稳定 ID。')
       const { type: _type, section_index: _index, ...patch } = operation
       Object.assign(section, patch)
+      if (operation.writable === false) {
+        section.scoring_response_point_ids = []
+        section.scoring_response_points = []
+      }
       continue
     }
     const structureIssues: StageValidationIssue[] = []

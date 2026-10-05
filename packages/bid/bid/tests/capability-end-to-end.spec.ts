@@ -162,7 +162,7 @@ it('同一完成项目连续更正要求、移动合并章节和局部约束后�
       title: '合并后的实施方案', purpose: '完整说明实施和交付' }], content_assignments: assignments,
   })).toMatchObject({ status: 'completed' })
   expect(await readFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), 'utf8'))
-    .toBe(firstBody + secondBody)
+    .toBe(firstBody + '\n' + secondBody)
   const planPath = join(workspace.projectRoot, 'chapters/writing-plan.json')
   const priorPlan = parseWritingPlan(JSON.parse(await readFile(planPath, 'utf8')))
   const planMessage = createUserMessage({ content: [{ type: 'text', text: '仅第三章增加实施检查步骤' }],

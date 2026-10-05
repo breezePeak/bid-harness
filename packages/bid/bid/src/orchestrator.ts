@@ -21,7 +21,7 @@ import {
 import { BidRunCoordinator, DirectBidRunScheduler, type BidRunContext } from './run-coordinator.ts'
 import type { BidRunResumeIdentity } from './control-plane-contract.ts'
 import { safeBidRunError, summarizeBidValidationIssues } from './safe-error.ts'
-import { safeRecoverableBidFailure } from './bid-recovery.ts'
+import { bidRecoverableRun, safeRecoverableBidFailure } from './bid-recovery.ts'
 
 function signalAborted(signal: AbortSignal): boolean { return signal.aborted }
 
@@ -163,10 +163,10 @@ export class BidOrchestrator {
   }
 
   /**
-   * Reconcile a suspended attempt through the stage Executor's durable checkpoints, then continue unfinished work.
-   * @param suspendedRunId - Exact suspended attempt to resume.
-   * @param onAccepted - Callback invoked after the replacement Run is durable.
-   * @returns State reached when the resumed work next settles.
+   * 恢复当前挂起或失败 Run 的原 Work，从阶段持久化检查点继续执行。
+   * @param suspendedRunId 要恢复的原 Run 标识，须匹配当前可恢复任务。
+   * @param onAccepted 替代 Run 持久化后的回调。
+   * @returns 恢复任务下一次结束时的状态。
    */
   resume(
     suspendedRunId: string,
@@ -174,16 +174,16 @@ export class BidOrchestrator {
   ): Promise<BidTaskState> {
     this.assertIdle()
     const state = this.state
-    if (state.status !== 'suspended' || state.run.runId !== suspendedRunId) {
-      throw new BidOrchestratorError('BID_RESUME_NOT_ALLOWED', 'the requested suspended Bid Run is no longer current')
+    const recoverable = bidRecoverableRun(this.session, state)
+    if (recoverable === undefined || recoverable.runId !== suspendedRunId) {
+      throw new BidOrchestratorError('BID_RESUME_NOT_ALLOWED', '请求恢复的投标 Run 已不是当前可恢复任务。')
     }
-    const suspended = state.run
     return this.begin(async () => {
       const resumeOf: BidRunResumeIdentity = {
-        runId: suspended.runId,
-        cause: suspended.cause,
+        runId: recoverable.runId,
+        cause: recoverable.cause,
       }
-      const settlement = await this.executeStage(state.stage, resumeOf, suspended.work, onAccepted)
+      const settlement = await this.executeStage(state.stage, resumeOf, recoverable.work, onAccepted)
       return settlement === 'completed' ? this.driveLoop() : this.state
     })
   }

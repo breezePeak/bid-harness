@@ -95,8 +95,8 @@ it.each(['file_intake', 'tender_analysis'] as const)('%s 默认运行不创建 G
   await agent.whenIdle()
   expect(agent.session.events.some(event => event.type === 'bid.run.decision.required')).toBe(false)
   expect(agent.session.events.some(event => event.type === 'user/message' && event.data.content.some(block =>
-    block.type === 'text' && block.text.startsWith('当前阶段执行失败，失败状态已保存。')))).toBe(stage === 'tender_analysis')
-  expect(steer).toHaveBeenCalledTimes(stage === 'tender_analysis' ? 1 : 0)
+    block.type === 'text' && block.text.startsWith('当前阶段执行失败，失败状态已保存。')))).toBe(true)
+  expect(steer).toHaveBeenCalledOnce()
   expect(agent.session.events.some(event => event.type === 'bid.goal.recovery.requested')).toBe(false)
   expect(agent.ctx.tools.schemas(agent).some(tool => tool.name === 'bid_recover_task')).toBe(stage === 'tender_analysis')
 })
@@ -365,8 +365,11 @@ it('无 Goal 时主 Agent 恢复原 Run；重复失败再次 steer，相同指�
     gate.resolve(undefined)
     await vi.waitFor(() => { expect(host.inFlight.size).toBe(0) })
     const repeated = await readBidProjectState(workspace)
-    if (repeated?.status !== 'suspended') throw new Error('测试没有重复故障')
-    await expect(ctx.bid.resumeCurrentRun(agent.session, repeated.run.runId, repeated.revision, undefined,
+    if (repeated?.status !== 'failed') throw new Error('测试没有重复故障')
+    expect(agent.session.events.some(event => event.type === 'bid.run.suspended')).toBe(false)
+    expect(agent.session.events.findLast(event => event.type === 'bid.run.notice')?.data)
+      .toMatchObject({ noticeId: `run:${value.run_id}:failed`, runId: value.run_id })
+    await expect(ctx.bid.resumeCurrentRun(agent.session, value.run_id, repeated.revision, undefined,
       { instruction: '  补齐项目字段并按原提交工具提交。  ' }))
       .rejects.toMatchObject({ code: 'BID_RECOVERY_DUPLICATE_INSTRUCTION' })
     expect(steer).toHaveBeenCalledTimes(2)

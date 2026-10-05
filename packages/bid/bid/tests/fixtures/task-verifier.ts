@@ -11,7 +11,7 @@ import { CallId, type GenerateOptions } from '@deepseek-ai/dsh-llm'
  */
 export function scriptedVerificationCall(input: {
   requirements?: readonly object[]
-  sources: readonly { selected: boolean; text?: string }[]
+  sources: readonly { selected: boolean; text?: string; context_messages?: readonly string[] }[]
   task: { steps: readonly { call: { capability: string } }[] }
   evidence: readonly { evidence_position: number; total_characters: number }[]
 }, messages: GenerateOptions['messages']): { name: string; args: object } {
@@ -30,13 +30,14 @@ export function scriptedVerificationCall(input: {
   } }
   const check = { met: true, reason: '测试指定的执行器校验已通过', evidence_positions: [file.evidence_position] }
   if (input.requirements !== undefined) return { name: 'structured_output', args: { checks: input.requirements.map(() => check) } }
-  const requirement = { description: '执行器测试指定的业务产物', object: 'review',
+  const requirement = { source_quote: input.sources[0]?.context_messages?.[0] ?? input.sources[0]?.text ?? '执行器测试指定的业务产物', object: 'review',
     new_children: false, completed_content: false, repair: false, preserve_migrated_content: false, check }
-  return { name: 'structured_output', args: { scope_authorized: true, sources: input.sources.map((source, index) => ({
-    relevant: source.selected, requirements: !source.selected ? [] : [requirement,
-      ...index === 0 && (input.task.steps.some(step => step.call.capability === 'docx.export')
+  return { name: 'structured_output', args: { scope_authorized: true, scope_constraints: [], sources: input.sources.map((source, index) => ({
+    relevant: source.selected, requirements: !source.selected ? [] : [{ ...requirement,
+      source_quote: source.context_messages?.[0] ?? source.text ?? '' },
+    ...index === 0 && (input.task.steps.some(step => step.call.capability === 'docx.export')
         || input.sources[0]?.text === '更正要求并导出 Word。')
-        ? [{ ...requirement, description: '执行器测试的独立导出尾步骤', object: 'export' }] : []],
+      ? [{ ...requirement, object: 'export' }] : []],
   })) } }
 }
 
@@ -44,10 +45,14 @@ export function scriptedVerificationCall(input: {
 export const executorTestVerifier: BidTaskVerifier = async (input) => {
   const requirements = input.requirements ?? [...[input.source.message.message_id,
     ...input.source.issues.map(issue => issue.issue_id)].map(source_id => ({
-    source_id, description: '执行器测试指定的业务产物', object: 'review' as const,
+    source_id, source_quote: source_id === input.source.message.message_id ? input.source.message.text
+      : input.source.issues.find(issue => issue.issue_id === source_id)!.instruction,
+    description: source_id === input.source.message.message_id ? input.source.message.text
+      : input.source.issues.find(issue => issue.issue_id === source_id)!.instruction, object: 'review' as const,
     section_ids: [], new_children: false, completed_content: false, repair: false, preserve_migrated_content: false,
   })), ...input.task.steps.some(step => step.call.capability === 'docx.export') ? [{
-    source_id: input.source.message.message_id, description: '执行器测试的独立导出尾步骤', object: 'export' as const,
+    source_id: input.source.message.message_id, source_quote: input.source.message.text,
+    description: input.source.message.text, object: 'export' as const,
     section_ids: [], new_children: false, completed_content: false, repair: false, preserve_migrated_content: false,
   }] : []]
   return { scope_authorized: true, relevant_issue_ids: input.source.issues.map(issue => issue.issue_id),

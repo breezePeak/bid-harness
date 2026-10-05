@@ -146,7 +146,6 @@ export function selectOriginalChapterContent(markdown: string, flowcharts: reado
   }
   const chartHash = (chart: FlowchartSpec): string =>
     sha256(JSON.stringify(normalizeFlowchartInputs('preserved', [chart])))
-  const originalCharts = new Set(originals.flatMap(original => original.flowcharts.map(chartHash)))
   const retained: { text: string; start: number }[] = []
   for (const [text, count] of originalBlocks) {
     let offset = 0
@@ -157,8 +156,26 @@ export function selectOriginalChapterContent(markdown: string, flowcharts: reado
       offset = start + text.length
     }
   }
-  return { markdown: retained.sort((left, right) => left.start - right.start).map(block => block.text).join('\n\n'),
-    flowcharts: flowcharts.filter(chart => originalCharts.has(chartHash(chart))) }
+  const preservedMarkdown = retained.sort((left, right) => left.start - right.start).map(block => block.text).join('\n\n')
+  const chartsByKey = new Map<string, Map<string, FlowchartSpec>>()
+  for (const original of originals) for (const chart of original.flowcharts) {
+    const key = chart.key?.trim() || chart.id
+    if (!preservedMarkdown.includes(`{{flowchart:${key}}}`)) continue
+    const definitions = chartsByKey.get(key) ?? new Map<string, FlowchartSpec>()
+    definitions.set(chartHash(chart), chart)
+    chartsByKey.set(key, definitions)
+  }
+  const preservedCharts: FlowchartSpec[] = []
+  for (const [key, definitions] of chartsByKey) {
+    const matching = flowcharts.filter(chart => (chart.key?.trim() || chart.id) === key && definitions.has(chartHash(chart)))
+    const identities = new Set(matching.map(chartHash))
+    const identity = identities.size === 1 ? identities.values().next().value : undefined
+    const chart = definitions.size === 1 ? definitions.values().next().value
+      : identity === undefined ? undefined : definitions.get(identity)
+    if (chart === undefined) throw new Error(`BID_CHAPTER_REUSE_ORIGINAL_FLOWCHART_AMBIGUOUS: ${key}`)
+    preservedCharts.push(chart)
+  }
+  return { markdown: preservedMarkdown, flowcharts: preservedCharts }
 }
 
 /**

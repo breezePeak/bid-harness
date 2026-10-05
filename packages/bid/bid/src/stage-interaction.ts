@@ -40,7 +40,7 @@ import { revisionBatchTaskInputSchema } from './chapter-revision-batch.ts'
 import { buildWritableSectionWorklist } from './section-evidence-context.ts'
 import { assertNoLinkedPath, within } from './workspace-path.ts'
 import type { BidRunData } from './control-plane-contract.ts'
-import { bidCapabilityTakeoverRun, bidCompletedCapabilityRun, bidRunRecoveryEligibility, bidWritingPlanRecoveryEligibility } from './bid-recovery.ts'
+import { bidCapabilityTakeoverRun, bidCompletedCapabilityRun, bidRecoverableRun, bidRunRecoveryEligibility, bidWritingPlanRecoveryEligibility } from './bid-recovery.ts'
 import { resolveBidToolAuthorization } from './bid-tool-authorization.ts'
 import { bidModelTaskJsonSchema, bindBidModelTask, bindBidModelSteps, bindBidModelProjectQuery,
   bindBidModelWritingPlan, bindBidModelReference, collectBidModelTaskCatalog,
@@ -236,15 +236,15 @@ async function inspectBidStageValue(
 ) {
   const task = session.events.reduce(reduceBidTaskState, BID_INITIAL_TASK_STATE)
   if (view === 'recovery') {
+    const run = bidRecoverableRun(session, task)
     const runNotice = task.status === 'suspended' ? session.events.findLast(event =>
       event.type === 'bid.run.notice' && event.data.noticeId === `run:${task.run.runId}:resume-failed`) : undefined
     const decision = task.stage === 'chapter_writing' && task.status === 'waiting_user'
       ? bidWritingPlanRecoveryEligibility(session) : bidRunRecoveryEligibility(session)
     let writingPlanDiagnostic: { readable: boolean; matchesTarget: boolean; error?: string } | undefined
     let artifactDiagnostic: { path: string; readable: boolean; reason?: string } | undefined
-    const artifact = task.status === 'suspended'
-      ? task.run.error?.issues?.map(issue => issue.artifact).find(path => path !== undefined && recoveryArtifactPaths.has(path))
-      : undefined
+    const artifact = run?.error?.issues?.map(issue => issue.artifact)
+      .find(path => path !== undefined && recoveryArtifactPaths.has(path))
     if (artifact !== undefined) {
       try {
         const path = within(workspace.projectRoot, artifact)
@@ -286,11 +286,11 @@ async function inspectBidStageValue(
       artifact_diagnostic: artifactDiagnostic ?? null,
       latest_run_notice: runNotice?.type === 'bid.run.notice'
         ? { kind: runNotice.data.kind, severity: runNotice.data.severity, message: runNotice.data.message } : null,
-      run_id: task.status === 'suspended' ? task.run.runId : null,
-      cause: task.status === 'suspended' ? task.run.cause : null,
+      run_id: run?.runId ?? null,
+      cause: run?.cause ?? null,
       failure: task.status === 'suspended' ? task.run.error ?? null
         : task.status === 'failed' ? task.failure : null,
-      unit: task.status === 'suspended' ? task.run.error?.recovery?.unit ?? null : null,
+      unit: run?.error?.recovery?.unit ?? null,
     }
   }
   const started = task.run
@@ -697,6 +697,7 @@ export function installStageInteractionTools(
     const sync = (agent: Agent): void => {
       const task = agent.session.events.reduce(reduceBidTaskState, BID_INITIAL_TASK_STATE)
       const suspended = task.status === 'suspended' ? task.run : undefined
+      const repairable = bidRecoverableRun(agent.session, task)
       const chatResume = suspended !== undefined && suspended.cause !== 'user_stop' && suspended.cause !== 'awaiting_input'
       const stage = isBidMainSession(agent.session) ? task.stage : undefined
       const scope = stage === undefined ? undefined : `${stage}:${suspended === undefined ? task.status : `suspended:${suspended.runId}`}`
@@ -729,8 +730,8 @@ export function installStageInteractionTools(
         ...task.status === 'failed' && !takeoverAvailable || task.status === 'suspended'
           && (suspended?.work.kind !== 'capability_task' || suspended.cause === 'awaiting_input')
           ? [] : ['bid_run_task'],
-        ...(task.status === 'suspended' && suspended?.work.kind === 'capability_task'
-          && suspended.cause !== 'awaiting_input' || bidCompletedCapabilityRun(agent.session, task) !== undefined) ? ['bid_plan_task'] : [],
+        ...(repairable?.work.kind === 'capability_task'
+          && repairable.cause !== 'awaiting_input' || bidCompletedCapabilityRun(agent.session, task) !== undefined) ? ['bid_plan_task'] : [],
         ...task.status === 'failed' || task.status === 'suspended' ? [] : [
           'bid_outline_apply_operations', 'bid_outline_regenerate_scope', 'bid_evidence_remap',
           'bid_confirm_writing_plan', 'bid_revise_chapter',
@@ -919,7 +920,7 @@ export function installStageInteractionTools(
                 const state = agent.session.events.reduce(reduceBidTaskState, BID_INITIAL_TASK_STATE)
                 const catalog = modelCatalogs.get(agent)
                 if (catalog === undefined) throw new Error('BID_MODEL_TASK_INSPECT_REQUIRED')
-                const run = state.status === 'suspended' ? state.run : bidCompletedCapabilityRun(agent.session, state)
+                const run = bidRecoverableRun(agent.session, state) ?? bidCompletedCapabilityRun(agent.session, state)
                 if (run === undefined || state.status === 'completed' && request.edit !== 'append') throw new Error('BID_CAPABILITY_PLAN_PATCH_NOT_READY')
                 const workspace = workspaceFor(agent.session)
                 const path = within(workspace.projectRoot, `runs/${run.work.workId}/task-checkpoint.json`)
@@ -951,7 +952,9 @@ export function installStageInteractionTools(
                 const catalog = modelCatalogs.get(agent) ?? await collectBidModelTaskCatalog(workspaceFor(agent.session), agent.session)
                 const query = bindBidModelProjectQuery(raw.query, catalog)
                 const result = await execute(agent, { query, action: name }, exec.signal)
-                const catalogWorkspace = await resolveBidProjectInspectWorkspace(workspaceFor(agent.session), query)
+                const state = agent.session.events.reduce(reduceBidTaskState, BID_INITIAL_TASK_STATE)
+                const catalogWorkspace = await resolveBidProjectInspectWorkspace(workspaceFor(agent.session), query,
+                  undefined, bidRecoverableRun(agent.session, state)?.work)
                 if (catalogWorkspace === undefined) {
                   modelCatalogs.delete(agent)
                   return result

@@ -9,6 +9,7 @@ import {
   getBidStagePolicy,
   type BidStage,
   type BidRunContext,
+  type BidRunData,
   type BidStageTask,
   type StageArtifact,
 } from '@deepseek-ai/dsh-bid'
@@ -21,6 +22,22 @@ async function session() {
   const ctx = new Context()
   await ctx.plugin(SessionStore)
   return ctx.sessions.create()
+}
+
+function recordFailedOutlineRun(current: Awaited<ReturnType<typeof session>>, noticeRunId?: string): BidRunData {
+  const failedRun: BidRunData = {
+    runId: 'failed-outline-run', epoch: 1, baseProjectRevision: 4, startedAt: 1, updatedAt: 1,
+    work: { kind: 'stage_execution', workId: 'outline-work', stage: 'outline_generation',
+      requestRef: 'requests/outline-work.json', requestSha256: '0'.repeat(64), inputFingerprint: '1'.repeat(64) },
+  }
+  current.append('bid.task.changed', { state: { stage: 'outline_generation', status: 'ready', run: null } })
+  current.append('bid.run.started', { run: failedRun })
+  current.append('bid.task.changed', { state: { stage: 'outline_generation', status: 'failed', run: null,
+    failure: { code: 'BID_STAGE_EXECUTION_FAILED', message: '目录候选需要修复。' } } })
+  current.append('bid.run.notice', { noticeId: `run:${noticeRunId ?? failedRun.runId}:failed`,
+    runId: noticeRunId ?? failedRun.runId, stage: 'outline_generation',
+    kind: 'interrupted', severity: 'error', supersedesTurn: null, message: '目录候选需要修复。' })
+  return failedRun
 }
 
 describe('BidOrchestrator', () => {
@@ -103,7 +120,7 @@ describe('BidOrchestrator', () => {
     )).resolves.toEqual({ stage: 'chapter_writing', status: 'ready', run: null })
   })
 
-  it('keeps non-S2 validation issues out of the run error summary', async () => {
+  it('非 S2 校验失败保留具体问题，使用阶段通用错误摘要', async () => {
     const current = await session()
     const issue = { code: 'CHAPTER_REVIEW_TEXT_INVALID', message: '覆盖记录文本必须匹配当前章节 canonical 条目。' }
     const orchestrator = new BidOrchestrator(
@@ -113,14 +130,13 @@ describe('BidOrchestrator', () => {
     )
     current.append('bid.project.resumed', { state: { stage: 'chapter_writing', status: 'waiting_user', run: null }, revision: 1 })
     current.append('bid.user_confirmation.received', { stage: 'chapter_writing', confirmed: true })
-    await expect(orchestrator.runConfirmedStage()).resolves.toMatchObject({ stage: 'chapter_writing', status: 'suspended' })
-    expect(orchestrator.state).toMatchObject({ status: 'suspended', run: {
-      error: { code: 'BID_STAGE_VALIDATION_FAILED', message: '当前阶段结果未通过校验。', issues: [issue] },
-    },
+    await expect(orchestrator.runConfirmedStage()).resolves.toMatchObject({ stage: 'chapter_writing', status: 'failed' })
+    expect(orchestrator.state).toMatchObject({ status: 'failed', run: null,
+      failure: { code: 'BID_STAGE_VALIDATION_FAILED', message: '当前阶段结果未通过校验。', issues: [issue] },
     })
   })
 
-  it('records executor validation issues on the current stage', async () => {
+  it('校验失败在当前阶段保存具体产物问题', async () => {
     const current = await session()
     const orchestrator = new BidOrchestrator(
       current,
@@ -130,9 +146,9 @@ describe('BidOrchestrator', () => {
     current.append('bid.stage.started', { stage: 'file_intake', status: 'running' })
     current.append('bid.stage.completed', { stage: 'file_intake', status: 'completed', artifacts: artifacts('file_intake') })
 
-    await expect(orchestrator.runCurrentAutomaticStage()).resolves.toMatchObject({ stage: 'tender_analysis', status: 'suspended' })
-    expect(orchestrator.state).toMatchObject({ status: 'suspended', run: { cause: 'retry_exhausted',
-      error: { issues: [{ code: 'INVALID_ARTIFACT', artifact: 'analysis/scoring.json' }] } } })
+    await expect(orchestrator.runCurrentAutomaticStage()).resolves.toMatchObject({ stage: 'tender_analysis', status: 'failed' })
+    expect(orchestrator.state).toMatchObject({ status: 'failed', run: null,
+      failure: { issues: [{ code: 'INVALID_ARTIFACT', artifact: 'analysis/scoring.json' }] } })
   })
 
   it('starts a reset S2 directly from ready without a second confirmation', async () => {
@@ -243,7 +259,7 @@ describe('BidOrchestrator', () => {
     expect(prepare).not.toHaveBeenCalled()
   })
 
-  it('same-stage resume does not prepare a cross-stage context boundary', async () => {
+  it('同阶段恢复失败任务不切换模型上下文', async () => {
     const current = await session()
     current.append('bid.stage.started', { stage: 'file_intake', status: 'running' })
     current.append('bid.stage.completed', { stage: 'file_intake', status: 'completed', artifacts: artifacts('file_intake') })
@@ -260,13 +276,51 @@ describe('BidOrchestrator', () => {
     )
 
     await orchestrator.runCurrentAutomaticStage()
-    const suspended = orchestrator.state
-    expect(suspended.status).toBe('suspended')
-    if (suspended.status !== 'suspended') throw new Error('测试未进入挂起态')
+    expect(orchestrator.state.status).toBe('failed')
+    const started = current.events.findLast(event => event.type === 'bid.run.started')
+    if (started?.type !== 'bid.run.started') throw new Error('测试没有原 Run 记录')
     valid = true
-    await expect(orchestrator.resume(suspended.run.runId)).resolves.toEqual({
+    await expect(orchestrator.resume(started.data.run.runId)).resolves.toEqual({
       stage: 'tender_analysis', status: 'waiting_user', run: null,
     })
     expect(prepare).not.toHaveBeenCalled()
+  })
+
+  it('从失败通知对应的原 Run 恢复同一 Work，校验通过后等待用户确认', async () => {
+    const current = await session()
+    const failedRun = recordFailedOutlineRun(current)
+    const execute = vi.fn(async (task: BidStageTask, _run: BidRunContext) => artifacts(task.stage))
+    const onAccepted = vi.fn()
+    const orchestrator = new BidOrchestrator(current, { canExecute: () => true, execute },
+      { validate: async () => ({ ok: true }) })
+
+    expect(orchestrator.state.status).toBe('failed')
+    await expect(orchestrator.resume(failedRun.runId, onAccepted)).resolves.toEqual({
+      stage: 'outline_generation', status: 'waiting_user', run: null,
+    })
+    expect(execute).toHaveBeenCalledOnce()
+    const resumed = execute.mock.calls[0]![1]
+    expect(resumed.work).toEqual(failedRun.work)
+    expect(resumed.resumeOf).toEqual({ runId: failedRun.runId, cause: 'executor_error' })
+    expect(resumed.runId).not.toBe(failedRun.runId)
+    expect(onAccepted).toHaveBeenCalledWith(resumed)
+    expect(current.events.filter(event => event.type === 'bid.run.started').at(-1))
+      .toMatchObject({ data: { run: { work: failedRun.work, resumeOf: { runId: failedRun.runId, cause: 'executor_error' } } } })
+  })
+
+  it.each(['wrong_run', 'unmatched_notice'] as const)('失败 Run 恢复拒绝 %s，不执行其他任务', async (kind) => {
+    const current = await session()
+    const failedRun = recordFailedOutlineRun(current, kind === 'wrong_run' ? undefined : 'other-run')
+    const execute = vi.fn(async (task: BidStageTask, _run: BidRunContext) => artifacts(task.stage))
+    const onAccepted = vi.fn()
+    const orchestrator = new BidOrchestrator(current, { canExecute: () => true, execute },
+      { validate: async () => ({ ok: true }) })
+
+    expect(() => orchestrator.resume(kind === 'wrong_run' ? 'other-run' : failedRun.runId, onAccepted))
+      .toThrow(expect.objectContaining({ code: 'BID_RESUME_NOT_ALLOWED' }))
+    expect(orchestrator.state.status).toBe('failed')
+    expect(execute).not.toHaveBeenCalled()
+    expect(onAccepted).not.toHaveBeenCalled()
+    expect(current.events.filter(event => event.type === 'bid.run.started')).toHaveLength(1)
   })
 })

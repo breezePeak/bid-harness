@@ -52,6 +52,26 @@ describe('chapter content reuse', () => {
       .toEqual({ markdown: '', flowcharts: [] })
   })
 
+  it('已改动或缺失的原图仍从正式锚点恢复，不能变成可改写的新增图', () => {
+    const markdown = '原流程说明。\n\n{{flowchart:original}}'
+    const charts = normalizeFlowchartInputs('old', [{ key: 'original', title: '原流程', direction: 'TB',
+      nodes: [{ key: 'start', type: 'start', text: '开始' }, { key: 'end', type: 'end', text: '完成' }],
+      edges: [{ from: 'start', to: 'end' }] }])
+    const changed = normalizeFlowchartInputs('new', [{ ...charts[0]!, direction: 'LR',
+      nodes: charts[0]!.nodes.map(node => ({ ...node, text: node.text + '被修改' })) }])
+    for (const candidate of [changed, []]) {
+      expect(selectOriginalChapterContent(markdown, candidate, [{ markdown, flowcharts: charts }]).flowcharts).toEqual(charts)
+    }
+    expect(selectOriginalChapterContent('本节没有原流程锚点。', changed,
+      [{ markdown, flowcharts: charts }]).flowcharts).toEqual([])
+    const other = [{ ...charts[0]!, title: '另一份同名原流程' }]
+    expect(() => selectOriginalChapterContent(markdown, changed,
+      [{ markdown, flowcharts: charts }, { markdown, flowcharts: other }]))
+      .toThrow('BID_CHAPTER_REUSE_ORIGINAL_FLOWCHART_AMBIGUOUS')
+    expect(selectOriginalChapterContent(markdown, charts,
+      [{ markdown, flowcharts: charts }, { markdown, flowcharts: other }]).flowcharts).toEqual(charts)
+  })
+
   it('原文与新增文字处于同一段落时仍逐字冻结原块，并按候选位置保留次序', () => {
     const original = '原始受理说明。\n\n原始交付说明。'
     const candidate = '新增引导：原始交付说明。新增归档条件。\n\n原始受理说明。新增核验条件。'

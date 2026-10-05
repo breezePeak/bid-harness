@@ -6,6 +6,39 @@ import { LOADER_SMOKE_TEST_TIMEOUT_MS, runLoaderSmoke } from '@deepseek-ai/dsh-l
 import type { SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
 import { expect, it } from 'vitest'
 
+it('第八章新增小节的数字选择保留完整上下文，拒绝捏造目录限制并在同一 Work 完成', async () => {
+  const configPath = fileURLToPath(new URL('../bid-stage-interaction.cordis.snapshot.yml', import.meta.url))
+  const result = await runLoaderSmoke({ label: '数字澄清的真实新增小节', tempDirPrefix: 'dsh-bid-numeric-clarification-',
+    binScript: fileURLToPath(new URL('./fixtures/bid-stage-interaction-driver.ts', import.meta.url)),
+    configPath, binArgs: [configPath, 'task-numeric-clarification'], mode: 'src', processTimeoutMs: 120_000,
+    tsconfigPath: fileURLToPath(new URL('../../../tsconfig.json', import.meta.url)) })
+  expect(JSON.parse(result.stdout)).toMatchObject({ state: 'completed', source: '3', userMessages: 2,
+    sourceContext: ['我需要将第8章也细化一下，增加几个小章节。'], workIds: [expect.any(String)],
+    unfoundedRestrictionRejected: true, noSuspension: true, verifiedCompletionNotice: true, seedPreserved: true, outsidePreserved: true,
+    children: ['收集输入', '校验结果', '交付成果'], workbench: Array(3).fill({ status: 'completed', content: true }) })
+}, 150_000)
+
+it('同一 Work 更新写作规则后继续无变更业务绑定，复用范围外强依赖并按当前规则审核发布', async () => {
+  const configPath = fileURLToPath(new URL('../bid-stage-interaction.cordis.snapshot.yml', import.meta.url))
+  const result = await runLoaderSmoke({
+    label: '局部写作与验收规则一致', tempDirPrefix: 'dsh-bid-current-rules-',
+    binScript: fileURLToPath(new URL('./fixtures/bid-stage-interaction-driver.ts', import.meta.url)),
+    configPath, binArgs: [configPath, 'task-rules-update'], mode: 'src', processTimeoutMs: 120_000,
+    tsconfigPath: fileURLToPath(new URL('../../../tsconfig.json', import.meta.url)),
+  })
+  const facts = JSON.parse(result.stdout) as Record<string, unknown>
+  expect(facts, JSON.stringify(facts.recoveryErrors)).toMatchObject({
+    state: 'completed', interrupted: true, workIds: [expect.any(String)], userMessages: 1,
+    seedPreserved: true, outsidePreserved: true, outsideCompleted: true, currentRulesReviewed: true, currentRulesShared: true,
+    outsideDependencyPreserved: true, acceptedCheckpointRestored: true, missingCitationRejected: true,
+    revisionPreservationShared: true, revisionPublished: true,
+    selectedRouteInherited: true,
+    recoveryErrors: [{ code: 'ETIMEDOUT' }],
+    executions: ['outline.update', 'chapter.reorganize', 'chapter.write', 'chapter.review', 'writing.plan', 'outline.update', 'chapter.write', 'chapter.review', 'chapter.revise'],
+    workbench: Array(3).fill({ status: 'completed', content: true }),
+  })
+}, 150_000)
+
 it('六子章稀疏迁移在同一子会话拒绝漏块、表题分离及原文共享，空草稿子章仍完成写作审核和发布', async () => {
   const configPath = fileURLToPath(new URL('../bid-stage-interaction.cordis.snapshot.yml', import.meta.url))
   const result = await runLoaderSmoke({
@@ -320,7 +353,7 @@ it('首次任务与重规划拒绝超长步骤说明，同回合改为短摘要�
 it.each(['supersede', 'failed-supersede'])('主 Agent 用新用户任务通过 %s 接管旧 Work 并发布评分目录', async (scenario) => {
   const configPath = fileURLToPath(new URL('../bid-stage-interaction.cordis.snapshot.yml', import.meta.url))
   const result = await runLoaderSmoke({
-    label: '挂起能力任务接管源码装配', tempDirPrefix: 'dsh-bid-supersede-snapshot-',
+    label: '失败能力任务接管源码装配', tempDirPrefix: 'dsh-bid-supersede-snapshot-',
     binScript: fileURLToPath(new URL('./fixtures/bid-stage-interaction-driver.ts', import.meta.url)),
     configPath, binArgs: [configPath, scenario], mode: 'src',
     processTimeoutMs: 60_000,

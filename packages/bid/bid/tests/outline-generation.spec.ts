@@ -491,17 +491,97 @@ describe('S3 需求、合规、框架与结构局部修复', () => {
     expect(issues.map(issue => issue.code)).toContain('OUTLINE_SHARED_SECTION_PARENT_UNKNOWN')
   })
 
-  it('将已拆分父节修为结构章时显式清空父节作答要求，保留子节内容', async () => {
+  it('将已拆分父节修为结构章时清空父节响应点和作答要求，保留业务引用与子节内容', async () => {
     const workspace = await fixture()
     const catalog = parseScoringResponsePointCatalog(JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/scoring-response-points.json'), 'utf8')))
     const outline = structuredClone(reviewedOutline)
-    outline.sections[0] = { ...outline.sections[0]!, writable: true, must_answer: ['说明组织与进度。'] }
+    outline.sections[0] = { ...outline.sections[0]!, writable: true, must_answer: ['说明组织与进度。'],
+      requirement_ids: ['REQ-ORG', 'REQ-SCHEDULE'], scoring_ids: ['SCORE-SCHEDULE'], compliance_ids: ['COMP-DELIVERY'],
+      scoring_response_point_ids: ['RP-000001'], scoring_response_points: structuredClone(outline.sections[2]!.scoring_response_points) }
     const repaired = applyOutlineRepair(outline, [{ type: 'repair_structure', section_index: 0,
       writable: false, must_answer: [] }], catalog, scoringArtifact)
-    expect(repaired.sections[0]).toMatchObject({ writable: false, must_answer: [] })
+    expect(repaired.sections[0]).toEqual({ ...outline.sections[0], writable: false, must_answer: [],
+      scoring_response_point_ids: [], scoring_response_points: [] })
     expect(repaired.sections.slice(1)).toEqual(outline.sections.slice(1))
+    expect(repaired.sections[2]!.scoring_response_point_ids).toEqual(['RP-000001'])
+    expect(validateConfirmedOutline(repaired, requirements, scoring, compliance, catalog)).toEqual({ ok: true })
     expect(() => applyOutlineRepair(outline, [{ type: 'repair_structure', section_index: 0,
       writable: false }], catalog, scoringArtifact)).toThrow('结构章节的 must_answer 必须为空')
+  })
+
+  it.each(['update_section', 'add_section'] as const)('父节转为结构章并由 %s 将响应点交给叶节后完成质量复核', async (type) => {
+    const workspace = await fixture()
+    const outline = structuredClone(reviewedOutline)
+    outline.sections[0] = { ...outline.sections[0]!, writable: true, must_answer: ['说明组织与进度。'],
+      scoring_ids: ['SCORE-SCHEDULE'], scoring_response_point_ids: ['RP-000001'],
+      scoring_response_points: structuredClone(outline.sections[2]!.scoring_response_points) }
+    outline.sections[2]!.scoring_response_point_ids = []
+    outline.sections[2]!.scoring_response_points = []
+    await publishOutline(workspace, outline)
+    const assignment = { scoring_response_point_ids: ['RP-000001'], must_answer: ['列明实施阶段、里程碑和进度保障措施。'] }
+    const operations = [
+      { type: 'repair_structure', section_index: 1, writable: false, must_answer: [] },
+      type === 'update_section'
+        ? { type, section_id: 'SEC-SCHEDULE', ...assignment }
+        : { type, parent_id: 'SEC-IMPLEMENTATION', order: 3, title: '实施里程碑与进度保障',
+          purpose: '说明里程碑和进度保障措施。', writable: true, ...assignment },
+    ]
+    const { agent, followup, subagentStart } = modelAgent(workspace, async (prompt, submitReview) => {
+      if (prompt.includes('局部关联与结构修复')) {
+        expect(prompt).toContain('OUTLINE_SHARED_WRITABLE_NOT_LEAF')
+        expect(prompt).toContain('OUTLINE_SHARED_RESPONSE_POINT_MISSING')
+        await writeFile(join(workspace.projectRoot, 'outline/repair-operations.json'), JSON.stringify(operations))
+      } else {
+        expect(prompt).toContain('Blueprint Quality Review')
+        await submitReview()
+      }
+    })
+    await executeOutlineGeneration(agent, workspace, buildBidStageTask('outline_generation'))
+    expect(followup).toHaveBeenCalledTimes(1)
+    expect(subagentStart.mock.calls.filter(call => call[1].label === '目录质量复核')).toHaveLength(1)
+    const repaired = JSON.parse(await readFile(join(workspace.projectRoot, 'outline/outline.json'), 'utf8')) as OutlineArtifact
+    expect(repaired.sections.find(section => section.id === 'SEC-IMPLEMENTATION')).toMatchObject({
+      writable: false, must_answer: [], scoring_ids: ['SCORE-SCHEDULE'], scoring_response_point_ids: [], scoring_response_points: [],
+    })
+    const leaf = repaired.sections.find(section => section.scoring_response_point_ids?.includes('RP-000001'))!
+    expect(leaf).toMatchObject({ writable: true, ...assignment,
+      scoring_response_points: reviewedOutline.sections[2]!.scoring_response_points })
+    const catalog = parseScoringResponsePointCatalog(JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/scoring-response-points.json'), 'utf8')))
+    expect(validateConfirmedOutline(repaired, requirements, scoring, compliance, catalog)).toEqual({ ok: true })
+    await expect(validateOutlineGeneration(workspace, 'outline_generation', artifacts)).resolves.toEqual({ ok: true })
+    const report = parseOutlineQualityReport(JSON.parse(await readFile(join(workspace.projectRoot, 'outline/quality-report.json'), 'utf8')))
+    expect(report.checked_scoring_response_point_ids).toEqual(['RP-000001'])
+    expect(report.reviewed_section_ids).toEqual(repaired.sections.map(section => section.id))
+  })
+
+  it('父节转为结构章后响应点未交给叶节时仍因覆盖缺失失败，不发布质量报告', async () => {
+    const workspace = await fixture()
+    const outline = structuredClone(reviewedOutline)
+    outline.sections[0] = { ...outline.sections[0]!, writable: true, must_answer: ['说明组织与进度。'],
+      scoring_ids: ['SCORE-SCHEDULE'], scoring_response_point_ids: ['RP-000001'],
+      scoring_response_points: structuredClone(outline.sections[2]!.scoring_response_points) }
+    outline.sections[2]!.scoring_response_point_ids = []
+    outline.sections[2]!.scoring_response_points = []
+    await publishOutline(workspace, outline)
+    const { agent, followup, subagentStart } = modelAgent(workspace, async (prompt) => {
+      expect(prompt).toContain('局部关联与结构修复')
+      await writeFile(join(workspace.projectRoot, 'outline/repair-operations.json'), JSON.stringify([
+        { type: 'repair_structure', section_index: 1, writable: false, must_answer: [] },
+      ]))
+    })
+    await expect(executeOutlineGeneration(agent, workspace, buildBidStageTask('outline_generation')))
+      .rejects.toThrow('OUTLINE_SHARED_RESPONSE_POINT_MISSING')
+    expect(followup).toHaveBeenCalledTimes(1)
+    expect(subagentStart.mock.calls.filter(call => call[1].label === '目录质量复核')).toHaveLength(0)
+    const repaired = JSON.parse(await readFile(join(workspace.projectRoot, 'outline/outline.json'), 'utf8')) as OutlineArtifact
+    expect(repaired.sections.find(section => section.id === 'SEC-IMPLEMENTATION')).toMatchObject({
+      writable: false, scoring_response_point_ids: [], scoring_response_points: [],
+    })
+    const catalog = parseScoringResponsePointCatalog(JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/scoring-response-points.json'), 'utf8')))
+    const validation = validateConfirmedOutline(repaired, requirements, scoring, compliance, catalog)
+    expect(validation.ok).toBe(false)
+    if (!validation.ok) expect(validation.issues.map(issue => issue.code)).toEqual(['OUTLINE_SHARED_RESPONSE_POINT_MISSING'])
+    await expect(readFile(join(workspace.projectRoot, 'outline/quality-report.json'))).rejects.toMatchObject({ code: 'ENOENT' })
   })
 
   it('新增与拆分章节可明确分配需求、合规、框架和评分，不扩大浏览器操作权限', async () => {

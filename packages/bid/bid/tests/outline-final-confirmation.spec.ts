@@ -116,7 +116,7 @@ beforeEach(() => {
 })
 
 describe('S4 Draft 最终确认', () => {
-  it('已授权目录重生成的内部错误保存 repair metadata', async () => {
+  it('已授权目录重生成的内部错误保存失败状态和修复信息', async () => {
     const f = await fixture()
     try {
       const draft = await getOrCreateOutlineDraft(f.workspace)
@@ -124,8 +124,9 @@ describe('S4 Draft 最终确认', () => {
       await expect(f.host.regenerateOutline(f.session, { ...identity(draft), feedback: '明确方案标题' }))
         .resolves.toMatchObject({ ok: false, error: { code: 'BID_REGENERATE_FAILED' } })
       expect(executeOutlineGeneration).toHaveBeenCalledOnce()
-      expect(await readBidProjectState(f.workspace)).toMatchObject({ stage: 'evidence_mapping', status: 'suspended',
-        run: { cause: 'retry_exhausted', error: { recovery: { kind: 'repair' } } } })
+      expect(await readBidProjectState(f.workspace)).toMatchObject({ stage: 'evidence_mapping', status: 'failed',
+        run: null, failure: { recovery: { kind: 'repair' } } })
+      expect(f.session.events.some(event => event.type === 'bid.run.suspended')).toBe(false)
       expect(f.session.events.some(event => event.type === 'bid.user_confirmation.received')).toBe(false)
     } finally { await f.ctx.fiber.dispose() }
   })

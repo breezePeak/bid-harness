@@ -103,7 +103,8 @@ describe('S5 Writer 短引用与语义输入', () => {
       nodes: [{ key: 'start', type: 'start' as const, text: '开始' }, { key: 'end', type: 'end' as const, text: '完成' }],
       edges: [{ from: 'start', to: 'end' }] }
     const preserved = selectOriginalChapterContent(original + '\n\n重复草稿。\n\n{{flowchart:added}}',
-      [...charts, ...normalizeFlowchartInputs('new', [added])], [{ markdown: original, flowcharts: charts }])
+      [...normalizeFlowchartInputs('new', [{ ...charts[0]!, direction: 'LR', title: '误改的原流程' }]),
+        ...normalizeFlowchartInputs('new', [added])], [{ markdown: original, flowcharts: charts }])
     const candidate = await bindChapterWriterInput(workspace, manifest, context, refs, {
       markdown: `# ${context.section.title}\n\n{{reuse:0}}\n\n{{reuse:1}}\n\n已整改正文。\n\n{{flowchart:added}}`,
       metadata: { flowcharts: [{ ...added, title: '整改后的流程' }] },
@@ -111,6 +112,8 @@ describe('S5 Writer 短引用与语义输入', () => {
     expect(candidate.markdown).toContain(original)
     expect(candidate.markdown).not.toContain('重复草稿')
     expect(candidate.metadata.flowcharts.map(chart => chart.title)).toEqual(['原流程', '整改后的流程'])
+    expect(candidate.metadata.flowcharts[0]?.direction).toBe('TB')
+    expect(candidate.metadata.flowcharts[0]?.nodes).toEqual(charts[0]?.nodes)
     await expect(bindChapterWriterInput(workspace, manifest, context, refs, {
       markdown: `# ${context.section.title}\n\n{{reuse:1}}\n\n已整改正文。`, metadata: {},
     }, [], preserved.flowcharts, preserved.markdown)).rejects.toThrow('缺少须原样保留的原文块位置')

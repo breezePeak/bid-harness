@@ -45,7 +45,7 @@ S6 只对流程图、表格和图片执行最终页面视觉审核；标题、�
 
 自动恢复检查全部错误项；目录范围或依赖失效、目标无效、权限、数据损坏与不变量错误优先阻断，不因同时出现候选校验问题而重试。
 
-默认 S1～S6 流程不创建或绑定 Goal，模型工具目录隐藏 `create_goal`。执行器局部修复耗尽后保留挂起 Run、结构化错误及已完成检查点，主动唤醒主 Agent 分析原因；Provider、额度和凭证阻断也通知主 Agent，但不开放自动恢复。Host 在失败落盘并释放项目锁后以有界 plugin notice 调用 `steer()` 唤醒主 Agent。主 Agent 用 `bid_stage_inspect(view="recovery")` 读取真实错误、检查点和历史指令，再用 `bid_recover_task(instruction=...)` 提交具体方案；能力步骤从原检查点接收该指令，不改变原任务输入身份。S5 已保存回答的计划失败也复用该入口，不重复询问用户。Host 重启自动续行失败时保存当前 Run 诊断并通知主 Agent。Host 只负责接纳、输入与权限校验、检查点续行和正式发布；主 Agent 不能代替用户确认。用户停止仍使用原生 Run 决策，等待输入仍使用原问题。
+默认 S1～S6 流程不创建或绑定 Goal，模型工具目录隐藏 `create_goal`。执行器错误和局部修复耗尽记录带诊断的失败状态，保留原 Work 及已完成检查点并自动唤醒主 Agent；内部执行问题不保存为挂起。主 Agent 从严格对应的原 Run 失败通知取得恢复身份，用 `bid_stage_inspect(view="recovery")` 分析错误，再用 `bid_recover_task(instruction=...)` 在原 Work 提交修复方案。Provider、额度、凭证、输入及权限阻断保留明确原因，不开放自动修改。Host 在失败落盘并释放项目锁后以有界 plugin notice 调用 `steer()` 唤醒主 Agent。能力步骤接收恢复指令，不改变原任务输入身份。S5 已保存回答的计划失败复用该入口，不重复询问用户。Host 重启自动续行失败保存当前 Run 诊断并通知主 Agent。Host 只负责接纳、输入与权限校验、检查点续行和正式发布；主 Agent 不能代替用户确认。用户停止仍使用原生 Run 决策，等待输入仍使用原问题。
 
 后台 Execution Agent 直接调用 `ask_user_question` 会在工具执行前被拒绝；Host 将有界的问题原文写入原 Run 的失败记录，取消并结算后台执行。项目锁释放后，主 Agent 收到失败通知，可检查原任务并决定修复或向用户提问。问题不会只挂在 Execution 子会话等待用户，Host 不替主 Agent 选择业务处理方式。
 
@@ -61,7 +61,7 @@ Long Run 的正式文件只能由 Commit Scope 发布，短确定性修改由带
 
 The browser sends one ordered, same-origin binary S1 request whose body contains the original selected file streams and whose small headers carry their names, roles, types, and sizes. The Host resolves the live Session from that request, admits the complete batch under a project lock, imports through `BidWorkspace`, validates the resulting `manifest.json`, input, corpus, chunk index, and chunks, then calls `drive()`. A body that cannot reconstruct every declared file records S1 as failed and cannot advance it. Host 在 `agent/session-start` 先读取项目状态；waiting_user、failed 和 completed 保持原状态，只由现有驱动器执行 pending 阶段。
 
-S2 的 Main Agent 只用 `grep`、`read`、按需 `view_pdf_page` 和一个 `submit_tender_analysis` 私有工具提取 Project、Requirements、Scoring 与 Compliance 语义；模型一次提交四个完整数组及其 `T1`、`chunk_*`、`anchor_text` 来源，不提交业务 ID、revision 或正式 Artifact 字段。Host 从真实 chunk 正文生成 `raw_text`、文件 ID、路径和行号，固定评分 `parent=null`，分配稳定 `REQ-*`、`SC-*`、`COM-*` ID，并统一写入四个正式 Artifact。评分大项保留完整规则且不包含响应点字段。S3 把 Host 读取的 Scoring 直接注入一个无文件工具的 Child，通过结构化输出生成响应点并在同轮自检；Host 校验 Schema、评分归属、非空性和连续顺序后写入 Candidate，再分配稳定 `RP-*` 身份。S3 适配可选框架树、保存精确框架标题引用、生成初始目录并拥有首次用户确认；一个响应点可以关联多个可写 Section。S4 为每个可写叶子并行研究章节任务与资料，通过研究充分性判断后决定是否深化当前 Section 子树，再完成轻量 Final Check，向 S5 交付可直接写作的 Blueprint。
+S2 的 Main Agent 只用 `grep`、`read`、按需 `view_pdf_page` 和一个 `submit_tender_analysis` 私有工具提取 Project、Requirements、Scoring 与 Compliance 语义；模型一次提交四个完整数组及其 `T1`、`chunk_*`、`anchor_text` 来源，不提交业务 ID、revision 或正式 Artifact 字段。Host 从真实 chunk 正文生成 `raw_text`、文件 ID、路径和行号，固定评分 `parent=null`，分配稳定 `REQ-*`、`SC-*`、`COM-*` ID，并统一写入四个正式 Artifact。评分大项保留完整规则且不包含响应点字段。S3 把 Host 读取的 Scoring 直接注入一个无文件工具的 Child，通过结构化输出生成响应点并在同轮自检；Host 校验 Schema、评分归属、非空性和连续顺序后写入 Candidate，再分配稳定 `RP-*` 身份。S3 适配可选框架树、保存精确框架标题引用、生成初始目录并拥有首次用户确认；一个响应点可以关联多个可写 Section。局部修复显式将父节改为结构章时，Host 同步清空其响应点编号和快照；模型在同批操作中分配叶节作答指导及响应点，完整覆盖检查拒绝遗漏。S4 为每个可写叶子并行研究章节任务与资料，通过研究充分性判断后决定是否深化当前 Section 子树，再完成轻量 Final Check，向 S5 交付可直接写作的 Blueprint。
 
 S5 的 Main Agent 把自然语言要求转成版本化任务契约：全书指令、逐节任务、逐节验收条件和整书验收条件。Writer 接收当前章节的完整契约；Reviewer 在既有 Requirement、Scoring、Compliance、Evidence、声明依据、章节职责和质量审核之外逐项记录动态验收结果。Writer 能修复的 `required` 失败进入有界定向修订，`preferred` 失败和外部资料缺口只保留在报告中。Host 只负责身份、版本、并发、失效、持久化和显式确定性指标，不按需求文字选择业务分支。
 
@@ -73,7 +73,7 @@ Bid Main Agent 可在允许新任务的项目状态通过 `bid_run_task` 提交�
 
 已写章节的拆分或合并使用有序能力计划，依次调整目录、迁移原文和复核结果；明确只改目录的任务可留下待迁移正文。正式原文块只能迁入一个目标，副本完整登记后按正式源文件份数保留，不能以共享决定复制；粘连的候选原块恢复独立身份，输出补齐块间空行，表格引导、表题和表一起迁移。发布核验对照原始正文和原图的出现次数，新增副本或缺失均拒绝发布。`outline.update` 新增或拆分章节且未提供业务归属时，执行器取得新章节 ID 后通过独立子会话按职责分配招标要求、评分响应点和合规引用，再执行完整目录校验；自动分配必须保留原范围内全部业务覆盖，再清空结构父节点的叶节归属。显式归属可独立更新而无需目录占位操作，仍直接校验，缺失或非法引用不会因自动分配而放行。
 
-隔离任务核验器通过结构化工具提交结论。未完整读取的证据在提交时拒绝，反馈证据位置与补读起点；核验器在同一子会话补读后重新提交，完整读取和范围引用通过前不能发布。
+隔离任务核验器通过结构化工具提交结论，每项要求逐字引用真实用户原话，禁止能力须单独绑定原话；无原话证明的历史判断不参与新核验。未完整读取的证据在提交时拒绝，反馈证据位置与补读起点；正文完成结论漏引文件时，反馈该项必须补齐的文件索引。核验器在同一子会话补读或补齐引用后重新提交。Host 还核对已完成写作步骤实际目标的当前写作身份及通过审核；步骤完成、完整读取和范围引用均不能代替正文通过。
 
 运行中的跨能力请求先写入不可变请求，再登记到原 Work 的 `commands.json`；原 Work 结束后按顺序启动独立能力 Work，挂起时保留待办并让原 Run 先恢复。`getCapabilityTaskPlan` 从请求和步骤检查点返回实际进度，未登记的孤立文件不构成接纳。`docx.export` 只能作为任务最后一步，在前序能力正式结算后使用独立 Word 导出；导出提示包含正文快照摘要。已存在的最终确认目录与章节位置决定详情和正文入口是否可见，阶段标签不会隐藏已有正式正文。
 
@@ -87,13 +87,13 @@ Main Agent 按用户目标、当前产物和能力范围规划步骤：`outline.
 
 挂起的 `capability_task` 遇到新的真实用户目标时，`bid_run_task.supersede` 以旧 Run ID 和当前项目 revision 校验接管，建立独立 Work 和无 `resumeOf` 的 Run；旧请求、检查点和候选留作审计，完成后恢复旧请求记录的稳定 `return_state`。`awaiting_input` 仍使用原生问题，`failed` 状态不开放新能力任务。工具参数从运行时 Zod Schema 生成；`accepted` 只表示接纳，`execution_status=queued/started/suspended/failed` 均不表示完成，正式发布凭据存在时才返回 `completed=true`。
 
-每个能力步骤的 `description` 是面向用户的单行短摘要，用一句话说明对象、动作和预期结果，最多 20 字；详细执行要求放在 `call.input` 中。初始任务、排队请求、计划补丁及持久记录共用此约束，超长或多行说明会被拒绝。`getCapabilityTaskPlan` 从持久请求及检查点读取最新摘要、实际状态和结果，已完成前缀在重规划后继续保留，后续默认阶段启动不会隐藏最近的能力计划。已接纳请求缺少步骤说明时，读取检查点并继续执行，计划显示通用说明。
+每个新能力步骤的 `description` 是面向用户的单行短摘要，用一句话说明对象、动作和预期结果，最多 20 字；详细执行要求放在 `call.input` 中。初始任务、排队请求及新计划补丁共用此约束，超长或多行说明在接纳前拒绝。已冻结摘要的展示字数不撤销原 Work 授权；持久请求和检查点仍按原哈希、业务参数及范围核对，不为缩短摘要改写请求。`getCapabilityTaskPlan` 从持久请求及检查点读取最新摘要、实际状态和结果，已完成前缀在重规划后继续保留，后续默认阶段启动不会隐藏最近的能力计划。已接纳请求缺少步骤说明时，读取检查点并继续执行，计划显示通用说明。
 
 `bid-capability-contract.ts` 定义静态能力 ID、按能力区分的业务输入、项目或章节或段落任务范围，以及来源于任务、前一步真实目标或明确章节 ID 的步骤范围。段落范围只接纳引用同一选区的单步 `chapter.revise`；后续计划补丁不能扩大该范围。Host 持有 Run、输入摘要、工作副本和允许写入的文件集合；`bid-capability-registry.ts` 声明实际输入前提、核对结果引用，并将默认 S2–S5 路线映射到现有执行器与整阶段 Validator。上传后续行和恢复续行共用 `automaticOrchestrator()` 的能力分发；阶段确认、恢复和后继阶段仍由 `BidOrchestrator` 处理。主 Agent 在各阶段可用 `bid_project_inspect` 分页读取招标理解、目录、资料映射、写作计划、正文和执行记录，用 `bid_run_task` 提交授权的局部能力任务；运行中跨能力写入先持久化排队。旧 `bid_stage_inspect` 继续提供阶段快照。
 
 `bid_project_inspect(source="candidate")` 的业务数据和对象选择表均读取同一 Work 候选；新增叶节、正文选区和写作计划版本按候选绑定。调整挂起任务前须读取候选对象，不能用正式项目的旧版本更新候选计划。状态及恢复查询保持最近对象选择表，不能把候选选择替换为正式项目位置；候选缺失时返回不可用并撤回旧对象表。恢复核验复用冻结验收要求，模型按原数量和顺序逐项判断，不重新生成要求。
 
-任务核验首次请求仅包含来源、计划、冻结要求、范围对照及证据目录；完整文件由 Host 冻结并绑定摘要，隔离核验会话通过私有 `read_task_evidence` 按位置读取，每次最多 12000 个字符，返回继续读取的起点。每项判断只绑定模型引用且已完整读取的文件；正文完成或原文保留的通过结论必须包含范围内全部正文、元数据及审核报告。判断通过 `structured_output` 提交，未读引用在提交时返回证据位置和补读起点，同一核验会话可修正后重新提交。该工具没有文件路径参数，不提供写入、提问或编排能力。模型失败保留经过脱敏的错误类别，项目保持暂停及已完成步骤，完成状态以正式发布凭据为准。
+任务核验来源包含接纳前真实用户原话及助手公开澄清选项；助手文本只解释数字或短回复，不授予权限。用户明确禁止能力时，`scope_constraints` 引用真实来源原话，计划与产物入口共同拒绝违反限制的步骤；未提及步骤不能推定为禁止。通过记录绑定完整来源摘要，后续核验冻结要求和限制，不重新否定已接纳步骤的授权；缺少来源证明的历史记录在原 Work 按原消息重新核验。完整文件由 Host 冻结并绑定摘要，隔离核验会话通过私有 `read_task_evidence` 按位置读取，每次最多 12000 个字符，返回继续读取的起点。每项判断只绑定模型引用且已完整读取的文件；正文完成或原文保留的通过结论必须包含范围内全部正文、元数据及审核报告。判断通过 `structured_output` 提交，未读引用在提交时返回证据位置和补读起点，同一核验会话可修正后重新提交。该工具没有文件路径参数，不提供写入、提问或编排能力。模型失败保留经过脱敏的错误类别和已完成步骤，完成状态以正式发布凭据为准。
 
 `bid_plan_task(edit="replace_pending", steps=[])` 可移除尚未开始的冗余后缀，保留已完成前缀；Host 继续拒绝删除已执行步骤、清空整个任务或撤销冻结验收要求。
 
@@ -192,6 +192,8 @@ Writer 在缺少真实项目数量、人员、设备或记录值时只保留正�
 
 阶段重置会先取消并等待当前 Agent 树静止，再清理目标阶段及其后续 Artifact。S2–S4 在同一操作中提交 `ready` 后立即进入正常执行；S1 与 S5 回到 `waiting_user`，且 S5 不创建执行 Agent。重启后内存执行记录缺失也不会跳过 Agent drain。
 
+局部写作与独立审核共用当前 Writing Plan 的章节要求和验收条件。规则更新只使受影响且尚未按当前要求审核的章节失效；已核验的范围外正文和审核作为只读强依赖复用，不扩大写作授权。步骤候选日志丢失完成身份或关系损坏时，仅在正文、元数据和审核文件逐字一致后，从同一 Work 已接纳检查点恢复原记录，不覆盖候选正文。连锁复审先核对全部已接纳审核请求，再逐章安排复审，保留调度前的上游交接身份。缺少有效范围外依赖时，以 `BID_CHAPTER_WRITING_DEPENDENCY_UNAVAILABLE` 列出所需章节，先完成其正文与审核。目录步骤校验历史执行关系的目录、节点和依赖合法性；当前规则的关系重规划及产物验收由后续写作完成，正式发布仍要求计划、日志和审核一致。
+
 ## Model Experience
 
 ### Bid inventory and S5 task context
@@ -233,6 +235,8 @@ Writer 在缺少真实项目数量、人员、设备或记录值时只保留正�
 #### What the model sees
 
 章节完成后的用户修订通过 `reviseChapter` 定位执行日志中的原 Writer。批量修订在同一原 parent 下续写各章节的原 Writer；目标 Writer 属于不同 parent 时，Host 在模型运行前拒绝整批执行。章节引用绑定完整正文 SHA-256，段落引用另带 UTF-16 起止位置与原文；会话恢复失败或选区身份不一致时，Host 在模型运行前拒绝修订。
+
+能力任务要求保留迁移原文时，普通写作与整章修订共用 Host 从冻结来源和当前正文解析的保留块及原图定义。Writer 使用当前块位置引用原文，提交和最终验收按同一映射展开，Reviewer 接收相同的只读原文与原图要求。批次修订保留范围外已完成强依赖的交接输入，不能把它们替换为空依赖。
 
 ##### Paragraph-only revision task
 

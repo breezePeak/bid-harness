@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import SessionStore from '@deepseek-ai/dsh-session'
-import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import { createUserMessage, createAssistantMessage } from '@deepseek-ai/dsh-llm'
 import { afterEach, expect, it } from 'vitest'
 import { BidWorkspace, type BidRunData } from '../src/index.ts'
 import { bindBidTaskSourceContext, bidTaskSourceSnapshotSchema, freezeBidTaskSource } from '../src/bid-task-source.ts'
@@ -116,6 +116,47 @@ it.each(['bid.run.started', 'bid.run.completed'] as const)('澄清上下文不�
   expect(source.context_messages?.map(item => item.text)).toEqual(['第5章也需要小章节。'])
 })
 
+it('数字回复只选择真实助手选项，助手文本不能补造用户禁止项', async () => {
+  const { workspace, session } = await fixture()
+  const request = createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: '第8章增加几个小章节。' }] })
+  session.append('user/message', request, { surfaceOp: 'append' })
+  const options = createAssistantMessage({ source: { provider: 'test', model: 'test' },
+    content: [{ type: 'text', text: '请选择章节：1 服务方案；2 工作进度；3 数据安全。' }] })
+  session.append('assistant/message', { turn: 1, step: 1, message: options }, { surfaceOp: 'append' })
+  const selection = createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: '3' }] })
+  session.append('user/message', selection, { surfaceOp: 'append' })
+  const task = bidCapabilityTaskSchema.parse({ goal: '拆分数据安全', scope: { kind: 'sections', section_ids: ['SEC-1'] },
+    steps: [{ description: '审核本章', scope: { source: 'task' }, call: { capability: 'chapter.review', input: { reason: '审核本章' } } }] })
+  const source = await freezeBidTaskSource(workspace, session, task,
+    { session_id: String(session.id), message_id: String(selection.id) })
+  expect(source.message.text).toBe('3')
+  expect(source.clarification_dialogue?.slice(-2)).toMatchObject([
+    { role: 'user', text: '第8章增加几个小章节。' }, { role: 'assistant', text: '请选择章节：1 服务方案；2 工作进度；3 数据安全。' },
+  ])
+  const input = { phase: 'plan' as const, source, task, evidence: await collectBidTaskEvidence(workspace, task, []) }
+  const decision = await executorTestVerifier(input, {} as Parameters<BidTaskVerifier>[1], new AbortController().signal)
+  await expect(validateBidTaskVerification(input, { ...decision, scope_constraints: [{ source_id: String(selection.id),
+    quote: '仅改目录，不允许审核', forbidden_capabilities: ['chapter.review'] }] }, workspace, workspace))
+    .rejects.toThrow('BID_TASK_VERIFICATION_CONSTRAINT_SOURCE_INVALID')
+})
+
+it.each(['plan', 'result'] as const)('用户明确禁止审核时，%s 不接纳含审核步骤的计划，即使模型声称通过', async (phase) => {
+  const { workspace, session } = await fixture()
+  const message = createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: '只调整目录，不审核正文。' }] })
+  session.append('user/message', message, { surfaceOp: 'append' })
+  const task = bidCapabilityTaskSchema.parse({ goal: '修改目录', scope: { kind: 'sections', section_ids: ['SEC-1'] },
+    steps: [{ description: '审核本章', scope: { source: 'task' }, call: { capability: 'chapter.review', input: { reason: '审核本章' } } }] })
+  const source = await freezeBidTaskSource(workspace, session, task, { session_id: String(session.id), message_id: String(message.id) })
+  const input = { phase, source, task, evidence: await collectBidTaskEvidence(workspace, task, []) }
+  const decision = await executorTestVerifier(input, {} as Parameters<BidTaskVerifier>[1], new AbortController().signal)
+  const constraint = { source_id: String(message.id), quote: '不审核正文', forbidden_capabilities: ['chapter.review' as const] }
+  const verified = await validateBidTaskVerification(input, { ...decision, scope_constraints: [constraint] }, workspace, workspace)
+  expect(verified.goal_met).toBe(false)
+  expect(verified.unmet).toContain('计划包含用户原话禁止的能力：不审核正文')
+  await expect(validateBidTaskVerification({ ...input, requirements: verified.requirements, scope_constraints: [] },
+    { ...decision, scope_constraints: [constraint] }, workspace, workspace)).rejects.toThrow('BID_TASK_VERIFICATION_CONSTRAINTS_CHANGED')
+})
+
 it('S3 没有确认目录时返回真实草稿及 artifact', async () => {
   const { workspace } = await fixture()
   const outline = JSON.parse(await readFile(join(workspace.projectRoot, 'outline/confirmed-outline.json'), 'utf8')) as unknown
@@ -143,6 +184,36 @@ import { collectBidTaskEvidence, collectBidTaskScopeEvidence, collectBidTaskPres
   validateBidTaskVerification, type BidTaskVerifier } from '../src/bid-task-verification.ts'
 
 const falseSatisfied = '当前正文已将主流程拆分为受理、资料核验、分派、外业、内业、复核、提交整改、归档等清晰阶段，并进一步以节点表逐项展开输入处理、输出记录、责任岗位及放行条件；各阶段已形成便于独立阅读的小节式分项结构，落实了将各阶段分别展开的意见。'
+
+it('恢复不复用缺少原话证明的授权要求，也不把旧拒绝摘要交给新核验', async () => {
+  const { workspace, session, message } = await fixture()
+  const task = bidCapabilityTaskSchema.parse({ goal: '审核第一章', scope: { kind: 'sections', section_ids: ['SEC-1'] },
+    steps: [{ description: '审核第一章', scope: { source: 'task' }, call: { capability: 'chapter.review', input: { reason: '审核第一章' } } }] })
+  const work = await persistCapabilityTaskRequest(workspace, session, 'chapter_writing', task,
+    { session_id: String(session.id), message_id: String(message.id) }, [], { stage: 'chapter_writing', status: 'completed', run: null })
+  const request = capabilityTaskRequestSchema.parse(await readBidWorkRequest(workspace, work))
+  const source = bindBidTaskSourceContext(session, request.source_snapshot!)
+  const working = new BidWorkspace((await prepareBidWorkingTree(workspace, work)).root, workspace.config)
+  const input = { phase: 'plan' as const, source, task, evidence: await collectBidTaskEvidence(workspace, task, []) }
+  const decision = await executorTestVerifier(input, {} as Parameters<BidTaskVerifier>[1], new AbortController().signal)
+  const verified = await validateBidTaskVerification(input, decision, workspace, workspace)
+  const legacy = { ...verified, requirements: verified.requirements.map(({ source_quote: _quote, ...requirement }) =>
+    ({ ...requirement, description: '仅改目录，不允许审核正文。' })) }
+  const checkpoint = capabilityTaskCheckpointSchema.parse({ schema_version: 1, work_id: work.workId,
+    request_sha256: work.requestSha256, plan_patches: [], steps: [{ step_id: 'step-1', step: task.steps[0], status: 'pending',
+      authorization: { session_id: String(session.id), message_id: String(message.id) } }],
+    verifications: [legacy, { ...legacy, unmet: ['错误认定不授权审核'], goal_met: false }] })
+  const refreshed = await collectCapabilityTaskVerificationInput(workspace, working, source, request, checkpoint, 'plan')
+  expect(refreshed.requirements).toBeUndefined()
+  expect(refreshed.accepted_plan_sha256).toBeUndefined()
+  expect(refreshed.execution_history?.prior_plan_rejections).toEqual([])
+  const current = await collectCapabilityTaskVerificationInput(workspace, working, source, request,
+    { ...checkpoint, verifications: [...checkpoint.verifications!, verified] }, 'plan')
+  expect(current.requirements).toEqual(verified.requirements)
+  await expect(validateBidTaskVerification(input, { ...decision, requirements: decision.requirements.map(requirement =>
+    ({ ...requirement, source_quote: '不允许审核正文', description: '不允许审核正文' })) }, workspace, working))
+    .rejects.toThrow('BID_TASK_VERIFICATION_REQUIREMENT_SOURCE_INVALID')
+})
 
 it('范围外核验读取真实基线和候选摘要，并拒绝核验器忽略的正文变更', async () => {
   const { workspace, session, message } = await fixture()
@@ -240,7 +311,10 @@ const structureVerifier: BidTaskVerifier = async input => ({
   relevant_issue_ids: input.source.issues.map(issue => issue.issue_id),
   requirements: [...(input.requirements ?? [input.source.message.message_id,
     ...input.source.issues.map(issue => issue.issue_id)].map(source_id => ({
-    source_id, description: '将流程阶段建立为真实目录子章节',
+    source_id, source_quote: source_id === input.source.message.message_id ? input.source.message.text
+      : input.source.issues.find(issue => issue.issue_id === source_id)!.instruction,
+    description: source_id === input.source.message.message_id ? input.source.message.text
+      : input.source.issues.find(issue => issue.issue_id === source_id)!.instruction,
     object: 'outline' as const, section_ids: ['SEC-1'], new_children: true,
     completed_content: false, repair: false, preserve_migrated_content: false,
   })))],

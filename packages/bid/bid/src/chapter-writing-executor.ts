@@ -194,13 +194,14 @@ interface ChapterWritingBaseOptions extends ModelStageExecutionOptions {
   maxCompletionRepairRounds?: number
   /** 局部能力的整书审查另由独立步骤执行，避免更新范围外报告。 */
   documentReview?: 'defer'
+  /** 修订与普通写作共用的 Host 原文引用和流程图定义。 */
+  preservation?: ChapterContentPreservationInput
+  /** 原 Writer 的身份所属父会话；模型与独立 Reviewer 使用当前执行 Agent。 */
+  writerParentFor?: (writerId: string) => Promise<Agent>
 }
 
-/** 仅对指定叶节运行 Writer/Reviewer，范围外强依赖只返回影响。 */
-export interface ScopedChapterWritingInput {
-  readonly targetSectionIds: readonly string[]
-  readonly mode: 'write' | 'review'
-  readonly instruction: string
+/** Writer 提交及最终验收按同一份原文展开引用，Reviewer 接收相同保留要求。 */
+export interface ChapterContentPreservationInput {
   readonly seedBySectionId?: ReadonlyMap<string, string>
   /** 迁移原文附带的真实流程图定义；锚点不能由 Writer 猜测重建。 */
   readonly seedFlowchartsBySectionId?: ReadonlyMap<string, ReturnType<typeof parseChapterMetadata>['flowcharts']>
@@ -211,6 +212,15 @@ export interface ScopedChapterWritingInput {
     readonly markdown: string
     readonly flowcharts: readonly FlowchartSpec[]
   }>
+}
+
+/** 仅对指定叶节运行 Writer/Reviewer，范围外强依赖只返回影响。 */
+export interface ScopedChapterWritingInput extends ChapterContentPreservationInput {
+  readonly targetSectionIds: readonly string[]
+  readonly mode: 'write' | 'review'
+  readonly instruction: string
+  /** 同一 Work 已接纳前缀；仅恢复与步骤候选文件逐字一致的已核验身份。 */
+  readonly checkpointWorkspace?: BidWorkspace
   /** 既有 Writer 保持原父会话；由当前操作共享恢复器并负责释放。 */
   readonly writerParentFor?: (writerId: string) => Promise<Agent>
   readonly affectedDependentIds?: Set<string>
@@ -1279,8 +1289,7 @@ interface ChapterCheckpoint {
 }
 
 /**
- * Restore only a checkpoint whose plan, log, chapter bytes, metadata, and review
- * identities all belong to the current confirmed outline.
+ * 恢复当前目录下身份完整的章节；局部任务保留范围外已审核依赖，规则变更只使受影响的旧审核失效。
  */
 async function loadChapterCheckpoint(
   workspace: BidWorkspace,
@@ -1295,10 +1304,13 @@ async function loadChapterCheckpoint(
 ): Promise<ChapterCheckpoint | undefined> {
   try {
     const plan = parseChapterExecutionPlan(await readJson(workspace, PLAN_PATH))
-    if (validateChapterExecutionPlan(plan, outline, outlineHash, writingPlanVersion).length > 0) return undefined
+    // 局部写作可从历史关系恢复已审核依赖；目标章节仍按当前写作规则失效、重规划和审核。
+    const checkpointVersion = activeSectionIds === undefined ? writingPlanVersion
+      : Math.min(plan.writing_plan_version, writingPlanVersion)
+    if (validateChapterExecutionPlan(plan, outline, outlineHash, checkpointVersion).length > 0) return undefined
     const executionLog = parseOrMigrateChapterExecutionLog(await readJson(workspace, LOG_PATH))
     if (executionLog.confirmed_outline_sha256 !== outlineHash
-      || executionLog.writing_plan_version !== writingPlanVersion) return undefined
+      || executionLog.writing_plan_version !== checkpointVersion) return undefined
     const worklist = buildChapterWorklist(outline)
     if (executionLog.sections.length !== worklist.length) return undefined
     const planSections = new Map(plan.sections.map(section => [section.section_id, section]))
@@ -1397,13 +1409,20 @@ async function loadChapterCheckpoint(
     }
     const downstream = new Map<string, string[]>()
     for (const section of plan.sections) {
+      if (activeSectionIds !== undefined && !activeSectionIds.has(section.section_id)) continue
       for (const dependency of section.depends_on) {
         const dependents = downstream.get(dependency.section_id) ?? []
         dependents.push(section.section_id)
         downstream.set(dependency.section_id, dependents)
       }
     }
-    const planAffected = new Set(writingPlanInvalidations)
+    const ruleAffected = new Set([...writingPlanInvalidations].filter((sectionId) => {
+      const log = executionLog.sections.find(section => section.section_id === sectionId)
+      const accepted = log?.attempts.findLast(attempt => attempt.role === 'reviewer' && attempt.accepted
+        && attempt.child_session_id === log.final_reviewer_child_session_id)
+      return accepted?.input.plan_version !== contexts.get(sectionId)?.writingPlan.plan_version
+    }))
+    const planAffected = new Set(ruleAffected)
     for (const sectionId of planAffected) {
       for (const dependent of downstream.get(sectionId) ?? []) planAffected.add(dependent)
     }
@@ -1415,7 +1434,7 @@ async function loadChapterCheckpoint(
     for (const sectionId of invalid) for (const dependent of downstream.get(sectionId) ?? []) invalid.add(dependent)
     for (const log of executionLog.sections) {
       if (!invalid.has(log.section_id)) continue
-      if (writingPlanInvalidations.has(log.section_id)) {
+      if (ruleAffected.has(log.section_id)) {
         const writerId = log.final_writer_child_session_id ?? drafts.get(log.section_id)?.writerChildSessionId
         const context = contexts.get(log.section_id)
         if (writerId !== undefined && context !== undefined) {
@@ -1502,11 +1521,13 @@ function scopedPlanUpdate(
   previous: ChapterExecutionPlan,
   proposed: ChapterExecutionPlan,
   seeds: ReadonlySet<string>,
+  allowedIds?: ReadonlySet<string>,
 ): { plan: ChapterExecutionPlan; affected: Set<string> } {
   const previousById = new Map(previous.sections.map(section => [section.section_id, section]))
   const affected = new Set(seeds)
   for (const sectionId of affected) {
     for (const section of proposed.sections) {
+      if (allowedIds !== undefined && !allowedIds.has(section.section_id)) continue
       if (affected.has(section.section_id)) continue
       const prior = previousById.get(section.section_id)
       const dependsOnChanged = section.depends_on.some(item => item.section_id === sectionId)
@@ -2017,6 +2038,7 @@ async function runChapterWriting(
   revisionBatch?: RevisionBatchExecutionInput,
 ): Promise<StageArtifact[]> {
   const scoped = options.scoped
+  const preservation = options.preservation ?? scoped
   if (task.stage !== 'chapter_writing') throw new Error('chapter-writing-executor-stage-invalid')
   if (!Number.isSafeInteger(options.maxConcurrency) || options.maxConcurrency < 1 || options.maxConcurrency > 8) {
     throw new Error('chapter-writing-max-concurrency-invalid')
@@ -2158,17 +2180,23 @@ async function runChapterWriting(
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
   }
   const planRevision = writingPlan.revision
-  // 局部审核及已绑定步骤输入的候选恢复按当前契约核对正文；整本计划应用标记不能撤销其候选。
-  const writingPlanInvalidations = scoped?.mode === 'review' || scoped !== undefined && options.resumeCandidate === true
+  // 局部写作与审核共用当前规则；整书应用标记不决定范围外已审核章节是否可复用。
+  const writingPlanInvalidations = scoped?.mode === 'review'
     || appliedWritingPlanVersion === writingPlan.plan_version
     || appliedWritingPlanVersion === undefined && writingPlan.plan_version === 1
     ? new Set<string>()
-    : planRevision !== null && appliedWritingPlanVersion === planRevision.base_plan_version
+    : scoped !== undefined && planRevision !== null
       ? new Set(planRevision.affected_section_ids)
-      : new Set(worklist.map(section => section.id))
-  const checkpointVersion = writingPlanInvalidations.size > 0 && appliedWritingPlanVersion !== undefined
-    ? appliedWritingPlanVersion
-    : writingPlan.plan_version
+      : planRevision !== null && appliedWritingPlanVersion === planRevision.base_plan_version
+        ? new Set(planRevision.affected_section_ids)
+        : new Set(worklist.map(section => section.id))
+  if (scopedIds !== undefined) for (const id of writingPlanInvalidations) {
+    if (!scopedIds.has(id)) writingPlanInvalidations.delete(id)
+  }
+  const checkpointVersion = scoped !== undefined ? writingPlan.plan_version
+    : writingPlanInvalidations.size > 0 && appliedWritingPlanVersion !== undefined
+      ? appliedWritingPlanVersion
+      : writingPlan.plan_version
   const activeSectionIds = scoped === undefined && revision === undefined && revisionBatch === undefined ? undefined
     : new Set(scoped?.targetSectionIds ?? (revision === undefined ? undefined : [revision.request.reference.section_id])
       ?? revisionBatch?.tasks.map(task => task.section_id))
@@ -2183,6 +2211,75 @@ async function runChapterWriting(
       workspace, outline, outlineHash, contexts, options.maxConcurrency, new Set(), writingPlan.plan_version,
       recoverAcceptedArtifacts, activeSectionIds,
     )
+  }
+  if (scoped?.checkpointWorkspace !== undefined && scoped.checkpointWorkspace.root !== workspace.root) {
+    const checkpointWorkspace = scoped.checkpointWorkspace
+    const retained = await loadChapterCheckpoint(checkpointWorkspace, outline, outlineHash, contexts,
+      options.maxConcurrency, writingPlanInvalidations, writingPlan.plan_version, false, activeSectionIds)
+    if (retained !== undefined) {
+      const matching = new Set<string>()
+      for (const [sectionId, context] of contexts) {
+        const paths = [context.contentPath, context.metadataPath, context.reviewPath]
+        let pairs: Array<readonly [string, string]>
+        try {
+          pairs = await Promise.all(paths.map(async (path) => {
+            const current = join(workspace.projectRoot, path)
+            await assertNoLinkedPath(workspace.root, current)
+            return [await readFile(current, 'utf8'),
+              await readFile(join(checkpointWorkspace.projectRoot, path), 'utf8')] as const
+          }))
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue
+          throw error
+        }
+        if (pairs.every(([current, prior]) => current === prior)) matching.add(sectionId)
+      }
+      if (checkpoint === undefined) {
+        // 候选索引损坏不撤销字节相同的已接纳章节；不同的候选仍须重新获得写作和审核身份。
+        checkpoint = retained
+        for (const log of checkpoint.executionLog.sections) {
+          if (matching.has(log.section_id)) continue
+          checkpoint.completed.delete(log.section_id)
+          checkpoint.drafts.delete(log.section_id)
+          checkpoint.reusableWriterIds.delete(log.section_id)
+          checkpoint.planRevisions.delete(log.section_id)
+          log.status = 'pending'
+          log.phase = 'queued'
+          log.failure_phase = null
+          log.final_writer_child_session_id = null
+          log.final_reviewer_child_session_id = null
+        }
+        await writeJson(join(workspace.projectRoot, PLAN_PATH), checkpoint.plan, options.run.commits)
+      } else {
+        const restored = new Set<string>()
+        for (const record of retained.executionLog.sections) {
+          const sectionId = record.section_id
+          if (!matching.has(sectionId)) continue
+          if (checkpoint.completed.has(sectionId) || checkpoint.drafts.has(sectionId)
+            || checkpoint.reusableWriterIds.has(sectionId)) continue
+          const completed = retained.completed.get(sectionId)
+          const writer = retained.reusableWriterIds.get(sectionId)
+          if (completed === undefined && writer === undefined) continue
+          if (completed !== undefined) checkpoint.completed.set(sectionId, completed)
+          if (writer !== undefined) checkpoint.reusableWriterIds.set(sectionId, writer)
+          const revision = retained.planRevisions.get(sectionId)
+          if (revision !== undefined) checkpoint.planRevisions.set(sectionId, revision)
+          checkpoint.executionLog.sections = checkpoint.executionLog.sections.map(section =>
+            section.section_id === sectionId ? record : section)
+          if (!scopedIds?.has(sectionId)) restored.add(sectionId)
+        }
+        for (const relation of retained.plan.sections) {
+          if (!restored.has(relation.section_id)) continue
+          checkpoint.plan.sections = checkpoint.plan.sections.map(section => section.section_id === relation.section_id
+            ? relation : section)
+        }
+        const issues = validateChapterExecutionPlan(checkpoint.plan, outline, outlineHash,
+          Math.min(checkpoint.plan.writing_plan_version, writingPlan.plan_version))
+        if (issues.length > 0) throw new Error('BID_CHAPTER_CHECKPOINT_RELATIONS_INVALID: '
+          + issues.map(issue => issue.message).join('；'))
+        if (restored.size > 0) await writeJson(join(workspace.projectRoot, PLAN_PATH), checkpoint.plan, options.run.commits)
+      }
+    }
   }
   const originalWriterId = revision === undefined ? undefined
     : checkpoint?.executionLog.sections.find(section => section.section_id === revision.request.reference.section_id)
@@ -2228,7 +2325,7 @@ async function runChapterWriting(
       options.run, true, options.recovery,
     )
     if (checkpoint !== undefined && previousPlan !== undefined) {
-      const update = scopedPlanUpdate(previousPlan, plan, writingPlanInvalidations)
+      const update = scopedPlanUpdate(previousPlan, plan, writingPlanInvalidations, scopedIds)
       plan = update.plan
       await writeJson(join(workspace.projectRoot, PLAN_PATH), plan, options.run.commits)
       for (const sectionId of update.affected) {
@@ -2271,6 +2368,7 @@ async function runChapterWriting(
   let planSections = new Map(plan.sections.map(section => [section.section_id, section]))
   if (revisionBatch !== undefined) {
     const taskIdToSectionId = new Map(revisionBatch.tasks.map(task => [task.task_id, task.section_id]))
+    const batchSectionIds = new Set(taskIdToSectionId.values())
     for (const task of revisionBatch.tasks) {
       const existing = planSections.get(task.section_id)
       const batchDeps = task.depends_on
@@ -2279,7 +2377,7 @@ async function runChapterWriting(
         .map(sectionId => ({ section_id: sectionId, reason: 'batch dependency' }))
       planSections.set(task.section_id, {
         ...(existing ?? { section_id: task.section_id, depends_on: [], related_sections: [], planning_notes: [] }),
-        depends_on: batchDeps,
+        depends_on: [...existing?.depends_on.filter(dependency => !batchSectionIds.has(dependency.section_id)) ?? [], ...batchDeps],
       })
     }
   }
@@ -2483,6 +2581,10 @@ async function runChapterWriting(
     if (invalidated) await persistLog()
   }
 
+  const initialReviewRequests = new Map(scoped?.mode !== 'review' ? [] : [...scopedIds ?? []].flatMap((sectionId) => {
+    const accepted = completed.get(sectionId)
+    return accepted === undefined ? [] : [[sectionId, scopedReviewRequestSha256(sectionId, accepted.candidate)] as const]
+  }))
   if (scoped !== undefined) {
     for (const sectionId of scopedIds ?? []) {
       if (scoped.mode === 'review' || options.resumeCandidate === true) {
@@ -2492,7 +2594,7 @@ async function runChapterWriting(
         if (accepted !== undefined && log !== undefined && context !== undefined) {
           const saved = parseChapterReviewArtifact(await readJson(workspace, context.reviewPath))
           const retained = scoped.mode === 'review'
-            ? saved.request_sha256 === scopedReviewRequestSha256(sectionId, accepted.candidate)
+            ? saved.request_sha256 === initialReviewRequests.get(sectionId)
             : saved.verdict === 'pass'
           if (!retained) {
             const writerChildSessionId = log.final_writer_child_session_id
@@ -2900,13 +3002,13 @@ async function runChapterWriting(
                 revisionOriginal === undefined || !revisionOriginal.split('\n').some(original => original.trim() === line))),
             )
           })
-          const assignedOriginal = scoped?.preservedContentBySectionId?.get(sectionId)
-          const assignedSeed = assignedOriginal?.markdown ?? scoped?.seedBySectionId?.get(sectionId)
+          const assignedOriginal = preservation?.preservedContentBySectionId?.get(sectionId)
+          const assignedSeed = assignedOriginal?.markdown ?? preservation?.seedBySectionId?.get(sectionId)
           const reviewer = await subagents.start('spawn', {
             label: reviewLabel,
             parent: agent,
             prompt: [{ type: 'text', text: [renderChapterReviewerTask(context, candidate, dependencies, quotes, evidencePack, hostAcceptanceResults, revisionReviewIssues, paragraphRevision),
-              ...(scoped === undefined ? [] : [
+              ...(scoped === undefined && preservation === undefined ? [] : [
                 '本次局部任务由多个叶节共同完成。你只审核当前叶节的职责和分配原文；未分配表格或流程图的叶节，不承担保留其他叶节载体的义务。整项任务的原文、表格和流程图完整保留由 Host 跨节核验，不得要求每个子章重复全部原文载体。',
                 ...(assignedSeed === undefined ? [] : ['当前叶节必须逐字保留的原正式正文载体：\n' + assignedSeed,
                   '这些原文载体的完整保留是用户要求，整体流程表和流程图可以作为交接索引承载相邻节点；审查本节新增正文的职责、重复和自洽性。不能要求 Writer 删除或改写这些原块；分配冲突须具体说明。候选草稿新增段落和新增图形仍须按当前职责整改。']),
@@ -3030,15 +3132,15 @@ async function runChapterWriting(
         const contextPrompt = renderChapterSubagentTask(
           context, plan.global_consistency_notes, planned.planning_notes, dependencies, references,
         )
-        const seed = scoped?.seedBySectionId?.get(sectionId)
-        const seedFlowcharts = scoped?.seedFlowchartsBySectionId?.get(sectionId)
-        const preservedContent = scoped?.preservedContentBySectionId?.get(sectionId)
+        const seed = preservation?.seedBySectionId?.get(sectionId)
+        const seedFlowcharts = preservation?.seedFlowchartsBySectionId?.get(sectionId)
+        const preservedContent = preservation?.preservedContentBySectionId?.get(sectionId)
         const preservedMarkdown = preservedContent?.markdown ?? seed
         const preservedFlowcharts = preservedContent?.flowcharts ?? seedFlowcharts ?? []
-        const freshPrompt = scoped === undefined ? contextPrompt : [contextPrompt,
-          `本次局部写作要求：${scoped.instruction}`,
+        const freshPrompt = scoped === undefined && preservation === undefined ? contextPrompt : [contextPrompt,
+          ...(scoped === undefined ? [] : [`本次局部写作要求：${scoped.instruction}`]),
           ...(seed === undefined ? [] : ['原文草稿的保留、改写和补充以本次原始任务为准。用户要求保留原文时，保留已分配的原句、完整表格和流程图锚点，在其周围补充；不得用概括、同义改写或新绘流程图替代原文载体。',
-            scoped.preserveSeedFlowcharts === true ? [
+            preservation?.preserveSeedFlowcharts === true ? [
               '原文保留块：' + JSON.stringify(indexChapterContentBlocks(sectionId, preservedMarkdown ?? '')
                 .filter(block => block.type !== 'heading' && block.markdown.trim() !== '')
                 .map((block, position) => ({ position, type: block.type, readonly_markdown: block.markdown.trim() }))),
@@ -3046,7 +3148,7 @@ async function runChapterWriting(
               ...(preservedContent === undefined ? [] : ['当前候选草稿（其中新增段落可以按审核意见改写、合并或删除，不能将其全部当作保留原文再次重复补写）：\n' + seed]),
             ].join('\n') : `已分配给本节的原文草稿：\n${seed}`]),
           ...(seedFlowcharts === undefined || seedFlowcharts.length === 0 ? [] : [
-            scoped.preserveSeedFlowcharts === true
+            preservation?.preserveSeedFlowcharts === true
               ? '原正式正文的流程图定义由 Host 复用；只保留对应原文锚点。候选新增图形仍可整改，需重新提交其完整定义：'
                 + JSON.stringify(seedFlowcharts.filter(chart => !preservedFlowcharts.some(original => original.key === chart.key)))
               : '本节迁移原文的流程图定义；按真实任务判断是否调整：' + JSON.stringify(seedFlowcharts),
@@ -3055,9 +3157,9 @@ async function runChapterWriting(
         const basePrompt = effectiveRevision === undefined && batchTask === undefined || revisionOriginal === undefined
           ? freshPrompt
           : batchTask !== undefined
-            ? `${contextPrompt}\n\n${renderRevisionBatchSectionPrompt(batchTask, revisionOriginal)}`
+            ? `${freshPrompt}\n\n${renderRevisionBatchSectionPrompt(batchTask, revisionOriginal)}`
             : effectiveRevision !== undefined
-              ? `${contextPrompt}\n\n${renderChapterRevisionTask(effectiveRevision, revisionOriginal)}`
+              ? `${freshPrompt}\n\n${renderChapterRevisionTask(effectiveRevision, revisionOriginal)}`
               : contextPrompt
         if (pendingVisualPrompt !== undefined && options.control?.flowchartVisualReviewPolicy?.() === 'skip') {
           pendingVisualPrompt = undefined
@@ -3095,15 +3197,16 @@ async function runChapterWriting(
         childSetups.set(label, (child) => {
           readableWebPathsByChild.set(String(child.id), mappedWebPaths(context))
         })
-        const writerParent = reusableWriterId !== undefined && scoped?.writerParentFor !== undefined
-          ? await scoped.writerParentFor(reusableWriterId) : agent
+        const resolveWriterParent = options.writerParentFor ?? scoped?.writerParentFor
+        const writerParent = reusableWriterId !== undefined && resolveWriterParent !== undefined
+          ? await resolveWriterParent(reusableWriterId) : agent
         writerParentIds.add(writerParent.id)
         writer ??= createChapterWriterChild(writerParent, label, options.maxRepairAttempts, async (child, value) => {
           const snapshots = buildWebEvidenceSnapshots(capturedByChild.get(String(child.id))?.values() ?? [])
           const parsed = preserveParagraphRevisionMetadata(await bindChapterWriterInput(
             workspace, manifest, context, references, value, snapshots,
-            scoped?.preserveSeedFlowcharts === true ? preservedFlowcharts : [],
-            scoped?.preserveSeedFlowcharts === true ? preservedMarkdown : undefined,
+            preservation?.preserveSeedFlowcharts === true ? preservedFlowcharts : [],
+            preservation?.preserveSeedFlowcharts === true ? preservedMarkdown : undefined,
           ), revisionMetadata)
           const customerFacingIssues = chapterInternalIdentifierIssues(context, parsed.markdown)
           const tableCaptionIssues = missingTableCaptionLines(parsed.markdown)
@@ -3159,8 +3262,8 @@ async function runChapterWriting(
             try {
               const parsed = preserveParagraphRevisionMetadata(await bindChapterWriterInput(
                 workspace, manifest, context, references, result.structured, attemptSnapshots,
-                scoped?.preserveSeedFlowcharts === true ? preservedFlowcharts : [],
-                scoped?.preserveSeedFlowcharts === true ? preservedMarkdown : undefined,
+                preservation?.preserveSeedFlowcharts === true ? preservedFlowcharts : [],
+                preservation?.preserveSeedFlowcharts === true ? preservedMarkdown : undefined,
               ), revisionMetadata)
               const validated = await validateAndBindChapterCandidate(
                 workspace, manifest, context, parsed, [...durableWebSources.values()], attemptSnapshots,
@@ -3379,6 +3482,12 @@ async function runChapterWriting(
   }
 
   try {
+    if (scopedIds !== undefined) for (const sectionId of pending) {
+      const unavailable = (planSections.get(sectionId)?.depends_on ?? [])
+        .filter(dependency => !scopedIds.has(dependency.section_id) && !completed.has(dependency.section_id))
+      if (unavailable.length > 0) throw new Error(`BID_CHAPTER_WRITING_DEPENDENCY_UNAVAILABLE: ${sectionId} -> `
+        + unavailable.map(dependency => dependency.section_id).join(', ') + '；请先完成这些章节的正文与审核。')
+    }
     while (true) {
       signal.throwIfAborted()
       await options.run.scheduler.waitUntilRunnable(signal)

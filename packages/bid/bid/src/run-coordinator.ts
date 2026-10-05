@@ -404,10 +404,10 @@ export class BidRunCoordinator {
   }
 
   /**
-   * Retire, cancel, and drain before publishing a resumable suspension or terminal executor failure.
-   * @param cause - Stable settlement classification; recoverable executor errors retain their Run boundary.
-   * @param error - Sanitized durable failure details when applicable.
-   * @returns Settled snapshot, or undefined when no Run is active.
+   * 退休写入权限并排空任务；执行错误提交失败诊断，控制中断保存可续行 Run。
+   * @param cause 执行错误和修复耗尽不产生挂起；停止、输入及重启使用各自控制规则。
+   * @param error 脱敏失败事实，可修复问题由主 Agent 从失败通知取得原 Run 身份。
+   * @returns 已结算的原 Run 快照；没有运行任务时返回 undefined。
    */
   suspend(
     cause: BidRunSuspensionCause,
@@ -458,7 +458,7 @@ export class BidRunCoordinator {
       updatedAt: Date.now(),
     }
     this.active = undefined
-    const terminal = cause === 'executor_error' && (observedError?.recovery === undefined || observedError.recovery.kind === 'blocked')
+    const terminal = cause === 'executor_error' || cause === 'retry_exhausted'
     if (terminal) {
       this.session.append('bid.task.changed', {
         state: { stage: snapshot.work.stage, status: 'failed', run: null,
