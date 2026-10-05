@@ -634,7 +634,7 @@ function renderSuspendedRunPrompt(
           ? '原 Work 的继续、重跑或停止仍由原生用户问题处理。用户明确提出新目标时，先用 bid_project_inspect(object=task) 核对旧目标和步骤，再用 bid_run_task(supersede=true) 创建新 Work；Host 绑定旧 Run 和项目版本。'
           : '继续同一目标时先用 bid_project_inspect(object=task) 核对原目标和步骤，必要时 bid_plan_task 重规划，再 bid_recover_task；只继续被打断的原 Work 时用 bid_resume_current_run。用户明确提出新目标时，用 bid_run_task(supersede=true) 创建新 Work；Host 绑定旧 Run 和项目版本。'
         : interrupted
-          ? '用户明确要求继续时调用 bid_resume_current_run，传入当前 Run ID 和项目 revision；内部可修复失败由主 Agent inspect 后调用 bid_recover_task，普通询问保持只读。'
+          ? '用户明确要求继续时无参数调用 bid_resume_current_run；程序绑定当前 Run 和项目 revision。内部可修复失败由主 Agent inspect 后调用 bid_recover_task，普通询问保持只读。'
           : '挂起 Run 的继续、当前阶段重跑或停止由 Host 通过 DSH 原生用户提问处理；普通消息不视为这些决策的答案。',
     stage === 'chapter_writing' && workKind === 'stage_execution'
       ? interrupted

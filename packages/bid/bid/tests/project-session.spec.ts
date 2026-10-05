@@ -3214,6 +3214,15 @@ describe('Workspace 项目与独立 Session', () => {
     expect(executor.execute).not.toHaveBeenCalled()
     expect((await readBidProjectState(workspace))?.run).toEqual(before?.run)
     expect(ctx.tools.schemas(agent).map(tool => tool.name)).toContain('bid_resume_current_run')
+    const requestText = adapter.requests.findLast(candidate => String(candidate.sessionId) === String(agent.id))?.messages
+      .flatMap(message => message.content).filter(block => block.type === 'text').map(block => block.text).join('\n')
+    expect(requestText).toContain('无参数调用 bid_resume_current_run；程序绑定当前 Run 和项目 revision')
+    expect(requestText).not.toContain('传入当前 Run ID')
+    const resume = ctx.tools.schemas(agent).find(tool => tool.name === 'bid_resume_current_run')!
+    expect(validateJsonSchemaValue(resume.parameters, {})).toEqual([])
+    expect(validateJsonSchemaValue(resume.parameters, {
+      run_id: before!.run!.runId, expected_project_revision: before!.revision,
+    })).not.toEqual([])
     expect(agent.session.events.some(event => event.type === 'bid.run.decision.required')).toBe(false)
   })
 

@@ -30,6 +30,10 @@ it('corrects S4 tool arguments in one Child turn through the headless Loader', a
       const [headerLine, ...eventLines] = childLog.trimEnd().split('\n')
       const header = JSON.parse(headerLine!) as SessionHeader
       const events = eventLines.map(line => JSON.parse(line) as SessionEvent)
+      expect(childLog).toContain('current_coverage_ownership：{\\"requirement_positions\\":[0],\\"scoring_positions\\":[0],\\"response_point_positions\\":[0]}')
+      expect(childLog).toContain('basis.requirement_positions 和 coverage_override.requirement_positions')
+      expect(childLog).not.toContain('basis.requirement_ids / coverage_override.requirement_ids 只能使用')
+      expect(childLog).not.toContain('basis.requirement_ids=[]')
       const calls = events.filter(event => event.type === 'tool/call')
         .filter(event => event.data.name === 'web_search' || event.data.name === 'web_fetch')
       expect(calls.map(event => [event.data.name, event.data.turn])).toEqual([['web_search', 1], ['web_fetch', 1]])
@@ -102,6 +106,15 @@ it('corrects S4 tool arguments in one Child turn through the headless Loader', a
       const [finalHeaderLine, ...finalEventLines] = finalCheckLog.trimEnd().split('\n')
       const finalHeader = JSON.parse(finalHeaderLine!) as SessionHeader
       const finalEvents = finalEventLines.map(line => JSON.parse(line) as SessionEvent)
+      expect(finalCheckLog).toContain('首轮及修复轮次都必须先调用 list_review_items')
+      for (const event of finalEvents) {
+        if (event.type !== 'tool/call' || event.data.name !== 'review_items') continue
+        const input = JSON.parse(event.data.arguments) as { items: Array<Record<string, unknown>> }
+        for (const item of input.items) {
+          expect(Number.isInteger(item.review_position)).toBe(true)
+          expect(item).not.toHaveProperty('review_ref')
+        }
+      }
       expect(finalEvents.filter(event => event.type === 'tool/call').map(event => event.data.name)).toEqual([
         'finish_final_check', 'list_review_items', 'read_source', 'review_items', 'finish_final_check',
       ])

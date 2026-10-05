@@ -866,6 +866,7 @@ function applySectionTaskOperation(
   state: MappingSubmissionState, task: EvidenceMappingTask, raw: unknown,
   bindPlan: (mapping: PartialSectionMapping, input: z.infer<typeof sectionAnswerPlanInputSchema>) => SectionAnswerPlan,
   allowOutlineRefinement: boolean,
+  inputs: EvidenceMappingInputs,
 ): SectionTaskChange {
   if (taskOwnsOutlineRefinement(task)) assertResearchReady(state)
   else if (!state.locked) throw new ToolArgsError(['section_id: 必须先调用 lock_section_outline。'])
@@ -878,25 +879,31 @@ function applySectionTaskOperation(
     throw new ToolArgsError([`section_id: ${operation.section_id} 不属于当前任务。`])
   }
   const allowedRequirementIds = [...state.assignedCoverage.requirement_ids]
+  const allowedPositions = mappingCoveragePositions(inputs, state.assignedCoverage)
+  const positionsByCoverage = {
+    requirement_ids: allowedPositions.requirement_positions,
+    scoring_ids: allowedPositions.scoring_positions,
+    scoring_response_point_ids: allowedPositions.response_point_positions,
+  }
   if (operation.basis.kind === 'tender_requirement' && allowedRequirementIds.length === 0) {
     throw new ToolArgsError([
-      'basis.kind: 当前任务没有可写 Requirement Coverage；相关 Requirements 仅为只读研究上下文。若依据章节职责完善 Blueprint，请使用 kind=section_responsibility、requirement_ids=[]；禁止猜测 Requirement ID。',
+      'basis.kind: 当前任务没有可写 Requirement Coverage；相关 Requirements 仅为只读研究上下文。若依据章节职责完善 Blueprint，请使用 kind=section_responsibility、requirement_positions=[]。',
     ])
   }
   if (operation.basis.kind === 'tender_requirement' && operation.basis.requirement_ids.length === 0) {
-    throw new ToolArgsError(['basis.requirement_ids: 招标要求依据必须指明相关要求。'])
+    throw new ToolArgsError(['basis.requirement_positions: 招标要求依据必须选择 current_coverage_ownership 中的相关要求位置。'])
   }
   for (const id of operation.basis.requirement_ids) if (!state.assignedCoverage.requirement_ids.has(id)) {
     throw new ToolArgsError([
-      `basis.requirement_ids: ${id} 不属于本任务 Coverage Ownership。当前允许值：${JSON.stringify(allowedRequirementIds)}。`
-      + (allowedRequirementIds.length === 0 ? ' 当前必须传 requirement_ids=[]；若依据章节职责修改 Blueprint，使用 kind=section_responsibility。' : ''),
+      `basis.requirement_positions: 所选对象不属于本任务 Coverage Ownership。当前允许位置：${JSON.stringify(allowedPositions.requirement_positions)}。`
+      + (allowedRequirementIds.length === 0 ? ' 当前必须传 requirement_positions=[]；若依据章节职责修改 Blueprint，使用 kind=section_responsibility。' : ' 从 objects.requirements 选择允许的位置。'),
     ])
   }
   if (operation.coverage_override !== undefined) {
     for (const key of Object.keys(state.assignedCoverage) as Array<keyof typeof state.assignedCoverage>) {
       const unknown = operation.coverage_override[key].find(id => !state.assignedCoverage[key].has(id))
       if (unknown !== undefined) throw new ToolArgsError([
-        `coverage_override.${key}: ${unknown} 不属于当前任务 Coverage Ownership。当前允许值：${JSON.stringify([...state.assignedCoverage[key]])}。`,
+        `coverage_override.${mappingModelFieldName(key)}: 所选对象不属于当前任务 Coverage Ownership。当前允许位置：${JSON.stringify(positionsByCoverage[key])}。请从对应业务对象表选择允许的位置。`,
       ])
     }
   }
@@ -1113,7 +1120,7 @@ function assertResearchFindingReferences(
     seen.add(finding.finding_ref)
     for (const [basisIndex, basis] of finding.basis.entries()) {
       if (!validRefs[basis.kind].has(basis.ref)) {
-        violations.push(`${path}.basis.${basisIndex}.ref: ${basis.ref} 不是当前运行中已验证的 ${basis.kind} 引用。`)
+        violations.push(`${path}.basis.${basisIndex}.reference_position: 所选对象不是当前运行中已验证的 ${basis.kind} 依据；请从 objects.references 选择当前有效且已读取的依据位置。`)
       }
     }
   }
@@ -1516,7 +1523,7 @@ async function parseSectionMappingSubmission(
       location, chunk, ref: mappingMaterialRef(fileIndex, chunk.id),
     })))
       .find(item => item.ref === ref)
-    if (located === undefined) throw new ToolArgsError([`local_materials.${index}.material_ref: 未知材料引用 ${ref || '(empty)'}。`])
+    if (located === undefined) throw new ToolArgsError([`local_materials.${index}.material_position: 所选对象不是本地正文材料；请从 objects.references 选择已读取的本地材料位置。`])
     const { location, chunk } = located
     const chunkId = chunk.id
     await assertNoLinkedPath(workspace.root, chunk.path)
@@ -1541,7 +1548,7 @@ async function parseSectionMappingSubmission(
     const material = transientWebChunkEvidenceMaterialSchema.parse(value)
     const unread = material.chunk_refs.find(ref => !readWebChunkRefs.has(ref))
     if (unread !== undefined) {
-      throw new ToolArgsError([`web_materials.${index}.chunk_refs: ${unread} 未由当前 Child 成功调用 read_source 阅读。`])
+      throw new ToolArgsError([`web_materials.${index}.chunk_positions: 所选材料未由当前 Child 成功调用 read_source 阅读；请先按 objects.sources 读取，再从 objects.references 选择已读取的 Web Chunk 位置。`])
     }
     return material
   })
@@ -1602,7 +1609,11 @@ async function validateCompletedMappingState(
           ? [`web:${basis.source_id}:${basis.chunk_refs.join(',')}`] : [])) ?? [],
       ])
       for (const problem of validateSectionAnswerPlan(mapping.answer_plan, checklist, sourceKeys)) {
-        issues.push({ code: 'EVIDENCE_MAPPING_ANSWER_PLAN_INVALID', message: `${section.id}：${problem}`, path: 'answer_plan' })
+        const unanswered = checklist.find(item => problem === `answer_plan: 未回应 ${item.item_ref}。`)
+        issues.push({ code: 'EVIDENCE_MAPPING_ANSWER_PLAN_INVALID',
+          message: unanswered === undefined ? `${section.id}：${problem}`
+            : `answer_plan.target_refs: 尚未回应 objects.targets 中的位置 ${state.objectPositions.targets.indexOf(unanswered.item_ref)}；请补齐该检查项的回应计划。`,
+          path: unanswered === undefined ? 'answer_plan' : 'answer_plan.target_refs' })
       }
     }
   }
@@ -1671,8 +1682,10 @@ async function completeMappingSubmission(
     const issues = state.locked ? [] : [{ code: 'EVIDENCE_MAPPING_SECTION_NOT_LOCKED', message: '必须先锁定当前 Section 子树。' }]
     state.lastIncompleteIssues = [
       ...issues,
-      ...missing.map(sectionId => ({ code: 'EVIDENCE_MAPPING_PARTIAL_MISSING', message: `Section mapping 缺少已分配 ID ${sectionId}。` })),
-      ...missingSummaries.map(sectionId => ({ code: 'EVIDENCE_MAPPING_BRANCH_SUMMARY_MISSING', message: `Branch summary 缺少目录节点 ${sectionId}。` })),
+      ...missing.map(sectionId => ({ code: 'EVIDENCE_MAPPING_PARTIAL_MISSING',
+        message: `章节 ${sectionId} 尚未提交材料映射；按返回的缺失章节位置与 objects.sections 选择 section_position 后完成提交。` })),
+      ...missingSummaries.map(sectionId => ({ code: 'EVIDENCE_MAPPING_BRANCH_SUMMARY_MISSING',
+        message: `父节点 ${sectionId} 尚未提交总述；按 missing_summary_section_positions 和 objects.sections 选择 section_position 后完成提交。` })),
     ]
     return { response: task.phase === 'final_check'
       ? { completed: false, missing_mapping_section_ids: missing, missing_summary_section_ids: missingSummaries }
@@ -1697,7 +1710,7 @@ async function completeMappingSubmission(
   if (task.coverage_candidates !== undefined
     && !state.taskOperations.some(change => change.operation.coverage_override !== undefined)) {
     const issue = { code: 'EVIDENCE_MAPPING_NEW_LEAF_COVERAGE_UNDECIDED',
-      message: '拆分后的新叶节必须通过 update_section_task.coverage_override 明确分配当前候选业务 ID；若本节不承担某类业务，显式提交空数组。' }
+      message: '拆分后的新叶节必须通过 update_section_task.coverage_override 的 requirement_positions、scoring_positions 和 response_point_positions 明确选择 current_coverage_ownership 中的业务对象位置；若本节不承担某类业务，显式提交空数组。' }
     state.lastIncompleteIssues = [issue]
     return { response: { completed: false, missing_section_ids: [], issues: toolIssues([issue]) } }
   }
@@ -1745,6 +1758,41 @@ function mappingBusinessObjectView(task: EvidenceMappingTask, inputs: EvidenceMa
     scoring: select(inputs.scoring.scoring_items, visible.scoring, item => item.criterion),
     compliance: select(inputs.compliance.compliance_items, visible.compliance, item => item.normalized_rule),
     response_points: select(inputs.responsePoints.points, visible.responsePoints, item => item.text),
+  }
+}
+
+const MAPPING_MODEL_FIELDS: Readonly<Record<string, string>> = {
+  section_id: 'section_position', target_section_id: 'target_section_position', parent_id: 'parent_position',
+  section_ids: 'section_positions', requirement_id: 'requirement_position', requirement_ids: 'requirement_positions',
+  scoring_id: 'scoring_position', scoring_ids: 'scoring_positions', compliance_id: 'compliance_position',
+  compliance_ids: 'compliance_positions', scoring_response_point_ids: 'response_point_positions',
+  finding_refs: 'finding_positions', review_ref: 'review_position', material_ref: 'material_position',
+  chunk_refs: 'chunk_positions', source_ref: 'source_position', scope_ref: 'scope_position',
+  target_refs: 'target_positions', record_id: 'record_position', ref: 'reference_position',
+}
+
+function mappingModelFieldName(field: string): string {
+  return MAPPING_MODEL_FIELDS[field] ?? field
+}
+
+/** 模型诊断使用接受参数的字段名，持久化及校验继续使用正式身份。 */
+function mappingModelDiagnostic(message: string): string {
+  return message.replace(/\b\w+\b/gu, mappingModelFieldName)
+}
+
+function mappingCoveragePositions(inputs: EvidenceMappingInputs, coverage: {
+  requirement_ids: Iterable<string>
+  scoring_ids: Iterable<string>
+  scoring_response_point_ids: Iterable<string>
+}) {
+  const positions = (all: readonly { id: string }[], selected: Iterable<string>) => {
+    const allowed = new Set(selected)
+    return all.flatMap((item, position) => allowed.has(item.id) ? [position] : [])
+  }
+  return {
+    requirement_positions: positions(inputs.requirements.requirements, coverage.requirement_ids),
+    scoring_positions: positions(inputs.scoring.scoring_items, coverage.scoring_ids),
+    response_point_positions: positions(inputs.responsePoints.points, coverage.scoring_response_point_ids),
   }
 }
 
@@ -1903,6 +1951,7 @@ function attachMappingSubmissionRuntime(
       position: currentReviewObjects().indexOf(item.review_ref), id: item.review_ref, kind: item.kind,
     })),
     answer_checklists: answerChecklists(),
+    current_coverage_ownership: mappingCoveragePositions(inputs, state.assignedCoverage),
   })
   const register = (definition: Parameters<typeof childCtx.tools.register>[0]): void => {
     const referencePositions = () => createMappingReferencePositions(
@@ -1914,11 +1963,37 @@ function attachMappingSubmissionRuntime(
         const operation = record(bound)?.operation
         const input = definition.name === 'apply_section_outline_edit' && record(operation)?.type === 'add_section'
           ? { ...record(bound), operation: { ...record(operation), writable: true } } : bound
-        const result = await definition.execute(input, exec)
+        let result: unknown
+        try { result = await definition.execute(input, exec) } catch (error: unknown) {
+          if (error instanceof ToolArgsError) throw new ToolArgsError(error.violations.map(mappingModelDiagnostic))
+          if (error instanceof ZodError) throw new ToolArgsError(submissionViolations(error).map(mappingModelDiagnostic))
+          throw error
+        }
         registerNavigationReferences(result)
         const value = record(result)
-        return value === undefined || ['finish_mapping_task', 'finish_final_check'].includes(definition.name)
-          ? result : { ...value, objects: objectView() }
+        if (value === undefined) return result
+        if (['finish_mapping_task', 'finish_final_check'].includes(definition.name) && value.completed === true) return result
+        const progressFields: Readonly<Record<string, { field: string; ids: readonly string[] }>> = {
+          missing_section_ids: { field: 'missing_section_positions', ids: currentSectionObjects() },
+          missing_mapping_section_ids: { field: 'missing_mapping_section_positions', ids: currentSectionObjects() },
+          missing_summary_section_ids: { field: 'missing_summary_section_positions', ids: currentSectionObjects() },
+          remaining_section_ids: { field: 'remaining_section_positions', ids: currentSectionObjects() },
+          pending_review_refs: { field: 'pending_review_positions', ids: currentReviewObjects() },
+        }
+        const projected = Object.fromEntries(Object.entries(value).map(([field, item]) => {
+          const progress = progressFields[field]
+          if (progress !== undefined && Array.isArray(item)) return [progress.field, item.map(id => progress.ids.indexOf(String(id)))]
+          if (field === 'issues' && Array.isArray(item)) return [field, item.map((issue: unknown) => {
+            const detail = record(issue)
+            return detail === undefined ? issue : { ...detail,
+              ...(typeof detail.message === 'string' ? { message: mappingModelDiagnostic(detail.message) } : {}),
+              ...(typeof detail.path === 'string' ? { path: mappingModelDiagnostic(detail.path) } : {}),
+              ...(typeof detail.field === 'string' ? { field: mappingModelDiagnostic(detail.field) } : {}),
+            }
+          })]
+          return [field, item]
+        }))
+        return { ...projected, objects: objectView() }
       },
     }))
   }
@@ -1966,7 +2041,19 @@ function attachMappingSubmissionRuntime(
     try {
       return bindSectionAnswerPlan(input, checklist, { s2Keys, local, webChunkRefs: readWebChunkRefs(), sectionId: section.id })
     } catch (error) {
-      throw new ToolArgsError([error instanceof Error ? error.message : String(error)])
+      const message = error instanceof Error ? error.message : String(error)
+      const fields: Readonly<Record<string, string>> = {
+        ANSWER_PLAN_TARGET_UNKNOWN: 'target_positions: 所选检查项已过期或不属于当前章节；请读取当前 objects.targets 与 answer_checklists。',
+        ANSWER_PLAN_S2_UNKNOWN: 'basis.record_position: 所选 S2 记录不属于当前章节任务；请从 objects.references 选择本章依据。',
+        ANSWER_PLAN_LOCAL_UNREAD: 'basis.material_position: 所选本地材料未由当前 Child 成功读取；请先读取，再从 objects.references 选择材料位置。',
+        ANSWER_PLAN_WEB_UNREAD: 'basis.chunk_positions: 所选 Web Chunk 未由当前 Child 成功读取；请先读取，再从 objects.references 选择材料位置。',
+        ANSWER_PLAN_WEB_MIXED_SOURCE: 'basis.chunk_positions: 同一 Web 依据必须选择同一网页快照的 Chunk 位置。',
+      }
+      throw new ToolArgsError(message.split('\n').map((problem) => {
+        const unanswered = checklist.find(item => problem === `answer_plan: 未回应 ${item.item_ref}。`)
+        return unanswered === undefined ? fields[problem.split(':')[0] ?? ''] ?? problem
+          : `answer_plan.target_positions: 尚未回应 objects.targets 中的位置 ${currentTargetObjects().indexOf(unanswered.item_ref)}；请补齐该检查项的回应计划。`
+      }))
     }
   }
   if (task.task_kind !== 'branch_summary') {
@@ -2024,12 +2111,12 @@ function attachMappingSubmissionRuntime(
     description: [
       '研究充分性判断通过后，记录或修改章节 Writing Brief、展开维度、职责内缺口、覆盖关联和 answer_plan；材料仍须锁定后另行提交。修改 must_answer 或 coverage 后先读取返回的 answer_checklist，再提交完整 answer_plan；list_mapping_objects 也返回当前 answer_checklists。answer_plan 的 target_positions 使用当前 objects.targets 清单，S2 basis 仅提交 kind=s2 与 objects.references 中的 record_position，程序派生 artifact；local basis 使用本 Child 已读取的 material_position，web basis 使用已读取的 chunk_positions，Host 绑定真实身份。必须提供招标要求、用户修改或章节职责依据，资料命中本身不能扩大任务。',
       state.assignedCoverage.requirement_ids.size === 0
-        ? '当前任务 requirement_ids 可写集合为空；基于章节职责更新时使用 section_responsibility + requirement_ids=[]；Related Requirements 仅为只读上下文。'
-        : `basis.requirement_ids / coverage_override.requirement_ids 只能使用：${[...state.assignedCoverage.requirement_ids].join(', ')}。`,
+        ? '当前任务 requirement_positions 可写集合为空；基于章节职责更新时使用 section_responsibility + requirement_positions=[]；Related Requirements 仅为只读上下文。'
+        : `basis.requirement_positions / coverage_override.requirement_positions 只能选择 objects.requirements 中的允许位置：${JSON.stringify(mappingCoveragePositions(inputs, state.assignedCoverage).requirement_positions)}。`,
     ].join(' '),
     parameters: zodJsonSchema(sectionTaskOperationSchema), output,
     async execute(args: unknown): Promise<unknown> {
-      const change = applySectionTaskOperation(state, task, args, bindPlan, allowOutlineRefinement)
+      const change = applySectionTaskOperation(state, task, args, bindPlan, allowOutlineRefinement, inputs)
       if (task.phase === 'final_check') await persistProgress(mappingSubmissionSnapshot(state, task), false)
       return {
         applied: true,
@@ -2253,7 +2340,7 @@ function attachMappingSubmissionRuntime(
       },
     })
     register({
-      name: 'review_items', description: '按运行内引用批量提交语义复核结论。先对照 S3、S2、用户修改和全书职责判断任务调整是否合理，再判断材料用途。keep、remove、block 不携带 correction；correct 必须携带具体 correction，应用修改并产生新待审项。越界且无法修正时 block，不能作为非阻断建议放行。',
+      name: 'review_items', description: '先调用 list_review_items 读取最新待审项及 objects.reviews，再以 review_position 批量提交语义复核结论。先对照 S3、S2、用户修改和全书职责判断任务调整是否合理，再判断材料用途。keep、remove、block 不携带 correction；correct 必须携带具体 correction，应用修改并产生新待审项。越界且无法修正时 block，不能作为非阻断建议放行。',
       parameters: zodJsonSchema(reviewSchema), output,
       async execute(raw: unknown): Promise<unknown> {
         const { items } = reviewSchema.parse(raw)
@@ -2278,13 +2365,13 @@ function attachMappingSubmissionRuntime(
         }
         for (const decision of items) {
           const item = refreshReviewItems(draft, task).find(item => item.review_ref === decision.review_ref)
-          if (item === undefined) throw new ToolArgsError([`review_ref: ${decision.review_ref} 未知或已过期，请读取当前待审项。`])
+          if (item === undefined) throw new ToolArgsError(['review_position: 所选复核项未知或已过期，请调用 list_review_items，从最新 objects.reviews 选择位置。'])
           if (decision.decision === 'keep' || decision.decision === 'block') {
-            if (decision.decision === 'keep' && item.kind === 'branch_summary' && item.value === null) throw new ToolArgsError(['review_ref: 父节点总述为空，必须先提交正文。'])
+            if (decision.decision === 'keep' && item.kind === 'branch_summary' && item.value === null) throw new ToolArgsError(['review_position: 父节点总述为空，必须先提交正文。'])
             if (decision.decision === 'keep' && item.kind === 'web_material') {
               const material = transientWebChunkEvidenceMaterialSchema.parse(item.value)
               const unread = material.chunk_refs.find(ref => !readWebChunkRefs().has(ref))
-              if (unread !== undefined) throw new ToolArgsError([`review_ref: ${unread} 未由当前 Child 成功调用 read_source 阅读，不能保留该 Web Evidence。`])
+              if (unread !== undefined) throw new ToolArgsError(['review_position: 所选 Web Evidence 未由当前 Child 成功调用 read_source 阅读，不能保留；请按 objects.sources 先读取对应正文。'])
             }
             item.conclusion = { decision: decision.decision, reason: decision.reason }
             continue
@@ -2295,7 +2382,7 @@ function attachMappingSubmissionRuntime(
             if (decision.decision === 'remove' || correction?.task?.section_id !== item.section_id || Object.keys(correction).length !== 1) {
               throw new ToolArgsError(['correction.task: 任务只能通过同章的独立章节任务操作修正；Final Check 不能删除章节。'])
             }
-            applySectionTaskOperation(draft, task, correction.task, bindPlan, allowOutlineRefinement)
+            applySectionTaskOperation(draft, task, correction.task, bindPlan, allowOutlineRefinement, inputs)
           } else if (item.kind === 'branch_summary') {
             if (decision.decision === 'remove' || correction?.summary === undefined || Object.keys(correction).length !== 1) throw new ToolArgsError(['correction.summary: 只能修正父节点总述正文，不能删除父节点。'])
             assertCustomerFacingSummary(correction.summary)
@@ -2831,14 +2918,14 @@ export function renderEvidenceMappingSubagentTask(
     `相关 Scoring：${JSON.stringify(subagentTaskContext(scoring))}`,
     `相关 Response Points：${JSON.stringify(subagentTaskContext(responsePoints))}`,
     `相关 Compliance：${JSON.stringify(subagentTaskContext(compliance))}`,
-    `current_coverage_ownership：${JSON.stringify(coverageOwnership)}`,
+    `current_coverage_ownership：${JSON.stringify(mappingCoveragePositions(inputs, coverageOwnership))}`,
     '相关 Requirements / Scoring / Response Points 是当前 Child 可读取、研究和引用的业务上下文；current_coverage_ownership 才是 update_section_task 可以写入的 coverage 范围，两者不是同一概念。',
-    'update_section_task.basis.requirement_positions 和 coverage_override.requirement_positions 只能选择 current_coverage_ownership.requirement_ids 对应对象的位置。',
+    'update_section_task.basis.requirement_positions 和 coverage_override.requirement_positions 只能从 current_coverage_ownership.requirement_positions 选择；它们使用 objects.requirements 的位置。coverage_override.scoring_positions 和 response_point_positions 分别选择 current_coverage_ownership 对应允许集合，使用 objects.scoring 和 objects.response_points 的位置。',
     ...(task.coverage_candidates === undefined ? [] : [
-      '当前是拆分后的新叶节研究任务。current_coverage_ownership 是旧叶节留下的候选业务 ID；本节原有 ID 为空不表示可以忽略这些要求。调用 update_section_task 时必须显式提供完整的 coverage_override 三组数组，按本节真实职责承接相关 Requirement、Scoring 和 Response Point。覆盖多个新叶节的宽泛要求可以由多个相关子节共同承接；不得机械复制全部 ID，也不得在所有子节都留下空覆盖。不属于本节的类别显式传空数组。',
+      '当前是拆分后的新叶节研究任务。current_coverage_ownership 是旧叶节留下的候选业务对象位置；本节原有覆盖为空不表示可以忽略这些要求。调用 update_section_task 时必须显式提供 coverage_override 的 requirement_positions、scoring_positions 和 response_point_positions 三组数组，按本节真实职责承接相关 Requirement、Scoring 和 Response Point。覆盖多个新叶节的宽泛要求可以由多个相关子节共同承接；不得机械复制全部候选位置，也不得在所有子节都留下空覆盖。不属于本节的类别显式传空数组。',
     ]),
     ...(coverageOwnership.requirement_ids.length === 0 ? [
-      'current_coverage_ownership.requirement_ids=[] 时，不得猜测 Requirement，不得使用 kind=tender_requirement；依据当前章节职责完善 Blueprint 时使用 kind=section_responsibility，并传 requirement_positions=[]。',
+      'current_coverage_ownership.requirement_positions=[] 时，不得猜测 Requirement，不得使用 kind=tender_requirement；依据当前章节职责完善 Blueprint 时使用 kind=section_responsibility，并传 requirement_positions=[]。',
     ] : []),
     ...(task.phase === 'final_check' ? [] : [`可用资料目录与正文定位：${JSON.stringify(mappingSourceCatalog(locations))}`]),
     `只允许调用：${allowedTools.join(', ')}。资料只能通过授权引用读取。`,
@@ -2858,22 +2945,22 @@ export function renderEvidenceMappingSubagentTask(
     ...(taskOwnsOutlineRefinement(task) ? [
       'apply_section_outline_edit 的 basis.finding_indices 引用当前返回的研究发现序号。只能编辑 outline_edit_scope_id 标识的 Section 自身和新生成的后代，不得修改父节点或兄弟 Section。Host 返回新 ID 和实际 finding_bindings。',
       '当前 Structure Assessment 有效且主题落实后调用 lock_section_outline(comparison)。若 mapping_sections 仍包含当前叶子，再为它调用 submit_section_mapping；若拆分后 mapping_sections 为空，不得替 queued_leaf_sections 提交 Evidence，直接调用 finish_mapping_task，Host 会为新叶子创建独立任务。',
-      '覆盖关联默认为当前目录关联；需要调整时，在 update_section_task 中明确提交三类 coverage_override，只能引用当前任务可见 ID。必须修正任务越界，不能写入 add_mapping_suggestion 后当作已解决。',
-      '当前任务的单个 mapping Section 完成，或者它已转为父节点后，调用 finish_mapping_task；若返回 missing_section_ids 或 issues，只修正明确指出的当前 Section。',
+      '覆盖关联默认为当前目录关联；需要调整时，在 update_section_task 中明确提交 coverage_override 三组位置数组，只能从 current_coverage_ownership 的对应允许集合选择。必须修正任务越界，不能写入 add_mapping_suggestion 后当作已解决。',
+      '当前任务的单个 mapping Section 完成，或者它已转为父节点后，调用 finish_mapping_task；若返回 missing_section_positions 或 issues，只修正明确指出的当前 Section。',
       '拆分可写叶子时，先用 update_section 为将成为结构节点的原章节补充 summary，再执行 split_section。',
     ] : task.task_kind === 'branch_summary' ? [
       '当前任务只生成并复核指定父节点的正式总述。父节点只依据自身职责、直接子 Section 的最终 writing brief、直接子节点已通过的 summary 和已确认项目事实，不重新读取整棵子树的原始 Evidence。',
       '先调用 submit_branch_summary，再用 review_items 复核新正文。总述直接描述我方总体方案、实施措施、组织方式和成果，不写“本章节将”，不提评分点、内部编号、模型、Agent 或系统状态，也不虚构企业能力与项目事实。',
-      '提示末尾的 pending_review_items 提供当前待审引用；修正产生新版本后必须再次复核。最后调用无参数 finish_final_check。',
+      '提示末尾的 pending_review_items 提供当前待审内容。先调用 list_review_items 取得最新 objects.reviews，使用 review_position 提交结论；修正产生新版本后重新读取并再次复核。最后调用无参数 finish_final_check。',
     ] : task.phase === 'final_check' ? [
       '先对照 S3 已确认任务、S2 要求、用户修改、S4 调整前后差异及全书职责，判断任务调整本身是否合理，再判断材料能否支持该任务。不能先扩大任务，再以材料符合扩大后的任务为由通过。空材料章节和职责内缺口也必须复核。',
       '待审任务中的 identified_issues 是目录复核发现的阻断问题，必须逐项核对并通过任务修正解决；只有能够引用原始业务依据说明问题不成立时才可 keep，并写明理由。仍未解决或超出当前编辑权限时必须 block，不能仅登记为建议。在本章职责内可以设计作业方法，但不得把参考方案写成本项目既定事实。',
-      '提示末尾的 pending_review_items 提供首轮待审引用；首轮可直接使用这些引用，不必重复调用 list_review_items。修复轮次必须先调用 list_review_items 读取当前 pending_items。review_items 批量提交 keep、remove、correct 或 block 及具体理由；correct 必须立即修改当前 S4 产物，不能只记录意见。修正会使旧 review_ref 失效，必须再次读取新 review item、重新审核并在确认正确后提交 keep。baseline 存在不表示已审。新增、替换、用途变化后重新审查该关联；章节任务改变后本章材料及受影响祖先总述需要重新审查。',
+      '提示末尾的 pending_review_items 提供首轮待审内容。首轮及修复轮次都必须先调用 list_review_items 取得当前 pending_items 和 objects.reviews；review_items 使用 review_position 批量提交 keep、remove、correct 或 block 及具体理由，不提交 review_ref。correct 必须立即修改当前 S4 产物，不能只记录意见。修正会使旧复核位置对应的版本失效，必须再次读取新待审项和 objects.reviews、重新审核并在确认正确后用新 review_position 提交 keep。baseline 存在不表示已审。新增、替换、用途变化后重新审查该关联；章节任务改变后本章材料及受影响祖先总述需要重新审查。',
       'Final Check 不是只报告问题：可修问题必须 correct，不得用 block 代替自动修正；只有确实无法在当前任务边界内修复的问题才允许 block。只有 pending_items 清空后才能调用无参数 finish_final_check；不得连续调用 finish_final_check 代替修改。程序仍会计算漏项、过期结论及阻断项。Final Check 不能新增、删除、移动、拆分、合并章节或修改标题。',
     ] : [
       '读取资料并判断可写边界后，先调用 list_mapping_objects 取得当前 answer_checklists；用 update_section_task 提交 writing_dimensions、missing_topics 和完整 answer_plan，再调用 submit_section_mapping 提交所采用材料。仅提交材料不能证明任务依据充分。',
       ...(!allowOutlineRefinement ? ['当前目录及职责固定；update_section_task 不得提交 writing_brief 或 coverage_override 改变已确认职责。'] : []),
-      'update_section_task 的 basis 使用当前章节职责及合法业务位置；answer_plan 按当前清单说明逐项回应、已读取依据或方案设计及事实边界，真实业务缺口使用 gap 并说明 required_input。按 remaining_section_ids 完成每章的计划和材料后调用 finish_mapping_task；若返回缺失列表或 issues，只处理明确章节，直到 completed=true。',
+      'update_section_task 的 basis 使用当前章节职责及合法业务位置；answer_plan 按当前清单说明逐项回应、已读取依据或方案设计及事实边界，真实业务缺口使用 gap 并说明 required_input。按 remaining_section_positions 完成每章的计划和材料后调用 finish_mapping_task；若返回缺失位置列表或 issues，只处理明确章节，直到 completed=true。',
     ]),
     'missing_topics 只记属于本章职责、经检索和语义判断后仍存在的业务缺口；其他章节的实施任务不能登记为本章缺口。未知引用、工具失败或 Web 抓取失败属于技术问题，不能改写为业务缺口。',
   ].join('\n')
@@ -2882,6 +2969,7 @@ export function renderEvidenceMappingSubagentTask(
 function renderEvidenceMappingRepairChecklist(
   task: EvidenceMappingTask,
   state: MappingSubmissionState,
+  inputs: EvidenceMappingInputs,
 ): string[] {
   const missingMappings = mappingTaskSections(state.stagedOutline, task)
     .map(section => section.id)
@@ -2892,13 +2980,13 @@ function renderEvidenceMappingRepairChecklist(
     const missingBlueprints = mappingTaskWritingSections(state.stagedOutline, task)
       .filter(section => !state.blueprintSections.has(section.id)).map(section => section.id)
     if (missingBlueprints.length > 0) {
-      const allowedRequirementIds = [...state.assignedCoverage.requirement_ids]
+      const allowedRequirementPositions = mappingCoveragePositions(inputs, state.assignedCoverage).requirement_positions
       steps.push([
-        `随后为 ${missingBlueprints.join('、')} 调用 update_section_task，提交完整 Blueprint。`,
-        `当前可写 requirement_ids=${JSON.stringify(allowedRequirementIds)}。`,
-        ...(allowedRequirementIds.length === 0 ? [
-          '本任务没有 Requirement Coverage；不要猜 Requirement ID。依据章节职责更新时使用 basis.kind=section_responsibility、basis.requirement_ids=[]。',
-        ] : ['只能从该集合选择 Requirement ID。']),
+        `随后为 objects.sections 中位置 ${JSON.stringify(missingBlueprints.map(id => state.objectPositions.sections.indexOf(id)))} 调用 update_section_task，提交完整 Blueprint。`,
+        `当前允许 requirement_positions=${JSON.stringify(allowedRequirementPositions)}。`,
+        ...(allowedRequirementPositions.length === 0 ? [
+          '本任务没有 Requirement Coverage。依据章节职责更新时使用 basis.kind=section_responsibility、basis.requirement_positions=[]。',
+        ] : ['只能从该集合选择 objects.requirements 的位置。']),
       ].join(''))
     }
     if (state.structureAssessment === undefined || state.structureAssessment.stale) steps.push('再调用 submit_section_structure_assessment，针对当前 Blueprint 提交有效的目录判断。')
@@ -2908,17 +2996,17 @@ function renderEvidenceMappingRepairChecklist(
   }
   if (task.coverage_candidates !== undefined
     && !state.taskOperations.some(change => change.operation.coverage_override !== undefined)) {
-    steps.push('新叶节还没有业务归属决定；调用 update_section_task，显式提交 coverage_override 的三组 ID，未归属本节的类别传空数组。')
+    steps.push('新叶节还没有业务归属决定；调用 update_section_task，显式提交 coverage_override 的 requirement_positions、scoring_positions 和 response_point_positions，从对应 current_coverage_ownership 允许集合选择，未归属本节的类别传空数组。')
   }
   if (missingMappings.length > 0) {
     const mappingTool = task.phase === 'final_check' ? 'replace_section_mapping' : 'submit_section_mapping'
-    steps.push(`锁定后逐项调用 ${mappingTool}，当前未提交章节：${missingMappings.join('、')}。`)
+    steps.push(`锁定后逐项调用 ${mappingTool}，当前未提交章节位置：${JSON.stringify(missingMappings.map(id => state.objectPositions.sections.indexOf(id)))}；按 objects.sections 选择 section_position。`)
   }
   if (task.phase === 'final_check') {
     const missingSummaries = affectedSummarySections(state.stagedOutline, task)
       .filter(section => !state.branchSummaries.has(section.id)).map(section => section.id)
-    if (missingSummaries.length > 0) steps.push(`提交父节点总述：${missingSummaries.join('、')}。`)
-    if (pendingReviews(state, task).length > 0) steps.push('调用 list_review_items，并复核返回的全部待审项。')
+    if (missingSummaries.length > 0) steps.push(`提交父节点总述，section_position=${JSON.stringify(missingSummaries.map(id => state.objectPositions.sections.indexOf(id)))}。`)
+    if (pendingReviews(state, task).length > 0) steps.push('调用 list_review_items，并按返回的 objects.reviews 选择 review_position，复核全部待审项。')
   }
   steps.push(`完成以上动作后调用 ${task.phase === 'final_check' ? 'finish_final_check' : 'finish_mapping_task'}；不要直接结束本轮。`)
   return steps
@@ -2929,6 +3017,7 @@ function renderEvidenceMappingSubagentRepairTask(
   issues: readonly StageValidationIssue[],
   task: EvidenceMappingTask,
   state: MappingSubmissionState,
+  inputs: EvidenceMappingInputs,
 ): string {
   const finalCheckReviewPending = task.phase === 'final_check'
     && issues.some(issue => issue.code === 'EVIDENCE_MAPPING_REVIEW_PENDING')
@@ -2936,10 +3025,10 @@ function renderEvidenceMappingSubagentRepairTask(
     basePrompt,
     '',
     '这是 Final Check 的复核修复回合，不是普通结果重试。必须先调用 list_review_items 读取当前 pending_items。',
-    '对当前版本正确的项提交 keep；对可修正问题使用 review_items 的 correct 和具体 correction 立即修改 S4 产物。每次 correct 后旧 review_ref 失效，必须再次调用 list_review_items，重新审核新版本，并对新 review_ref 提交 keep。',
+    '对当前版本正确的项按 objects.reviews 选择 review_position 提交 keep；对可修正问题使用 review_items 的 correct 和具体 correction 立即修改 S4 产物。每次 correct 后旧复核版本失效，必须再次调用 list_review_items，重新审核新版本，并用新的 review_position 提交 keep。',
     '不得只报告问题、连续调用 finish_final_check 或用 block 代替能够完成的修正。只有确实无法在当前任务边界内修复的问题才提交 block；存在 block 时本轮不能完成 Final Check。pending_items 清空后才能调用 finish_final_check。',
-    ...renderStageRepairIssues(issues).slice(0, 24),
-    ...renderEvidenceMappingRepairChecklist(task, state).map((step, index) => `${String(index + 1)}. ${step}`),
+    ...renderStageRepairIssues(issues).slice(0, 24).map(mappingModelDiagnostic),
+    ...renderEvidenceMappingRepairChecklist(task, state, inputs).map((step, index) => `${String(index + 1)}. ${step}`),
   ].join('\n')
   return [
     basePrompt,
@@ -2947,9 +3036,9 @@ function renderEvidenceMappingSubagentRepairTask(
     '这是同一 Child Session 的语义修复轮次。保留已检索内容和工具内草稿，只修正下面的问题；不得复述分析过程。',
     ...(issues.some(issue => issue.code === 'EVIDENCE_MAPPING_INTERNAL_ID_VISIBLE' && issue.path?.includes('.summary'))
       ? ['客户可见总述含内部编号时，使用 apply_section_outline_edit 的 summary-only update_section 修正对应 Section；已锁定结构不需重做判断。修正后再次调用 finish_mapping_task，不要机械重复 finish。'] : []),
-    ...renderStageRepairIssues(issues).slice(0, 24),
+    ...renderStageRepairIssues(issues).slice(0, 24).map(mappingModelDiagnostic),
     'Host 当前进度要求按以下顺序完成：',
-    ...renderEvidenceMappingRepairChecklist(task, state).map((step, index) => `${String(index + 1)}. ${step}`),
+    ...renderEvidenceMappingRepairChecklist(task, state, inputs).map((step, index) => `${String(index + 1)}. ${step}`),
   ].join('\n')
 }
 
@@ -4867,7 +4956,7 @@ async function executeEvidenceMappingRun(
               submissionRequest.state.captured = undefined
               await subagents.followup(agent, started.childId, [{
                 type: 'text', text: [
-                  renderEvidenceMappingSubagentRepairTask(basePrompt, latestIssues, mappingTask, submissionRequest.state),
+                  renderEvidenceMappingSubagentRepairTask(basePrompt, latestIssues, mappingTask, submissionRequest.state, runInputs),
                   `本轮 research_history：${renderResearchHistory(capturedByChild.get(String(started.childId))?.values() ?? [], submissionRequest.state.researchAssessment)}`,
                   '若仍有影响 Blueprint 的缺口，必须依据这份历史改用不同的检索维度、关键词粒度、资料类型或来源范围；不得机械重复已失败或零命中的相同查询。Provider 或 URL 错误如阻止必要研究，保留其明确错误，不得伪装成资料不足。',
                 ].join('\n'),

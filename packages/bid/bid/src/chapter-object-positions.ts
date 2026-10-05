@@ -36,7 +36,10 @@ export function createChapterObjectPositions(fields: readonly ChapterObjectPosit
       if (name === 'writable') throw new ToolArgsError(['writable: 是否可写由程序根据目录子节点派生。'])
       if (name === 'order') throw new ToolArgsError(['order: 请选择 sibling_position，正式顺序由程序生成。'])
       if (name === 'sibling_position') return ['order', chapterPosition(child) + 1]
-      if (canonical.has(name)) throw new ToolArgsError([`${name}: 请选择对象位置，实际身份由程序绑定。`])
+      const identity = canonical.get(name)
+      if (identity !== undefined) throw new ToolArgsError([
+        `${name}: 不得填写 ID 或短引用；请使用 ${identity.model} 选择当前对象表中的${identity.many ? '位置数组' : '位置'}，实际身份由程序绑定。`,
+      ])
       const field = model.get(name)
       if (field === undefined) return [name, bind(child)]
       if (field.many && !Array.isArray(child)) throw new ToolArgsError([`${field.model}: 必须选择位置数组。`])
@@ -53,13 +56,15 @@ export function createChapterObjectPositions(fields: readonly ChapterObjectPosit
       }
       if (name !== 'properties' || child === null || typeof child !== 'object') return [name, schema(child)]
       return [name, Object.fromEntries(Object.entries(child).filter(([property]) => property !== 'writable').map(([property, input]) => {
-        if (property === 'order') return ['sibling_position', { type: 'integer' }]
+        if (property === 'order') return ['sibling_position', { type: 'integer',
+          description: '选择同级顺序的位置（从 0 开始），正式顺序由程序生成。' }]
         const field = canonical.get(property)
         if (field === undefined) return [property, schema(input)]
-        const position = { type: 'integer' }
+        const description = `选择当前对象表中的${field.many ? '位置数组' : '位置'}，实际身份由程序绑定；不得填写 ID 或短引用。`
+        const position = { type: 'integer', description: '选择当前对象表中的位置，实际身份由程序绑定；不得填写 ID 或短引用。' }
         const source = input as Record<string, unknown>
-        return [field.model, field.many ? { ...source, items: position }
-          : source.oneOf !== undefined || source.anyOf !== undefined ? { oneOf: [position, { type: 'null' }] } : position]
+        return [field.model, field.many ? { ...source, description, items: position }
+          : source.oneOf !== undefined || source.anyOf !== undefined ? { oneOf: [position, { type: 'null' }], description } : position]
       }))]
     }))
   }

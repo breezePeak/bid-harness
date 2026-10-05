@@ -216,8 +216,9 @@ it('S4 Prompt 分开显示技术偏离表的全量只读 Requirement 与空 cove
   }
 
   expect((field(deviationPrompt, '相关 Requirements：') as Array<{ id: string }>).map(item => item.id)).toEqual(['R-1', 'R-2'])
-  expect(field(deviationPrompt, 'current_coverage_ownership：')).toMatchObject({ requirement_ids: [] })
+  expect(field(deviationPrompt, 'current_coverage_ownership：')).toEqual({ requirement_positions: [], scoring_positions: [], response_point_positions: [] })
   expect((field(ordinaryPrompt, '相关 Requirements：') as Array<{ id: string }>).map(item => item.id)).toEqual(['R-1'])
+  expect(field(ordinaryPrompt, 'current_coverage_ownership：')).toEqual({ requirement_positions: [0], scoring_positions: [], response_point_positions: [] })
 })
 
 async function writeInputs(workspace: BidWorkspace, sectionIds: readonly string[] = ['SEC-1', 'SEC-2'],
@@ -394,7 +395,22 @@ function mappingFixture(
       return line === undefined ? undefined : JSON.parse(line.slice(prefix.length))
     }
     const task = field('Mapping Task：') as EvidenceMappingTask
-    const coverageCandidates = field('current_coverage_ownership：') as EvidenceMappingTask['coverage_candidates']
+    const ownership = field('current_coverage_ownership：') as {
+      requirement_positions: number[]
+      scoring_positions: number[]
+      response_point_positions: number[]
+    }
+    const objects = field('对象位置：') as Parameters<typeof mappingModelArguments>[1]
+    const selectedIds = (kind: string, positions: readonly number[]) => positions.map((position) => {
+      const selected = objects[kind]?.find(item => item.position === position)
+      if (selected === undefined) throw new Error(`缺少业务对象位置 ${kind}:${position}`)
+      return selected.id
+    })
+    const coverageCandidates = {
+      requirement_ids: selectedIds('requirements', ownership.requirement_positions),
+      scoring_ids: selectedIds('scoring', ownership.scoring_positions),
+      scoring_response_point_ids: selectedIds('response_points', ownership.response_point_positions),
+    }
     const sections = field('current_section_scope：') as OutlineSection[]
     const current = field('current_section_mapping：') as Array<Omit<SectionEvidenceMapping, 'local_materials' | 'web_materials'> & {
       local_materials: Array<{ material_ref: string; usage: LocalEvidenceMaterial['usage']; summary: string }>
@@ -1138,9 +1154,9 @@ describe('evidence-mapping Agent executor', () => {
       objects: { sources: Array<{ id: string; position: number }> }
     }
     const sourcePosition = objects.objects.sources.find(source => source.id === 'F1')!.position
-    await expect(read.execute({ source_ref: 'F1' }, exec)).rejects.toThrow('请选择对象位置')
-    await expect(search.execute({ scope_ref: 'ALL', keywords: ['质量'] }, exec)).rejects.toThrow('请选择对象位置')
-    await expect(chunks.execute({ source_ref: 'W:WEB-0000000000000000' }, exec)).rejects.toThrow('请选择对象位置')
+    await expect(read.execute({ source_ref: 'F1' }, exec)).rejects.toThrow('请使用 source_position')
+    await expect(search.execute({ scope_ref: 'ALL', keywords: ['质量'] }, exec)).rejects.toThrow('请使用 scope_position')
+    await expect(chunks.execute({ source_ref: 'W:WEB-0000000000000000' }, exec)).rejects.toThrow('请使用 source_position')
     await expect(read.execute({ source_position: 999_999 }, exec)).rejects.toThrow('未知对象位置')
     await expect(edit.execute({ operation: { type: 'add_section', parent_position: 0, sibling_position: 0,
       writable: false, title: '质量控制', purpose: '说明质量核验', must_answer: ['明确核验方法'] },
@@ -1175,7 +1191,7 @@ describe('evidence-mapping Agent executor', () => {
       basis: { kind: 'section_responsibility', explanation: '逐项明确回应方案。', requirement_positions: [] }, answer_plan: plan }
     await expect(task.execute({ ...planInput,
       answer_plan: [{ ...plan[0], target_refs: ['R1'] }],
-    }, exec)).rejects.toThrow('请选择对象位置')
+    }, exec)).rejects.toThrow('请使用 target_positions')
     expect(await task.execute(planInput, exec)).toMatchObject({ applied: true })
     await expect(edit.execute({ operation: { type: 'move_section', section_position: 0, parent_position: null, order: 1 },
       basis: { explanation: '调整结构位置。', finding_indices: [1] } }, exec)).rejects.toThrow('请选择 sibling_position')
@@ -1266,7 +1282,9 @@ describe('evidence-mapping Agent executor', () => {
       basis: { kind: 'section_responsibility', explanation: '按固定章节职责形成索引。', requirement_ids: ['R-1'] },
       writing_dimensions: ['逐项技术响应'],
     })
-    expect(invalid.isError && invalid.error.message).toContain('当前允许值：[]')
+    expect(invalid.isError && invalid.error.message).toContain('basis.requirement_positions')
+    expect(invalid.isError && invalid.error.message).toContain('当前允许位置：[]')
+    expect(invalid.isError && invalid.error.message).not.toContain('requirement_ids')
     expect(invalid.isError && invalid.error.message).toContain('section_responsibility')
     const blueprint = {
       section_id: TECHNICAL_DEVIATION_SECTION_ID,
@@ -1290,7 +1308,7 @@ describe('evidence-mapping Agent executor', () => {
     expect((await invoke('lock_section_outline', { comparison: '固定技术偏离表职责完整，无需调整目录。' })).isError).toBe(false)
     expect((await invoke('submit_section_mapping', { section_id: TECHNICAL_DEVIATION_SECTION_ID, local_materials: [], web_materials: [] })).isError).toBe(false)
     expect(await invoke('finish_mapping_task', {})).toMatchObject({ isError: false, value: { completed: true } })
-    expect(fixture.submissionTool(childId, 'update_section_task').description).toContain('requirement_ids 可写集合为空')
+    expect(fixture.submissionTool(childId, 'update_section_task').description).toContain('requirement_positions 可写集合为空')
 
     start.complete()
     fixture.starts.filter(item => item !== start).forEach((item) => { item.resolve() })
@@ -1356,10 +1374,13 @@ describe('evidence-mapping Agent executor', () => {
       value: unknown
       conclusion?: { decision: string; reason: string }
     }
+    let reviewObjects: Array<{ id: string; position: number }> = []
     const pending = async () => {
       const result = await call('list_review_items', {})
       expect(result.isError).toBe(false)
-      return (result as { value: { pending_items: Pending[] } }).value.pending_items
+      const value = (result as { value: { pending_items: Pending[]; objects: { reviews: Array<{ id: string; position: number }> } } }).value
+      reviewObjects = value.objects.reviews
+      return value.pending_items
     }
     const refs = await pending()
     expect(refs.map(item => item.kind).sort()).toEqual(['local_material', 'task', 'web_material'])
@@ -1374,7 +1395,8 @@ describe('evidence-mapping Agent executor', () => {
       value: {
         completed: false,
         reason: 'review_pending',
-        pending_review_refs: expect.arrayContaining(refs.map(item => item.review_ref)),
+        pending_review_positions: expect.arrayContaining(refs.map(item =>
+          reviewObjects.find(object => object.id === item.review_ref)!.position)),
         issues: expect.arrayContaining([expect.objectContaining({ code: 'EVIDENCE_MAPPING_REVIEW_PENDING' })]),
       },
     })
@@ -1420,7 +1442,7 @@ describe('evidence-mapping Agent executor', () => {
     await expect(call('finish_final_check', {})).resolves.toMatchObject({
       isError: false, value: {
         completed: false, reason: 'review_pending', review_progress: { review_pending: 3 },
-        pending_review_refs: expect.arrayContaining([taskRef]),
+        pending_review_positions: expect.arrayContaining([reviewObjects.find(object => object.id === taskRef)!.position]),
         issues: expect.arrayContaining([expect.objectContaining({ code: 'EVIDENCE_MAPPING_SEMANTIC_BLOCKED' })]),
       },
     })
@@ -2153,7 +2175,7 @@ describe('evidence-mapping Agent executor', () => {
         expect(prompt).toContain('相关 Requirements：[{"id":"R-1"')
         expect(prompt).toContain('相关 Scoring：[{"id":"S-1"')
         expect(prompt).toContain('相关 Response Points：[{"id":"RP-000001"')
-        expect(prompt).toContain('current_coverage_ownership：{"requirement_ids":["R-1"]')
+        expect(prompt).toContain('current_coverage_ownership：{"requirement_positions":[0]')
         const assessment = branchResearchAssessment(true, [], 'R-1')
         assessment.key_findings[0]!.basis.push({ kind: 'scoring', ref: 'S-1' },
           { kind: 'response_point', ref: 'RP-000001' })
@@ -2164,7 +2186,7 @@ describe('evidence-mapping Agent executor', () => {
     }
     await execution
     expect(promptText(fixture.starts[2]!.request.request)).toContain(`"local_material_refs":["M1:${material.chunk}"]`)
-    expect(promptText(fixture.starts[2]!.request.request)).toContain('必须显式提供完整的 coverage_override 三组数组')
+    expect(promptText(fixture.starts[2]!.request.request)).toContain('必须显式提供 coverage_override 的 requirement_positions')
     const log = JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/evidence-mapping-log.json'), 'utf8')) as {
       statistics: {
         initial_leaf_count: number
@@ -3047,7 +3069,7 @@ describe('evidence-mapping Agent executor', () => {
     await rejection
     const failures = fixture.submissionResults.filter(result => result.isError)
     expect(failures).toHaveLength(2)
-    expect(failures.every(result => result.isError && result.error.message.includes('chunk_refs'))).toBe(true)
+    expect(failures.every(result => result.isError && result.error.message.includes('chunk_positions'))).toBe(true)
   })
 
   it.each(['schema', 'unknown-file'] as const)('提交工具拒绝单章任务的 %s material 后允许同轮修正', async (scenario) => {
@@ -3308,7 +3330,7 @@ describe('evidence-mapping Agent executor', () => {
     if (unfinished === undefined) throw new Error('missing SEC-1 Mapping Child')
     expect(await fixture.invokeSubmissionTool(unfinished.request.childId!, 'finish_mapping_task', {})).toMatchObject({
       isError: false,
-      value: { completed: false, missing_section_ids: ['SEC-1'] },
+      value: { completed: false, missing_section_positions: [0] },
     })
     unfinished.complete()
     fixture.starts.filter(start => start !== unfinished).forEach((start) => { start.resolve() })
@@ -3320,7 +3342,10 @@ describe('evidence-mapping Agent executor', () => {
     expect(repairPrompt.text).toContain('Host 当前进度要求按以下顺序完成')
     expect(repairPrompt.text).toContain('submit_section_research_assessment')
     expect(repairPrompt.text).toContain('lock_section_outline')
-    expect(repairPrompt.text).toContain('当前未提交章节：SEC-1')
+    expect(repairPrompt.text).toContain('当前未提交章节位置：[0]')
+    expect(repairPrompt.text).toContain('basis.requirement_positions')
+    expect(repairPrompt.text).not.toContain('basis.requirement_ids')
+    expect(repairPrompt.text).not.toContain('选择 Requirement ID')
     expect(repairPrompt.text).toContain('finish_mapping_task；不要直接结束本轮')
   })
 
@@ -4069,6 +4094,76 @@ describe('evidence-mapping Agent executor', () => {
     expect(quality.issues).toEqual([{ message: '确认职责边界。', severity: 'advisory', code: 'OUTLINE_QUALITY_ADVISORY' }])
   })
 
+  it('Final Check 先获取复核对象位置，再通过真实接受入口提交结论并拒绝短引用', async () => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-final-review-positions-')))
+    const material = await writeInputs(workspace)
+    const initialFixture = mappingFixture(workspace, material)
+    const initial = executeEvidenceMapping(initialFixture.agent, workspace, buildBidStageTask('evidence_mapping'))
+    await vi.waitFor(() => { expect(initialFixture.starts).toHaveLength(2) })
+    initialFixture.starts.forEach((start) => { start.resolve() })
+    await initial
+    const outline = parseOutlineArtifact(JSON.parse(await readFile(join(workspace.projectRoot, 'outline/outline.json'), 'utf8')))
+    const evidencePath = join(workspace.projectRoot, 'analysis/evidence-map.json')
+    const evidence = parseEvidenceMapArtifact(JSON.parse(await readFile(evidencePath, 'utf8')))
+    const mapping = evidence.section_mappings.find(section => section.section_id === 'SEC-1')!
+    mapping.answer_plan = mapping.answer_plan!.slice(1)
+    await writeFile(evidencePath, JSON.stringify(evidence))
+    const fixture = mappingFixture(workspace, material, false, {}, false)
+    const checking = executeEvidenceMappingFinalCheck(fixture.agent, workspace, outline, ['SEC-1', 'SEC-2'], { maxRepairAttempts: 0 })
+    await vi.waitFor(() => { expect(fixture.finalStarts).toHaveLength(1) })
+    const final = fixture.finalStarts[0]!
+    const childId = final.request.childId!
+    const prompt = promptText(final.request.request)
+    expect(prompt).toContain('首轮及修复轮次都必须先调用 list_review_items')
+    expect(prompt).not.toContain('首轮可直接使用这些引用')
+    const listed = await fixture.invokeSubmissionTool(childId, 'list_review_items', {})
+    if (listed.isError) throw new Error(listed.error.message)
+    const value = listed.value as {
+      pending_items: Array<{ review_ref: string; kind: string }>
+      objects: {
+        reviews: Array<{ id: string; position: number }>
+        targets: Array<{ id: string; position: number }>
+        answer_checklists: Array<{ section_position: number; items: Array<{ item_ref: string; text: string }> }>
+      }
+    }
+    const item = value.pending_items.find(candidate => candidate.kind === 'task')!
+    const position = value.objects.reviews.find(candidate => candidate.id === item.review_ref)!.position
+    const tool = fixture.submissionTool(childId, 'review_items')
+    expect(tool.description).toContain('list_review_items')
+    expect(tool.description).toContain('review_position')
+    const exec = { agent: fixture.children.get(String(childId))!, signal: new AbortController().signal } as ToolRunContext
+    await expect(tool.execute({ items: [{ review_ref: item.review_ref, decision: 'keep', reason: '本章任务正确。' }] }, exec))
+      .rejects.toThrow('请使用 review_position')
+    expect(await tool.execute({ items: [{ review_position: position, decision: 'keep', reason: '本章任务正确。' }] }, exec))
+      .toMatchObject({ recorded: true })
+    const checklist = value.objects.answer_checklists.find(section => section.section_position === 0)!.items
+    expect(value.objects.reviews.some(review => review.id === 'R1')).toBe(true)
+    expect(checklist[0]!.item_ref).toBe('R1')
+    const plan = checklist.map(answer => ({
+      target_positions: [value.objects.targets.find(target => target.id === answer.item_ref)!.position],
+      mode: 'proposal', content: `拟落实${answer.text}。`, boundary: '方案不证明未经确认的能力。',
+      basis: [{ kind: 'section_responsibility' }],
+    }))
+    const taskTool = fixture.submissionTool(childId, 'update_section_task')
+    const taskInput = { section_position: 0, basis: { kind: 'section_responsibility',
+      explanation: '逐项明确章节回应。', requirement_positions: [] } }
+    await expect(taskTool.execute({ ...taskInput, answer_plan: plan.slice(1) }, exec)).rejects
+      .toThrow(`answer_plan.target_positions: 尚未回应 objects.targets 中的位置 ${plan[0]!.target_positions[0]}`)
+    await fixture.reviewAll(childId)
+    const incomplete = await fixture.invokeSubmissionTool(childId, 'finish_final_check', {})
+    if (incomplete.isError) throw new Error(incomplete.error.message)
+    expect(incomplete.value).toMatchObject({ completed: false, issues: [expect.objectContaining({
+      code: 'EVIDENCE_MAPPING_ANSWER_PLAN_INVALID', field: 'answer_plan.target_positions',
+      message: `answer_plan.target_positions: 尚未回应 objects.targets 中的位置 ${plan[0]!.target_positions[0]}；请补齐该检查项的回应计划。`,
+    })] })
+    expect(JSON.stringify(incomplete.value)).not.toContain('未回应 review_position')
+    expect(await taskTool.execute({ ...taskInput, answer_plan: plan }, exec)).toMatchObject({ applied: true })
+    await fixture.reviewAll(childId)
+    expect(await fixture.invokeSubmissionTool(childId, 'finish_final_check', {})).toMatchObject({ isError: false, value: { completed: true } })
+    final.complete()
+    await checking
+  })
+
   it('Final Check 逐项保留未变更章节，程序发布完整 baseline 映射', async () => {
     const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-evidence-final-delta-')))
     const fixture = mappingFixture(workspace, await writeInputs(workspace))
@@ -4112,11 +4207,11 @@ describe('evidence-mapping Agent executor', () => {
     const childId = final.request.childId!
     await expect(fixture.invokeSubmissionTool(childId, 'finish_final_check', {})).resolves.toMatchObject({
       isError: false,
-      value: { completed: false, missing_mapping_section_ids: ['SEC-NEW'], missing_summary_section_ids: [] },
+      value: { completed: false, missing_mapping_section_positions: [2], missing_summary_section_positions: [] },
     })
     await expect(fixture.invokeSubmissionTool(childId, 'replace_section_mapping', {
       section_id: 'SEC-NEW', local_materials: [], web_materials: [],
-    })).resolves.toMatchObject({ isError: false, value: { remaining_section_ids: [] } })
+    })).resolves.toMatchObject({ isError: false, value: { remaining_section_positions: [] } })
     const updated = await fixture.invokeSubmissionTool(childId, 'update_section_task', {
       section_id: 'SEC-NEW', basis: { kind: 'user_change', explanation: '按用户新增章节明确响应。', requirement_ids: [] },
       writing_brief: {
@@ -5162,6 +5257,12 @@ describe('S4 实际工具统一依据对象表', () => {
     }
     expect(objects.objects.requirements).toMatchObject([{ id: 'R-1', position: 6 }])
     expect(objects.objects.scoring).toMatchObject([{ id: 'S-1', position: 0 }])
+    const ownershipLine = promptText(fixture.starts[0]!.request.request).split('\n').find(line => line.startsWith('current_coverage_ownership：'))!
+    expect(JSON.parse(ownershipLine.slice('current_coverage_ownership：'.length))).toEqual({
+      requirement_positions: [6], scoring_positions: [0], response_point_positions: [0],
+    })
+    expect(task.description).toContain('允许位置：[6]')
+    expect(task.description).not.toContain('requirement_ids')
     const reference = (kind: string) => objects.objects.references.find(item => item.kind === kind)!.position
     expect(reference('requirement')).toBe(0)
     expect(reference('scoring')).toBe(1)
@@ -5176,6 +5277,15 @@ describe('S4 实际工具统一依据对象表', () => {
     expect(bound.key_findings[0]!.basis).toEqual([
       { kind: 'requirement', ref: 'R-1' }, { kind: 'scoring', ref: 'S-1' },
     ])
+    const operation = { section_position: 0, basis: { kind: 'section_responsibility',
+      explanation: '按当前职责组织方案。', requirement_positions: [] }, writing_dimensions: ['技术响应'] }
+    await expect(task.execute({ ...operation, basis: { ...operation.basis, requirement_positions: [5] } }, exec))
+      .rejects.toThrow('basis.requirement_positions: 所选对象不属于本任务 Coverage Ownership。当前允许位置：[6]')
+    await expect(task.execute({ ...operation, coverage_override: {
+      requirement_positions: [5], scoring_positions: [0], response_point_positions: [0],
+    } }, exec)).rejects.toThrow('coverage_override.requirement_positions: 所选对象不属于当前任务 Coverage Ownership。当前允许位置：[6]')
+    await expect(task.execute({ ...operation, basis: { kind: 'section_responsibility',
+      explanation: '旧协议不可作为模型输入。', requirement_ids: ['R-1'] } }, exec)).rejects.toThrow('请使用 requirement_positions')
     const findings = wire.key_findings
     await expect(research.execute({ ...wire, key_findings: [{ ...findings[0],
       basis: [{ kind: 'scoring', reference_position: 0 }] }] }, exec)).rejects.toThrow('Unrecognized key')
