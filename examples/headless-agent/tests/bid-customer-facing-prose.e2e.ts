@@ -27,16 +27,18 @@ import {
 } from '@deepseek-ai/dsh-bid'
 import { collectDocxMarkdown } from '../../../packages/bid/bid/src/docx-export.ts'
 import { registerIntegrationTools } from '../../../packages/bid/bid/tests/fixtures/evidence-mapping-loop.ts'
+import { createScoringResponsePointCatalog } from '../../../packages/bid/bid/src/scoring-response-point-artifacts.ts'
+import { TECHNICAL_DEVIATION_SECTION_ID } from '../../../packages/bid/bid/src/outline-generation-artifacts.ts'
 
 const savedHome = process.env.DSH_HOME ?? join(homedir(), '.dsh')
 const provider = process.env.DSH_BID_EVAL_PROVIDER ?? 'deepseek-official'
 
 describe.skipIf(!process.env.DEEPSEEK_API_KEY && !process.env.DSH_BID_EVAL_PROVIDER)('真实模型客户可见标书边界', () => {
-  it('纯资格事项不生成正文页，技术章节以投标人立场作答且不显示内部编号', { timeout: 1_200_000, retry: 0 }, async () => {
+  async function runSynthetic(focused = false) {
     const root = await mkdtemp(join(tmpdir(), 'dsh-bid-customer-prose-'))
     vi.stubEnv('DSH_HOME', root)
     const ctx = new Context()
-    const signal = AbortSignal.timeout(1_140_000)
+    const signal = AbortSignal.timeout(focused ? 350_000 : 1_140_000)
     try {
       await ctx.plugin(LlmRuntime)
       await ctx.plugin(FileSettingsProvider, { dshHome: savedHome, watch: false })
@@ -55,6 +57,29 @@ describe.skipIf(!process.env.DEEPSEEK_API_KEY && !process.env.DSH_BID_EVAL_PROVI
       await ctx.plugin(SubagentRuntime)
       await ctx.plugin(spawn, { providerName: 'spawn' })
       registerIntegrationTools(ctx, root, [])
+      const observedS5Roles = new Set<string>()
+      ctx.on('llm/stream', (options, next) => {
+        const tools = options.tools ?? []
+        const writer = tools.find(tool => tool.name === 'submit_chapter')
+        const reviewer = tools.find(tool => tool.name === 'review_coverage_items')
+        const globalReviewer = tools.find(tool => tool.name === 'review_global_compliance')
+        const completionReviewer = tools.find(tool => tool.name === 'submit_chapter_writing_completion_review')
+        if (writer !== undefined || reviewer !== undefined || globalReviewer !== undefined || completionReviewer !== undefined) {
+          if (writer !== undefined) observedS5Roles.add('writer')
+          if (reviewer !== undefined) observedS5Roles.add('reviewer')
+          if (globalReviewer !== undefined) observedS5Roles.add('global')
+          if (completionReviewer !== undefined) observedS5Roles.add('completion')
+          const schema = JSON.stringify(tools)
+          for (const field of ['material_ref', 'file_ref', 'chunk', 'web_ref', 'item_ref', 'evidence_quote_refs',
+            'claim_quote_ref', 'source_reference', 'evidence_refs', 'section_id', 'criterion_id', 'compliance_id', 'key', 'direction']) {
+            expect(schema).not.toContain('"' + field + '"')
+          }
+          for (const name of ['write', 'exec', 'terminal', 'run_code']) {
+            expect(tools.map(tool => tool.name)).not.toEqual(expect.arrayContaining([name]))
+          }
+        }
+        return next()
+      }, { global: true })
 
       const workspace = new BidWorkspace(root)
       const [tender] = await workspace.import([{
@@ -114,14 +139,42 @@ describe.skipIf(!process.env.DEEPSEEK_API_KEY && !process.env.DSH_BID_EVAL_PROVI
         await writeFile(join(workspace.projectRoot, path), `${JSON.stringify(value)}\n`)
       }
 
-      const s3Agent = ctx.agentLoop.create(SessionId('customer-prose-s3'), {
-        provider, model: process.env.DSH_BID_EVAL_MODEL ?? 'deepseek-v4-flash',
-      }, { cwd: root })
-      const s3Artifacts = await executeOutlineGeneration(s3Agent, workspace, buildBidStageTask('outline_generation'), {
-        maxRepairAttempts: 2, run: createTestBidRunContext({ signal }),
-      })
-      await expect(validateOutlineGeneration(workspace, 'outline_generation', s3Artifacts)).resolves.toEqual({ ok: true })
-      const outline = parseOutlineArtifact(JSON.parse(await readFile(join(workspace.projectRoot, 'outline/outline.json'), 'utf8')))
+      let outline: ReturnType<typeof parseOutlineArtifact>
+      if (focused) {
+        const response = '说明访问控制的职责、审批、审计和交付成果。'
+        const catalog = createScoringResponsePointCatalog(scoring, { schema_version: 1,
+          points: [{ scoring_id: 'SC-001', order: 1, text: response }] })
+        outline = parseOutlineArtifact({ schema_version: 3, scope: 'technical_bid', document_title: '技术标',
+          global_compliance_ids: ['COM-001'], sections: [
+            { id: TECHNICAL_DEVIATION_SECTION_ID, parent_id: null, order: 1, level: 1, title: '技术偏离表',
+              purpose: '逐条形成技术响应索引及偏离声明。', writable: true, must_answer: ['逐条形成技术偏离表。'],
+              requirement_ids: [], scoring_ids: [], compliance_ids: [], origin: 'generated',
+              scoring_response_point_ids: [], scoring_response_points: [], suggested_tables: [], suggested_figures: [], writing_notes: [] },
+            { id: 'SEC-001', parent_id: null, order: 2, level: 1, title: '访问控制实施方案',
+              purpose: '说明本方案访问控制措施及核验成果。', writable: true, must_answer: [response],
+              requirement_ids: ['REQ-001'], scoring_ids: ['SC-001'], compliance_ids: [], origin: 'generated',
+              scoring_response_point_ids: [catalog.points[0]!.id], scoring_response_points: [{ scoring_id: 'SC-001', response_point: response }],
+              suggested_tables: [], suggested_figures: [], writing_notes: ['本合成样例只写正文，不新增任何流程图或图片。'] },
+          ] })
+        await mkdir(join(workspace.projectRoot, 'outline'), { recursive: true })
+        await writeFile(join(workspace.projectRoot, 'outline/outline.json'), `${JSON.stringify(outline)}\n`)
+        await writeFile(join(workspace.projectRoot, 'outline/quality-report.json'), `${JSON.stringify({
+          schema_version: 4, scope: 'technical_bid', checked_requirement_ids: ['REQ-001'], checked_scoring_ids: ['SC-001'],
+          checked_scoring_response_point_ids: catalog.points.map(point => point.id),
+          reviewed_section_ids: outline.sections.map(section => section.id),
+          issues: [],
+        })}\n`)
+        await writeFile(join(workspace.projectRoot, 'analysis/scoring-response-points.json'), `${JSON.stringify(catalog)}\n`)
+      } else {
+        const s3Agent = ctx.agentLoop.create(SessionId('customer-prose-s3'), {
+          provider, model: process.env.DSH_BID_EVAL_MODEL ?? 'deepseek-v4-flash',
+        }, { cwd: root })
+        const s3Artifacts = await executeOutlineGeneration(s3Agent, workspace, buildBidStageTask('outline_generation'), {
+          maxRepairAttempts: 2, run: createTestBidRunContext({ signal }),
+        })
+        await expect(validateOutlineGeneration(workspace, 'outline_generation', s3Artifacts)).resolves.toEqual({ ok: true })
+        outline = parseOutlineArtifact(JSON.parse(await readFile(join(workspace.projectRoot, 'outline/outline.json'), 'utf8')))
+      }
       expect(outline.global_compliance_ids).toContain('COM-001')
       expect(outline.sections.some(section => /资格|资质|证书|行政递交/u.test(section.title))).toBe(false)
       for (const section of outline.sections) {
@@ -139,6 +192,16 @@ describe.skipIf(!process.env.DEEPSEEK_API_KEY && !process.env.DSH_BID_EVAL_PROVI
           section_mappings: outline.sections.filter(section => section.writable).map(section => ({
             section_id: section.id, local_materials: [], web_materials: [], missing_topics: [],
             writing_dimensions: ['实施方法', '职责分工', '质量控制', '交付成果'],
+            ...(focused ? { answer_plan: [{
+              targets: [
+                ...section.must_answer.map((text, position) => ({ kind: 'must_answer', position, text })),
+                ...(section.id === TECHNICAL_DEVIATION_SECTION_ID ? ['REQ-001'] : section.requirement_ids)
+                  .map(id => ({ kind: 'requirement', id })),
+                ...(section.scoring_response_point_ids ?? []).map(id => ({ kind: 'response_point', id })),
+              ], mode: 'proposal', content: '我方拟按角色权限、最小权限审批、操作审计和交付核验组织本次方案。',
+              basis: [{ kind: 'section_responsibility', section_id: section.id }],
+              boundary: '本次拟采用的方案不证明企业已有资质、产品或既有能力。',
+            }] } : {}),
           })),
         })}\n`),
         writeFile(join(workspace.projectRoot, 'analysis/web-evidence-sources.json'), `${JSON.stringify({
@@ -160,7 +223,8 @@ describe.skipIf(!process.env.DEEPSEEK_API_KEY && !process.env.DSH_BID_EVAL_PROVI
         confirmed_outline_sha256: outlineHash,
         user_message_refs: [{ session_id: String(s5Agent.id), message_id: String(message.id), seq: event.seq }],
         user_requirements: ['直接编写可交付采购方的技术标正文，不写资质要求解读。'],
-        global_instructions: ['以我方方案、措施、责任和交付成果直接作答。'], document_acceptance: [],
+        global_instructions: ['以我方方案、措施、责任和交付成果直接作答。',
+          ...(focused ? ['本合成样例只写正文，不新增任何流程图或图片。'] : [])], document_acceptance: [],
         sections: outline.sections.filter(section => section.writable).map(section => ({
           section_id: section.id, task: `完成“${section.title}”技术响应。`, user_message_refs: [],
           user_requirements: [], writing_instructions: ['不复述采购要求，不显示系统内部编号。'], acceptance_criteria: [],
@@ -172,6 +236,7 @@ describe.skipIf(!process.env.DEEPSEEK_API_KEY && !process.env.DSH_BID_EVAL_PROVI
         maxRepairAttempts: 2, maxCompletionRepairRounds: 1, maxConcurrency: 1,
         run: createTestBidRunContext({ signal }),
       })
+      expect([...observedS5Roles].sort()).toEqual(['completion', 'global', 'reviewer', 'writer'])
       await expect(validateChapterWriting(workspace, 'chapter_writing', s5Artifacts)).resolves.toEqual({ ok: true })
       const manifest = parseChapterWritingManifest(JSON.parse(
         await readFile(join(workspace.projectRoot, 'chapters/manifest.json'), 'utf8'),
@@ -188,5 +253,8 @@ describe.skipIf(!process.env.DEEPSEEK_API_KEY && !process.env.DSH_BID_EVAL_PROVI
       await ctx.fiber.dispose()
       vi.unstubAllEnvs()
     }
-  })
+  }
+
+  it('纯资格事项不生成正文页，技术章节以投标人立场作答且不显示内部编号', { timeout: 1_200_000, retry: 0 }, () => runSynthetic())
+  it('S5 最小合成样例全程采用位置协议并由程序落盘', { timeout: 400_000, retry: 0 }, () => runSynthetic(true))
 })

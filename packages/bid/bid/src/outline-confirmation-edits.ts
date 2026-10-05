@@ -3,12 +3,13 @@ import { applyOutlineEdits, buildOutlineView, type OutlineEditOperation, type Ou
 import type { OutlineArtifact } from './outline-generation-artifacts.ts'
 import type { TenderRequirementsArtifact, TenderScoringArtifact, TenderComplianceArtifact } from './tender-analysis-artifacts.ts'
 import type { ScoringResponsePointCatalog } from './scoring-response-point-artifacts.ts'
+import { bindSectionResponsePoints } from './scoring-response-point-bindings.ts'
 
 export { applyOutlineEdits, buildOutlineView }
 export type { OutlineEditOperation, OutlineViewSection }
 
 const text = z.string().min(1)
-/** 模型与浏览器共用的结构化目录编辑参数。 */
+/** 程序与浏览器使用的结构化目录编辑参数；模型位置协议由绑定器转换。 */
 export const outlineEditOperationSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('update_section'), section_id: text, title: text.optional(), purpose: text.optional(), summary: text.optional(), must_answer: z.array(text).optional(), writing_notes: z.array(text).optional() }).strict().refine(value => value.title !== undefined || value.purpose !== undefined || value.summary !== undefined || value.must_answer !== undefined || value.writing_notes !== undefined),
   z.object({ type: z.literal('add_section'), parent_id: z.string().min(1).nullable(), order: z.number().int().positive(), writable: z.boolean(), title: text, purpose: text, summary: text.optional(), must_answer: z.array(text).optional() }).strict().superRefine((value, context) => {
@@ -34,7 +35,7 @@ export const outlineBusinessBindingSchema = z.object({
 export type OutlineBusinessBinding = z.infer<typeof outlineBusinessBindingSchema>
 
 /**
- * 在同一内存候选中更新真实业务 ID，最终完整性由 shared validator 检查。
+ * 更新真实业务归属并补齐响应点唯一确定的父评分项，最终完整性由 shared validator 检查。
  * @param outline 结构编辑后的目录。
  * @param bindings 明确重新分配的章节归属。
  * @param requirements 当前 Requirement 清单。
@@ -72,11 +73,10 @@ export function applyOutlineBusinessBindings(
         throw new Error(`BID_OUTLINE_BINDING_REFERENCE_INVALID: ${section.id}.${key}`)
       }
     }
-    if (binding.scoring_response_point_ids.some(id => !binding.scoring_ids.includes(points.get(id)?.scoring_id ?? ''))) {
-      throw new Error(`BID_OUTLINE_BINDING_SCORING_INVALID: ${section.id}`)
-    }
   }
-  const replacements = new Map(updates.map(binding => [binding.section_id, binding]))
+  const replacements = new Map(updates.map(binding => [binding.section_id, { ...binding,
+    scoring_ids: bindSectionResponsePoints(binding.scoring_ids, binding.scoring_response_point_ids, catalog).scoring_ids,
+  }]))
   return { ...outline, sections: outline.sections.map((section) => {
     const binding = replacements.get(section.id)
     if (binding === undefined) return section

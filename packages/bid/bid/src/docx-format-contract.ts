@@ -105,7 +105,7 @@ export interface DocxTemplateLibraryView {
   templateMaxBytes: number
   templates: DocxTemplateSummary[]
 }
-/** 模型只能引用提取文本及候选，程序在保存前校验全部引用。 */
+/** 程序从模板语义位置选择绑定正式格式键和样式身份后的解释。 */
 export interface DocxFormatInterpretation {
   values: FormatValues
   mapping: Partial<Record<FormatRole, string>>

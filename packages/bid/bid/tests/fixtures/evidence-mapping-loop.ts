@@ -1,5 +1,7 @@
 import { scriptedVerificationCall } from './task-verifier.ts'
 import { mappingModelReply } from './mapping-model-positions.ts'
+import { chapterModelReply } from './chapter-model-positions.ts'
+import { nestedModelSections } from './outline-model-tree.ts'
 /** S4/S5 真实工具循环与 Loader 回放共用的外部结果和输入资料。 */
 import { lstat, mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { join, relative, resolve } from 'node:path'
@@ -101,7 +103,8 @@ class ScriptedAdapter extends LlmAdapter {
       return
     }
     if (response === undefined) throw new Error('Bid scripted adapter exhausted')
-    yield* mappingModelReply(typeof response === 'function' ? response(options) : response, options)
+    const chunks = typeof response === 'function' ? response(options) : response
+    yield* mappingModelReply(chapterModelReply(chunks, options), options)
   }
 }
 
@@ -218,7 +221,7 @@ export async function runTenderAnalysisLoop(ctx: Context, root: string) {
   }
   const chunk = index.chunks[0]?.id
   if (chunk === undefined) throw new Error('S2 integration chunk missing')
-  const source = (anchor_text: string) => ({ file_ref: 'T1', chunk, anchor_text })
+  const source = (anchor_text: string) => ({ file_position: 0, chunk_position: 0, anchor_text })
   const sessionId = SessionId('s2-real-loop')
   const parentScript = [
     toolCall('submit-analysis', 'submit_tender_analysis', {
@@ -713,27 +716,28 @@ export async function runOutlineGenerationLoop(ctx: Context, root: string, scena
     must_answer: ['说明身份鉴别与权限授予流程。'], requirement_ids: ['REQ-1'],
   })
   const candidate = { document_title: outline.document_title, global_compliance_positions: [],
-    sections: outline.sections.map(({ id: _id, parent_id, level: _level, order: _order, requirement_ids,
+    sections: nestedModelSections(outline.sections.map(({ id: _id, parent_id, level: _level, order: _order,
+      writable: _writable, requirement_ids,
       scoring_ids, compliance_ids, scoring_response_point_ids, scoring_response_points: _points,
       framework_refs: _frameworks, ...item }) => ({ ...item,
       parent_position: parent_id === null ? null : outline.sections.findIndex(section => section.id === parent_id),
       requirement_positions: requirement_ids.map(() => 0), scoring_positions: scoring_ids.map(() => 0),
       compliance_positions: compliance_ids.map(() => 0),
       response_point_positions: scoring_response_point_ids?.map(id => pointIds.indexOf(id)) ?? [], framework_refs: [],
-    })) }
+    }))) }
   const responseCandidate = { points: texts.map(text => ({ scoring_position: 0, text: '说明' + text })) }
   const sessionId = SessionId('s3-outline-recovery')
   const parentScript: ScriptStep[] = []
   const repairScript: ScriptStep[] = []
   if (scenario === 'structural-parent') {
     const attempts = [
-      [{ type: 'repair_structure', section_index: 1, writable: false }],
-      [{ type: 'repair_structure', section_index: 1, writable: false, must_answer: [] },
-        { type: 'add_section', parent_position: 1, sibling_position: 1, writable: true,
-          title: '安全审计与追溯措施', purpose: '完整响应各项安全技术措施。',
-          must_answer: section.must_answer, requirement_positions: [0], scoring_positions: [0],
-          response_point_positions: pointIds.map((_id, index) => index),
-        }],
+      [{ type: 'update_section', section_position: 2, response_point_positions: [999_999],
+        must_answer: ['说明身份鉴别与权限授予流程。'] }],
+      [{ type: 'add_section', parent_position: 1, sibling_position: 1,
+        title: '安全审计与追溯措施', purpose: '完整响应各项安全技术措施。',
+        must_answer: section.must_answer, requirement_positions: [0], scoring_positions: [0],
+        response_point_positions: pointIds.map((_id, index) => index),
+      }],
     ]
     for (const [attempt, operations] of attempts.entries()) repairScript.push(
       toolCall(`repair-outline-${attempt + 1}`, 'structured_output', { operations }),
@@ -746,7 +750,7 @@ export async function runOutlineGenerationLoop(ctx: Context, root: string, scena
     ...repairScript,
     toolCall('quality-review', 'structured_output', {
       operations: [{ type: 'update_section', section_position: 1, title: '访问控制、安全审计与追溯' }],
-      issues: [{ severity: 'advisory', message: '请确认安全审计与追溯安排。' }],
+      issues: [{ message: '请确认安全审计与追溯安排。' }],
     }),
   ]
   const adapter = new ScriptedAdapter(sessionId, parentScript, childScript)
@@ -779,8 +783,9 @@ export async function runOutlineGenerationLoop(ctx: Context, root: string, scena
   if (outcome.status !== 'waiting_user') throw new Error('S3 没有进入用户确认：' + JSON.stringify(outcome))
   const result = parseOutlineArtifact(JSON.parse(await readFile(join(workspace.projectRoot, 'outline/outline.json'), 'utf8')))
   const report = JSON.parse(await readFile(join(workspace.projectRoot, 'outline/quality-report.json'), 'utf8')) as unknown
-  const untouchedUnchanged = isDeepStrictEqual({ ...outline.sections[1], id: 'SEC-002', order: 3, framework_refs: [] },
-    result.sections.find(item => item.id === 'SEC-002'))
+  const untouchedId = scenario === 'structural-parent' ? 'SEC-003' : 'SEC-002'
+  const untouchedUnchanged = isDeepStrictEqual({ ...outline.sections[1], id: untouchedId, order: 3, framework_refs: [] },
+    result.sections.find(item => item.id === untouchedId))
   if (!untouchedUnchanged) throw new Error('S3 修改了无关内容')
   return { outcome, untouchedUnchanged, outline: result, report, ...(recovery === undefined ? {} : { recovery }),
     confirmationEvents: agent.session.events.filter(event => event.type === 'bid.user_confirmation.received').length }

@@ -182,16 +182,17 @@ export function attachGlobalComplianceReview(
   const canonical = new Map(compliance.compliance_items.map(item => [item.id, item]))
   const items = new Map(retained.map(item => [item.compliance_id, item]))
   const ids = chapters.map(chapter => chapter.section_id)
+  const quoteRefs = registerCompletedChapterReader(runtime, new Map(chapters.map(chapter => [chapter.section_id, {
+    markdown: chapter.markdown, content_sha256: chapter.candidate_sha256,
+  }])), ids, evidence.length)
   const positions = createChapterObjectPositions([
     { canonical: 'compliance_id', model: 'compliance_position', ids: outline.global_compliance_ids },
     { canonical: 'section_id', model: 'section_position', ids },
     { canonical: 'checked_section_ids', model: 'checked_section_positions', ids, many: true },
     { canonical: 'affected_section_ids', model: 'affected_section_positions', ids, many: true },
+    { canonical: 'evidence_refs', model: 'evidence_positions', get ids() { return [...evidenceByRef.keys(), ...quoteRefs.keys()] }, many: true },
   ])
   try {
-    const quoteRefs = registerCompletedChapterReader(runtime, new Map(chapters.map(chapter => [chapter.section_id, {
-      markdown: chapter.markdown, content_sha256: chapter.candidate_sha256,
-    }])))
     runtime.register({
       name: 'review_global_compliance',
       description: '记录全局要求的核验性质、责任归属、结论与当前依据；合法 fail/pending 可保存。',

@@ -32,11 +32,12 @@ const TECHNICAL_SCORING_ANCHORS = '技术评分、技术评审、技术评价、
 const TENDER_ANALYSIS_VIEW_TOOL_NAMES: ReadonlySet<string> = new Set(TENDER_ANALYSIS_VIEW_TOOLS)
 
 function renderLocators(locators: readonly TenderLocator[]): string[] {
-  return locators.flatMap(locator => [
-    `${locator.file_ref}:`,
+  return locators.flatMap((locator, file_position) => [
+    `file_position: ${String(file_position)}`,
     `  name: ${locator.name}`,
     `  chunks_path: ${locator.chunks_path}`,
     `  chunk_index_path: ${locator.chunk_index_path}`,
+    `  chunks: ${JSON.stringify([...locator.chunks.values()].map((chunk, chunk_position) => ({ chunk_position, path: chunk.artifactPath })))}`,
   ])
 }
 
@@ -45,7 +46,7 @@ function renderLocators(locators: readonly TenderLocator[]): string[] {
  * @param agent Live Agent that owns the Bid Session.
  * @param workspace Workspace 级 Bid 项目.
  * @param task Orchestrator task for the tender-analysis stage.
- * @param locators Host-issued short references for successful tender files.
+ * @param locators 程序冻结的成功招标文件及分块对象表。
  * @returns Dynamic assignment text for the Agent follow-up.
  */
 export function renderTenderAnalysisTask(
@@ -72,7 +73,7 @@ export function renderTenderAnalysisTask(
     '提取技术评分时，先用 grep 搜索评分区域锚点：' + TECHNICAL_SCORING_ANCHORS + '。命中后 read 对应 chunk 和 chunks/index.json，利用 prev_chunk、next_chunk 和 heading_path 连续阅读评分区域；只在边界截断时扩展，进入商务、价格、资格或无关区域时停止。完成该区域后只再 grep 一次检查远距离第二评分区域，发现新区域才继续读取。不得为每个评分项全局 grep。',
     '完整分析结果包含 project_facts、requirements、scoring_items 和 compliance_items 四个数组。项目数组字段每个语义项各占一条；未知项目字段省略，Host 自动补齐 null 或 []。所有项目内容必须至少有一个真实 tender source，不得补通用模板。',
     'requirements 中每项是一个可独立响应的原子技术要求。scoring_items 只包含招标评分体系中具有独立名称及总分、权重或独立区块边界的评分大项，并在 criterion 中保留该大项的完整评分细则；大项内部的评价内容、得分条件、子要求、分档规则或分项得分说明不得另建评分项。compliance_items 包含每个影响技术方案的强制或合规规则。',
-    '引用只提交 sources=[{file_ref,chunk,anchor_text}]；file_ref 使用 T1、T2 等 locator，chunk 使用 chunk_0001 等 index id。anchor_text 填写该 chunk 对应的非空来源文本。Host 只校验真实 tender、chunk 归属和非空文本，并以整个 chunk 的实际行范围生成引用。',
+    '引用只提交 sources=[{file_position,chunk_position,anchor_text}]，位置使用上方程序冻结的文件及分块对象表，均从 0 开始；不得提交文件或分块 ID。anchor_text 填写对应分块的非空来源文本。程序校验位置与非空文本，并以整个分块的实际行范围生成正式引用。view_pdf_page 也只选择 file_position 和实际页码。',
     '不得填写或猜测任何业务 ID、runtime ref、revision、replace_ref、quote、raw_text、file_id、source_refs、line_start、line_end、parent、schema_version、analyzed_tender_files 或最终 Artifact 路径。Host 从来源输入生成原文、引用、全部 ID、排序和固定字段；归纳字段不得改变数字、单位、“应、须、必须、不得”等强制语义或增加原文没有的要求。',
     '分析完成后仅调用一次 submit_tender_analysis，提交四个完整数组。普通文字回复不会完成 S2。',
     ...task.constraints.map(constraint => `约束：${constraint}`),

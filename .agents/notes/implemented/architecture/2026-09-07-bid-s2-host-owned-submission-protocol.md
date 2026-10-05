@@ -10,13 +10,13 @@ S2 Main Agent 直接写四个完整 JSON 时同时承担招标语义判断、正
 
 `tender_analysis` 继续由同一 live Agent 在当前 Session 和 Workspace 中执行，并保持 tender-only 技术标边界、`grep → read` 检索、评分区域连续读取、最终 Validator 与用户确认。普通工具只开放 `grep` 和 `read`，版式不足时按需使用 `view_pdf_page`；阶段执行器动态注册一个 `submit_tender_analysis`，模型不能调用 `write` 生成正式 Artifact。
 
-Host 按 manifest 顺序把每个 `role=tender && parseStatus=success` 文件映射为 `T1`、`T2` 等执行期引用。提交工具的 source 只接受 `file_ref`、chunk index 中的 `chunk_*` ID 和非空 `anchor_text`；Host 验证文件与 chunk 归属，将去除首尾空白的文本作为 quote，并把整个 chunk 的实际行范围写入 `line_start` 和 `line_end`，不因 PDF 提取造成的换行、空格、标点或全半角差异触发 repair。该来源边界见 [S2 chunk 级来源校验](../simplification/2026-09-21-bid-s2-chunk-source-validation.md)。
+Host 按 manifest 顺序冻结每个 `role=tender && parseStatus=success` 文件及其分块对象表。提交工具的 source 只接受 `file_position`、`chunk_position` 和非空 `anchor_text`；Host 绑定真实文件和分块身份，将去除首尾空白的文本作为 quote，并把整个 chunk 的实际行范围写入 `line_start` 和 `line_end`，不因 PDF 提取造成的换行、空格、标点或全半角差异触发 repair。该来源边界见 [S2 chunk 级来源校验](../simplification/2026-09-21-bid-s2-chunk-source-validation.md)。
 
 模型一次提交 `project_facts`、`requirements`、`scoring_items` 和 `compliance_items` 四个完整数组，只提供分类、归纳、强制性、评分规则等语义字段及真实来源。Host 在整批来源和内容通过校验后，按最终数组顺序分配三位补零的 `REQ-*`、`SC-*`、`COM-*` 正式 ID；模型不生成 runtime ref、revision、replace ref 或正式 ID。三类记录的 `raw_text` 都由 Host 连接已定位的原文 quote 生成。Scoring 只接受招标评分体系中作为独立评审对象，并具有独立名称及总分、权重或区块边界的评分大项，Host 固定正式 `parent=null`；重复评分大项按除来源和 ID 外的完整结构化内容归并并合并来源，不能只凭名称合并。
 
 `submit_tender_analysis` 首次接收完整数组后立即持久化内部 candidate，再组装四个现有 Schema：Host 提供 schema version、未知项目单值 `null`、未知数组 `[]`、manifest 中全部成功 tender 的 `analyzed_tender_files`、正式 ID 和 source refs。持久化前复用 Validator 的语料完整性与技术评分分类检查；来源、缺项或结构问题只把当前问题、出错项及其引用的 chunk 原文交给下一轮，模型通过同一个工具提交该项的 `repair`，Host 按内部数组位置合并并重验。通过后 Host 原子写入四个正式路径并立即运行 `validateTenderAnalysis()`；Agent 只回复文字不能推进 S2。批量替代逐项 staged、finish 和 review 的理由见 [S2 完整结果单次提交](../simplification/2026-09-21-bid-s2-complete-submission.md)。
 
-用户确认仍只编辑规范化结论并保留 ID、原文、引用和文件覆盖。S3 继续读取相同路径、扁平数组和 Artifact Schema，并独立负责评分细则的响应点拆解。
+模型选择位置及程序绑定身份遵循[语义输出与程序身份绑定](../bug-fix/2026-10-05-bid-host-id-bindings.md)。用户确认仍只编辑规范化结论并保留 ID、原文、引用和文件覆盖。S3 继续读取相同路径、扁平数组和 Artifact Schema，并独立负责评分细则的响应点拆解。
 
 ## Alternatives considered
 

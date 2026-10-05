@@ -49,9 +49,12 @@ it('章节重写和相邻段落修改续用原 Writer 上下文，越界提交�
           if (block.type !== 'text') continue
           const locations = block.text.match(/Available Evidence Files：([^\n]+)/u)?.[1]
           if (locations === undefined) continue
-          for (const location of JSON.parse(locations) as Array<{ chunks_path: string; chunk_index_path: string }>) {
-            expect((await stat(location.chunks_path)).isDirectory()).toBe(true)
-            expect((await stat(location.chunk_index_path)).isFile()).toBe(true)
+          for (const location of JSON.parse(locations) as Array<{ chunks: Array<{ chunk_position: number; read_path: string }> }>) {
+            expect(location.chunks.length).toBeGreaterThan(0)
+            for (const [position, chunk] of location.chunks.entries()) {
+              expect(chunk.chunk_position).toBe(position)
+              expect((await stat(chunk.read_path)).isFile()).toBe(true)
+            }
           }
         }
       }

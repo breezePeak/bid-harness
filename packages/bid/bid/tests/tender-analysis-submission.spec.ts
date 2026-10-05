@@ -69,10 +69,10 @@ async function fixture() {
   return { workspace, agent, definitions, runtime, concludeTurn, call }
 }
 
-function source(anchor_text: string, chunk?: string, file_ref = 'T1') {
-  const resolvedChunk = chunk ?? (anchor_text === PROJECT_QUOTE ? 'chunk_0001'
-    : anchor_text === REQUIREMENT_QUOTE || anchor_text === COMPLIANCE_QUOTE ? 'chunk_0002' : 'chunk_0003')
-  return { file_ref, chunk: resolvedChunk, anchor_text }
+function source(anchor_text: string, chunk_position?: number, file_position = 0) {
+  const resolvedChunk = chunk_position ?? (anchor_text === PROJECT_QUOTE ? 0
+    : anchor_text === REQUIREMENT_QUOTE || anchor_text === COMPLIANCE_QUOTE ? 1 : 2)
+  return { file_position, chunk_position: resolvedChunk, anchor_text }
 }
 
 function completeSubmission() {
@@ -95,6 +95,21 @@ function completeSubmission() {
 }
 
 describe('tender-analysis complete submission runtime', () => {
+  it('模型提交拒绝文件与分块身份，越界位置不能生成正式产物', async () => {
+    const value = await fixture()
+    const input = completeSubmission()
+    const validSource = input.project_facts[0]!.sources[0]!
+    const withSource = (source: unknown) => ({ ...input, project_facts: [{ ...input.project_facts[0], sources: [source] }] })
+    await expect(value.call(withSource({ ...validSource, file_ref: 'T1' }))).rejects.toThrow('invalid arguments')
+    await expect(value.call(withSource({ ...validSource, chunk: 'chunk_0001' }))).rejects.toThrow('invalid arguments')
+    await expect(value.call(withSource({ ...validSource, file_position: -1 }))).rejects.toThrow('invalid arguments')
+    expect(await value.call(withSource({ ...validSource, file_position: 8 }))).toMatchObject({ completed: false })
+    value.runtime.dispose()
+    const next = await fixture()
+    expect(await next.call(withSource({ ...validSource, chunk_position: 99 }))).toMatchObject({ completed: false })
+    next.runtime.dispose()
+  })
+
   it('renders one located PDF page as an image block and rejects routes without image input', async () => {
     const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-tender-pdf-page-')))
     const pdf = await readFile(join(import.meta.dirname, 'fixtures/bid-document.pdf'))
@@ -138,21 +153,22 @@ describe('tender-analysis complete submission runtime', () => {
     )
     const tool = definitions.get('view_pdf_page')
     const exec = { agent, signal: new AbortController().signal, concludeTurn: vi.fn() } as unknown as ToolRunContext
-    const result = await tool?.execute({ file_ref: 'T1', page: 1 }, exec) as {
+    await expect(tool?.execute({ file_ref: 'T1', page: 1 }, exec)).rejects.toThrow('file_position')
+    const result = await tool?.execute({ file_position: 0, page: 1 }, exec) as {
       page_count: number
       image: { attachmentId: string }
     }
     expect(result).toMatchObject({ page_count: 2, image: { attachmentId: 'att-pdf-page' } })
     expect(Array.from(savedPng!.slice(0, 8))).toEqual([137, 80, 78, 71, 13, 10, 26, 10])
-    expect(tool!.output.render({ file_ref: 'T1', page: 1 }, result)[1])
+    expect(tool!.output.render({ file_position: 0, page: 1 }, result)[1])
       .toMatchObject({ type: 'image', attachment: { attachmentId: 'att-pdf-page' } })
 
     resolveModelInfo.mockResolvedValueOnce({ inputModalities: ['text'] })
-    await expect(tool?.execute({ file_ref: 'T1', page: 1 }, exec)).rejects.toThrow('请切换到支持图片输入的模型')
-    await expect(tool?.execute({ file_ref: 'T9', page: 1 }, exec)).rejects.toThrow('未知 tender 引用 T9')
+    await expect(tool?.execute({ file_position: 0, page: 1 }, exec)).rejects.toThrow('请切换到支持图片输入的模型')
+    await expect(tool?.execute({ file_position: 8, page: 1 }, exec)).rejects.toThrow('未知招标文件位置 8')
     resolveModelInfo.mockResolvedValue({ inputModalities: ['text', 'image'] })
-    await expect(tool?.execute({ file_ref: 'T1', page: 3 }, exec)).rejects.toThrow('该文件共 2 页')
-    await expect(tool?.execute({ file_ref: 'T2', page: 1 }, exec)).rejects.toThrow('T2 不是 PDF')
+    await expect(tool?.execute({ file_position: 0, page: 3 }, exec)).rejects.toThrow('该文件共 2 页')
+    await expect(tool?.execute({ file_position: 1, page: 1 }, exec)).rejects.toThrow('1 不是 PDF')
     runtime.dispose()
   })
 
@@ -165,7 +181,7 @@ describe('tender-analysis complete submission runtime', () => {
     const chunk = locator.chunks.get('chunk_0001')!
     const content = await readFile(chunk.absolutePath, 'utf8')
     await expect(resolveTenderSourceAnchor(value.workspace, value.runtime.locators, {
-      file_ref: 'T1', chunk: 'chunk_0001', anchor_text: '  PDF换行、空格，标点ＡＢＣ均不同。  ',
+      file_position: 0, chunk_position: 0, anchor_text: '  PDF换行、空格，标点ＡＢＣ均不同。  ',
     })).resolves.toEqual({
       quote: 'PDF换行、空格，标点ＡＢＣ均不同。',
       source_ref: {
@@ -176,13 +192,13 @@ describe('tender-analysis complete submission runtime', () => {
       },
     })
     await expect(resolveTenderSourceAnchor(value.workspace, value.runtime.locators, {
-      file_ref: 'T9', chunk: 'chunk_0001', anchor_text: '有效文本',
-    })).rejects.toThrow('未知 tender 引用 T9')
+      file_position: 8, chunk_position: 0, anchor_text: '有效文本',
+    })).rejects.toThrow('未知招标文件位置 8')
     await expect(resolveTenderSourceAnchor(value.workspace, value.runtime.locators, {
-      file_ref: 'T1', chunk: 'chunk_0004', anchor_text: '有效文本',
-    })).rejects.toThrow('chunk_0004 不属于 T1')
+      file_position: 0, chunk_position: 3, anchor_text: '有效文本',
+    })).rejects.toThrow('未知招标分块位置 3')
     await expect(resolveTenderSourceAnchor(value.workspace, value.runtime.locators, {
-      file_ref: 'T1', chunk: 'chunk_0001', anchor_text: ' \n\t ',
+      file_position: 0, chunk_position: 0, anchor_text: ' \n\t ',
     })).rejects.toThrow('anchor_text: 必须是非空文本')
     value.runtime.dispose()
   })
@@ -190,8 +206,8 @@ describe('tender-analysis complete submission runtime', () => {
   it('does not request repair when source text differs from chunk formatting', async () => {
     const value = await fixture()
     const input = completeSubmission()
-    input.requirements[0]!.sources = [source('  PDF提取后的换行、空格与标点不同。  ', 'chunk_0002')]
-    input.scoring_items[0]!.sources = [source('重复短语。', 'chunk_0003')]
+    input.requirements[0]!.sources = [source('  PDF提取后的换行、空格与标点不同。  ', 1)]
+    input.scoring_items[0]!.sources = [source('重复短语。', 2)]
 
     await expect(value.call(input)).resolves.toEqual({
       completed: true,

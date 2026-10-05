@@ -1,4 +1,5 @@
 import { writeInputs, writeWritingPlan, writingPlanFixture, outlineFixture, emptyChapterContext } from './fixtures/chapter-writing-inputs.ts'
+import { chapterModelCandidate, chapterModelPositions } from './fixtures/chapter-model-positions.ts'
 import { createHash } from 'node:crypto'
 import { cp, mkdir, mkdtemp, readFile, writeFile, unlink, symlink } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -353,7 +354,8 @@ function reviewFrom(request: SubagentStartRequest) {
   const section = JSON.parse(blueprintLine.slice('Current Chapter Blueprint：'.length)) as { id: string; must_answer: string[]; requirement_ids: string[]; scoring_response_point_ids: string[]; compliance_ids: string[] }
   const candidate = JSON.parse(candidateLine.slice('Writer Candidate：'.length)) as { markdown: string }
   const quoteOptionsLine = lines.find(line => line.startsWith('Quote Options：'))!
-  const quoteOptions = JSON.parse(quoteOptionsLine.slice('Quote Options：'.length)) as Record<string, string>
+  const quoteOptions = Object.fromEntries((JSON.parse(quoteOptionsLine.slice('Quote Options：'.length)) as Array<{ quote_position: number; text: string }>).
+    map(item => ['Q' + String(item.quote_position + 1), item.text]))
   const globalLine = lines.find(line => line.startsWith('Global Compliance：'))
   const globalCompliance = globalLine === undefined ? [] : JSON.parse(globalLine.slice('Global Compliance：'.length)) as Array<{ id: string; normalized_rule: string }>
   const semanticLine = lines.find(line => line.startsWith('Semantic Acceptance：'))
@@ -466,7 +468,8 @@ function fixtureAgent(
     const exec = {
       agent: owner, name, arguments: args, signal: new AbortController().signal, concludeTurn() {}, token: {},
     } as unknown as ToolRunContext
-    const value = await registry.get(name)!.execute(args, exec)
+    const value = await registry.get(name)!.execute(name === 'submit_chapter'
+      ? chapterModelCandidate(args as TestWriterCandidate) : chapterModelPositions(args), exec)
     events.get('tools/result')?.(exec, { isError: false, value })
     return value
   }
@@ -622,9 +625,9 @@ function fixtureAgent(
           await call(localAgent, registry, events, 'review_acceptance_criteria', {
             items: review.acceptance_criteria_results.filter(item => item.evaluator === 'semantic').map((item, position) => ({
               criterion_position: position, status: item.status,
-              evidence_quote_refs: item.evidence_quotes.map(quote => Object.entries(
-                JSON.parse(promptText(request).split('\n').find(line => line.startsWith('Quote Options：'))!.slice('Quote Options：'.length)) as Record<string, string>,
-              ).find(([, text]) => text === quote)?.[0]).filter((ref): ref is string => ref !== undefined),
+              evidence_quote_refs: item.evidence_quotes.map(quote => (JSON.parse(promptText(request).split('\n')
+                .find(line => line.startsWith('Quote Options：'))!.slice('Quote Options：'.length)) as Array<{ quote_position: number; text: string }>)
+                .find(item => item.text === quote)).filter(item => item !== undefined).map(item => 'Q' + String(item.quote_position + 1)),
               reason: item.reason,
             })),
           })
@@ -659,6 +662,7 @@ function fixtureAgent(
     }),
     schemas: vi.fn(() => ['grep', 'read', 'write', 'web_search', 'web_fetch'].map(name => ({ name }))),
     restrict: vi.fn(() => () => {}),
+    presentAs: vi.fn(() => () => {}),
     guard: vi.fn((guard: (execution: Readonly<ToolExecution>) => string | undefined) => {
       guards.push(guard)
       return () => { guards.splice(guards.indexOf(guard), 1) }
@@ -1974,14 +1978,14 @@ describe('chapter-writing executor', () => {
     expect(fixture.starts.filter(run => run.request.label?.includes('章节3'))).toHaveLength(1)
   })
 
-  it('Writer Schema 只接受短引用语义字段，Reviewer 不要求 structured output', async () => {
+  it('Writer Schema 只接受位置和语义字段，Reviewer 不要求 structured output', async () => {
     const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-chapter-material-schema-')))
     const outline = await writeInputs(workspace)
     await seedReadableMaterials(workspace)
     const fixture = fixtureAgent(workspace, outline)
     await executeChapterWriting(fixture.agent, workspace, buildBidStageTask('chapter_writing'), { maxRepairAttempts: 1, maxConcurrency: 1 })
-    expect(promptText(fixture.starts[0]!.request)).toContain('{{flowchart:<key>}}')
-    expect(promptText(fixture.starts[0]!.request)).toContain('{{flow_ref:<key>}}')
+    expect(promptText(fixture.starts[0]!.request)).toContain('{{flowchart:0}}')
+    expect(promptText(fixture.starts[0]!.request)).toContain('{{flow_ref:0}}')
     expect(fixture.starts[0]!.request.outputSchema).toBeUndefined()
     const schema = chapterWriterOutputSchema
     assertSupportedJsonSchema(schema)
@@ -1989,11 +1993,11 @@ describe('chapter-writing executor', () => {
     expect(validateJsonSchemaValue(schema, candidate)).toEqual([])
     const validateMaterial = (material: unknown) =>
       validateJsonSchemaValue(schema, { ...candidate, metadata: { local_materials_used: [material] } })
-    expect(validateMaterial({ file_ref: 'F1', chunk: 'chunk_0001', usage: 'reference', summary: '资料依据' })).toEqual([])
-    expect(validateMaterial({ material_ref: 'M1', usage: 'reference', summary: '资料依据' })).toEqual([])
+    expect(validateMaterial({ file_position: 0, chunk_position: 0, usage: 'reference', summary: '资料依据' })).toEqual([])
+    expect(validateMaterial({ material_position: 0, usage: 'reference', summary: '资料依据' })).toEqual([])
     expect(validateMaterial({ material_ref: 'M1', file_ref: 'F1', chunk: 'chunk_0001', usage: 'reference', summary: '资料依据' })).not.toEqual([])
     expect(validateMaterial({ source_kind: 'reference', file_id: 'REFERENCE', chunk: 'chunk_0001', usage: 'reference', summary: '资料依据' })).not.toEqual([])
-    expect(validateJsonSchemaValue(schema, { ...candidate, metadata: { flowcharts: [{ title: '流程', nodes: [], edges: [] }] } })).not.toEqual([])
+    expect(validateJsonSchemaValue(schema, { ...candidate, metadata: { flowcharts: [{ title: '流程', key: 'model-id', nodes: [], edges: [] }] } })).not.toEqual([])
     expect(validateJsonSchemaValue(schema, { ...candidate, section_id: 'SEC-1' })).not.toEqual([])
     const reviewRequest = fixture.subagents.start.mock.calls.find(([, request]) => request.toolFilter?.allow?.length === 0)![1]
     expect(reviewRequest.outputSchema).toBeUndefined()
@@ -2268,7 +2272,7 @@ describe('chapter-writing executor', () => {
     expect(firstWriter).toBeDefined()
     const prompt = promptText(firstWriter!.request)
     expect(prompt).toContain('corpus/reference/chunks/chunk_0001.md')
-    expect(prompt).toContain('corpus/reference/chunks/index.json')
+    expect(prompt).toContain('"chunk_position":0')
     expect(prompt).toContain('corpus/reference_bid/chunks/chunk_0001.md')
     expect(prompt).toContain('analysis/web-sources/WEB-aaaaaaaaaaaaaaaa.md')
 
@@ -2306,13 +2310,12 @@ describe('chapter-writing executor', () => {
     const fixture: ReturnType<typeof fixtureAgent> = fixtureAgent(workspace, outline, {}, true, () => true, async (_attempt, request) => {
       const lines = promptText(request).split('\n')
       const corpus = JSON.parse(lines.find(line => line.startsWith('Available Evidence Files：'))!.slice('Available Evidence Files：'.length)) as Array<{
-        file_ref: string
+        file_position: number
         role: string
-        chunks_path: string
-        chunk_index_path: string
+        chunks: Array<{ chunk_position: number; read_path: string }>
       }>
       expect(corpus.map(file => file.role)).toEqual(['reference', 'reference_bid'])
-      const snapshots = JSON.parse(lines.find(line => line.startsWith('Verified Web Chunks：'))!.slice('Verified Web Chunks：'.length)) as Array<{ web_ref: string; read_path: string }>
+      const snapshots = JSON.parse(lines.find(line => line.startsWith('Verified Web Chunks：'))!.slice('Verified Web Chunks：'.length)) as Array<{ web_position: number; read_path: string }>
       expect(snapshots).toEqual([])
       const candidate = candidateFrom(request)
       if (!('metadata' in candidate)) throw new Error('expected writer candidate')
@@ -2326,14 +2329,13 @@ describe('chapter-writing executor', () => {
         name, arguments: { [name === 'grep' ? 'path' : 'file_path']: path },
         agent: { session: { header: { cwd: workspace.root, parentSession: 'parent', origin: 'subagent' } } },
       } as unknown as ToolExecution)
-      expect(allowed('grep', file.chunks_path)).toBeUndefined()
-      const chunkPath = join(file.chunks_path, 'chunk_0001.md')
+      const chunkPath = file.chunks[0]!.read_path
       expect(allowed('read', chunkPath)).toBeUndefined()
       const text = (await readFile(chunkPath, 'utf8')).trim()
       return { stopReason: 'completed', output: [], structured: {
         ...candidate, markdown: `结合 ${text}，说明本项目实施流程与质量控制要求。`,
         metadata: { ...candidate.metadata, local_materials_used: [{
-          file_ref: file.file_ref, chunk: 'chunk_0001', usage: 'reference', summary: '支撑本章实施流程与质量控制要求。',
+          file_position: file.file_position, chunk_position: file.chunks[0]!.chunk_position, usage: 'reference', summary: '支撑本章实施流程与质量控制要求。',
         }] },
       } }
     })
@@ -2503,7 +2505,7 @@ describe('chapter-writing executor', () => {
     expect(fixture.maxActive()).toBe(2)
     await expect(readFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
     expect(fixture.followup).toHaveBeenCalledOnce()
-    expect(fixture.tools.restrict).not.toHaveBeenCalled()
+    expect(fixture.tools.restrict).toHaveBeenCalledWith({ allow: ['grep', 'read', 'web_search', 'web_fetch'] })
     const planningPrompt = JSON.stringify(fixture.followup.mock.calls[0]?.[0])
     expect(planningPrompt).toContain('Relation Planning')
     expect(planningPrompt).not.toContain('source_refs')

@@ -20,12 +20,13 @@ import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import { describe, expect, it, vi } from 'vitest'
 import {
-  BidWorkspace, buildBidStageTask, createTestBidRunContext, executeOutlineGeneration,
+  BidWorkspace, buildBidStageTask, createTestBidRunContext, executeOutlineGeneration, executeTenderAnalysis,
   parseOutlineArtifact, parseOutlineQualityReport, parseScoringResponsePointCatalog,
   parseTenderComplianceArtifact, parseTenderProjectArtifact, parseTenderRequirementsArtifact,
-  parseTenderScoringArtifact, validateOutlineGeneration,
+  parseTenderScoringArtifact, validateOutlineGeneration, validateTenderAnalysis,
 } from '@deepseek-ai/dsh-bid'
 import { TECHNICAL_DEVIATION_SECTION_ID } from '../../../packages/bid/bid/src/outline-generation-artifacts.ts'
+import { registerIntegrationTools } from '../../../packages/bid/bid/tests/fixtures/evidence-mapping-loop.ts'
 
 const savedHome = process.env.DSH_HOME ?? join(homedir(), '.dsh')
 const provider = process.env.DSH_BID_EVAL_PROVIDER ?? 'deepseek-official'
@@ -46,13 +47,61 @@ function canonicalFields(value: unknown): string[] {
   const forbidden = new Set(['id', 'parent_id', 'section_id', 'section_ids', 'requirement_ids',
     'scoring_id', 'scoring_ids', 'compliance_ids', 'scoring_response_point_ids', 'response_point_id',
     'global_compliance_ids', 'file_id', 'schema_version', 'scope', 'code', 'order', 'level',
-    'next_sequence', 'scoring_response_points'])
+    'next_sequence', 'scoring_response_points', 'writable'])
   return Object.entries(value).flatMap(([field, child]) => [
     ...forbidden.has(field) ? [field] : [], ...canonicalFields(child),
   ])
 }
 
-describe.skipIf(!process.env.DEEPSEEK_API_KEY && !process.env.DSH_BID_EVAL_PROVIDER)('真实 S3 程序身份绑定', () => {
+describe.skipIf(!process.env.DEEPSEEK_API_KEY && !process.env.DSH_BID_EVAL_PROVIDER)('真实程序身份绑定', () => {
+  it('S2 只选择文件与分块位置，程序生成业务身份及正式来源引用', { timeout: 200_000, retry: 0 }, async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-bid-s2-positions-'))
+    vi.stubEnv('DSH_HOME', root)
+    const ctx = new Context()
+    const submissions: string[] = []
+    try {
+      await ctx.plugin(LlmRuntime)
+      await ctx.plugin(FileSettingsProvider, { dshHome: savedHome, watch: false })
+      await ctx.plugin(LocalCredentialProvider, { dshHome: savedHome, watch: false })
+      await ctx.plugin(LocalAttachmentStore, { dshHome: root })
+      if (provider === 'deepseek-official') {
+        await ctx.plugin(DeepSeek, { ...(process.env.DEEPSEEK_BASE_URL === undefined ? {} : { baseURL: process.env.DEEPSEEK_BASE_URL }) })
+      } else await ctx.plugin(PiAi, {})
+      await ctx.plugin(SessionStore)
+      await ctx.plugin(JsonlSessionPersistence, { root: join(root, '.session-store'), compression: 'none' })
+      await ctx.plugin(SystemPrompt, { persona: '仅提取当前招标文件的技术标事实与完整评分大项。' })
+      await ctx.plugin(ToolRuntime)
+      await ctx.plugin(LocalFileSystem)
+      await ctx.plugin(AgentRegistry)
+      await ctx.plugin(AgentLoop, { agents: [] })
+      registerIntegrationTools(ctx, root, [])
+      ctx.on('session/event', (_session, event) => {
+        if (event.type === 'tool/call' && event.data.name === 'submit_tender_analysis') submissions.push(event.data.arguments)
+      }, { global: true })
+      const workspace = new BidWorkspace(root)
+      const [file] = await workspace.import([{ name: 'tender.md', role: 'tender', bytes: new TextEncoder().encode(tender) }])
+      if (file?.parseStatus !== 'success') throw new Error('测试招标文件未生成真实语料')
+      const agent = ctx.agentLoop.create(SessionId('host-position-s2'), { provider, model }, { cwd: root })
+      const artifacts = await executeTenderAnalysis(agent, workspace, buildBidStageTask('tender_analysis'),
+        { maxRepairAttempts: 1, run: createTestBidRunContext({ signal: AbortSignal.timeout(170_000) }) })
+      await expect(validateTenderAnalysis(workspace, 'tender_analysis', artifacts)).resolves.toEqual({ ok: true })
+      const candidate = JSON.parse(submissions[0]!) as { scoring_items: Array<{ sources: unknown[] }> }
+      expect(candidate.scoring_items.length).toBeGreaterThan(0)
+      for (const source of candidate.scoring_items.flatMap(item => item.sources)) {
+        expect(source).toMatchObject({ file_position: 0, chunk_position: 0 })
+        expect(Object.keys(source as object).sort()).toEqual(['anchor_text', 'chunk_position', 'file_position'])
+      }
+      const scoring = parseTenderScoringArtifact(JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/scoring-origin.json'), 'utf8')))
+      expect(scoring.scoring_items.every(item => item.source_refs.every(source => source.file_id === file.id))).toBe(true)
+      expect(scoring.scoring_items.every(item => /^SC-\d{3}$/u.test(item.id))).toBe(true)
+    } finally {
+      await writeFile(join(root, 'model-submissions.json'), `${JSON.stringify(submissions.map(value => JSON.parse(value) as unknown), null, 2)}\n`)
+      console.info(`S2 来源位置验收记录：${root}`)
+      await ctx.fiber.dispose()
+      vi.unstubAllEnvs()
+    }
+  })
+
   it('非格式评分 ID 经评分拆解、语义复核、目录生成及质量复核形成闭合身份', { timeout: 270_000, retry: 0 }, async () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-bid-host-ids-'))
     vi.stubEnv('DSH_HOME', root)

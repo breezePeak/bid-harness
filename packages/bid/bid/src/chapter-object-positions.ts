@@ -33,6 +33,9 @@ export function createChapterObjectPositions(fields: readonly ChapterObjectPosit
     if (Array.isArray(value)) return value.map(bind)
     if (value === null || typeof value !== 'object') return value
     return Object.fromEntries(Object.entries(value).map(([name, child]) => {
+      if (name === 'writable') throw new ToolArgsError(['writable: 是否可写由程序根据目录子节点派生。'])
+      if (name === 'order') throw new ToolArgsError(['order: 请选择 sibling_position，正式顺序由程序生成。'])
+      if (name === 'sibling_position') return ['order', chapterPosition(child) + 1]
       if (canonical.has(name)) throw new ToolArgsError([`${name}: 请选择对象位置，实际身份由程序绑定。`])
       const field = model.get(name)
       if (field === undefined) return [name, bind(child)]
@@ -45,10 +48,12 @@ export function createChapterObjectPositions(fields: readonly ChapterObjectPosit
     if (value === null || typeof value !== 'object') return value
     return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([name, child]) => {
       if (name === 'required' && Array.isArray(child)) {
-        return [name, (child as unknown[]).map(item => canonical.get(String(item))?.model ?? item)]
+        return [name, (child as unknown[]).filter(item => item !== 'writable')
+          .map(item => item === 'order' ? 'sibling_position' : canonical.get(String(item))?.model ?? item)]
       }
       if (name !== 'properties' || child === null || typeof child !== 'object') return [name, schema(child)]
-      return [name, Object.fromEntries(Object.entries(child).map(([property, input]) => {
+      return [name, Object.fromEntries(Object.entries(child).filter(([property]) => property !== 'writable').map(([property, input]) => {
+        if (property === 'order') return ['sibling_position', { type: 'integer' }]
         const field = canonical.get(property)
         if (field === undefined) return [property, schema(input)]
         const position = { type: 'integer' }
@@ -59,4 +64,10 @@ export function createChapterObjectPositions(fields: readonly ChapterObjectPosit
     }))
   }
   return { bind, schema: input => schema(input) as Record<string, unknown> }
+}
+
+function chapterPosition(value: unknown): number {
+  const position = z.number().int().nonnegative().safeParse(value)
+  if (!position.success) throw new ToolArgsError(['sibling_position: 必须选择非负整数位置。'])
+  return position.data
 }

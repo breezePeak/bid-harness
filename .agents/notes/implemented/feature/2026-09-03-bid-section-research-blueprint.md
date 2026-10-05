@@ -12,7 +12,7 @@ Status: implemented
 
 S4 为每个可写叶子创建独立初始任务并保持现有并发上限。Child 先对照[完整旧标和本次目录](../bug-fix/2026-09-08-bid-outline-structure-before-writing.md)，研究 purpose、must_answer、写作维度、表图建议、业务关联、Evidence 和真实资料缺口，并按[研究充分后再决定目录深化](../bug-fix/2026-09-11-s4-research-before-outline-refinement.md)通过结构化判断后才修改当前 Section 子树和形成 Writing Brief。目录深化把新叶分别加入下一代任务；父任务读过的材料只作为候选，新叶仍须独立判断并提交 Evidence。后续单个轻量 Final Check 优先复用候选，只为具体问题局部检索，不能增删章节或调整层级。
 
-短文件引用只属于模型输入输出，Host 通过本轮定位表回填真实 file_id 和 source_kind。正式 Evidence Map v10 和 missing_topics:string[] 保持不变。技术错误进入执行日志及有限修复，单条错误引用不丢弃同章有效材料，也不自动变成资料缺口。Final Check 无法形成有效章节结论时拒绝发布。
+模型只选择本轮对象位置，Host 通过冻结定位表绑定真实 file_id、source_kind、短引用与分块身份，遵循[语义输出与程序身份绑定](../bug-fix/2026-10-05-bid-host-id-bindings.md)。正式 Evidence Map v10 和 missing_topics:string[] 保持不变。技术错误进入执行日志及有限修复，单条错误引用不丢弃同章有效材料，也不自动变成资料缺口。Final Check 无法形成有效章节结论时拒绝发布。
 
 Draft 保持 CAS 与结构、覆盖校验。保存操作不覆盖最近研究完成的目录；最终确认才比较章节任务、业务关联及祖先语义，复核受影响叶子并同步摘要。排序不触发模型。确认失败恢复正式目录、资料和 Web ledger，保留 Draft；最终成功后才按引用清理快照。
 

@@ -27,7 +27,7 @@ export async function modelTaskArguments(agent: Agent, request: { task: object; 
     if (Array.isArray(node)) return node.map(visit)
     if (node === null || typeof node !== 'object') return node
     return Object.fromEntries(Object.entries(node).flatMap(([name, child]) => {
-      if (name === 'task_id' || name === 'defer_content_migration') return []
+      if (name === 'task_id' || name === 'defer_content_migration' || name === 'writable') return []
       if (name === 'order') return [['sibling_position', Number(child) - 1]]
       const field = bindings.get(name)
       if (field === undefined) return [[name, visit(child)]]

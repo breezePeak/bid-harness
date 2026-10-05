@@ -175,6 +175,8 @@ export function createChapterWriterChild(
   let runtime: ChapterProtocol<unknown> | undefined
   let eventStart = 0
   let webGuard = () => {}
+  let toolRestriction = () => {}
+  let toolGuard = () => {}
   let modelGuard = () => {}
   const route = modelSource.session.requestHeader()?.config
   const provider = route?.provider ?? modelSource.options.provider
@@ -184,10 +186,16 @@ export function createChapterWriterChild(
   const install = (agent: Agent) => {
     runtime?.dispose()
     webGuard()
+    toolRestriction()
+    toolGuard()
     modelGuard()
     modelGuard = installModelSelection(agent.ctx, { current: selection, assembled: undefined })
     const tools = agent.ctx.get('tools')
     if (tools === undefined) throw new Error('S5 Writer requires tools service')
+    const allowedTools = !webSearchEnabled ? ['grep', 'read'] : ['grep', 'read', 'web_search', 'web_fetch']
+    toolRestriction = tools.restrict({ allow: allowedTools })
+    toolGuard = tools.guard(exec => exec.name === 'submit_chapter' || allowedTools.includes(exec.name)
+      ? undefined : 'BID_CHAPTER_WRITER_TOOL_DISABLED')
     webGuard = !webSearchEnabled
       ? tools.guard(exec => exec.name === 'web_search' || exec.name === 'web_fetch' ? 'BID_WEB_ACCESS_DISABLED' : undefined)
       : () => {}
@@ -279,6 +287,8 @@ export function createChapterWriterChild(
     async dispose() {
       try { await subagents.drainContinuableChildren(parent, [id]) } finally {
         webGuard()
+        toolRestriction()
+        toolGuard()
         modelGuard()
         runtime?.dispose()
         liftSetup()

@@ -114,6 +114,29 @@ describe('目录能力候选', () => {
     expect(() => applyOutlineBusinessBindings(source, [{ ...empty, requirement_ids: [requirements.requirements[0]!.id] }],
       requirements, scoring, compliance, points)).toThrow('BID_OUTLINE_BINDING_SECTION_INVALID')
   })
+
+  it('目录业务归属只选择 RP 时程序补齐父评分项，未知引用和重复评分仍拒绝', async () => {
+    const { workspace } = await fixture()
+    const outline = parseOutlineArtifact(await readJson(workspace, 'outline/confirmed-outline.json'))
+    const requirements = parseTenderRequirementsArtifact(await readJson(workspace, 'analysis/requirements.json'))
+    const scoring = parseTenderScoringArtifact(await readJson(workspace, 'analysis/scoring.json'))
+    const compliance = parseTenderComplianceArtifact(await readJson(workspace, 'analysis/compliance.json'))
+    const catalog = parseScoringResponsePointCatalog(await readJson(workspace, 'analysis/scoring-response-points.json'))
+    const binding = { section_id: 'SEC-1', requirement_ids: ['REQ-1'], scoring_ids: [],
+      scoring_response_point_ids: ['RP-000001'], compliance_ids: [] }
+    const result = applyOutlineBusinessBindings(outline, [binding], requirements, scoring, compliance, catalog)
+    expect(result.sections.find(section => section.id === 'SEC-1')).toMatchObject({
+      scoring_ids: ['SCORE-1'], scoring_response_point_ids: ['RP-000001'],
+      scoring_response_points: [{ scoring_id: 'SCORE-1', response_point: catalog.points[0]!.text }],
+    })
+    expect(binding.scoring_ids).toEqual([])
+    for (const invalid of [
+      { ...binding, scoring_response_point_ids: ['RP-999999'] },
+      { ...binding, scoring_ids: ['SCORE-UNKNOWN'] },
+      { ...binding, scoring_ids: ['SCORE-1', 'SCORE-1'] },
+    ]) expect(() => applyOutlineBusinessBindings(outline, [invalid], requirements, scoring, compliance, catalog))
+      .toThrow('BID_OUTLINE_BINDING_REFERENCE_INVALID')
+  })
   it.each([
     ['completed', true], ['pending', true], ['completed', false], ['pending', false],
   ] as const)('目录协调仅清理已完成章节的迁移种子（%s，目录变更=%s）', async (status, changed) => {
@@ -152,12 +175,12 @@ describe('目录能力候选', () => {
       .find(section => section.section_id === 'SEC-2')).toEqual(chapter)
   })
 
-  it.each(['split', 'add'] as const)('outline.update %s 对 Host 新 ID 分配真实业务引用并保留待迁移原文', async (operation) => {
+  it.each(['split', 'add'] as const)('outline.update %s 对 Host 新 ID 绑定所选 RP 的父评分项并保留待迁移原文', async (operation) => {
     const { workspace, context, stepId } = await fixture()
     const prefix = createHash('sha256').update(stepId).digest('hex').slice(0, 12)
     const childId = `SEC-${prefix}-1`
     const outputs = [
-      JSON.stringify([{ requirement_positions: [0], scoring_positions: [0], response_point_positions: [0], compliance_positions: [] },
+      JSON.stringify([{ requirement_positions: [0], scoring_positions: [], response_point_positions: [0], compliance_positions: [] },
         { requirement_positions: [], scoring_positions: [], response_point_positions: [], compliance_positions: [] }]),
     ]
     const prompts: unknown[] = []
@@ -190,6 +213,8 @@ describe('目录能力候选', () => {
     expect(JSON.stringify(prompts.at(-1))).toContain('requirement_positions')
     const outline = parseOutlineArtifact(await readJson(workspace, 'outline/confirmed-outline.json'))
     expect(outline.sections.find(section => section.id === childId)?.requirement_ids).toEqual(['REQ-1'])
+    expect(outline.sections.find(section => section.id === childId)?.scoring_ids).toEqual(['SCORE-1'])
+    expect(outline.sections.find(section => section.id === childId)?.scoring_response_point_ids).toEqual(['RP-000001'])
     expect(outline.sections.find(section => section.id === 'SEC-1')).toMatchObject({ writable: false,
       requirement_ids: [], scoring_ids: [], compliance_ids: [], scoring_response_point_ids: [] })
     expect(await readFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), 'utf8')).toBe(body)
@@ -203,13 +228,14 @@ describe('目录能力候选', () => {
   it.each([
     ['requirement_positions', 'requirement_ids'], ['scoring_positions', 'scoring_ids'],
     ['response_point_positions', 'scoring_response_point_ids'],
-  ] as const)('拆分生成的业务归属遗漏 %s 时拒绝候选并保留原目录和正文', async (field, key) => {
+  ] as const)('拆分生成的业务归属缺少可绑定的 %s 时拒绝候选并保留原目录和正文', async (field, key) => {
     const { workspace, context } = await fixture()
     const before = await readJson(workspace, 'outline/confirmed-outline.json')
     const body = await readFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), 'utf8')
     const start = vi.fn(async () => ({ result: Promise.resolve({ stopReason: 'completed',
       output: [{ type: 'text', text: JSON.stringify([
-        { requirement_positions: [0], scoring_positions: [0], response_point_positions: [0], compliance_positions: [], [field]: [] },
+        { requirement_positions: [0], scoring_positions: [0], response_point_positions: field === 'scoring_positions' ? [] : [0],
+          compliance_positions: [], [field]: [] },
         { requirement_positions: [], scoring_positions: [], response_point_positions: [], compliance_positions: [] },
       ]) }] }), dispose: async () => {} }))
     const agent = { ctx: { get: () => ({ getProvider: () => ({ inheritsParentContext: false }), start }) } } as unknown as BidCapabilityExecutionContext['agent']

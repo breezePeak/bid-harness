@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ToolArgsError } from '@deepseek-ai/dsh-tools'
 import { BidWorkspace } from '@deepseek-ai/dsh-bid'
 import { parseChapterCandidate, parseChapterMetadata } from '../src/chapter-writing-artifacts.ts'
-import { appendChapterWebReferences, bindChapterWriterInput, createChapterWriterReferences, mergeChapterWebMaterials, projectChapterWriterCandidate, readChapterWebSource, renderChapterWriterReferences } from '../src/chapter-writing-writer.ts'
+import { appendChapterWebReferences, bindChapterWriterInput, createChapterWriterReferences, loadChapterWriterChunkReferences, mergeChapterWebMaterials, projectChapterWriterCandidate, readChapterWebSource, renderChapterWriterReferences } from '../src/chapter-writing-writer.ts'
 import { buildChapterReviewEvidence } from '../src/chapter-writing-review.ts'
 import { webEvidenceContentSha256, webEvidenceSourceId } from '../src/web-evidence-source-artifacts.ts'
 import { buildWebEvidenceChunkIndex, webEvidenceChunkIndexPath } from '../src/web-evidence-chunks.ts'
@@ -13,6 +13,7 @@ import type { WebEvidenceSnapshot } from '../src/web-evidence-snapshot.ts'
 import { normalizeFlowchartInputs } from '../src/flowchart.ts'
 import { selectOriginalChapterContent } from '../src/chapter-content-reuse.ts'
 import { emptyChapterContext, outlineFixture } from './fixtures/chapter-writing-inputs.ts'
+import { chapterModelCandidate } from './fixtures/chapter-model-positions.ts'
 
 vi.mock('node:fs/promises', async (importOriginal) => {
   const original = await importOriginal<typeof import('node:fs/promises')>()
@@ -44,6 +45,7 @@ async function fixture() {
   context.availableLocalCorpus = manifest.files.filter(file => file.role !== 'tender').map(file => ({ file_id: String(file.id), name: file.originalName, role: file.role as 'reference' | 'reference_bid' | 'outline_framework', chunks_path: join(workspace.projectRoot, file.chunksPath!), chunk_index_path: join(workspace.projectRoot, file.chunkIndexPath!) }))
   context.relatedMaterials = [{ source_kind: 'reference', file_id: String(manifest.files[0]!.id), chunk: 'chunk_0001', usage: 'reference', summary: '企业资料' }]
   const refs = createChapterWriterReferences(context)
+  await loadChapterWriterChunkReferences(workspace, refs)
   const web = snapshot()
   await mkdir(join(workspace.projectRoot, 'analysis/web-sources'), { recursive: true })
   await writeFile(join(workspace.projectRoot, web.source.snapshot_path), web.content)
@@ -56,25 +58,60 @@ async function fixture() {
     usage: 'reference', summary: '公开资料', supports: '技术方法',
   }]
   await appendChapterWebReferences(workspace, refs, [web.source])
-  const bind = (metadata: unknown, snapshots: readonly WebEvidenceSnapshot[] = []) => bindChapterWriterInput(workspace, manifest, context, refs, { markdown: `# ${context.section.title}\n\n完整正文与具体技术方案。`, metadata }, snapshots)
+  const bind = (metadata: unknown, snapshots: readonly WebEvidenceSnapshot[] = []) => bindChapterWriterInput(
+    workspace, manifest, context, refs,
+    chapterModelCandidate({ markdown: `# ${context.section.title}\n\n完整正文与具体技术方案。`, metadata: metadata as Record<string, unknown> }), snapshots)
   return { workspace, manifest, context, refs, web, bind }
 }
 
 describe('S5 Writer 短引用与语义输入', () => {
   afterEach(() => vi.mocked(readFile).mockReset())
 
-  it('须保留的迁移原图由程序复用，省略或重写模型定义均不改变原节点和连线', async () => {
+  it.each([
+    { local_materials_used: [{ material_ref: 'M1', usage: 'reference', summary: '资料' }] },
+    { local_materials_used: [{ file_ref: 'F1', chunk: 'chunk_0001', usage: 'reference', summary: '资料' }] },
+    { web_materials_used: [{ web_ref: 'W1', usage: 'reference', summary: '资料', supports: '技术' }] },
+    { section_id: 'SEC-1' }, { snapshot_path: 'analysis/web-sources/a.md' }, { content_sha256: 'a'.repeat(64) },
+  ])('实际 Writer 接受路径拒绝模型提交原引用或程序身份 %j', async (metadata) => {
+    const { workspace, manifest, context, refs } = await fixture()
+    await expect(bindChapterWriterInput(workspace, manifest, context, refs, {
+      markdown: `# ${context.section.title}\n\n具体正文。`, metadata,
+    }, [])).rejects.toBeInstanceOf(ToolArgsError)
+  })
+
+  it('文件和资料块位置由程序绑定实际身份，模型不能补填 chunk 字符串', async () => {
+    const { workspace, manifest, context, refs } = await fixture()
+    const candidate = await bindChapterWriterInput(workspace, manifest, context, refs, {
+      markdown: `# ${context.section.title}\n\n具体正文。`, metadata: { local_materials_used: [{
+        file_position: 0, chunk_position: 0, usage: 'reference', summary: '真实资料支持实施方法。',
+      }] },
+    }, [])
+    expect(candidate.metadata.local_materials_used[0]).toMatchObject({
+      file_id: String(manifest.files[0]!.id), chunk: 'chunk_0001', source_kind: 'reference',
+    })
+    for (const chunk_position of [-1, 0.5, 999]) {
+      await expect(bindChapterWriterInput(workspace, manifest, context, refs, {
+        markdown: `# ${context.section.title}\n\n具体正文。`, metadata: { local_materials_used: [{
+          file_position: 0, chunk_position, usage: 'reference', summary: '资料',
+        }] },
+      }, [])).rejects.toBeInstanceOf(ToolArgsError)
+    }
+  })
+
+  it('须保留的迁移原图由程序复用，模型不能提交原图身份重写它', async () => {
     const { workspace, manifest, context, refs } = await fixture()
     const source = normalizeFlowchartInputs('old-section', [{ key: 'process', title: '原流程', direction: 'TB',
       nodes: [{ key: 'start', type: 'start', text: '开始' }, { key: 'end', type: 'end', text: '完成' }],
       edges: [{ from: 'start', to: 'end' }] }])
-    for (const flowcharts of [undefined, [{ key: 'process', title: '改写图', nodes: [{ key: 'only', type: 'process', text: '改写' }], edges: [] }]]) {
-      const candidate = await bindChapterWriterInput(workspace, manifest, context, refs, {
-        markdown: `# ${context.section.title}\n\n{{flowchart:process}}`, metadata: { flowcharts },
-      }, [], source)
-      expect(candidate.metadata.flowcharts).toEqual(normalizeFlowchartInputs(context.section.id, source))
-      expect(candidate.metadata.flowcharts[0]?.id).not.toBe(source[0]?.id)
-    }
+    const candidate = await bindChapterWriterInput(workspace, manifest, context, refs, {
+      markdown: `# ${context.section.title}\n\n{{flowchart:0}}`, metadata: {},
+    }, [], source)
+    expect(candidate.metadata.flowcharts).toEqual(normalizeFlowchartInputs(context.section.id, source))
+    expect(candidate.metadata.flowcharts[0]?.id).not.toBe(source[0]?.id)
+    await expect(bindChapterWriterInput(workspace, manifest, context, refs, {
+      markdown: `# ${context.section.title}\n\n{{flowchart:process}}`,
+      metadata: { flowcharts: [{ key: 'process', title: '改写图', nodes: [{ key: 'only', type: 'process', text: '改写' }], edges: [] }] },
+    }, [], source)).rejects.toThrow('Unrecognized key')
   })
 
   it('原文块位置由程序展开，修改或遗漏原表格的候选在提交时拒绝', async () => {
@@ -93,6 +130,34 @@ describe('S5 Writer 短引用与语义输入', () => {
     }, [], [], seed)).rejects.toThrow('未知原文块位置')
   })
 
+  it('本章及跨章图位置由程序绑定全书唯一键，原图子集与修复候选不会撞键', async () => {
+    const { workspace, manifest, context } = await fixture()
+    const chart = { title: '原流程', direction: 'TB' as const,
+      nodes: [{ key: 'start', type: 'start' as const, text: '开始' }, { key: 'end', type: 'end' as const, text: '完成' }],
+      edges: [{ from: 'start', to: 'end' }] }
+    const original = normalizeFlowchartInputs('old', [{ ...chart, key: 'FLOW-SEC-1-2' }])
+    const dependency = normalizeFlowchartInputs('SEC-2', [{ ...chart, key: 'FLOW-SEC-2-1' }])
+    const refs = createChapterWriterReferences(context, [{ chart: dependency[0]!, chapterTitle: '依赖章节' }])
+    const input = { markdown: `# ${context.section.title}\n\n{{reuse:0}}\n\n{{flowchart:1}}\n\n参见{{flow_ref:dependency:0}}。`,
+      metadata: { flowcharts: [{ title: '新增流程', nodes: [{ type: 'start', text: '开始' }, { type: 'end', text: '完成' }],
+        edges: [{ from_position: 0, to_position: 1 }] }] } }
+    const source = '{{flowchart:FLOW-SEC-1-2}}'
+    const candidate = await bindChapterWriterInput(workspace, manifest, context, refs, input, [], original, source)
+    expect(candidate.metadata.flowcharts.map(chart => chart.key)).toEqual(['FLOW-SEC-1-2', 'FLOW-SEC-1-3'])
+    expect(candidate.markdown).toContain(source)
+    expect(candidate.markdown).toContain('{{flowchart:FLOW-SEC-1-3}}')
+    expect(candidate.markdown).toContain('{{flow_ref:FLOW-SEC-2-1}}')
+    const projected = projectChapterWriterCandidate(candidate, refs, original)
+    expect(JSON.stringify(projected)).not.toContain('FLOW-SEC')
+    expect(JSON.stringify(projected)).toContain('{{flow_ref:dependency:0}}')
+    const repaired = await bindChapterWriterInput(workspace, manifest, context, refs, projected, [], original, source)
+    expect(repaired).toEqual(candidate)
+    for (const marker of ['{{flowchart:FLOW-SEC-1-2}}', '{{flow_ref:FLOW-SEC-2-1}}', '{{flow_ref:dependency:99}}']) {
+      await expect(bindChapterWriterInput(workspace, manifest, context, refs, { markdown: marker, metadata: {} }, [], original))
+        .rejects.toThrow('FLOWCHART_MODEL_ANCHOR_POSITION_INVALID')
+    }
+  })
+
   it('候选新增正文和图形可以修订，提交仍拒绝遗漏原正式正文', async () => {
     const { workspace, manifest, context, refs } = await fixture()
     const original = '原文段落。\n\n{{flowchart:original}}'
@@ -105,10 +170,10 @@ describe('S5 Writer 短引用与语义输入', () => {
     const preserved = selectOriginalChapterContent(original + '\n\n重复草稿。\n\n{{flowchart:added}}',
       [...normalizeFlowchartInputs('new', [{ ...charts[0]!, direction: 'LR', title: '误改的原流程' }]),
         ...normalizeFlowchartInputs('new', [added])], [{ markdown: original, flowcharts: charts }])
-    const candidate = await bindChapterWriterInput(workspace, manifest, context, refs, {
+    const candidate = await bindChapterWriterInput(workspace, manifest, context, refs, chapterModelCandidate({
       markdown: `# ${context.section.title}\n\n{{reuse:0}}\n\n{{reuse:1}}\n\n已整改正文。\n\n{{flowchart:added}}`,
       metadata: { flowcharts: [{ ...added, title: '整改后的流程' }] },
-    }, [], preserved.flowcharts, preserved.markdown)
+    }, preserved.flowcharts.length), [], preserved.flowcharts, preserved.markdown)
     expect(candidate.markdown).toContain(original)
     expect(candidate.markdown).not.toContain('重复草稿')
     expect(candidate.metadata.flowcharts.map(chart => chart.title)).toEqual(['原流程', '整改后的流程'])
@@ -171,7 +236,7 @@ describe('S5 Writer 短引用与语义输入', () => {
     expect(refs.web.get('W1')?.source_id).toBe(web.source.source_id)
     expect(refs.unavailable.get(web.source.source_id)).toContain('ENOENT')
     await expect(bind(metadata)).rejects.toBeInstanceOf(ToolArgsError)
-    expect(renderChapterWriterReferences(context, refs)).not.toContain('"read_path"')
+    expect(renderChapterWriterReferences(context, refs).split('\n').find(line => line.startsWith('Verified Web Chunks：'))).not.toContain('"read_path"')
     const second = snapshot('另一份正文')
     await writeFile(join(workspace.projectRoot, second.source.snapshot_path), second.content)
     await ledger(workspace, [second])
@@ -179,7 +244,7 @@ describe('S5 Writer 短引用与语义输入', () => {
     expect([...refs.web.keys()]).toEqual(['W1', 'W2'])
     expect(refs.unavailable.get(web.source.source_id)).toContain('账本')
     const { additional_web_materials: _additional, ...accepted } = candidate.metadata
-    expect(JSON.stringify(projectChapterWriterCandidate({ ...candidate, metadata: accepted }, refs))).toContain('W1')
+    expect(JSON.stringify(projectChapterWriterCandidate({ ...candidate, metadata: accepted }, refs))).toContain('"web_position":0')
     await writeFile(join(workspace.projectRoot, web.source.snapshot_path), web.content)
     await expect(bind(metadata)).rejects.toBeInstanceOf(ToolArgsError)
     await ledger(workspace, [web, second])
@@ -300,14 +365,14 @@ describe('S5 Writer 短引用与语义输入', () => {
     }))
     await appendChapterWebReferences(workspace, refs, [large.source])
     const rendered = renderChapterWriterReferences(context, refs)
-    const verified = JSON.parse(rendered.split('\n').find(line => line.startsWith('Verified Web Chunks：'))!.slice('Verified Web Chunks：'.length)) as Array<{ mapped_chunks: Array<{ chunk_ref: string }> }>
+    const verified = JSON.parse(rendered.split('\n').find(line => line.startsWith('Verified Web Chunks：'))!.slice('Verified Web Chunks：'.length)) as Array<{ mapped_chunks: Array<{ offset: number; limit: number }> }>
     expect(verified).toHaveLength(2)
-    expect(verified.map(item => item.mapped_chunks[0]?.chunk_ref)).toEqual(chunks.map(chunk => chunk.chunk_ref))
+    expect(verified.map(item => item.mapped_chunks[0]?.offset)).toEqual(chunks.map(chunk => chunk.start_line))
     const candidate = await bindChapterWriterInput(workspace, manifest, context, refs, {
       markdown: `# ${context.section.title}\n\n完整正文与具体技术方案。`,
       metadata: { web_materials_used: [
-        { web_ref: 'W2', usage: 'reference', summary: '实施流程', supports: '支持外业实施步骤' },
-        { web_ref: 'W2', usage: 'background', summary: '质量控制', supports: '支持质量检查机制' },
+        { web_position: 1, usage: 'reference', summary: '实施流程', supports: '支持外业实施步骤' },
+        { web_position: 1, usage: 'background', summary: '质量控制', supports: '支持质量检查机制' },
       ] },
     }, [])
     expect(candidate.metadata.web_materials_used.map(material => material.chunk_refs)).toEqual(chunks.map(chunk => [chunk.chunk_ref]))
@@ -331,7 +396,7 @@ describe('S5 Writer 短引用与语义输入', () => {
     const { bind, web, workspace } = await fixture()
     const semantics = { usage: 'reference', summary: '公开资料', supports: '技术方法' }
     expect((await bind({ web_materials_used: [{ web_ref: 'W1', ...semantics }] })).metadata.web_materials_used[0]?.source_id).toBe(web.source.source_id)
-    await expect(bind({ web_materials_used: [{ web_ref: 'W999', ...semantics }] })).rejects.toThrow('W999')
+    await expect(bind({ web_materials_used: [{ web_ref: 'W999', ...semantics }] })).rejects.toThrow('未知位置 998')
     await expect(bind({ additional_web_materials: [{ url: web.source.final_url, ...semantics }] })).rejects.toThrow('当前 Writer')
     const fetched = await bind({ additional_web_materials: [{ url: web.source.final_url, ...semantics }] }, [web])
     expect(fetched.metadata.additional_web_materials).toHaveLength(1)
@@ -354,8 +419,8 @@ describe('S5 Writer 短引用与语义输入', () => {
     const candidate = await bind({ local_materials_used: [{ file_ref: 'F1', chunk: 'chunk_0001', usage: 'reference', summary: '依据' }], web_materials_used: [{ web_ref: 'W2', usage: 'reference', summary: '依据', supports: '技术方法' }] })
     const { additional_web_materials: _additional, ...metadata } = candidate.metadata
     const projected = JSON.stringify(projectChapterWriterCandidate({ ...candidate, metadata }, refs))
-    expect(projected).toContain('M1')
-    expect(projected).toContain('W2')
+    expect(projected).toContain('"material_position":0')
+    expect(projected).toContain('"web_position":1')
     for (const key of ['section_id', 'covered_', 'source_id', 'file_id', 'snapshot_path']) expect(projected).not.toContain(key)
   })
 
@@ -399,8 +464,10 @@ describe('S5 Writer 短引用与语义输入', () => {
     expect(candidate.metadata.flowcharts[0]?.id).toBe('FLOW-SEC-1-1')
     expect(candidate.metadata.flowcharts[0]?.nodes.map(node => node.id)).toEqual(['N1', 'N2', 'N3', 'N4'])
     const projected = projectChapterWriterCandidate(candidate, refs) as {
-      metadata: { flowcharts: Array<{ nodes: Array<{ key: string }> }> }
+      metadata: { flowcharts: Array<{ nodes: Array<{ text: string }> }> }
     }
-    expect(projected.metadata.flowcharts[0]?.nodes[1]?.key).toBe('N2')
+    expect(projected.metadata.flowcharts[0]?.nodes[1]?.text).toBe('质量检查')
+    expect(JSON.stringify(projected)).not.toContain('"key"')
+    expect(JSON.stringify(projected)).not.toContain('"direction"')
   })
 })

@@ -16,7 +16,7 @@ const references = { requirement_positions: positions.optional(), scoring_positi
   framework_refs: frameworkRefs.optional() }
 const [update, add, split, remove, merge, move, global, structure] = outlineAssociationRepairOperationSchema.options
 
-const programFields = ['id', 'parent_id', 'section_id', 'section_ids', 'order', 'requirement_ids',
+const programFields = ['id', 'parent_id', 'section_id', 'section_ids', 'order', 'writable', 'requirement_ids',
   'scoring_ids', 'compliance_ids', 'scoring_response_point_ids', 'global_compliance_ids', 'framework_refs', 'children'] as const
 
 function semanticFields<Shape extends z.ZodRawShape>(shape: Shape): Omit<Shape, typeof programFields[number]> {
@@ -169,8 +169,8 @@ export function outlineModelView(outline: OutlineArtifact, inputs: OutlineModelB
 }
 
 /**
- * 绑定初稿位置，程序分配章节编号并派生树层级；旧模型身份格式被严格拒绝。
- * @param value 模型位置候选。
+ * 展开初稿语义树，程序分配章节编号并派生父关系与树层级；旧扁平父引用被严格拒绝。
+ * @param value 模型嵌套候选。
  * @param inputs 本次固定业务输入。
  * @param baseline 重新生成时保留已有节点身份的目录基线。
  * @returns 可交给正式规范化器的程序候选。
@@ -178,32 +178,34 @@ export function outlineModelView(outline: OutlineArtifact, inputs: OutlineModelB
 export function bindOutlineModelCandidate(value: unknown, inputs: OutlineModelBindingInputs,
   baseline?: OutlineArtifact): z.infer<typeof outlineCandidateSchema> {
   const candidate = outlineModelCandidateSchema.parse(value)
+  type ModelSection = z.infer<typeof outlineModelCandidateSchema>['sections'][number]
+  const nodes: Array<{ section: ModelSection; parent: number | null; order: number; level: number }> = []
+  const flatten = (siblings: readonly ModelSection[], parent: number | null, level: number): void => {
+    siblings.forEach((section, sibling) => {
+      const index = nodes.length
+      nodes.push({ section, parent, order: sibling + 1, level })
+      flatten(section.children, index, level + 1)
+    })
+  }
+  flatten(candidate.sections, null, 1)
   let next = Math.max(0, ...(baseline?.sections ?? []).map(section => /^SEC-\d+$/u.test(section.id) ? Number(section.id.slice(4)) : 0))
-  const identities = candidate.sections.map((section) => {
+  const identities = nodes.map(({ section }) => {
     if (section.source_position === undefined) return { id: `SEC-${String(++next).padStart(3, '0')}` }
     const previous = baseline?.sections[section.source_position]
     if (previous === undefined) throw new Error('BID_OUTLINE_MODEL_SOURCE_POSITION_INVALID')
     return { id: previous.id }
   })
   if (new Set(identities.map(item => item.id)).size !== identities.length) throw new Error('BID_OUTLINE_MODEL_SOURCE_POSITION_DUPLICATE')
-  const level = (index: number, visited = new Set<number>()): number => {
-    if (visited.has(index)) throw new Error('BID_OUTLINE_MODEL_PARENT_CYCLE')
-    visited.add(index)
-    const section = candidate.sections[index]
-    if (section === undefined) throw new Error('BID_OUTLINE_MODEL_PARENT_POSITION_INVALID')
-    return section.parent_position === null ? 1 : 1 + level(section.parent_position, visited)
-  }
   const reverse = Object.fromEntries(Object.entries(fieldNames).map(([persisted, model]) => [model, persisted]))
-  const siblingCounts = new Map<number | null, number>()
   return outlineCandidateSchema.parse({
     schema_version: OUTLINE_GENERATION_SCHEMA_VERSION, scope: 'technical_bid', document_title: candidate.document_title,
     global_compliance_ids: pick(inputs.compliance.compliance_items, candidate.global_compliance_positions),
-    sections: candidate.sections.map(({ source_position: _source, ...section }, index) => {
-      const order = (siblingCounts.get(section.parent_position) ?? 0) + 1
-      siblingCounts.set(section.parent_position, order)
-      return { id: identities[index]?.id, level: level(index), order,
+    sections: nodes.map(({ section: { source_position: _source, children, ...section }, parent, order, level }, index) => {
+      const writable = children.length === 0
+      return { id: identities[index]?.id, parent_id: parent === null ? null : identities[parent]?.id, level, order,
         ...Object.fromEntries(Object.entries(section).map(([field, value]) => [reverse[field] ?? field,
-          bindValue(field, value, inputs, identities)])) }
+          bindValue(field, value, inputs, identities)])), writable,
+        ...(!writable ? { must_answer: [], scoring_response_point_ids: [] } : {}) }
     }),
   })
 }
@@ -230,7 +232,8 @@ export function bindOutlineModelRepairOperations(value: unknown, outline: Outlin
       if (field === 'regenerate_id') return ['id', `SEC-${String(++next).padStart(3, '0')}`]
       return [reverse[field] ?? field, bindValue(field, item, inputs, outline.sections)]
     }))
-  return z.array(responsePointsOnly ? outlineRepairOperationSchema : outlineAssociationRepairOperationSchema).parse(operations.map(bind))
+  return z.array(responsePointsOnly ? outlineRepairOperationSchema : outlineAssociationRepairOperationSchema)
+    .parse(operations.map(operation => ({ ...bind(operation), ...(operation.type === 'add_section' ? { writable: true } : {}) })))
 }
 
 /**
@@ -260,7 +263,7 @@ export function bindOutlineModelCandidateRepairs(value: unknown, sections: reado
   inputs: OutlineModelBindingInputs): unknown {
   const reverse = Object.fromEntries(Object.entries(fieldNames).map(([persisted, model]) => [model, persisted]))
   return outlineModelCandidateRepairSchema.parse(value).map((operation) => {
-    if (['id', 'level', 'schema_version', 'scope'].includes(operation.field) || Object.hasOwn(fieldNames, operation.field)) throw new Error('BID_OUTLINE_MODEL_ID_FIELD_FORBIDDEN')
+    if (['id', 'level', 'writable', 'schema_version', 'scope'].includes(operation.field) || Object.hasOwn(fieldNames, operation.field)) throw new Error('BID_OUTLINE_MODEL_ID_FIELD_FORBIDDEN')
     return { ...operation, field: reverse[operation.field] ?? operation.field,
       ...(operation.remove === true ? {} : { value: bindValue(operation.field, operation.value, inputs, sections) }) }
   })

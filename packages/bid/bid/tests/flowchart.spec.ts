@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { boxesOverlap, layoutFlowchart, normalizeFlowchartInputs, renderFlowchartSvg, resolveFlowchartAnchors, validateFlowchartAnchors, validateFlowchartSpec, type FlowchartDraft, type FlowchartSpec } from '../src/flowchart.ts'
+import { bindFlowchartModelAnchors, bindFlowchartModelInputs, boxesOverlap, layoutFlowchart, normalizeFlowchartInputs, projectFlowchartModelAnchors, renderFlowchartSvg, resolveFlowchartAnchors, validateFlowchartAnchors, validateFlowchartSpec, type FlowchartDraft, type FlowchartSpec } from '../src/flowchart.ts'
 
 const draft: FlowchartDraft = {
   title: '质量检查闭环', direction: 'TB',
@@ -26,6 +26,43 @@ function expectNoOverlappingNodes(spec: FlowchartSpec): void {
 }
 
 describe('flowchart contract', () => {
+  it('模型只选择业务节点和边位置，程序生成绘图身份与正文图表位置', () => {
+    const semantic = {
+      title: '成果提交流程', nodes: [{ type: 'start', text: '开始' }, { type: 'end', text: '提交成果' }],
+      edges: [{ from_position: 0, to_position: 1, label: '完成' }],
+    }
+    const [spec] = bindFlowchartModelInputs('SEC-IMPLEMENT', [semantic], 2)
+    expect(spec).toMatchObject({ id: 'FLOW-SEC-IMPLEMENT-3', key: 'FLOW-SEC-IMPLEMENT-3', schema_version: 1, direction: 'TB',
+      nodes: [{ id: 'N1', type: 'start', text: '开始' }, { id: 'N2', type: 'end', text: '提交成果' }],
+      edges: [{ from: 'N1', to: 'N2', label: '完成' }] })
+    expect(validateFlowchartAnchors(bindFlowchartModelAnchors('前置说明\n\n{{flowchart:0}}', [spec!]), [spec!])).toEqual([])
+    expect(renderFlowchartSvg(spec!).svg).toContain('提交成果')
+    expect(() => bindFlowchartModelInputs('SEC-IMPLEMENT', [{ ...semantic, edges: [{ from_position: 0, to_position: 2 }] }])).toThrow('FLOWCHART_MODEL_NODE_POSITION_INVALID')
+    for (const extra of [{ id: 'FLOW-INVENTED' }, { key: 'model-key' }, { direction: 'LR' }, { layout: [] }, { svg: '<svg/>' }, { schema_version: 1 }]) {
+      expect(() => bindFlowchartModelInputs('SEC-IMPLEMENT', [{ ...semantic, ...extra }])).toThrow()
+    }
+    for (const extra of [{ id: 'N99' }, { key: 'model-node' }, { x: 1, y: 2 }]) {
+      expect(() => bindFlowchartModelInputs('SEC-IMPLEMENT', [{ ...semantic, nodes: [{ ...semantic.nodes[0], ...extra }] }])).toThrow()
+    }
+  })
+
+  it('程序生成全书唯一图键，绑定本章及跨章引用位置并避开保留图键', () => {
+    const semantic = { title: '流程', nodes: [{ type: 'start', text: '开始' }], edges: [] }
+    const first = bindFlowchartModelInputs('SEC-1', [semantic])
+    const second = bindFlowchartModelInputs('SEC-2', [semantic])
+    expect(first[0]!.key).not.toBe(second[0]!.key)
+    const text = '{{flowchart:0}}\n{{flow_ref:0}}\n{{flow_ref:dependency:0}}'
+    const bound = bindFlowchartModelAnchors(text, first, second)
+    expect(bound).toBe('{{flowchart:FLOW-SEC-1-1}}\n{{flow_ref:FLOW-SEC-1-1}}\n{{flow_ref:FLOW-SEC-2-1}}')
+    expect(projectFlowchartModelAnchors(bound, first, second)).toBe(text)
+    expect(resolveFlowchartAnchors(bound, first, new Map([[first[0]!.key!, 1], [second[0]!.key!, 2]]))).toContain('图 2')
+    const additional = bindFlowchartModelInputs('SEC-1', [semantic, semantic], 1, ['FLOW-SEC-1-2'])
+    expect(additional.map(spec => spec.key)).toEqual(['FLOW-SEC-1-3', 'FLOW-SEC-1-4'])
+    for (const marker of ['{{flowchart:9}}', '{{flow_ref:dependency:9}}', '{{flowchart:FLOW-SEC-1-1}}', '{{flowchart:dependency:0}}']) {
+      expect(() => bindFlowchartModelAnchors(marker, first, second)).toThrow('FLOWCHART_MODEL_ANCHOR_POSITION_INVALID')
+    }
+  })
+
   it('由 Host 分配流程图和节点身份，并生成可复用 SVG', () => {
     const [spec] = normalizeFlowchartInputs('SEC-IMPLEMENT', [draft])
     expect(spec).toBeDefined()
@@ -52,6 +89,18 @@ describe('flowchart contract', () => {
       expect.stringContaining('未声明'),
       expect.stringContaining('必须在正文中有且只有一个'),
     ]))
+  })
+
+  it('拒绝正文代码块绕过语义图绑定，保留普通文字和程序展开能力', () => {
+    const rawDrawings = ['```flowchart\n{}\n```', '~~~flowchart\n{}\n~~~', '> ```flowchart\n> {}\n> ```',
+      '- 图示\n\n  ```flowchart\n  {}\n  ```', '```svg\n<svg/>\n```', '```mermaid\ngraph TD; A-->B\n```',
+      '<svg xmlns="http://www.w3.org/2000/svg"></svg>', '```xml\n<VisioDocument xmlns="http://schemas.microsoft.com/visio/2003/core"/>\n```']
+    for (const markdown of rawDrawings) {
+      expect(validateFlowchartAnchors(markdown, [])).toEqual([expect.stringContaining('不得直接提交')])
+    }
+    expect(validateFlowchartAnchors('流程图采用 `flowchart` 语义规范。\n\n```json\n{}\n```', [])).toEqual([])
+    const [spec] = bindFlowchartModelInputs('SEC-1', [{ title: '流程', nodes: [{ type: 'start', text: '开始' }], edges: [] }])
+    expect(resolveFlowchartAnchors(bindFlowchartModelAnchors('{{flowchart:0}}', [spec!]), [spec!])).toContain('```flowchart')
   })
 
   it('为循环图保留前向层级，并严格按正文 anchor 展开', () => {

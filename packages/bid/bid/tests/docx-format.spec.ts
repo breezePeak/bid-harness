@@ -18,6 +18,8 @@ import { suggestDocxFormat, validateFormatSuggestion } from '../src/docx-format-
 import { createCaptionNumberer, createHeadingNumberer, missingTableCaptionLines, parseTableCaption } from '../src/docx-numbering.ts'
 
 const defaults = { font: '宋体', bodySize: 24, headingSize: 32 }
+const modelRule = (fields: readonly { key: string }[], key: string, value: string | number, evidence: string) =>
+  ({ field_position: fields.findIndex(field => field.key === key), value, evidence })
 async function workspace(): Promise<BidWorkspace> {
   const root = await mkdtemp(join(tmpdir(), 'bid-word-format-'))
   return { root, projectRoot: root, config: defaults } as BidWorkspace
@@ -75,20 +77,23 @@ describe('项目 Word 格式链路', () => {
     const extracted = await saveDocxTemplate(project, { revision: 0, name: '说明模板.docx', bytes: await template() })
     if (extracted.templateId === null) throw new Error('模板上传未返回模板 ID。')
     const suggestion = validateFormatSuggestion({ rules: [
-      { key: 'body.font', value: '宋体', evidence: '正文小四宋体' },
-      { key: 'body.size', value: '小四', evidence: '正文小四宋体' },
-      { key: 'body.latinFont', value: 'Times New Roman', evidence: '英文及数字 Times New Roman' },
-      { key: 'body.firstLine', value: '2字符', evidence: '首行缩进 2 字符' },
-      { key: 'body.line', value: '1.5倍', evidence: '1.5 倍行距' },
-    ], mapping: { body: 'Normal' } }, extracted)
+      modelRule(extracted.fields, 'body.font', '宋体', '正文小四宋体'),
+      modelRule(extracted.fields, 'body.size', '小四', '正文小四宋体'),
+      modelRule(extracted.fields, 'body.latinFont', 'Times New Roman', '英文及数字 Times New Roman'),
+      modelRule(extracted.fields, 'body.firstLine', '2字符', '首行缩进 2 字符'),
+      modelRule(extracted.fields, 'body.line', '1.5倍', '1.5 倍行距'),
+    ], mapping: { body: extracted.state.extracted.candidates.findIndex(candidate => candidate.id === 'Normal') } }, extracted)
     const saved = await saveDocxFormatInterpretation(project, extracted.templateId, extracted.state.revision, suggestion)
     expect(saved.state.modelInterpreted.values).toMatchObject({ 'body.font': '宋体', 'body.latinFont': 'Times New Roman',
       'body.size': 12, 'body.firstLine': 2, 'body.firstLineUnit': 'chars', 'body.line': 1.5, 'body.lineRule': 'auto' })
     expect(saved.state.modelInterpreted.evidence.find(item => item.key === 'body.size')?.value).toBe(12)
     expect(saved.state.resolved['body.font']).toBe('宋体')
-    expect(() => validateFormatSuggestion({ rules: [{ key: 'body.size', value: 15, evidence: '模板里没有这句话' }], mapping: {} }, extracted)).toThrow('模板原文')
-    expect(() => validateFormatSuggestion({ rules: [{ key: 'heading.font', value: '宋体', evidence: '正文小四宋体' }], mapping: {} }, extracted))
-      .toThrow('未知字段：heading.font')
+    expect(() => validateFormatSuggestion({ rules: [modelRule(extracted.fields, 'body.size', 15, '模板里没有这句话')], mapping: {} }, extracted)).toThrow('模板原文')
+    expect(() => validateFormatSuggestion({ rules: [{ field_position: extracted.fields.length, value: '宋体', evidence: '正文小四宋体' }], mapping: {} }, extracted))
+      .toThrow('不存在的字段位置')
+    expect(() => validateFormatSuggestion({ rules: [], mapping: { body: 'Normal' } }, extracted)).toThrow('无效')
+    expect(() => validateFormatSuggestion({ rules: [{ key: 'body.font', value: '宋体', evidence: '正文小四宋体' }], mapping: {} }, extracted)).toThrow('无效')
+    expect(() => validateFormatSuggestion({ rules: [], mapping: { body: extracted.state.extracted.candidates.length } }, extracted)).toThrow('不存在的模板样式位置')
   })
 
   it('模型选定候选后只采用该候选的有效格式', () => {
@@ -140,14 +145,14 @@ describe('项目 Word 格式链路', () => {
     const view = resolveFormat(defaultDocxFormatState(fields), fields)
     view.state.extracted.paragraphs = [source]
     const suggestion = validateFormatSuggestion({ rules: [
-      ...Array.from({ length: 6 }, (_, index) => ({ key: `heading${String(index + 1)}.size`, value: '三号', evidence: source })),
-      { key: 'body.size', value: '小四', evidence: source },
-      { key: 'figureCaption.size', value: '小四', evidence: source },
-      { key: 'tableCaption.size', value: '小四', evidence: source },
-      { key: 'body.firstLine', value: '2字符', evidence: source },
-      { key: 'body.before', value: '0行', evidence: source },
-      { key: 'body.after', value: '0行', evidence: source },
-      { key: 'body.line', value: '1.5倍', evidence: source },
+      ...Array.from({ length: 6 }, (_, index) => modelRule(fields, `heading${String(index + 1)}.size`, '三号', source)),
+      modelRule(fields, 'body.size', '小四', source),
+      modelRule(fields, 'figureCaption.size', '小四', source),
+      modelRule(fields, 'tableCaption.size', '小四', source),
+      modelRule(fields, 'body.firstLine', '2字符', source),
+      modelRule(fields, 'body.before', '0行', source),
+      modelRule(fields, 'body.after', '0行', source),
+      modelRule(fields, 'body.line', '1.5倍', source),
     ], mapping: {} }, view)
     expect(suggestion.values).toMatchObject({
       'heading1.size': 16,
@@ -486,7 +491,11 @@ describe('项目 Word 格式链路', () => {
   it('自动模型请求包含实际模板正文和多角色候选并记录到会话', async () => {
     const project = await workspace()
     const view = await saveDocxTemplate(project, { revision: 0, name: '模型模板.docx', bytes: await template() })
-    const generate = vi.fn(async (_request: GenerateOptions) => ({ finish: { kind: 'stop' }, message: { content: [{ type: 'text', text: '{"rules":[{"key":"body.font","value":"宋体","evidence":"正文小四宋体"}],"mapping":{"figureCaption":"Caption","tableCaption":"Caption"}}' }] } }))
+    const captionPosition = view.state.extracted.candidates.findIndex(candidate => candidate.id === 'Caption')
+    const generate = vi.fn(async (_request: GenerateOptions) => ({ finish: { kind: 'stop' }, message: { content: [{ type: 'text', text: JSON.stringify({
+      rules: [modelRule(view.fields, 'body.font', '宋体', '正文小四宋体')],
+      mapping: { figureCaption: captionPosition, tableCaption: captionPosition },
+    }) }] } }))
     const append = vi.fn()
     const ctx = { get: () => ({ generate }) } as unknown as Context
     const session = { id: 'format-test', requestHeader: () => ({ config: { provider: 'test', model: 'test' } }), append } as unknown as Session
@@ -495,10 +504,17 @@ describe('项目 Word 格式链路', () => {
     const request = generate.mock.calls[0]![0]
     const block = request.messages[0]!.content[0]!
     if (block.type !== 'text') throw new Error('格式输入必须是文本')
-    const input = JSON.parse(block.text) as { templateParagraphs: string[]; candidateColumns: string[] }
+    const input = JSON.parse(block.text) as { templateParagraphs: string[]
+      candidateColumns: string[]
+      fields: Array<{ position: number; key?: string; label: string; options?: string[]; min?: number; max?: number }> }
     expect(input.templateParagraphs.join('')).toContain('正文小四宋体')
-    expect(input.candidateColumns).toEqual(['id', 'name', 'roles', 'samples'])
-    expect(request.system).toContain('必须逐字选择 fields 第一列中的一个完整字段键')
+    expect(input.candidateColumns).toEqual(['position', 'name', 'roles', 'samples'])
+    expect(input.fields).toContainEqual(expect.objectContaining({
+      position: view.fields.findIndex(field => field.key === 'body.lineRule'), label: '正文行距类型', options: ['auto', 'exact', 'atLeast'],
+    }))
+    expect(input.fields).toContainEqual(expect.objectContaining({ label: '正文字号（磅）', min: 5, max: 96 }))
+    expect(input.fields.every(field => field.key === undefined)).toBe(true)
+    expect(request.system).toContain('格式键和样式身份由程序绑定')
     expect(append.mock.calls[0]![0]).toBe('bid.word-format.request')
   })
 

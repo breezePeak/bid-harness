@@ -1,4 +1,4 @@
-/** Writer 的叶节正文校验与资料短引用；持久化身份全部由 Host 解析。 */
+/** Writer 的叶节正文校验与资料位置选择；持久化身份全部由 Host 绑定。 */
 import { readFile } from 'node:fs/promises'
 import { ToolArgsError, type ObjectJsonSchema } from '@deepseek-ai/dsh-tools'
 import { z } from 'zod'
@@ -13,10 +13,12 @@ import { assertNoLinkedPath, within } from './workspace-path.ts'
 import { normalizeWebEvidenceUrl, parseWebEvidenceSourcesArtifact, webEvidenceContentSha256, type WebEvidenceSource } from './web-evidence-source-artifacts.ts'
 import type { WebEvidenceSnapshot } from './web-evidence-snapshot.ts'
 import { buildWebEvidenceChunkIndex } from './web-evidence-chunks.ts'
-import { normalizeFlowchartInputs, type FlowchartSpec } from './flowchart.ts'
+import { bindFlowchartModelAnchors, bindFlowchartModelInputs, flowchartModelDraftSchema, normalizeFlowchartInputs, projectFlowchartModelAnchors, type FlowchartSpec } from './flowchart.ts'
 import { indexChapterContentBlocks } from './chapter-content-reuse.ts'
+import { parseDocumentChunkIndex } from './document-chunk.ts'
 
 const text = z.string().trim().min(1)
+const position = z.number().int().nonnegative()
 const strings = z.array(text).optional()
 const localSemantics = { usage: z.enum(['reference', 'background', 'reuse', 'adapt']), summary: text }
 const webSemantics = { usage: z.enum(['reference', 'background']), summary: text, supports: text }
@@ -28,22 +30,19 @@ const writerInput = z.object({
   markdown: text,
   metadata: z.object({
     local_materials_used: z.array(z.union([
-      z.object({ material_ref: text, ...localSemantics }).strict(),
-      z.object({ file_ref: text, chunk: text, ...localSemantics }).strict(),
+      z.object({ material_position: position, ...localSemantics }).strict(),
+      z.object({ file_position: position, chunk_position: position, ...localSemantics }).strict(),
     ])).optional(),
-    web_materials_used: z.array(z.object({ web_ref: text, ...webSemantics }).strict()).optional(),
+    web_materials_used: z.array(z.object({ web_position: position, ...webSemantics }).strict()).optional(),
     additional_web_materials: z.array(transientWebEvidenceMaterialSchema).optional(),
     unresolved_topics: strings,
     handoff: z.object(handoffFields).strict().optional(),
-    flowcharts: z.array(z.object({
-      type: z.literal('flowchart').optional(), key: z.string().trim().regex(/^[A-Za-z0-9_-]{1,64}$/u), title: text, purpose: text.optional(), direction: z.enum(['TB', 'LR']).optional(),
-      nodes: z.array(z.object({ key: text, type: z.enum(['start', 'end', 'process', 'decision', 'document', 'subprocess']), text }).strict()),
-      edges: z.array(z.object({ from: text, to: text, label: text.optional() }).strict()),
-    }).strict()).max(100).optional(),
+    flowcharts: z.array(flowchartModelDraftSchema).max(100).optional(),
   }).strict(),
 }).strict()
 
 const stringParameter = { type: 'string' as const }
+const positionParameter = { type: 'integer' as const }
 const stringArray = { type: 'array' as const, items: stringParameter }
 const localProperties = { usage: { type: 'string' as const, enum: ['reference', 'background', 'reuse', 'adapt'] }, summary: stringParameter }
 const webProperties = { usage: { type: 'string' as const, enum: ['reference', 'background'] }, summary: stringParameter, supports: stringParameter }
@@ -55,21 +54,22 @@ export const chapterWriterOutputSchema: ObjectJsonSchema = {
     metadata: {
       type: 'object', properties: {
         local_materials_used: { type: 'array', items: { oneOf: [
-          { type: 'object', properties: { material_ref: stringParameter, ...localProperties }, required: ['material_ref', 'usage', 'summary'], additionalProperties: false },
-          { type: 'object', properties: { file_ref: stringParameter, chunk: stringParameter, ...localProperties }, required: ['file_ref', 'chunk', 'usage', 'summary'], additionalProperties: false },
+          { type: 'object', properties: { material_position: positionParameter, ...localProperties }, required: ['material_position', 'usage', 'summary'], additionalProperties: false },
+          { type: 'object', properties: { file_position: positionParameter, chunk_position: positionParameter, ...localProperties }, required: ['file_position', 'chunk_position', 'usage', 'summary'], additionalProperties: false },
         ] } },
-        web_materials_used: { type: 'array', items: { type: 'object', properties: { web_ref: stringParameter, ...webProperties }, required: ['web_ref', 'usage', 'summary', 'supports'], additionalProperties: false } },
+        web_materials_used: { type: 'array', items: { type: 'object', properties: { web_position: positionParameter, ...webProperties }, required: ['web_position', 'usage', 'summary', 'supports'], additionalProperties: false } },
         additional_web_materials: { type: 'array', items: { type: 'object', properties: { url: stringParameter, ...webProperties }, required: ['url', 'usage', 'summary', 'supports'], additionalProperties: false } },
         unresolved_topics: stringArray,
         handoff: { type: 'object', properties: Object.fromEntries(Object.keys(handoffFields).map(key => [key, stringArray])), additionalProperties: false },
         flowcharts: { type: 'array', items: { type: 'object', properties: {
-          type: { type: 'string', enum: ['flowchart'] }, key: stringParameter, title: stringParameter, purpose: stringParameter,
-          direction: { type: 'string', enum: ['TB', 'LR'] },
+          title: stringParameter, purpose: stringParameter,
           nodes: { type: 'array', items: { type: 'object', properties: {
-            key: stringParameter, type: { type: 'string', enum: ['start', 'end', 'process', 'decision', 'document', 'subprocess'] }, text: stringParameter,
-          }, required: ['key', 'type', 'text'], additionalProperties: false } },
-          edges: { type: 'array', items: { type: 'object', properties: { from: stringParameter, to: stringParameter, label: stringParameter }, required: ['from', 'to'], additionalProperties: false } },
-        }, required: ['key', 'title', 'nodes', 'edges'], additionalProperties: false } },
+            type: { type: 'string', enum: ['start', 'end', 'process', 'decision', 'document', 'subprocess'] }, text: stringParameter,
+          }, required: ['type', 'text'], additionalProperties: false } },
+          edges: { type: 'array', items: { type: 'object', properties: {
+            from_position: positionParameter, to_position: positionParameter, label: stringParameter,
+          }, required: ['from_position', 'to_position'], additionalProperties: false } },
+        }, required: ['title', 'nodes', 'edges'], additionalProperties: false } },
       }, additionalProperties: false,
     },
   }, required: ['markdown', 'metadata'], additionalProperties: false,
@@ -82,19 +82,39 @@ export interface ChapterWriterReferences {
   readonly web: Map<string, WebEvidenceSource & { read_path: string }>
   /** source_id 对应的当前不可用原因；包含尚未获发 W 的坏来源。 */
   readonly unavailable: Map<string, string>
+  readonly chunks: Map<string, readonly { id: string; path: string; heading_path: string[] }[]>
+  readonly dependencyFlowcharts: readonly { readonly chart: FlowchartSpec; readonly chapterTitle: string }[]
 }
 
 /**
  * 为当前章节分配稳定的已映射材料和补搜文件编号。
  * @param context 当前章节输入。
+ * @param dependencyFlowcharts 已完成强依赖章节的可引用图表，按冻结顺序排列。
  * @returns 章节内 M/F 引用表，不包含框架 Evidence。
  */
-export function createChapterWriterReferences(context: ChapterContext): ChapterWriterReferences {
+export function createChapterWriterReferences(context: ChapterContext,
+  dependencyFlowcharts: ChapterWriterReferences['dependencyFlowcharts'] = []): ChapterWriterReferences {
   return {
     materials: new Map([...context.relatedMaterials, ...context.referenceBidMaterials].map((value, index) => [`M${index + 1}`, value])),
     files: new Map(context.availableLocalCorpus.filter(file => file.role !== 'outline_framework').map((value, index) => [`F${index + 1}`, value])),
     web: new Map(),
     unavailable: new Map(),
+    chunks: new Map(),
+    dependencyFlowcharts,
+  }
+}
+
+/**
+ * 在模型请求前冻结可补充引用的文件块顺序。
+ * @param workspace 当前资料工作区。
+ * @param refs 当前章节文件和块的位置表。
+ */
+export async function loadChapterWriterChunkReferences(workspace: BidWorkspace, refs: ChapterWriterReferences): Promise<void> {
+  for (const [ref, file] of refs.files) {
+    await assertNoLinkedPath(workspace.root, file.chunk_index_path)
+    const index = parseDocumentChunkIndex(JSON.parse(await readFile(file.chunk_index_path, 'utf8')))
+    refs.chunks.set(ref, index.chunks.map(chunk => ({ id: chunk.id,
+      path: file.chunks_path + '/' + chunk.path, heading_path: chunk.heading_path })))
   }
 }
 
@@ -189,34 +209,41 @@ export function renderChapterWriterReferences(context: ChapterContext, refs: Cha
     }
   }
   return [
-    '资料提交用下列 M/F/W 短引用；grep/read 必须使用表中真实路径，短引用不是路径。',
-    `Mapped Materials：${JSON.stringify([...refs.materials].map(([material_ref, material]) => ({
-      material_ref, name: [...refs.files.values()].find(file => file.file_id === material.file_id)?.name,
-      role: material.source_kind, allowed_usage: usage(material.source_kind), summary: material.summary,
-      ...context.localReadLocations.find(value => value.file_id === material.file_id && value.chunk === material.chunk),
+    '资料选择使用下列从 0 开始的位置；grep/read 使用表中程序提供的读取路径。实际资料身份与块引用全部由程序绑定。',
+    `Dependency Flowcharts：${JSON.stringify(refs.dependencyFlowcharts.map(({ chart, chapterTitle }, reference_position) => ({
+      reference_position, title: chart.title, chapter_title: chapterTitle,
     })))}`,
-    `Available Evidence Files：${JSON.stringify([...refs.files].map(([file_ref, file]) => ({ file_ref, name: file.name, role: file.role, chunks_path: file.chunks_path, chunk_index_path: file.chunk_index_path, allowed_usage: usage(file.role) })))}`,
-    `Verified Web Chunks：${JSON.stringify([...refs.web].filter(([, source]) => !unavailable.has(source.source_id)).flatMap(([web_ref, source]) => {
+    `Mapped Materials：${JSON.stringify([...refs.materials.values()].map((material, material_position) => ({
+      material_position, name: [...refs.files.values()].find(file => file.file_id === material.file_id)?.name,
+      role: material.source_kind, allowed_usage: usage(material.source_kind), summary: material.summary,
+      read_path: context.localReadLocations.find(value => value.file_id === material.file_id && value.chunk === material.chunk)?.chunk_path,
+    })))}`,
+    `Available Evidence Files：${JSON.stringify([...refs.files].map(([ref, file], file_position) => ({ file_position, name: file.name, role: file.role,
+      allowed_usage: usage(file.role), chunks: (refs.chunks.get(ref) ?? []).map((chunk, chunk_position) => ({
+        chunk_position, read_path: chunk.path, heading_path: chunk.heading_path,
+      })) })))}`,
+    `Verified Web Chunks：${JSON.stringify([...refs.web.values()].flatMap((source, web_position) => {
+      if (unavailable.has(source.source_id)) return []
       const materials = context.webMaterials.filter(material => material.source_id === source.source_id)
       return (materials.length === 0 ? [undefined] : materials).map(material => ({
-        web_ref, url: source.final_url,
+        web_position, url: source.final_url,
         allowed_usage: ['reference', 'background'], truncated: source.truncated,
         ...(material === undefined ? {} : { summary: material.summary, supports: material.supports }),
         mapped_chunks: context.webReadLocations.filter(location => location.source_id === source.source_id
           && (material === undefined || material.chunk_refs.includes(location.chunk_ref))).map(location => ({
-          chunk_ref: location.chunk_ref, read_path: location.read_path, offset: location.start_line,
+          read_path: location.read_path, offset: location.start_line,
           limit: location.end_line - location.start_line + 1,
         })),
       }))
     }))}`,
     `不可用 Web 来源：${JSON.stringify([...unavailable].map(([source_id, reason]) => ({
-      source_id, web_ref: [...refs.web].find(([, source]) => source.source_id === source_id)?.[0], reason,
+      web_position: [...refs.web.values()].findIndex(source => source.source_id === source_id), reason,
       mapped_materials: context.webMaterials.filter(material => material.source_id === source_id).map(material => ({
         usage: material.usage, summary: material.summary, supports: material.supports,
       })),
     })))}`,
     '不可用来源不能作为证据引用；对应写作要求仍须回应，请补充有效来源，无法证实时明确记录未解决事项。',
-    '本地条目只提交 {material_ref, usage, summary} 或 {file_ref, chunk, usage, summary}，两者不可并用；已登记网页只提交 {web_ref, usage, summary, supports}，并仅按 mapped_chunks 给出的行范围读取。新网页提交 {url, usage, summary, supports}，必须有当前 Writer 成功 fetch 的正文。',
+    '本地条目只提交 {material_position, usage, summary} 或 {file_position, chunk_position, usage, summary}，两者不可并用；已登记网页只提交 {web_position, usage, summary, supports}，并仅按 mapped_chunks 给出的行范围读取。新网页提交 {url, usage, summary, supports}，必须有当前 Writer 成功 fetch 的正文。不要抄写任何短引用、文件身份或 chunk 身份。',
   ].join('\n')
 }
 
@@ -244,14 +271,14 @@ export function mergeChapterWebMaterials(materials: readonly WebEvidenceMaterial
 }
 
 /**
- * 拒绝正文新增目录，校验 Writer 短引用并注入章节身份与 Blueprint 索引；实际 W 引用重读账本和正文，账本读取或解析失败传播，不写文件。
+ * 拒绝正文新增目录，绑定 Writer 资料和图表位置，注入章节身份与 Blueprint 索引；实际网页重读账本和正文，账本读取或解析失败传播，不写文件。
  * @param workspace 资料工作区。
  * @param manifest 当前资料身份。
  * @param context 固定章节输入。
  * @param refs 当前章节引用表。
  * @param value 模型结构化提交参数。
  * @param snapshots 当前 Writer 成功 fetch 的实际正文。
- * @param preservedFlowcharts 须原样复用的迁移流程图；同 key 的模型定义不替代它们。
+ * @param preservedFlowcharts 须原样复用的迁移流程图，模型不能改写定义。
  * @param preservedMarkdown 须保留的分配原文；原文块占位符由 Host 展开，缺失块拒绝提交。
  * @returns durable candidate parser 可接受的候选，新增 URL 尚待 Host 持久化绑定。
  */
@@ -261,9 +288,14 @@ export async function bindChapterWriterInput(
   preservedMarkdown?: string,
 ): Promise<BoundChapterCandidate> {
   const input = chapterToolArgs(writerInput, value)
+  const flowcharts = normalizeFlowchartInputs(context.section.id, [
+    ...preservedFlowcharts, ...bindFlowchartModelInputs(context.section.id, input.metadata.flowcharts ?? [], preservedFlowcharts.length,
+      [...preservedFlowcharts, ...refs.dependencyFlowcharts.map(value => value.chart)].map(chart => chart.key ?? chart.id)),
+  ])
+  const boundMarkdown = bindFlowchartModelAnchors(input.markdown, flowcharts, refs.dependencyFlowcharts.map(value => value.chart))
   const originalBlocks = preservedMarkdown === undefined ? [] : indexChapterContentBlocks(context.section.id, preservedMarkdown)
     .filter(block => block.type !== 'heading' && block.markdown.trim() !== '')
-  const markdown = preservedMarkdown === undefined ? input.markdown : input.markdown.replace(/\{\{reuse:(\d+)\}\}/gu,
+  const markdown = preservedMarkdown === undefined ? boundMarkdown : boundMarkdown.replace(/\{\{reuse:(\d+)\}\}/gu,
     (_marker, position: string) => {
       const block = originalBlocks[Number(position)]
       if (block === undefined) throw new ToolArgsError(['markdown: 未知原文块位置 ' + position])
@@ -278,14 +310,16 @@ export async function bindChapterWriterInput(
   for (const [index, material] of (input.metadata.local_materials_used ?? []).entries()) {
     const path = `metadata.local_materials_used.${index}`
     let identity: Pick<LocalEvidenceMaterial, 'source_kind' | 'file_id' | 'chunk'>
-    if ('material_ref' in material) {
-      const mapped = refs.materials.get(material.material_ref)
-      if (mapped === undefined) throw new ToolArgsError([`${path}.material_ref: 未知 ${material.material_ref}。`])
+    if ('material_position' in material) {
+      const mapped = [...refs.materials.values()][material.material_position]
+      if (mapped === undefined) throw new ToolArgsError([`${path}.material_position: 未知位置 ${material.material_position}。`])
       identity = mapped
     } else {
-      const file = refs.files.get(material.file_ref)
-      if (file === undefined || file.role === 'outline_framework') throw new ToolArgsError([`${path}.file_ref: 未知或不可引用 ${material.file_ref}。`])
-      identity = { source_kind: file.role, file_id: file.file_id, chunk: material.chunk }
+      const entry = [...refs.files][material.file_position]
+      const file = entry?.[1]
+      const chunk = entry === undefined ? undefined : refs.chunks.get(entry[0])?.[material.chunk_position]
+      if (file === undefined || file.role === 'outline_framework' || chunk === undefined) throw new ToolArgsError([`${path}: 未知文件或资料块位置。`])
+      identity = { source_kind: file.role, file_id: file.file_id, chunk: chunk.id }
     }
     try {
       const resolved = await resolveEvidenceChunk(workspace, manifest, identity)
@@ -307,17 +341,17 @@ export async function bindChapterWriterInput(
     currentSources = parseWebEvidenceSourcesArtifact(JSON.parse(await readFile(ledgerPath, 'utf8'))).sources
   }
   for (const [index, material] of webMaterials.entries()) {
-    const source = refs.web.get(material.web_ref)
-    if (source === undefined) throw new ToolArgsError([`metadata.web_materials_used.${index}.web_ref: 未知 ${material.web_ref}。`])
+    const source = [...refs.web.values()][material.web_position]
+    if (source === undefined) throw new ToolArgsError([`metadata.web_materials_used.${index}.web_position: 未知位置 ${material.web_position}。`])
     const current = currentSources.find(value => value.source_id === source.source_id)
     if (current === undefined || !sameWebIdentity(current, source)) {
-      throw new ToolArgsError([`metadata.web_materials_used.${index}.web_ref: ${material.web_ref} 的来源已从账本移除或身份不匹配。`])
+      throw new ToolArgsError([`metadata.web_materials_used.${index}.web_position: 位置 ${material.web_position} 的来源已从账本移除或身份不匹配。`])
     }
     await readChapterWebSource(workspace, current)
     const candidates = context.webMaterials.filter(value => value.source_id === source.source_id)
     const use = mappedUses.get(source.source_id) ?? 0
     const mapped = candidates[use] ?? candidates[0]
-    if (mapped === undefined) throw new ToolArgsError([`metadata.web_materials_used.${index}.web_ref: ${material.web_ref} 不属于当前章节的 S4 映射。`])
+    if (mapped === undefined) throw new ToolArgsError([`metadata.web_materials_used.${index}.web_position: 位置 ${material.web_position} 不属于当前章节的 S4 映射。`])
     mappedUses.set(source.source_id, use + 1)
     web.push({
       source_id: source.source_id, snapshot_path: source.snapshot_path,
@@ -339,10 +373,6 @@ export async function bindChapterWriterInput(
       usage: material.usage, summary: material.summary, supports: material.supports })
   }
   mergeChapterWebMaterials([...web, ...additionalBound])
-  const preservedKeys = new Set(preservedFlowcharts.map(chart => chart.key))
-  const flowcharts = normalizeFlowchartInputs(context.section.id, [
-    ...preservedFlowcharts, ...(input.metadata.flowcharts ?? []).filter(chart => !preservedKeys.has(chart.key)),
-  ])
   const parsed = parseChapterCandidate({
     markdown, section_id: context.section.id,
     metadata: {
@@ -369,33 +399,39 @@ export async function bindChapterWriterInput(
 /**
  * 将已审核候选投影为修复 Writer 使用的语义输入。
  * @param candidate 上次完整候选。
- * @param refs 本章稳定短引用。
+ * @param refs 本章稳定资料位置表。
+ * @param preservedFlowcharts 程序保留的只读原图，不交回模型重写。
  * @returns 修复提示中不含内部身份或 Blueprint 索引的候选。
  */
-export function projectChapterWriterCandidate(candidate: AcceptedChapterCandidate, refs: ChapterWriterReferences): unknown {
+export function projectChapterWriterCandidate(candidate: AcceptedChapterCandidate, refs: ChapterWriterReferences,
+  preservedFlowcharts: readonly FlowchartSpec[] = []): unknown {
   const { section_id: _sectionId, ...handoff } = candidate.metadata.handoff
   return {
-    markdown: candidate.markdown,
+    markdown: projectFlowchartModelAnchors(candidate.markdown, candidate.metadata.flowcharts,
+      refs.dependencyFlowcharts.map(value => value.chart)),
     metadata: {
       local_materials_used: candidate.metadata.local_materials_used.map((material) => {
         const mapped = [...refs.materials].find(([, value]) => value.file_id === material.file_id && value.chunk === material.chunk)
         const semantics = { usage: material.usage, summary: material.summary }
-        return mapped !== undefined ? { material_ref: mapped[0], ...semantics }
-          : { file_ref: [...refs.files].find(([, value]) => value.file_id === material.file_id)?.[0], chunk: material.chunk, ...semantics }
+        const filePosition = [...refs.files.values()].findIndex(value => value.file_id === material.file_id)
+        const fileRef = [...refs.files.keys()][filePosition]
+        return mapped !== undefined ? { material_position: [...refs.materials.keys()].indexOf(mapped[0]), ...semantics }
+          : { file_position: filePosition, chunk_position: fileRef === undefined ? -1
+            : refs.chunks.get(fileRef)?.findIndex(chunk => chunk.id === material.chunk) ?? -1, ...semantics }
       }),
       web_materials_used: candidate.metadata.web_materials_used.map(material => ({
-        web_ref: [...refs.web].find(([, value]) => value.source_id === material.source_id)?.[0],
+        web_position: [...refs.web.values()].findIndex(value => value.source_id === material.source_id),
         usage: material.usage, summary: material.summary, supports: material.supports })),
       unresolved_topics: candidate.metadata.unresolved_topics, handoff,
-      flowcharts: candidate.metadata.flowcharts.map(flowchart => ({
-        type: 'flowchart' as const,
-        ...(flowchart.key === undefined ? {} : { key: flowchart.key }),
-        title: flowchart.title,
-        ...(flowchart.purpose === undefined ? {} : { purpose: flowchart.purpose }),
-        direction: flowchart.direction,
-        nodes: flowchart.nodes.map(node => ({ key: node.id, type: node.type, text: node.text })),
-        edges: flowchart.edges,
-      })),
+      flowcharts: candidate.metadata.flowcharts
+        .filter(flowchart => !preservedFlowcharts.some(original => original.key === flowchart.key)).map(flowchart => ({
+          title: flowchart.title,
+          ...(flowchart.purpose === undefined ? {} : { purpose: flowchart.purpose }),
+          nodes: flowchart.nodes.map(node => ({ type: node.type, text: node.text })),
+          edges: flowchart.edges.map(edge => ({ from_position: flowchart.nodes.findIndex(node => node.id === edge.from),
+            to_position: flowchart.nodes.findIndex(node => node.id === edge.to),
+            ...(edge.label === undefined ? {} : { label: edge.label }) })),
+        })),
     },
   }
 }

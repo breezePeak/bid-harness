@@ -7,6 +7,7 @@ import type { ScoringResponsePointCatalog } from './scoring-response-point-artif
 import type { TenderScoringArtifact } from './tender-analysis-artifacts.ts'
 import { validateOutlineSharedStructure } from './outline-shared-validator.ts'
 import type { StageValidationIssue } from './control-plane-contract.ts'
+import { deriveOutlineModelTree } from './outline-model-tree.ts'
 
 const ids = z.array(z.string().regex(/^RP-\d{6}$/u))
 const [update, add, remove, split, merge, move] = outlineEditOperationSchema.options
@@ -45,9 +46,9 @@ function applyReferences(section: OutlineSection, input: z.infer<typeof referenc
 }
 
 /**
- * 应用模型选择的局部目录编辑并重建派生引用。
+ * 应用正式局部目录编辑并重建派生引用，保留显式可写状态的严格校验。
  * @param outline 当前候选。
- * @param value 模型返回的局部操作数组。
+ * @param value 使用正式身份的局部操作数组。
  * @param catalog 只读正式响应点。
  * @param scoring 正式评分项。
  * @returns 应用局部编辑并规范化的候选；显式转为结构章时清空其响应点，叶节覆盖由调用方校验。
@@ -55,7 +56,26 @@ function applyReferences(section: OutlineSection, input: z.infer<typeof referenc
 export function applyOutlineRepair(
   outline: OutlineArtifact, value: unknown, catalog: ScoringResponsePointCatalog, scoring: TenderScoringArtifact,
 ): OutlineArtifact {
-  let candidate = structuredClone(outline)
+  return applyRepair(outline, value, catalog, scoring, false)
+}
+
+/**
+ * 应用已绑定位置的模型操作，并由 Host 同步结构节点状态。
+ * @param outline 当前候选。
+ * @param value 已绑定正式身份的模型操作。
+ * @param catalog 正式响应点清单。
+ * @param scoring 正式评分项。
+ * @returns 保留叶节语义并通过正式格式校验的目录。
+ */
+export function applyOutlineModelRepair(
+  outline: OutlineArtifact, value: unknown, catalog: ScoringResponsePointCatalog, scoring: TenderScoringArtifact,
+): OutlineArtifact {
+  return applyRepair(outline, value, catalog, scoring, true)
+}
+
+function applyRepair(outline: OutlineArtifact, value: unknown, catalog: ScoringResponsePointCatalog,
+  scoring: TenderScoringArtifact, modelTree: boolean): OutlineArtifact {
+  let candidate = modelTree ? deriveOutlineModelTree(structuredClone(outline)) : structuredClone(outline)
   for (const operation of z.array(outlineAssociationRepairOperationSchema).parse(value)) {
     const before = candidate
     const priorIds = new Set(before.sections.map(section => section.id))
@@ -73,6 +93,7 @@ export function applyOutlineRepair(
         section.scoring_response_point_ids = []
         section.scoring_response_points = []
       }
+      if (modelTree) candidate = deriveOutlineModelTree(candidate)
       continue
     }
     const structureIssues: StageValidationIssue[] = []
@@ -108,6 +129,7 @@ export function applyOutlineRepair(
       const order = structural || operation.type === 'add_section' && previous.parent_id === operation.parent_id ? section.order : previous.order
       return { ...section, order, level: structural ? section.level : previous.level }
     }) }
+    if (modelTree) candidate = deriveOutlineModelTree(candidate)
   }
   return normalizeOutlineCandidate(candidate, catalog, scoring)
 }

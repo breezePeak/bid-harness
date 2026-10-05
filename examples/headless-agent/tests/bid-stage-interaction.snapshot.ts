@@ -388,7 +388,8 @@ it('S4 waiting_user 通过源码 Loader 执行受控对话修改', async () => {
         ['bid.user_confirmation.required', 'evidence_mapping'],
         ['bid.user_confirmation.required', 'evidence_mapping'],
       ])
-      expect(parent).toContain('编号不是 Section ID')
+      expect(parent).toContain('对应到 objects.sections 或 objects.draft_sections 的位置')
+      expect(parent).toContain('身份与草稿版本由程序绑定')
       expect(parent).not.toContain('bid.user_confirmation.received')
       const starts = events.filter(event => event.type === 'bid.run.started'
         && event.data.run.work.kind === 'capability_task')

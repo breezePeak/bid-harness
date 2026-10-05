@@ -47,8 +47,12 @@ it('S5 通过真实 Loader 在 Writer 补搜后重研 Evidence 并审核最终�
       const researchFinal = childLogs.find(log => log.includes('research-final-finish'))!
       expect(researchInitial).toContain('allow_outline_refinement：false')
       expect(writerLog).toContain('Mapped Materials：[]')
-      expect(writerLog).toContain('F999')
-      expect(writerLog).toContain('未知 W1')
+      const badReference = calls.find(event => String(event.data.callId) === 'reject-bad-reference')!
+      expect(JSON.parse(badReference.data.arguments)).toMatchObject({ metadata: { local_materials_used: [{ file_position: 998 }] } })
+      expect(events.find(event => event.type === 'tool/result' && event.data.message.source.callId === badReference.data.callId))
+        .toMatchObject({ data: { message: { content: [{ isError: true }] } } })
+      expect(writerLog).toContain('未知文件或资料块位置')
+      expect(writerLog).toContain('web_position: 未知位置 0')
       expect(writerLog).toContain('正文包含系统内部编号 REQ-1')
       expect(writerLog).toContain('S5 Chapter Child 不可读取 tender 或未入库资料。')
       expect(events.find(event => event.type === 'tool/result')).toMatchObject({ data: { message: { content: [{ isError: true }] } } })

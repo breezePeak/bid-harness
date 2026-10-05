@@ -32,6 +32,7 @@ import { seedCapabilityProject } from '../capability-fixture.ts'
 import { ChapterAdapter } from './chapter-writing-adapter.ts'
 import IntegrationFileSystem, { registerIntegrationTools } from './evidence-mapping-loop.ts'
 import { mappingModelReply } from './mapping-model-positions.ts'
+import { chapterModelReply } from './chapter-model-positions.ts'
 
 function call(name: string, args: object): StreamChunk[] {
   return [{ type: 'block-start', index: 0, blockType: 'tool-call' },
@@ -227,12 +228,12 @@ class PlanningAdapter extends ChapterAdapter {
       const { section_id, items } = checklist
       const objects = inputJson<{ sections: Array<{ id: string; position: number }> }>(prompt, '对象位置：')
       const section_position = objects.sections.find(section => section.id === section_id)!.position
-      if (step === 0) yield* call('submit_section_mapping', { section_position, local_materials: [], web_materials: [] })
-      else if (step === 1) yield* call('update_section_task', { section_position, basis: {
+      if (step === 0) yield* mappingModelReply(call('submit_section_mapping', { section_position, local_materials: [], web_materials: [] }), options)
+      else if (step === 1) yield* mappingModelReply(call('update_section_task', { section_position, basis: {
         kind: 'section_responsibility', explanation: '本节只说明本阶段的执行方法，不扩展现实企业事实。', requirement_positions: [],
       }, writing_dimensions: ['保留源章执行步骤、产物和校验记录'], answer_plan: items.map(item => ({ target_refs: [item.item_ref], mode: 'proposal',
         content: '沿用源章已分配的流程方法和记录，按本阶段职责形成结果。',
-        basis: [{ kind: 'section_responsibility' }], boundary: '方法是本方案设计，不宣称企业已有能力或新事实。' })) })
+        basis: [{ kind: 'section_responsibility' }], boundary: '方法是本方案设计，不宣称企业已有能力或新事实。' })) }), options)
       else yield* call('finish_mapping_task', {})
       return
     }
@@ -384,11 +385,11 @@ class PlanningAdapter extends ChapterAdapter {
                   { title: '校验结果', purpose: '校验结果', must_answer: ['校验结果'] },
                   { title: '交付成果', purpose: '交付成果', must_answer: ['交付成果'] },
                 ] }] : [
-                { type: 'add_section', parent_position: 2, sibling_position: 0, writable: true,
+                { type: 'add_section', parent_position: 2, sibling_position: 0,
                   title: '收集输入', purpose: '收集输入并回答主题1', must_answer: ['回答主题1', '收集输入'] },
-                { type: 'add_section', parent_position: 2, sibling_position: 1, writable: true,
+                { type: 'add_section', parent_position: 2, sibling_position: 1,
                   title: '校验结果', purpose: '校验结果', must_answer: ['校验结果'] },
-                { type: 'add_section', parent_position: 2, sibling_position: 2, writable: true,
+                { type: 'add_section', parent_position: 2, sibling_position: 2,
                   title: '交付成果', purpose: '交付成果', must_answer: ['交付成果'] },
               ],
             } } },
@@ -446,11 +447,11 @@ class PlanningAdapter extends ChapterAdapter {
         ? '\n\n' + (draftWrite === 0 ? '需要整改的候选新增说明。' : '整改后的候选新增说明。') : '')
         + (prompt.includes('保留全部原文和原流程图，在原图旁说明交付前必须完成校验。')
           ? '\n\n交付成果前必须完成校验，按已通过的成果清单逐项核对并形成交接记录。' : '')
-      yield* call('submit_chapter', { markdown, metadata: blockLine === undefined && seed.includes('{{flowchart:process-flow}}') ? {
+      yield* chapterModelReply(call('submit_chapter', { markdown, metadata: blockLine === undefined && seed.includes('{{flowchart:process-flow}}') ? {
         flowcharts: [{ key: 'process-flow', title: '流程关系', direction: 'TB',
           nodes: [{ key: 'start', type: 'start', text: '启动' }, { key: 'finish', type: 'end', text: '完成' }],
           edges: [{ from: 'start', to: 'finish' }] }],
-      } : {} })
+      } : {} }), options)
       return
     }
     if (this.sixSparse && options.tools?.some(tool => tool.name === 'finish_chapter_review')
@@ -480,7 +481,8 @@ class PlanningAdapter extends ChapterAdapter {
           const args = JSON.parse(chunk.block.arguments) as object
           yield { ...chunk, block: { ...chunk.block, arguments: JSON.stringify({ ...args,
             assignment_conflicts: [{ task: '步骤只要求另一节正文', basis: '步骤指令与当前章节职责冲突，须由 Main 调整能力计划。',
-              related_section_ids: [section.id] }],
+              related_section_positions: [inputJson<Array<{ id: string }>>(prompt, 'Confirmed Outline Responsibilities：')
+                .findIndex(item => item.id === section.id)] }],
           }) } }
         } else yield chunk
       }

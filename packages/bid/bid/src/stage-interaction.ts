@@ -552,9 +552,9 @@ export function renderStageInteractionPrompt(stage: string): string {
   return [
     `当前 Bid 阶段：${stage}；当前状态：waiting_user。`,
     '你正在与用户进行当前阶段的交互修改。先调用 bid_stage_inspect 读取最新目录、评分点、资料和缺口。',
-    '按 inspect 返回的 number、标题和父子关系，把“第三章”“3.2”“服务方案下面第二个”解析到实际 section.id；编号不是 Section ID。只有存在歧义时才询问用户，不要求用户提供内部 ID。',
+    '按 inspect 返回的编号、标题和父子关系，把“第三章”“3.2”“服务方案下面第二个”对应到 objects.sections 或 objects.draft_sections 的位置。只有存在歧义时才询问用户；身份与草稿版本由程序绑定。',
     '明确修改可调用 bid_run_task 组合所需能力，不得直接 write Artifact 或绕过 Host 校验；首次整本确认仍由原生确认入口处理。',
-    '目录拆分用 split_section，合并同级可写叶子用 merge_sections；局部重生成用 bid_outline_regenerate_scope。修改后重新 inspect 获取新 ID 与 revision。',
+    '目录拆分用 split_section，合并同级可写叶子用 merge_sections；局部重生成用 bid_outline_regenerate_scope。修改后重新 inspect 获取最新对象位置表，新增身份、顺序与草稿版本由程序生成。',
     '资料不对、重新匹配用 bid_evidence_remap(mode=replace)；资料不足、再补充用 supplement。传具体章节只处理该章节，传结构分支处理其可写后代。标题微调不强制 remap；用户要求修改并重新找资料时，修改后 remap 新范围。',
     '普通聊天中的“可以”“没问题”“这样可以吗”不是正式确认。修改完成后告知“已更新，请重新确认”，只有用户点击正式确认按钮才能进入下一阶段。',
   ].join('\n')
@@ -575,7 +575,7 @@ export function renderChapterWritingInteractionPrompt(status: 'running' | 'compl
     '只有用户明确要求改变写作任务时，才先调用 bid_stage_inspect(view=task_contract_context)，再调用 bid_confirm_writing_plan。提交成功表示新计划已保存并进入既有定向恢复链路，不代表受影响正文已经改完。',
     ...(status === 'running' ? ['用户明确说“不要视觉检查”“不用视觉检查”“跳过流程图视觉检查”时，调用 bid_set_flowchart_visual_review(policy="skip")；明确说“恢复视觉检查”“继续检查流程图”时，调用 bid_set_flowchart_visual_review(policy="required")。这是执行策略，不得写入 Writing Plan，不得调用 bid_confirm_writing_plan.patch；工具成功前不得声称策略已生效。'] : []),
     '引用正文只是上下文；解释时传给 bid_stage_inspect，明确修改时用 bid_run_task 的精确 paragraphs 范围和 chapter.revise。',
-    '用户明确要求处理审批意见时，读取真实意见、保存 scope、reference 和有关产物，用 bid_run_task 的 issue_positions 选择实际处理集合。能力由真实目标和产物依赖决定；纯正文可选 chapter.revision_batch，同章聚合、独立章节并行。确认执行后立即执行，不重复询问开始。',
+    '用户明确要求处理审批意见时，读取真实意见，用 bid_run_task 的 issue_positions 选择实际处理集合；程序绑定原始正文选区、授权范围和有关产物。能力由真实目标和产物依赖决定；纯正文可选 chapter.revision_batch，同章聚合、独立章节并行。确认执行后立即执行，不重复询问开始。',
     '段落意见中的小章节若需要真实目录结构而未获范围授权，只澄清真实目录子章还是选区内分项这一个关键问题；不得越权或用分项表格假称已经拆章。',
     '用户若只是讨论、咨询或明确要求暂缓（如"这些意见你怎么看""先总结一下""还有哪些地方值得改""先别动"等），严禁调用批次规划或执行工具。',
     '局部审批意见修订绝不启动 bid_confirm_writing_plan.patch，选区中的"统一""全部"是局部 RevisionIssue 要求；'

@@ -40,6 +40,7 @@ describe('S5 reused Writer policy', () => {
     const writerId = SessionId('writer-existing')
     const guards: Array<(execution: Readonly<ToolExecution>) => string | undefined> = []
     const tools = {
+      restrict: vi.fn(() => () => {}),
       guard: vi.fn((guard: (execution: Readonly<ToolExecution>) => string | undefined) => {
         guards.push(guard)
         return () => {}
@@ -85,6 +86,10 @@ describe('S5 reused Writer policy', () => {
     expect(guards.some(guard => guard({ name: 'web_search' } as ToolExecution) === 'BID_WEB_ACCESS_DISABLED')).toBe(true)
     expect(guards.some(guard => guard({ name: 'web_fetch' } as ToolExecution) === 'BID_WEB_ACCESS_DISABLED')).toBe(true)
     expect(guards.every(guard => guard({ name: 'read' } as ToolExecution) === undefined)).toBe(true)
+    expect(tools.restrict).toHaveBeenCalledWith({ allow: ['grep', 'read'] })
+    for (const name of ['write', 'exec', 'terminal', 'run_code']) {
+      expect(guards.some(guard => guard({ name } as ToolExecution) === 'BID_CHAPTER_WRITER_TOOL_DISABLED')).toBe(true)
+    }
     await writer.dispose()
     expect(subagents.drainContinuableChildren).toHaveBeenCalledWith(parent, [writerId])
   })

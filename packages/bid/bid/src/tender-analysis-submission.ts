@@ -71,10 +71,10 @@ export interface TenderLocator {
   readonly media_type: string
 }
 
-/** Model-provided source text associated with one tender chunk. */
+/** 模型选择的招标文件、分块位置及来源语义文本。 */
 export interface TenderSourceAnchor {
-  readonly file_ref: string
-  readonly chunk: string
+  readonly file_position: number
+  readonly chunk_position: number
   readonly anchor_text: string
 }
 
@@ -121,8 +121,8 @@ interface ComplianceDraft {
 
 const text = z.string().trim().min(1)
 const sourceAnchorSchema = z.object({
-  file_ref: z.string().regex(/^T[1-9]\d*$/u),
-  chunk: z.string().regex(/^chunk_[0-9]+$/u),
+  file_position: z.number().int().nonnegative(),
+  chunk_position: z.number().int().nonnegative(),
   anchor_text: text,
 }).strict()
 const sourcesSchema = z.array(sourceAnchorSchema).min(1)
@@ -202,21 +202,21 @@ function uniqueSourceRefs(values: readonly TenderSourceRef[]): TenderSourceRef[]
 }
 
 /**
- * Resolve one model-provided anchor to a validated tender chunk.
- * @param workspace Workspace that owns the tender corpus.
- * @param locators Host-built tender identity table for this S2 execution.
- * @param source Model-provided short file reference, chunk id, and source text.
- * @returns Trimmed source text and the chunk-wide canonical line reference.
+ * 从冻结对象位置绑定招标来源身份及分块的真实行范围。
+ * @param workspace 持有招标语料的工作区。
+ * @param locators 本次执行冻结的招标对象表。
+ * @param source 模型选择的文件、分块位置及语义文本。
+ * @returns 去除首尾空白的来源文本和程序生成的正式引用。
  */
 export async function resolveTenderSourceAnchor(
   workspace: BidWorkspace,
   locators: readonly TenderLocator[],
   source: TenderSourceAnchor,
 ): Promise<ResolvedTenderSource> {
-  const locator = locators.find(value => value.file_ref === source.file_ref)
-  if (locator === undefined) throw new ToolArgsError([`file_ref: 未知 tender 引用 ${source.file_ref}。`])
-  const chunk = locator.chunks.get(source.chunk)
-  if (chunk === undefined) throw new ToolArgsError([`chunk: ${source.chunk} 不属于 ${source.file_ref}。`])
+  const locator = locators[source.file_position]
+  if (locator === undefined) throw new ToolArgsError([`file_position: 未知招标文件位置 ${String(source.file_position)}。`])
+  const chunk = [...locator.chunks.values()][source.chunk_position]
+  if (chunk === undefined) throw new ToolArgsError([`chunk_position: 未知招标分块位置 ${String(source.chunk_position)}。`])
   const quote = source.anchor_text.trim()
   if (quote.length === 0) throw new ToolArgsError(['anchor_text: 必须是非空文本。'])
   await assertNoLinkedPath(workspace.root, chunk.absolutePath)
@@ -270,7 +270,7 @@ export async function buildTenderLocators(workspace: BidWorkspace, manifest: Bid
 }
 
 interface PdfPageViewValue {
-  file_ref: string
+  file_position: number
   name: string
   page: number
   page_count: number
@@ -278,7 +278,7 @@ interface PdfPageViewValue {
 }
 
 const pdfPageSchema = z.object({
-  file_ref: z.string().trim().min(1),
+  file_position: z.number().int().nonnegative(),
   page: z.number().int().positive(),
 }).strict()
 
@@ -300,7 +300,7 @@ function pdfPageContent(value: PdfPageViewValue) {
   return [
     {
       type: 'text' as const,
-      text: `<pdf_page>\nfile_ref: ${value.file_ref}\nname: ${value.name}\npage: ${String(value.page)}/${String(value.page_count)}\n</pdf_page>`,
+      text: `<pdf_page>\nfile_position: ${String(value.file_position)}\nname: ${value.name}\npage: ${String(value.page)}/${String(value.page_count)}\n</pdf_page>`,
     },
     { type: 'image' as const, attachment: value.image },
   ]
@@ -430,14 +430,14 @@ export async function attachTenderAnalysisSubmissionRuntime(
     const relatedChunks = []
     const seen = new Set<string>()
     for (const anchor of anchors) {
-      const key = `${anchor.file_ref}\0${anchor.chunk}`
+      const key = `${String(anchor.file_position)}\0${String(anchor.chunk_position)}`
       if (seen.has(key)) continue
       seen.add(key)
-      const locator = locators.find(value => value.file_ref === anchor.file_ref)
-      const chunk = locator?.chunks.get(anchor.chunk)
+      const locator = locators[anchor.file_position]
+      const chunk = locator === undefined ? undefined : [...locator.chunks.values()][anchor.chunk_position]
       if (chunk !== undefined) relatedChunks.push({
-        file_ref: anchor.file_ref,
-        chunk: anchor.chunk,
+        file_position: anchor.file_position,
+        chunk_position: anchor.chunk_position,
         text: await readFile(chunk.absolutePath, 'utf8'),
       })
     }
@@ -445,11 +445,11 @@ export async function attachTenderAnalysisSubmissionRuntime(
       const signal = repairTarget.kind === 'scoring_items'
         ? /技术评分|技术评审|技术评价|评分标准|评分表|评审因素|分值|满分/u
         : repairTarget.kind === 'requirements' ? /技术要求|功能要求|性能要求|应当|应|必须|不得/u : undefined
-      for (const locator of locators) {
-        for (const [chunkId, chunk] of locator.chunks) {
+      for (const [file_position, locator] of locators.entries()) {
+        for (const [chunk_position, chunk] of [...locator.chunks.values()].entries()) {
           const text = await readFile(chunk.absolutePath, 'utf8')
           if (signal !== undefined && !signal.test(text)) continue
-          relatedChunks.push({ file_ref: locator.file_ref, chunk: chunkId, text })
+          relatedChunks.push({ file_position, chunk_position, text })
           // oxlint-disable-next-line typescript/no-unnecessary-condition -- push() 会改变数组长度。
           if (relatedChunks.length >= 3) break
         }
@@ -507,10 +507,10 @@ export async function attachTenderAnalysisSubmissionRuntime(
     async execute(args, exec) {
       if (exec.agent !== agent) throw new Error('BID_ACTION_NOT_ALLOWED')
       const input = toolArgs(args, pdfPageSchema)
-      const locator = locators.find(value => value.file_ref === input.file_ref)
-      if (locator === undefined) throw new ToolArgsError([`file_ref: 未知 tender 引用 ${input.file_ref}。`])
+      const locator = locators[input.file_position]
+      if (locator === undefined) throw new ToolArgsError([`file_position: 未知招标文件位置 ${String(input.file_position)}。`])
       if (locator.media_type !== 'application/pdf') {
-        throw new ToolArgsError([`file_ref: ${input.file_ref} 不是 PDF，不能使用 view_pdf_page。`])
+        throw new ToolArgsError([`file_position: ${String(input.file_position)} 不是 PDF，不能使用 view_pdf_page。`])
       }
       const attachments = agent.ctx.get('attachments')
       if (attachments === undefined) throw new Error('无法查看 PDF 页面：当前运行环境未挂载附件存储。')
@@ -530,7 +530,7 @@ export async function attachTenderAnalysisSubmissionRuntime(
         name: `${basename(locator.name)}-page-${String(input.page)}.png`,
       })
       return {
-        file_ref: locator.file_ref,
+        file_position: input.file_position,
         name: locator.name,
         page: input.page,
         page_count: rendered.pageCount,

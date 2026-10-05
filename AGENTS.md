@@ -65,7 +65,7 @@ DeepSeek Harness 基于仓库内固定版本的 Cordis，所有能力通过插�
 
 ## 插件与运行时
 
-- 模型只负责思考、规划与语义判断；所有实质性落地，包括执行、校验、文件与状态写入、绘图布局及导出，均由程序完成。所有 ID、引用身份和确定性派生字段由程序生成、解析与绑定，禁止要求模型生成、抄写、补填或修复；模型只选择程序提供的对象位置并提交语义内容。详见[身份绑定规则](.agents/notes/implemented/bug-fix/2026-10-05-bid-host-id-bindings.md)。
+- 模型负责思考、规划、语义及效果判断，可尝试并选择视觉比例等判断参数；所有实质性落地，包括执行、校验、文件与状态写入、绘图布局及导出，均由程序完成。所有 ID、引用身份和确定性派生字段由程序生成、解析与绑定，禁止要求模型生成、抄写、补填或修复；模型选择程序提供的对象位置并提交语义内容。详见[身份绑定规则](.agents/notes/implemented/bug-fix/2026-10-05-bid-host-id-bindings.md)。
 - 新行为使用已有插件扩展点；修改 `agent-loop` 必须同步更新[架构说明](docs/architecture.md)。能力由服务定义、服务提供者、消费者共同构成，仅在各角色独立演进时拆包，见[能力定义](docs/glossary.md#capability-seam)。
 - 所有注册通过 `ctx.effect()` 或 `ctx.on()` 管理，注册 API 返回 disposer。waterfall 监听器须调用 `next()` 委托后续处理；不调用即截断，见[waterfall 语义](docs/cordis-primer.md#cordis-waterfall-semantics)。
 - 运行时不变量检查自己拥有的可变数据或权威事件关系，不检查服务或方法是否存在、插件元数据或固定纯函数示例。没有合理关系时，保留说明原因的空伴随模块，见 [packages/AGENTS.md](packages/AGENTS.md)。

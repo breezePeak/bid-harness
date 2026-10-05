@@ -1,6 +1,6 @@
 /** 从正式响应点清单派生章节所属评分项和文字快照；不改变业务选择。 */
 import { ToolArgsError } from '@deepseek-ai/dsh-tools'
-import type { ScoringResponsePointCatalog } from './scoring-response-point-artifacts.ts'
+import type { ScoringResponsePoint } from './scoring-response-point-artifacts.ts'
 
 /** 章节所选响应点对应的确定性评分关联与快照。 */
 interface SectionResponsePointBindings {
@@ -16,7 +16,8 @@ interface SectionResponsePointBindings {
  * @returns 去重评分关联及按响应点顺序生成的快照；未知响应点拒绝处理。
  */
 export function bindSectionResponsePoints(
-  scoringIds: readonly string[], responsePointIds: readonly string[], catalog: ScoringResponsePointCatalog,
+  scoringIds: readonly string[], responsePointIds: readonly string[],
+  catalog: { readonly points: readonly Pick<ScoringResponsePoint, 'id' | 'scoring_id' | 'text'>[] },
 ): SectionResponsePointBindings {
   const byId = new Map(catalog.points.map(point => [point.id, point]))
   const points = responsePointIds.map((id) => {

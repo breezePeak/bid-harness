@@ -63,28 +63,33 @@ export const outlineCandidateSchema = outlineArtifactSchema.extend({
   }).strict()).min(1),
 })
 
-const { id: _id, parent_id: _parent, level: _level, order: _order, requirement_ids: _requirements,
+const { id: _id, parent_id: _parent, level: _level, order: _order, writable: _writable, requirement_ids: _requirements,
   scoring_ids: _scoring, compliance_ids: _compliance, scoring_response_point_ids: _points,
   scoring_response_points: _snapshots, framework_refs: _frameworks, ...modelSectionFields } = outlineSectionSchema.shape
 const positions = z.array(z.number().int().nonnegative())
 
-/** 初稿与整本重生成只选择数组位置；程序负责节点身份、树层级和正式业务引用。 */
+const outlineModelSectionFields = z.strictObject({
+  ...modelSectionFields,
+  source_position: z.number().int().nonnegative().optional(),
+  requirement_positions: positions,
+  scoring_positions: positions,
+  compliance_positions: positions,
+  response_point_positions: positions,
+  framework_refs: z.array(z.object({
+    framework_position: z.number().int().nonnegative(),
+    heading_position: z.number().int().nonnegative(),
+  }).strict()),
+})
+type ModelSection = z.infer<typeof outlineModelSectionFields> & { children: ModelSection[] }
+const outlineModelSectionSchema = outlineModelSectionFields.extend({
+  children: z.lazy((): z.ZodType<ModelSection[]> => z.array(outlineModelSectionSchema)),
+})
+
+/** 初稿与整本重生成返回嵌套语义树；程序展开父关系、身份、顺序、层级和可写状态。 */
 export const outlineModelCandidateSchema = z.object({
   document_title: outlineArtifactSchema.shape.document_title,
   global_compliance_positions: positions,
-  sections: z.array(z.object({
-    ...modelSectionFields,
-    source_position: z.number().int().nonnegative().optional(),
-    parent_position: z.number().int().nonnegative().nullable(),
-    requirement_positions: positions,
-    scoring_positions: positions,
-    compliance_positions: positions,
-    response_point_positions: positions,
-    framework_refs: z.array(z.object({
-      framework_position: z.number().int().nonnegative(),
-      heading_position: z.number().int().nonnegative(),
-    }).strict()),
-  }).strict()).min(1),
+  sections: z.array(outlineModelSectionSchema).min(1),
 }).strict()
 
 /** Non-blocking semantic finding retained by the S3 Blueprint Quality Review. */

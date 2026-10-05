@@ -232,7 +232,7 @@ describe('S5 真实 DSH Child 接入', () => {
           && prompt.split('\n').some(line => line.startsWith('Current Chapter Blueprint：') && line.includes('"id":"SEC-2"'))) {
           const verified = prompt.split('\n').find(line => line.startsWith('Verified Web Chunks：'))!
           expect(JSON.parse(verified.slice('Verified Web Chunks：'.length))).toEqual([
-            expect.objectContaining({ web_ref: 'W1', url: sources[2]!.final_url }),
+            expect.objectContaining({ web_position: 0, url: sources[2]!.final_url }),
           ])
           expect(prompt).not.toContain(sources[0]!.final_url)
           expect(prompt).not.toContain(sources[1]!.final_url)
@@ -251,7 +251,7 @@ describe('S5 真实 DSH Child 接入', () => {
       const events = childSessions.get(damagedWriter!)!.events
       const calls = events.filter(event => event.type === 'tool/call')
       expect(calls.map(event => event.data.name)).toEqual(['submit_chapter', 'submit_chapter'])
-      expect(JSON.parse(calls[0]!.data.arguments)).toMatchObject({ metadata: { web_materials_used: [{ web_ref: 'W1' }] } })
+      expect(JSON.parse(calls[0]!.data.arguments)).toMatchObject({ metadata: { web_materials_used: [{ web_position: 0 }] } })
       expect(JSON.parse(calls[1]!.data.arguments)).toHaveProperty('metadata', {})
       const results = events.filter(event => event.type === 'tool/result')
       expect(results).toHaveLength(2)

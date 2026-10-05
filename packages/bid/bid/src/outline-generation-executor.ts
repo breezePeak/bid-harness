@@ -40,12 +40,14 @@ import {
   type ScoringResponsePointCandidate,
 } from './scoring-response-point-artifacts.ts'
 import { parseTenderProjectArtifact, parseTenderRequirementsArtifact, parseTenderComplianceArtifact, parseTenderScoringArtifact, type TenderProjectArtifact, type TenderScoringArtifact, type TenderRequirementsArtifact, type TenderComplianceArtifact } from './tender-analysis-artifacts.ts'
-import { applyOutlineRepair, outlineAssociationRepairOperationSchema } from './outline-generation-repair.ts'
+import { applyOutlineModelRepair, outlineAssociationRepairOperationSchema } from './outline-generation-repair.ts'
+import { deriveOutlineModelTree } from './outline-model-tree.ts'
 import { inspectOutlineCandidate, applyOutlineCandidateRepair } from './outline-candidate-repair.ts'
 import { ensureTechnicalDeviationSection } from './outline-generation-normalization.ts'
 import { missingOutlineResponsePoints, validateOutlineSharedCoverage, validateOutlineSharedStructure } from './outline-shared-validator.ts'
 import { assertNoLinkedPath } from './workspace-path.ts'
 import { customerFacingOutlineText, findBidInternalIdentifiers } from './customer-facing-prose.ts'
+import { bindSectionResponsePoints } from './scoring-response-point-bindings.ts'
 import { validateOutlineGeneration } from './outline-generation-validator.ts'
 import { bindOutlineModelCandidate, bindOutlineModelRepairOperations, bindOutlineModelCandidateRepairs,
   outlineModelInputView, outlineModelView, outlineModelFieldName, outlineModelRepairOperationSchema,
@@ -60,7 +62,7 @@ const REPAIR_RECEIPT = 'outline/repair-operations.json'
 const REGENERATION_CHANGE_SET = 'outline/regeneration/change-set.json'
 const outlineQualityReviewResultSchema = z.object({
   operations: z.array(outlineModelRepairOperationSchema),
-  issues: z.array(outlineQualityIssueSchema.omit({ code: true })),
+  issues: z.array(outlineQualityIssueSchema.pick({ message: true })),
 }).strict()
 
 // 子代理结构化输出仅接受结构约束；Host 的 Zod 解析保留全部标量约束。
@@ -103,6 +105,17 @@ const scoringResponsePointCandidateOutputSchema: ObjectJsonSchema = {
   type: 'object',
 }
 const rawOutlineCandidateOutputSchema = zodJsonSchema(outlineModelCandidateSchema, { unrepresentable: 'any' })
+const rawOutlineNodeOutputSchema = zodJsonSchema(outlineModelCandidateSchema.shape.sections.element, { unrepresentable: 'any' })
+const outlineNodeProperties = rawOutlineNodeOutputSchema.properties as Record<string, unknown>
+// 工具 Schema 子集不支持递归引用；每层完整规则由 Host 的递归候选 Schema 在绑定前校验。
+outlineNodeProperties.children = { type: 'array', items: { type: 'object',
+  description: '与根章节完全相同的节点结构，包含全部必填语义字段和 children 数组；叶节点 children: []。不得提交 parent_position、ID、order、level 或 writable。' } }
+delete rawOutlineNodeOutputSchema.definitions
+const outlineCandidateProperties = rawOutlineCandidateOutputSchema.properties as Record<string, unknown>
+outlineCandidateProperties.sections = {
+  type: 'array', items: rawOutlineNodeOutputSchema,
+}
+delete rawOutlineCandidateOutputSchema.definitions
 removeUnsupportedSubagentSchemaConstraints(rawOutlineCandidateOutputSchema)
 const outlineCandidateOutputSchema: ObjectJsonSchema = {
   ...rawOutlineCandidateOutputSchema,
@@ -155,7 +168,7 @@ export async function generateScopedOutlineOperations(
     signal.throwIfAborted()
     if (result.stopReason !== 'completed') throw new Error(`BID_REGENERATE_FAILED: ${result.stopReason}`)
     const operations = bindOutlineModelStructuralOperations(JSON.parse(result.output.flatMap(block => block.type === 'text' ? [block.text] : []).join('')), draft.outline)
-    const candidate = applyOutlineEdits(draft.outline, operations)
+    const candidate = deriveOutlineModelTree(applyOutlineEdits(draft.outline, operations))
     const candidateScope = outlineSectionScope(candidate, sectionIds)
     if (sectionIds.some((id) => {
       const before = draft.outline.sections.find(section => section.id === id)
@@ -169,7 +182,7 @@ export async function generateScopedOutlineOperations(
 }
 
 /**
- * 结构操作完成后，让独立子会话按 Host 分配的真实章节 ID 重新分配业务引用。
+ * 结构操作完成后，让独立子会话按章节顺序选择业务位置，由 Host 绑定身份。
  * @param agent 当前执行 Agent。
  * @param candidate 已分配新 ID 的候选目录。
  * @param sectionIds 本次可修改的章节范围。
@@ -245,11 +258,18 @@ export async function generateScopedOutlineBusinessBindings(
       result.output.flatMap(block => block.type === 'text' ? [block.text] : []).join(''),
     ) as unknown)
     if (output.length !== targets.length) throw new Error('BID_OUTLINE_BINDING_TARGET_COUNT_INVALID')
-    const bindings = output.map((binding, index) => outlineBusinessBindingSchema.parse({ section_id: targets[index]?.id,
-      requirement_ids: pick(facts.requirements, binding.requirement_positions),
-      scoring_ids: pick(facts.scoring, binding.scoring_positions),
-      scoring_response_point_ids: pick(facts.response_points, binding.response_point_positions),
-      compliance_ids: pick(facts.compliance, binding.compliance_positions) }))
+    const bindings = output.map((binding, index) => {
+      if (Object.values(binding).some(values => new Set(values).size !== values.length)) {
+        throw new Error('BID_OUTLINE_BINDING_REFERENCE_INVALID')
+      }
+      const responsePointIds = pick(facts.response_points, binding.response_point_positions)
+      return outlineBusinessBindingSchema.parse({ section_id: targets[index]?.id,
+        requirement_ids: pick(facts.requirements, binding.requirement_positions),
+        scoring_ids: bindSectionResponsePoints(pick(facts.scoring, binding.scoring_positions), responsePointIds,
+          { points: facts.response_points }).scoring_ids,
+        scoring_response_point_ids: responsePointIds,
+        compliance_ids: pick(facts.compliance, binding.compliance_positions) })
+    })
     for (const key of ['requirement_ids', 'scoring_ids', 'scoring_response_point_ids', 'compliance_ids'] as const) {
       const assigned = new Set(bindings.flatMap(binding => binding[key]))
       if (before.sections.filter(section => selected.has(section.id))
@@ -342,8 +362,8 @@ function renderInitialOutlineTask(agent: Agent, task: BidStageTask, input: Outli
     '人工框架决定主要骨架并且只有人工框架标题可以写入 framework_refs；reference_bid 只能参考目录组织，不得复制旧项目专有章节、不得写入 framework_refs，也不得优先于当前 Tender。',
     '根据当前 Project、Requirements、Scoring、Compliance 和稳定评分响应点设计技术标详细写作 Blueprint。每个响应点位置至少由一个合适的可写叶子覆盖，只选择 response_point_positions，正式身份和快照由程序绑定。',
     '评分响应点是章节要回答的要求，不等于目录标题；按技术方案的自然结构组织层级，不要机械地把每个响应点或评分项第一条提升成标题。仅当响应点本身构成独立方案主题时才用作标题。',
-    '技术标目录只组织投标人需要展开的技术方案、实施措施和交付成果；只需材料核验的 Compliance 放入 global_compliance_positions。结构节点 writable=false 且 must_answer=[]；可写节点必须有具体 must_answer。',
-    '返回 document_title、global_compliance_positions、sections。新目录节点位置是 sections 数组下标，parent_position 指向该数组或为 null。只选择业务位置和框架标题位置；节点编号、树层级、版本、scope 和所有业务身份由程序填写。',
+    '技术标目录只组织投标人需要展开的技术方案、实施措施和交付成果；只需材料核验的 Compliance 放入 global_compliance_positions。程序按子节点生成 writable 并清空结构节点的 must_answer 和响应点；叶节点必须有具体 must_answer。不得返回 writable。',
+    '返回 document_title、global_compliance_positions、sections；sections 只放根章节，子章节嵌套在所属父章节的 children 数组中，叶章节返回 children: []。所有深度的子章节都遵守与根章节完全相同的节点字段和必填规则；Host 会完整递归校验后才接受目录。按语义直接组织这棵树，不计算或返回 parent_position。只选择业务位置和框架标题位置；父引用、节点编号、同级顺序、树层级、版本、scope 和所有业务身份由程序填写。',
     '不要生成“封面”“目录”或“技术偏离表”；Host 会确定性补入固定第一章，返回内容只负责第二章以后的动态技术正文目录。',
     ...task.constraints.map(constraint => `约束：${constraint}`),
   ].join('\n')
@@ -368,11 +388,11 @@ function renderStructuredQualityReviewTask(
     '逐项检查技术 Requirement、Scoring 和稳定 Response Point 是否在合适的可写叶子中真实覆盖；区分技术响应 Compliance 与全局材料核验，并检查章节颗粒度、must_answer、树结构、人工框架继承和旧项目污染。',
     '检查是否把细粒度评分响应点机械地提升成大标题；评分点应通过可写叶节的绑定与 must_answer 得到回答，目录层级由方案语义决定。',
     '只需材料核验的投标资格、企业证书和行政递交事项由 global_compliance_positions 覆盖，不为此新增可写章节或分配给技术叶子；已有全局 Compliance 不因缺少章节而算遗漏。',
-    '结构父节 writable=false 时 must_answer 必须保持 []，只用 summary 概述；具体 Requirement、Scoring 和 RP 的作答指导放在可写叶节，不给父节补写作要求。',
+    '程序按父子关系生成 writable，并清空结构父节的 must_answer 和响应点；父节只用 summary 概述。具体 Requirement、Scoring 和 RP 的作答指导放在可写叶节，不给父节补写作要求。',
     '若 update_section 修改 response_point_positions，同一操作必须提交该可写章节完整且具体的 must_answer；响应点只可由可写叶子承担。所有章节与业务引用只选择输入位置，不返回任何 ID。',
     '在本轮完成全部检查，把必须修正的问题一次性放入 operations，并自检应用这些操作后的完整目录；不要返回整本新目录。无需修正时返回 operations: []。措辞润色和可选补充放入 advisory issues，不要作为必须修改的操作。',
-    'issues 只允许 severity=advisory，用于仍可交给用户判断的非阻断建议；阻断问题不能只写入 issues。reference_bid 不能产生 framework_refs。',
-    '每条建议只返回 severity 和 message，message 用中文说明具体业务问题；不要生成问题代码或编号。',
+    'issues 只返回建议 message，用于仍可交给用户判断的非阻断建议；级别和问题类别由程序填写。阻断问题不能只写入 issues。reference_bid 不能产生 framework_refs。',
+    '每条建议只返回 message，用中文说明具体业务问题；不要生成问题代码、编号、scope 或 severity。',
     failure === undefined ? '' : `上一轮结果未能应用：${failure}`,
   ].join('\n')
 }
@@ -415,7 +435,7 @@ export function renderOutlineGenerationTask(
     '技术标目录只组织投标人需要展开的技术方案、实施措施和交付成果。投标资格、企业资质证书、行政递交或其他只需材料核验的 Compliance 放入 global_compliance_positions，不得为复述或解释这类要求单独创建可写章节；与技术任务混合时，章节只承担可作答的技术部分。',
     '仅返回结构化目录候选；程序保存目录并安排 Blueprint Quality Review，不调用工具或写文件。',
     '候选仅包含 document_title、global_compliance_positions、sections，不返回 schema_version、scope 或任何 ID。',
-    'sections 是 parent_position 的扁平树。parent_position 指本轮 sections 下标，null 表示根；同级语义顺序由数组排列表达，order 和层级由程序派生。每个节点返回 title、purpose、writable、must_answer、requirement_positions、scoring_positions、compliance_positions、origin、framework_refs、response_point_positions、suggested_tables、suggested_figures、writing_notes。origin 取 framework/generated/mixed；framework_refs 只选择 framework_position 与 heading_position。',
+    'sections 是 parent_position 的扁平树。parent_position 指本轮 sections 下标，null 表示根；同级语义顺序由数组排列表达，order、层级和 writable 由程序派生。每个节点返回 title、purpose、must_answer、requirement_positions、scoring_positions、compliance_positions、origin、framework_refs、response_point_positions、suggested_tables、suggested_figures、writing_notes。origin 取 framework/generated/mixed；framework_refs 只选择 framework_position 与 heading_position。',
     '模型只选择 response_point_positions；程序绑定所有业务身份、合并所属评分关联并重建响应点快照。每个响应点至少由一个合适的可写叶子覆盖，也可由多个章节共同响应。',
     'writable 节点必须有至少一个具体 must_answer。父评分、子评分和通用质量评分可以同时关联。结构节点 writable=false、must_answer=[] 且必须有子节点。章节标题应按技术语义表达组织、阶段、质量、风险、安全、验收等内容，但不要套固定模板。',
     '不要创建“目录”章节。程序固定保留技术偏离表为可写第一章；封面和目录由导出程序生成，第二章以后才组织本项目的动态技术正文。',
@@ -481,7 +501,7 @@ export function renderOutlineGenerationRepairTask(
     '当前目录（包含 purpose、must_answer 和已有关联）：' + JSON.stringify(outlineModelView(context.outline, inputs)),
     '未被可写叶子覆盖的响应点及所属评分原文：' + JSON.stringify(missing),
     ...(context.associations === undefined ? [] : [
-      '按问题选择 requirement_positions、scoring_positions、compliance_positions、framework_refs、origin 或 global_compliance_positions；新增或拆分章节时明确分配必要关联。已有全局覆盖的材料核验 Compliance 不分配给技术叶子。结构错误使用 move/add/delete/split/merge 或 repair_structure；层级由程序根据 parent_position 派生。父节改为不可写时，同一 repair_structure 须提交 writable=false、must_answer=[]，并把其要求分配给可写叶节。重复身份只能提交 regenerate_id=true，由程序分配新编号。',
+      '按问题选择 requirement_positions、scoring_positions、compliance_positions、framework_refs、origin 或 global_compliance_positions；新增或拆分章节时明确分配必要关联。已有全局覆盖的材料核验 Compliance 不分配给技术叶子。结构错误使用 move/add/delete/split/merge 或 repair_structure；层级和 writable 由程序根据 parent_position 派生。父节点的 must_answer 和响应点由程序清空，其要求仍须分配给合适的可写叶节。不得返回 writable。重复身份只能提交 regenerate_id=true，由程序分配新编号。',
     ]),
     ...renderStageRepairIssues(issues), context.failure ?? '',
     '判断已有章节能否承担：能则补充关联并完善具体 must_answer；update_section 修改 response_point_positions 时，同一操作必须提交该可写章节完整且具体的 must_answer。确实缺少内容时新增章节或局部拆分。保留未涉及章节的内容和相对顺序。不得默认挂到第一章、结构父节点或集中放入索引附录。只补关联没有实际写作指导不算修复。',
@@ -774,7 +794,7 @@ export async function executeOutlineGeneration(
         prompt: [renderInitialOutlineTask(agent, task, semanticInputs),
           renderOutlineRevisionFeedback(options.regeneration.feedback),
           `唯一目录基线：${JSON.stringify(outlineModelView(baseline.outline, semanticInputs))}`,
-          '保留已有节点时提交 source_position，指向唯一目录基线的节点位置；新增节点省略 source_position。所有节点父位置仍指向本轮 sections。未涉及节点保留内容、父子关系及相对顺序。实际变更清单与全部身份由程序生成。',
+          '保留已有节点时提交 source_position，指向唯一目录基线的节点位置；新增节点省略 source_position。根章节放在 sections，子章节嵌套在父章节的 children，叶章节 children: []，不得计算本轮父位置。未涉及节点保留内容、父子关系及相对顺序。实际变更清单与全部身份由程序生成。',
         ].join('\n'),
         outputSchema: outlineCandidateOutputSchema,
         persona: '你是技术标目录整本重生成 Subagent。只根据完整输入和用户反馈返回位置候选，不调用工具、不返回 ID。',
@@ -858,7 +878,7 @@ export async function executeOutlineGeneration(
     })
     let operations: unknown
     try {
-      const sectionIds = z.object({ sections: z.array(z.object({ id: z.string() }).passthrough()) }).parse(candidate.value).sections
+      const sectionIds = z.object({ sections: z.array(z.object({ id: z.string() }).loose()) }).parse(candidate.value).sections
       operations = bindOutlineModelCandidateRepairs(repairedFields.operations, sectionIds, semanticInputs)
       const repaired = applyOutlineCandidateRepair(candidate.value, operations, candidate.issues,
         { catalog: formalCatalog, scoring, requirements, compliance, frameworks })
@@ -921,7 +941,7 @@ export async function executeOutlineGeneration(
     try {
       operations = bindOutlineModelRepairOperations(repair.operations, outline, semanticInputs, rpOnly)
       await write(REPAIR_RECEIPT, operations)
-      repaired = applyOutlineRepair(outline, operations, formalCatalog, scoring)
+      repaired = applyOutlineModelRepair(outline, operations, formalCatalog, scoring)
       repaired = parseOutlineArtifact({ ...repaired, sections: ensureTechnicalDeviationSection(repaired.sections) })
     } catch (error) {
       if (options.run.signal.aborted) throw error
@@ -961,10 +981,10 @@ export async function executeOutlineGeneration(
     total: outline.sections.length,
   })
   let reviewFailure: string | undefined
-  let qualityIssues: Omit<OutlineQualityIssue, 'code'>[] | undefined
+  let qualityIssues: Pick<OutlineQualityIssue, 'message'>[] | undefined
   let reviewRounds = 0
   while (qualityIssues === undefined) {
-    let review: { operations: z.infer<typeof outlineAssociationRepairOperationSchema>[]; issues: Omit<OutlineQualityIssue, 'code'>[] }
+    let review: { operations: z.infer<typeof outlineAssociationRepairOperationSchema>[]; issues: Pick<OutlineQualityIssue, 'message'>[] }
     try {
       review = await runStructuredChild({
         label: '目录质量复核',
@@ -982,7 +1002,7 @@ export async function executeOutlineGeneration(
         qualityIssues = review.issues
         break
       }
-      let reviewed = applyOutlineRepair(outline, review.operations, formalCatalog, scoring)
+      let reviewed = applyOutlineModelRepair(outline, review.operations, formalCatalog, scoring)
       reviewed = parseOutlineArtifact({
         ...reviewed, sections: ensureTechnicalDeviationSection(reviewed.sections),
       })
@@ -1007,7 +1027,7 @@ export async function executeOutlineGeneration(
   const report = {
     schema_version: OUTLINE_QUALITY_REPORT_SCHEMA_VERSION,
     scope: 'technical_bid' as const,
-    issues: qualityIssues.map(issue => ({ ...issue, code: 'OUTLINE_QUALITY_ADVISORY' })),
+    issues: qualityIssues.map(issue => ({ ...issue, severity: 'advisory' as const, code: 'OUTLINE_QUALITY_ADVISORY' })),
     checked_requirement_ids: requirements.requirements.map(item => item.id),
     checked_scoring_ids: scoring.scoring_items.map(item => item.id),
     checked_scoring_response_point_ids: formalCatalog.points.map(point => point.id),

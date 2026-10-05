@@ -1,5 +1,8 @@
 /** Flowchart content contract, anchor resolution, layout, and the S5 SVG preview renderer. */
+import { z } from 'zod'
+import { fromMarkdown } from 'mdast-util-from-markdown'
 
+/** 程序生成与持久化流程图绘制规范的版本。 */
 export const FLOWCHART_SCHEMA_VERSION = 1 as const
 /** Maximum number of native shapes in one flowchart. */
 export const FLOWCHART_MAX_NODES = 100
@@ -30,7 +33,7 @@ export interface FlowchartBlock {
   readonly type: 'flowchart'
   readonly schema_version: number
   readonly id: string
-  /** Stable semantic key written by the model and used by正文 anchors. */
+  /** 程序绑定的正文图表位置；迁移保留原图的已有引用。 */
   readonly key?: string | undefined
   readonly title: string
   readonly purpose?: string | undefined
@@ -53,21 +56,21 @@ export function flowchartPlaceholder(spec: FlowchartSpec): string {
   return `${FLOWCHART_PLACEHOLDER_PREFIX}${spec.id}`
 }
 
-/** Model-facing node shape before Host IDs are assigned. */
+/** 程序规范化器使用的临时节点键；模型入口仅选择节点数组位置。 */
 export interface FlowchartDraftNode {
   readonly key: string
   readonly type: FlowchartNodeType
   readonly text: string
 }
 
-/** Model-facing connector before Host IDs are assigned. */
+/** 程序规范化器使用的临时连接端点。 */
 export interface FlowchartDraftEdge {
   readonly from: string
   readonly to: string
   readonly label?: string | undefined
 }
 
-/** Model-facing flowchart shape; IDs are assigned by the Host after validation. */
+/** 程序规范化器的语义图输入；正式身份由程序生成。 */
 export interface FlowchartDraft {
   readonly type?: 'flowchart' | undefined
   readonly key?: string | undefined
@@ -78,8 +81,103 @@ export interface FlowchartDraft {
   readonly edges: readonly FlowchartDraftEdge[]
 }
 
-/** Accepted model draft or already-normalized persisted flowchart. */
+/** 程序规范化器接受的语义图或持久化正式图。 */
 export type FlowchartInput = FlowchartDraft | FlowchartSpec
+
+const flowchartText = z.string().trim().min(1)
+/** 模型只返回业务节点和连接位置；图标识、节点标识及绘制方向由程序生成。 */
+export const flowchartModelDraftSchema = z.object({
+  title: flowchartText,
+  purpose: flowchartText.optional(),
+  nodes: z.array(z.object({
+    type: z.enum(['start', 'end', 'process', 'decision', 'document', 'subprocess']),
+    text: flowchartText,
+  }).strict()).min(1).max(FLOWCHART_MAX_NODES),
+  edges: z.array(z.object({
+    from_position: z.number().int().nonnegative(),
+    to_position: z.number().int().nonnegative(),
+    label: flowchartText.optional(),
+  }).strict()).max(FLOWCHART_MAX_EDGES),
+}).strict()
+
+/**
+ * 将模型语义图绑定为程序绘制规范，不接受身份、坐标或布局代码。
+ * @param sectionId 当前章节的正式身份。
+ * @param value 模型返回的语义图数组。
+ * @param startPosition 当前章节已保留图表的数量，也是新增图表的起始位置。
+ * @param reservedKeys 当前章节保留图的正式键；新增图键由程序避开已有键。
+ * @returns 由程序编号、绑定边端点和选择绘制方向的图表。
+ */
+export function bindFlowchartModelInputs(
+  sectionId: string, value: unknown, startPosition = 0, reservedKeys: readonly string[] = [],
+): FlowchartSpec[] {
+  const allocated = new Set(reservedKeys)
+  return z.array(flowchartModelDraftSchema).max(100).parse(value).map((input, index) => {
+    const nodes = input.nodes.map((node, nodeIndex) => ({ id: `N${String(nodeIndex + 1)}`, ...node }))
+    const endpoint = (position: number): string => {
+      const node = nodes[position]
+      if (node === undefined) throw new Error('FLOWCHART_MODEL_NODE_POSITION_INVALID')
+      return node.id
+    }
+    let sequence = startPosition + index + 1
+    const identity = (sequence: number): string => `FLOW-${sectionId.replaceAll(/[^A-Za-z0-9_-]/gu, '_')}-${String(sequence)}`
+    while (allocated.has(identity(sequence))) sequence += 1
+    const key = identity(sequence)
+    allocated.add(key)
+    const spec: FlowchartSpec = {
+      type: 'flowchart', schema_version: FLOWCHART_SCHEMA_VERSION,
+      id: key, key, title: input.title,
+      ...(input.purpose === undefined ? {} : { purpose: input.purpose }),
+      direction: 'TB', nodes,
+      edges: input.edges.map(({ from_position, to_position, label }) => ({
+        from: endpoint(from_position), to: endpoint(to_position),
+        ...(label === undefined ? {} : { label }),
+      })),
+    }
+    const issues = validateFlowchartSpec(spec)
+    if (issues.length > 0) throw new Error(`Flowchart ${spec.id} 无效：${issues.join('；')}`)
+    return spec
+  })
+}
+
+/**
+ * 将模型正文中的图表位置标记绑定为正式键；原文复用块应在本步骤之后由程序展开。
+ * @param markdown 模型提交、尚未展开原文复用块的正文。
+ * @param flowcharts 当前章节全部图，保留原图位于新增图之前。
+ * @param references 可供跨章引用的已保存图表，顺序与模型引用表一致。
+ * @returns 只使用正式图表键的正文；未知位置或模型直接提供键会被拒绝。
+ */
+export function bindFlowchartModelAnchors(
+  markdown: string, flowcharts: readonly FlowchartSpec[], references: readonly FlowchartSpec[] = [],
+): string {
+  return markdown.replace(/\{\{(flowchart|flow_ref):([^{}]+)\}\}/gu, (_marker, kind: string, position: string) => {
+    const dependency = kind === 'flow_ref' && position.startsWith('dependency:')
+    const selected = dependency ? position.slice('dependency:'.length) : position
+    if (!/^(?:0|[1-9]\d*)$/u.test(selected)) throw new Error('FLOWCHART_MODEL_ANCHOR_POSITION_INVALID')
+    const spec = (dependency ? references : flowcharts)[Number(selected)]
+    if (spec === undefined) throw new Error('FLOWCHART_MODEL_ANCHOR_POSITION_INVALID')
+    return `{{${kind}:${flowchartKey(spec)}}}`
+  })
+}
+
+/**
+ * 将已绑定候选的正式图表标记投影回模型位置协议，供同一 Writer 语义修订。
+ * @param markdown 候选中的正式图表标记；已冻结原文应先替换为复用位置占位符。
+ * @param flowcharts 当前章节全部图，顺序与新稿绑定时一致。
+ * @param references 已冻结的跨章图表引用表。
+ * @returns 不含正式图表键的位置标记正文；未知引用会被拒绝。
+ */
+export function projectFlowchartModelAnchors(
+  markdown: string, flowcharts: readonly FlowchartSpec[], references: readonly FlowchartSpec[] = [],
+): string {
+  return markdown.replace(/\{\{(flowchart|flow_ref):([^{}]+)\}\}/gu, (_marker, kind: string, key: string) => {
+    const position = flowcharts.findIndex(spec => flowchartKey(spec) === key)
+    if (position >= 0) return `{{${kind}:${String(position)}}}`
+    const dependency = kind === 'flow_ref' ? references.findIndex(spec => flowchartKey(spec) === key) : -1
+    if (dependency < 0) throw new Error('FLOWCHART_MODEL_REFERENCE_UNKNOWN')
+    return `{{flow_ref:dependency:${String(dependency)}}}`
+  })
+}
 
 /** Self-contained SVG preview result. */
 export interface FlowchartSvg {
@@ -323,16 +421,31 @@ function flowchartKey(spec: FlowchartSpec): string {
   return spec.key?.trim() || spec.id
 }
 
-/** Validate that every structured flowchart has exactly one semantic body anchor.
- * @param markdown Chapter Markdown to inspect.
- * @param flowcharts Structured flowcharts declared by the chapter metadata.
- * @returns Human-readable anchor violations.
+interface FlowchartMarkdownNode {
+  readonly type: string
+  readonly lang?: string | null | undefined
+  readonly value?: string | undefined
+  readonly children?: readonly FlowchartMarkdownNode[] | undefined
+}
+
+function hasRawFlowchartBlock(node: FlowchartMarkdownNode): boolean {
+  const drawingMarkup = /<(?:svg|mxfile|mxGraphModel|VisioDocument|PageContents|w:document|v:shape)(?=[\s/>])/iu.test(node.value ?? '')
+  return node.type === 'code' && (['flowchart', 'svg', 'mermaid', 'dot', 'graphviz', 'plantuml'].includes(node.lang ?? '') || drawingMarkup)
+    || node.type === 'html' && drawingMarkup
+    || node.children?.some(hasRawFlowchartBlock) === true
+}
+
+/** 校验正文只用图表位置标记，且每张正式图恰有一个标记。
+ * @param markdown 尚未由程序展开流程图块的章节正文。
+ * @param flowcharts 章节 metadata 中的正式流程图。
+ * @returns 正文位置或原始绘图数据的违规说明。
  */
 export function validateFlowchartAnchors(
   markdown: string,
   flowcharts: readonly { readonly key?: string | undefined; readonly id?: string | undefined }[],
 ): string[] {
   const issues: string[] = []
+  if (hasRawFlowchartBlock(fromMarkdown(markdown))) issues.push('正文不得直接提交 flowchart、SVG、Visio 或其他绘图代码；只使用程序绑定的流程图位置标记。')
   const keys = flowcharts.map(flowchart => flowchart.key?.trim() || flowchart.id || '')
   if (new Set(keys).size !== keys.length) issues.push('流程图语义 key 必须唯一。')
   const anchors = [...markdown.matchAll(/\{\{flowchart:([A-Za-z0-9_-]{1,64})\}\}/gu)].map(match => match[1] ?? '')
@@ -448,9 +561,9 @@ export function validateFlowchartSpec(spec: unknown): string[] {
   return issues
 }
 
-/** Assign Host-owned flowchart and node IDs after the model result is accepted.
+/** 重绑定流程图和节点身份，保留迁移原图的语义内容及绘制方向。
  * @param sectionId Confirmed outline section owning the flowcharts.
- * @param inputs Model drafts or previously normalized inputs.
+ * @param inputs 程序已绑定的语义图或持久化正式图。
  * @returns Normalized flowchart specifications.
  */
 export function normalizeFlowchartInputs(sectionId: string, inputs: readonly FlowchartInput[]): FlowchartSpec[] {

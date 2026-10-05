@@ -220,10 +220,11 @@ it('S4 Prompt 分开显示技术偏离表的全量只读 Requirement 与空 cove
   expect((field(ordinaryPrompt, '相关 Requirements：') as Array<{ id: string }>).map(item => item.id)).toEqual(['R-1'])
 })
 
-async function writeInputs(workspace: BidWorkspace, sectionIds: readonly string[] = ['SEC-1', 'SEC-2']) {
+async function writeInputs(workspace: BidWorkspace, sectionIds: readonly string[] = ['SEC-1', 'SEC-2'],
+  referenceText = '可复用的统一技术资料。') {
   const [tender, reference, framework, referenceBid] = await workspace.import([
     { name: 'tender.md', role: 'tender', bytes: new TextEncoder().encode('要求一。要求二。评分一。评分二。') },
-    { name: 'reference.md', role: 'reference', bytes: new TextEncoder().encode('可复用的统一技术资料。') },
+    { name: 'reference.md', role: 'reference', bytes: new TextEncoder().encode(referenceText) },
     { name: 'framework.md', role: 'outline_framework', bytes: new TextEncoder().encode('# 智慧园区方案\n\n框架正文。\n\n## 设备接入\n\n### 协议适配\n\n### 点位映射\n\n## 能耗分析\n\n### 用量统计\n\n### 用能诊断\n') },
     { name: 'reference-bid.md', role: 'reference_bid', bytes: new TextEncoder().encode('# 云平台建设方案\n\n成熟方案。\n\n## 数据服务\n\n### 数据接入\n\n### 数据治理\n\n#### 元数据目录\n\n#### 数据血缘\n\n## 平台运维\n\n### 监控告警\n') },
   ])
@@ -330,6 +331,7 @@ function mappingFixture(
   const submissionCandidates = vi.fn((value: unknown): unknown[] => [value])
   const submissionResults: Readonly<ToolExecutionResult>[] = []
   const serializeQuality = vi.fn((content: string) => content)
+  const transformModelQuality = vi.fn((value: unknown) => value)
   const outlineReviewPrompts: string[] = []
   const outlineReviewRequests: Array<{
     toolFilter?: { allow?: readonly string[] }
@@ -816,7 +818,7 @@ function mappingFixture(
         issues: [],
       }))
       let structured: unknown
-      try { structured = mappingModelQuality(JSON.parse(serialized), prompt) } catch { structured = undefined }
+      try { structured = transformModelQuality(mappingModelQuality(JSON.parse(serialized), prompt)) } catch { structured = undefined }
       const dispose = vi.fn(async () => {})
       outlineReviewDisposals.push(dispose)
       return {
@@ -989,7 +991,7 @@ function mappingFixture(
     childGuards, disposed, maxActive: () => maxActive, taskAttempts, on, onReply, onFinalReply, serializeReply, submissionCandidates,
     submissionResults, logger, tools, setWebAvailable: (value: boolean) => { webAvailable = value },
     setParentSession: (id: string) => { parentSessionId = id },
-    serializeQuality, outlineReviewPrompts, outlineReviewRequests, outlineReviewDisposals, emitWeb, children,
+    serializeQuality, transformModelQuality, outlineReviewPrompts, outlineReviewRequests, outlineReviewDisposals, emitWeb, children,
     submissionTool: (childId: SessionId, name: string) => {
       const definition = submissionTools.get(String(childId))?.get(name)
       if (definition === undefined) throw new Error(`missing submission tool ${name}`)
@@ -1092,6 +1094,80 @@ function executionLogFixture(
 }
 
 describe('evidence-mapping Agent executor', () => {
+  it('S4 在线工具只接受资料、检查项和同级位置，Host 绑定分页引用和正式排序', async () => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-s4-model-boundary-')))
+    const material = await writeInputs(workspace, ['SEC-1', 'SEC-2'], '技术方法与质量控制。\n'.repeat(2_000))
+    const fixture = mappingFixture(workspace, material)
+    const execution = executeEvidenceMapping(fixture.agent, workspace, buildBidStageTask('evidence_mapping'))
+    await vi.waitFor(() => { expect(fixture.starts).toHaveLength(2) })
+    const id = fixture.starts[0]!.request.childId!
+    const child = fixture.children.get(String(id))!
+    const exec = { agent: child, signal: new AbortController().signal } as ToolRunContext
+    const read = fixture.submissionTool(id, 'read_source')
+    const search = fixture.submissionTool(id, 'search_sources')
+    const chunks = fixture.submissionTool(id, 'list_web_chunks')
+    const edit = fixture.submissionTool(id, 'apply_section_outline_edit')
+    const task = fixture.submissionTool(id, 'update_section_task')
+    expect(read.parameters).toMatchObject({ required: ['source_position'] })
+    expect(search.parameters).toMatchObject({ required: ['scope_position', 'keywords'] })
+    expect(chunks.parameters).toHaveProperty('properties.source_position')
+    expect(JSON.stringify(edit.parameters)).toContain('"sibling_position"')
+    expect(JSON.stringify(edit.parameters)).not.toContain('"order"')
+    expect(JSON.stringify(edit.parameters)).not.toContain('"writable"')
+    expect(JSON.stringify(task.parameters)).toContain('"target_positions"')
+    expect(JSON.stringify(task.parameters)).not.toContain('"target_refs"')
+    for (const tool of ['read', 'write', 'exec']) {
+      expect(fixture.starts[0]!.request.request.toolFilter?.allow).not.toContain(tool)
+    }
+    const objects = (await fixture.invokeSubmissionTool(id, 'list_mapping_objects', {})).value as {
+      objects: { sources: Array<{ id: string; position: number }> }
+    }
+    const sourcePosition = objects.objects.sources.find(source => source.id === 'F1')!.position
+    await expect(read.execute({ source_ref: 'F1' }, exec)).rejects.toThrow('请选择对象位置')
+    await expect(search.execute({ scope_ref: 'ALL', keywords: ['质量'] }, exec)).rejects.toThrow('请选择对象位置')
+    await expect(chunks.execute({ source_ref: 'W:WEB-0000000000000000' }, exec)).rejects.toThrow('请选择对象位置')
+    await expect(read.execute({ source_position: 999_999 }, exec)).rejects.toThrow('未知对象位置')
+    await expect(edit.execute({ operation: { type: 'add_section', parent_position: 0, sibling_position: 0,
+      writable: false, title: '质量控制', purpose: '说明质量核验', must_answer: ['明确核验方法'] },
+    basis: { explanation: '独立质量职责。', finding_indices: [1] } }, exec)).rejects.toThrow('writable')
+    const page = await read.execute({ source_position: sourcePosition }, exec) as {
+      body: string
+      next_ref: string
+      objects: { sources: Array<{ id: string; position: number }> }
+    }
+    expect(page.body).toHaveLength(12_000)
+    const nextPosition = page.objects.sources.find(source => source.id === page.next_ref)!.position
+    expect(await read.execute({ source_position: nextPosition }, exec)).toMatchObject({ source_location: { character_offset: 12_000 } })
+    expect(await search.execute({ scope_position: sourcePosition, keywords: ['质量'] }, exec)).toMatchObject({ hits: expect.any(Array) })
+    await fixture.invokeSubmissionTool(id, 'submit_section_research_assessment', branchResearchAssessment())
+    const updated = await fixture.invokeSubmissionTool(id, 'update_section_task', {
+      section_id: 'SEC-1', basis: { kind: 'section_responsibility', explanation: '明确质量控制职责。', requirement_ids: [] },
+      writing_brief: { purpose: '说明实施方法与质量控制。', must_answer: ['说明质量控制方法'],
+        writing_notes: ['明确作业条件和复核责任'], suggested_tables: [], suggested_figures: [] },
+      writing_dimensions: ['质量控制'], missing_topics: [],
+    })
+    expect(updated.isError).toBe(false)
+    const value = updated.value as {
+      answer_checklist: Array<{ item_ref: string; text: string }>
+      objects: { targets: Array<{ id: string; position: number }> }
+    }
+    const plan = value.answer_checklist.map(item => ({
+      target_positions: [value.objects.targets.find(target => target.id === item.item_ref)!.position],
+      mode: 'proposal', content: `拟落实${item.text}。`, basis: [{ kind: 'section_responsibility' }],
+      boundary: '未经确认的事实不作承诺。',
+    }))
+    const planInput = { section_position: 0,
+      basis: { kind: 'section_responsibility', explanation: '逐项明确回应方案。', requirement_positions: [] }, answer_plan: plan }
+    await expect(task.execute({ ...planInput,
+      answer_plan: [{ ...plan[0], target_refs: ['R1'] }],
+    }, exec)).rejects.toThrow('请选择对象位置')
+    expect(await task.execute(planInput, exec)).toMatchObject({ applied: true })
+    await expect(edit.execute({ operation: { type: 'move_section', section_position: 0, parent_position: null, order: 1 },
+      basis: { explanation: '调整结构位置。', finding_indices: [1] } }, exec)).rejects.toThrow('请选择 sibling_position')
+    fixture.starts.forEach((start) => { start.resolve() })
+    await execution
+  })
+
   it('模型只选择响应点时 Host 补齐所属评分项并写入研究检查点和最终目录', async () => {
     const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-response-point-scoring-binding-')))
     const fixture = mappingFixture(workspace, await writeInputs(workspace))
@@ -3952,9 +4028,30 @@ describe('evidence-mapping Agent executor', () => {
     await execution
     expect(fixture.outlineReviewPrompts).toHaveLength(2)
     expect(JSON.stringify(fixture.outlineReviewRequests[0])).not.toContain('"code"')
+    expect(JSON.stringify(fixture.outlineReviewRequests[0])).not.toContain('"severity"')
     expect(fixture.outlineReviewPrompts[1]).toContain('OUTLINE_REFINEMENT_SCHEMA_INVALID')
     const quality = JSON.parse(await readFile(join(workspace.projectRoot, 'outline/quality-report.json'), 'utf8')) as { issues: unknown[] }
     expect(quality.issues).toEqual([{ ...advisory, code: 'OUTLINE_QUALITY_ADVISORY' }])
+  })
+
+  it.each(['scope', 'severity'])('目录复核拒绝模型填写固定字段 %s，Host 生成正式记录', async (field) => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-outline-program-fields-')))
+    const fixture = mappingFixture(workspace, await writeInputs(workspace))
+    fixture.transformModelQuality.mockImplementationOnce(value => ({ ...value as object,
+      ...(field === 'scope' ? { scope: 'technical_bid' } : { issues: [{ severity: 'advisory', message: '确认职责边界。' }] }),
+    })).mockImplementationOnce(value => ({ ...value as object, issues: [{ message: '确认职责边界。' }] }))
+    const execution = executeEvidenceMapping(fixture.agent, workspace, buildBidStageTask('evidence_mapping'))
+    await vi.waitFor(() => { expect(fixture.starts).toHaveLength(2) })
+    fixture.starts.forEach((start) => { start.resolve() })
+    await execution
+    expect(fixture.outlineReviewPrompts).toHaveLength(2)
+    expect(fixture.outlineReviewPrompts[1]).toContain('OUTLINE_REFINEMENT_SCHEMA_INVALID')
+    const quality = JSON.parse(await readFile(join(workspace.projectRoot, 'outline/quality-report.json'), 'utf8')) as {
+      scope: string
+      issues: unknown[]
+    }
+    expect(quality.scope).toBe('technical_bid')
+    expect(quality.issues).toEqual([{ message: '确认职责边界。', severity: 'advisory', code: 'OUTLINE_QUALITY_ADVISORY' }])
   })
 
   it('Final Check 逐项保留未变更章节，程序发布完整 baseline 映射', async () => {

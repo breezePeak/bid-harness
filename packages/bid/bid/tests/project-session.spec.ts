@@ -1321,6 +1321,44 @@ describe('Workspace 项目与独立 Session', () => {
       error: { code: 'BID_OUTLINE_DRAFT_CONFLICT' } } })
   })
 
+  it('程序为资料重映射生成短摘要，完整保留用户长指令', async () => {
+    const { ctx, workspace, fresh } = await fixture()
+    await seedCapabilityProject(workspace, 'complete')
+    await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'completed' })
+    const agent = await fresh('host-derived-task-summary')
+    const instruction = '保留当前章节的原始覆盖和全部正文，并结合项目要求重新核对实施过程中的职责分工、检查办法以及交付条件。'
+    agent.session.append('turn/start', { turn: 1 })
+    agent.session.append('user/message', createUserMessage({ content: [{ type: 'text', text: instruction }],
+      source: { kind: 'user' } }), { surfaceOp: 'append' })
+    await ctx.tools.execute({ agent, name: 'bid_project_inspect', arguments: { query: { object: 'outline' } },
+      callId: CallId('long-instruction-inspect'), signal: new AbortController().signal })
+    const received: Array<Parameters<CapabilityTaskDispatcher['execute']>[0]> = []
+    const unregister = ctx.bid.registerCapabilityTaskDispatcher({
+      verifyTask: executorTestVerifier,
+      allowedWrites: async () => new Set(['chapters/local-review.json']),
+      execute: async (call, context) => {
+        received.push(call)
+        await context.run.commits.writeJson(join(context.working.projectRoot, 'chapters/local-review.json'), { instruction })
+        return { result: { target_section_ids: [], changed_artifacts: ['chapters/local-review.json'],
+          change_summary: '已接纳完整指令', warnings: [], missing_topics: [], needs_input: false } }
+      },
+      validate: async () => {},
+    })
+    try {
+      const result = await ctx.tools.execute({ agent, name: 'bid_evidence_remap', arguments: { draft_section_positions: [4],
+        reason: instruction, mode: 'supplement' },
+      callId: CallId('long-instruction-submit'), signal: new AbortController().signal })
+      expect(result, JSON.stringify(result)).toMatchObject({ isError: false, value: { accepted: true } })
+      await settleCapabilityOperations(ctx)
+      expect(received).toEqual([{ capability: 'evidence.research', input: {
+        reason: instruction, mode: 'supplement', allow_outline_refinement: false } }])
+      const started = agent.session.events.find(event => event.type === 'bid.run.started')
+      if (started?.type !== 'bid.run.started') throw new Error('程序未接纳能力任务')
+      const request = capabilityTaskRequestSchema.parse(await readBidWorkRequest(workspace, started.data.run.work))
+      expect(request.task.steps[0]?.description.length).toBeLessThanOrEqual(20)
+    } finally { unregister() }
+  })
+
   it('运行中的 S4 将跨阶段修改登记到原 Work，收敛后向实际发起会话报告一次', async () => {
     const { ctx, workspace, fresh, host, executor, executeStage } = await fixture()
     await seedCapabilityProject(workspace, 'complete')

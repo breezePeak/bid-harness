@@ -11,15 +11,20 @@ type Objects = Record<string, Array<{ id: string; position: number }>>
  */
 export function mappingModelQuality(value: unknown, prompt: string): unknown {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return value
-  const { checked_requirement_ids: _requirements, checked_scoring_ids: _scoring,
+  const { scope: _scope, checked_requirement_ids: _requirements, checked_scoring_ids: _scoring,
     checked_scoring_response_point_ids: _points, ...report } = value as Record<string, unknown>
   const line = prompt.split('\n').find(item => item.startsWith('全书职责索引：'))
   const sections = line === undefined ? [] : JSON.parse(line.slice('全书职责索引：'.length)) as Array<{ id: string; position: number }>
-  return { ...report, blocking_issues: Array.isArray(report.blocking_issues) ? report.blocking_issues.map((issue: unknown) => {
-    if (issue === null || typeof issue !== 'object' || !('section_id' in issue)) return issue
-    const { section_id, ...rest } = issue
-    return { ...rest, section_position: sections.find(item => item.id === section_id)?.position ?? 999_999 }
-  }) : report.blocking_issues }
+  return { ...report, ...(_scope === undefined || _scope === 'technical_bid' ? {} : { scope: _scope }),
+    issues: Array.isArray(report.issues) ? report.issues.map((issue: unknown) => {
+      if (issue === null || typeof issue !== 'object' || Array.isArray(issue)) return issue
+      const { severity: _severity, ...content } = issue as Record<string, unknown>
+      return { ...content, ...(_severity === undefined || _severity === 'advisory' ? {} : { severity: _severity }) }
+    }) : report.issues, blocking_issues: Array.isArray(report.blocking_issues) ? report.blocking_issues.map((issue: unknown) => {
+      if (issue === null || typeof issue !== 'object' || !('section_id' in issue)) return issue
+      const { section_id, ...rest } = issue
+      return { ...rest, section_position: sections.find(item => item.id === section_id)?.position ?? 999_999 }
+    }) : report.blocking_issues }
 }
 const fields: Record<string, [string, string]> = {
   section_id: ['section_position', 'sections'], target_section_id: ['target_section_position', 'sections'],
@@ -31,6 +36,8 @@ const fields: Record<string, [string, string]> = {
   ref: ['reference_position', 'references'], record_id: ['record_position', 'references'],
   finding_refs: ['finding_positions', 'findings'], review_ref: ['review_position', 'reviews'],
   material_ref: ['material_position', 'references'], chunk_refs: ['chunk_positions', 'references'],
+  source_ref: ['source_position', 'sources'], scope_ref: ['scope_position', 'sources'],
+  target_refs: ['target_positions', 'targets'],
 }
 
 /**
@@ -42,7 +49,8 @@ const fields: Record<string, [string, string]> = {
 export function mappingModelArguments(value: unknown, objects: Objects): unknown {
   if (Array.isArray(value)) return (value as unknown[]).map(item => mappingModelArguments(item, objects))
   if (value === null || typeof value !== 'object') return value
-  return Object.fromEntries(Object.entries(value).map(([name, child]) => {
+  return Object.fromEntries(Object.entries(value).filter(([name]) => name !== 'writable').map(([name, child]) => {
+    if (name === 'order') return ['sibling_position', Number(child) - 1]
     const field = fields[name]
     if (field === undefined) return [name, mappingModelArguments(child, objects)]
     const select = (id: unknown) => id === null ? null : objects[field[1]]?.find(item => item.id === id)?.position ?? 999_999

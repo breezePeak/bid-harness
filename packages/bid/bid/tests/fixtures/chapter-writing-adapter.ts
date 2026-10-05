@@ -1,7 +1,7 @@
 /** S5 包测试与 Loader 会话回放共用的外部模型脚本。 */
 import { CallId, LlmAdapter, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import { assertSupportedJsonSchema } from '@deepseek-ai/dsh-tools'
-import type { ChapterReviewItem } from '../../src/chapter-writing-review.ts'
+import { chapterModelPositions } from './chapter-model-positions.ts'
 
 function call(name: string, args: object): StreamChunk[] {
   return [{ type: 'block-start', index: 0, blockType: 'tool-call' }, { type: 'block-end', index: 0, block: { type: 'tool-call', id: CallId(name), name, arguments: JSON.stringify(args) } }, { type: 'finish', reason: { kind: 'tool-calls' } }]
@@ -66,7 +66,7 @@ export class ChapterAdapter extends LlmAdapter {
         yield* call('submit_chapter_writing_completion_review', {
           action: 'complete', reason: '已消费章节权威审核并完成文档验收；章节风险保留为最终结果。',
           document_acceptance: criteria.filter(item => item.evaluator.kind === 'semantic').map(item => ({
-            criterion_position: item.position, status: 'met', evidence_quote_refs: [], reason: '章节审核与摘要足以判断。',
+            criterion_position: item.position, status: 'met', evidence_quote_positions: [], reason: '章节审核与摘要足以判断。',
           })),
         })
         return
@@ -74,6 +74,8 @@ export class ChapterAdapter extends LlmAdapter {
       if (globalReview) {
         const pendingLine = prompt.split('\n').find(line => line.startsWith('Pending Global Compliance：'))!
         const pending = JSON.parse(pendingLine.slice('Pending Global Compliance：'.length)) as Array<{ position: number }>
+        const evidenceLine = prompt.split('\n').find(line => line.startsWith('Evidence Position Count：'))!
+        const evidenceCount = Number(evidenceLine.slice('Evidence Position Count：'.length))
         const globalStep = step - 2
         if (globalStep === 0) {
           yield* call('read_completed_chapter', { section_position: 0, start: 0, length: 12_000 })
@@ -81,7 +83,7 @@ export class ChapterAdapter extends LlmAdapter {
           yield* call('review_global_compliance', {
             compliance_position: pending[globalStep - 1]!.position,
             category: 'cross_chapter_constraint', owners: [{ kind: 'document', section_position: null }],
-            status: 'pass', checked_section_positions: [0], evidence_refs: ['DQ1'], affected_section_positions: [], issue: null,
+            status: 'pass', checked_section_positions: [0], evidence_positions: [evidenceCount], affected_section_positions: [], issue: null,
           })
         } else yield* call('finish_global_compliance_review', {})
         return
@@ -99,32 +101,32 @@ export class ChapterAdapter extends LlmAdapter {
       if (section.id === 'SEC-1' && step === this.failWriterStep) throw new Error('暂时的模型传输错误')
       if (this.omitRepairSubmission && step >= 2) { yield* text('已完成修改。'); return }
       const markdown = `# ${section.id}\n\n${prompt.includes('这是同一章节 Writer 的修复轮次') ? '修复候选' : '首次候选'}：本章具体说明技术措施、责任接口与成果交付，逐项核查要求并形成可追溯的审计记录。`
-      yield* call('submit_chapter', { markdown, metadata: this.writerMetadata?.(section.id, step) ?? (step === 0 ? { local_materials_used: [{ material_ref: 'M999', usage: 'reference', summary: '错误短引用' }] } : {}) })
+      yield* call('submit_chapter', { markdown, metadata: chapterModelPositions(this.writerMetadata?.(section.id, step) ?? (step === 0 ? { local_materials_used: [{ material_ref: 'M999', usage: 'reference', summary: '错误资料位置' }] } : {})) })
       return
     }
     this.onReview?.()
     if (this.omitReviewFinish) { yield* text('审查已经完成，无需工具。'); return }
     const checklistLine = prompt.split('\n').find(line => line.startsWith('Review Checklist：'))!
-    const items = JSON.parse(checklistLine.slice('Review Checklist：'.length)) as ChapterReviewItem[]
-    const covered = (item: ChapterReviewItem) => ({ item_ref: item.item_ref, status: 'covered', evidence_quote_refs: ['Q2'], issue: null })
+    const items = JSON.parse(checklistLine.slice('Review Checklist：'.length)) as Array<{ item_position: number }>
+    const covered = (item: { item_position: number }) => ({ item_position: item.item_position, status: 'covered', evidence_quote_positions: [1], issue: null })
     switch (step) {
       case 0: yield* this.reviewPreamble ? text('审查已完成。') : call('finish_chapter_review', {}); break
       case 1: yield* call('review_coverage_items', { items: [covered(items.at(-1)!)] }); break
       case 2: yield* call('finish_chapter_review', {}); break
-      case 3: yield* call('review_coverage_items', { items: [...items].reverse().map(item => section.id === 'SEC-1' && item.item_ref === 'R1'
+      case 3: yield* call('review_coverage_items', { items: [...items].reverse().map(item => section.id === 'SEC-1' && item.item_position === 0
         && [...this.requests.values()].filter(request => request.role === 'review' && request.sectionId === section.id).length <= this.repairReviews
-        ? { item_ref: item.item_ref, status: 'missing', evidence_quote_refs: [], issue: '缺少适用的实际设备数量依据。' } : covered(item)) }); break
+        ? { item_position: item.item_position, status: 'missing', evidence_quote_positions: [], issue: '缺少适用的实际设备数量依据。' } : covered(item)) }); break
       case 4: {
         const line = prompt.split('\n').find(value => value.startsWith('Global Compliance：'))!
         const globals = JSON.parse(line.slice('Global Compliance：'.length)) as Array<{ position: number }>
-        yield* call('review_global_constraints', { items: globals.map(item => ({ compliance_position: item.position, status: 'not_applicable', evidence_quote_refs: [], issue: '当前章节不适用。' })) })
+        yield* call('review_global_constraints', { items: globals.map(item => ({ compliance_position: item.position, status: 'not_applicable', evidence_quote_positions: [], issue: '当前章节不适用。' })) })
         break
       }
       case 5: {
         const line = prompt.split('\n').find(value => value.startsWith('Semantic Acceptance：'))!
         const criteria = JSON.parse(line.slice('Semantic Acceptance：'.length)) as Array<{ position: number }>
         yield* call('review_acceptance_criteria', { items: criteria.map(item => ({
-          criterion_position: item.position, status: 'met', evidence_quote_refs: [], reason: '当前正文满足该条件。',
+          criterion_position: item.position, status: 'met', evidence_quote_positions: [], reason: '当前正文满足该条件。',
         })) })
         break
       }

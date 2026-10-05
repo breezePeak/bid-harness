@@ -6,6 +6,7 @@ import { parseOutlineQualityReport } from '@deepseek-ai/dsh-bid'
 import { normalizeSessionSnapshot } from '@deepseek-ai/dsh-acp-snapshot'
 import { LOADER_SMOKE_TEST_TIMEOUT_MS, runLoaderSmoke } from '@deepseek-ai/dsh-loader-smoke'
 import type { runOutlineGenerationLoop } from '../../../packages/bid/bid/tests/fixtures/evidence-mapping-loop.ts'
+import type { runFullOutlineRegenerationLoop } from '../../../packages/bid/bid/tests/fixtures/stage-interaction-loop.ts'
 import type { SessionHeader } from '@deepseek-ai/dsh-session'
 import { expect, it } from 'vitest'
 
@@ -37,6 +38,22 @@ it('S3 一次生成响应点和目录、质量复核修改后等待用户确认'
           return record.type === 'tool/call' && typeof record.data?.name === 'string' ? [record.data.name] : []
         })
         expect(toolNames).toEqual(['structured_output'])
+      }
+      const orderedChildren = ['response-points-analysis', 'response-points-review', 'initial-outline', 'quality-review']
+        .map(callId => childLogs.find(content => content.includes(`"id":"${callId}"`))!)
+      expect(orderedChildren.every(content => content !== undefined)).toBe(true)
+      const sessionIds = ['s3-outline-recovery', ...orderedChildren.map(content => (JSON.parse(content.split('\n')[0]!) as SessionHeader).id)]
+      const semanticSnapshots = {
+        'initial-child.expected.jsonl': normalizeSessionSnapshot(orderedChildren[2]!, { sessionIds, cwd, cwdAliases: [cwd.replaceAll('\\', '/')] }),
+        'quality-child.expected.jsonl': normalizeSessionSnapshot(orderedChildren[3]!, { sessionIds, cwd, cwdAliases: [cwd.replaceAll('\\', '/')] }),
+      }
+      for (const [name, content] of Object.entries(semanticSnapshots)) {
+        const path = join(fixtureDir, name)
+        if (process.env.DSH_SNAPSHOT === 'refresh') {
+          await mkdir(fixtureDir, { recursive: true })
+          await writeFile(path, content)
+        }
+        expect(content).toBe(await readFile(path, 'utf8'))
       }
       const workspaceFiles = await readdir(join(cwd, '.bid-harness'), { recursive: true })
       expect(workspaceFiles.some(path => path.replaceAll('\\', '/').endsWith('scoring-response-points.candidate.json'))).toBe(false)
@@ -90,6 +107,50 @@ it('S3 一次生成响应点和目录、质量复核修改后等待用户确认'
   expect(report.checked_scoring_response_point_ids).toHaveLength(11)
 }, LOADER_SMOKE_TEST_TIMEOUT_MS)
 
+it('S3 整本重生成通过嵌套语义树保留已有身份，Host 保存 Draft 和变更清单后等待确认', async () => {
+  const configPath = fileURLToPath(new URL('../bid-evidence-mapping.cordis.snapshot.yml', import.meta.url))
+  const result = await runLoaderSmoke({
+    label: 'S3 嵌套树整本重生成', tempDirPrefix: 'dsh-s3-full-regeneration-snapshot-',
+    binScript: fileURLToPath(new URL('./fixtures/bid-outline-generation-driver.ts', import.meta.url)),
+    configPath, binArgs: [configPath, 'full-regeneration'], mode: 'src',
+    tsconfigPath: fileURLToPath(new URL('../../../tsconfig.json', import.meta.url)),
+    inspect: async (cwd) => {
+      const store = join(cwd, '.session-store')
+      const paths = (await readdir(store, { recursive: true })).filter(path => path.endsWith('.jsonl'))
+      const logs = await Promise.all(paths.map(async path => readFile(join(store, path), 'utf8')))
+      const childLog = logs.find(content => content.includes('唯一目录基线：'))
+      if (childLog === undefined) throw new Error('缺少整本重生成 Child 日志')
+      const header = JSON.parse(childLog.split('\n')[0]!) as SessionHeader
+      if (header.cwd === undefined) throw new Error('整本重生成 Child 缺少工作目录')
+      const calls = childLog.trimEnd().split('\n').map(line => JSON.parse(line) as {
+        type?: string
+        data?: { name?: string; arguments?: string }
+      }).filter(record => record.type === 'tool/call')
+      expect(calls.map(record => record.data?.name)).toEqual(['structured_output'])
+      const reply = JSON.parse(calls[0]!.data!.arguments!) as { sections: Array<Record<string, unknown>> }
+      expect(reply.sections).toHaveLength(1)
+      expect(reply.sections[0]?.source_position).toBeTypeOf('number')
+      expect(reply.sections[0]?.children).toEqual([])
+      expect(calls[0]!.data!.arguments).not.toMatch(/"(?:id|parent_id|parent_position|order|level|writable)"\s*:/u)
+      const transcript = normalizeSessionSnapshot(childLog, {
+        sessionIds: [header.parentSession!, header.id], cwd, cwdAliases: [cwd.replaceAll('\\', '/'), header.cwd],
+      })
+      const path = join(fixtureDir, 'full-regeneration-child.expected.jsonl')
+      if (process.env.DSH_SNAPSHOT === 'refresh') {
+        await mkdir(fixtureDir, { recursive: true })
+        await writeFile(path, transcript)
+      }
+      expect(transcript).toBe(await readFile(path, 'utf8'))
+    },
+  })
+  const actual = JSON.parse(result.stdout) as Awaited<ReturnType<typeof runFullOutlineRegenerationLoop>>
+  expect(actual).toMatchObject({ result: { ok: true }, draft: { revision: 2 },
+    canonicalPreserved: true, state: { stage: 'evidence_mapping', status: 'waiting_user' } })
+  expect(actual.draft.outline.sections.find(section => section.id === 'SEC-SECURITY')?.title).toBe('访问控制与安全审计方案')
+  expect(actual.transitions).toContain('bid.run.started')
+  expect(actual.transitions).toContain('bid.run.completed')
+}, LOADER_SMOKE_TEST_TIMEOUT_MS)
+
 it('S3 父章局部修复失败后恢复原 Work，由新叶节承接响应点并等待用户确认', async () => {
   const configPath = fileURLToPath(new URL('../bid-evidence-mapping.cordis.snapshot.yml', import.meta.url))
   const result = await runLoaderSmoke({
@@ -114,9 +175,9 @@ it('S3 父章局部修复失败后恢复原 Work，由新叶节承接响应点�
       })
       const progress = records.flatMap(record => record.type === 'bid.run.progress' ? [record.data.progress!] : [])
       expect(progress.find(item => item.phase === 'repairing')?.details).toEqual(expect.arrayContaining([
-        'OUTLINE_SHARED_WRITABLE_NOT_LEAF：A writable section must be a leaf.',
         expect.stringContaining('OUTLINE_SHARED_RESPONSE_POINT_MISSING'),
       ]))
+      expect(progress.flatMap(item => item.details ?? []).some(detail => detail.startsWith('OUTLINE_SHARED_WRITABLE_NOT_LEAF'))).toBe(false)
       expect(progress.map(({ phase, summary }) => ({ phase, summary }))).toMatchInlineSnapshot(`
         [
           {
@@ -181,13 +242,15 @@ it('S3 父章局部修复失败后恢复原 Work，由新叶节承接响应点�
         data: { name?: string; arguments?: string }
       }))
       expect(childRecords.filter(record => record.type === 'tool/call').every(record => record.data.name === 'structured_output')).toBe(true)
+      for (const call of childRecords.filter(record => record.type === 'tool/call')) {
+        expect(call.data.arguments).not.toMatch(/"(?:writable|order|section_id|parent_id|scoring_ids)"\s*:/u)
+      }
       const operations = childRecords.filter(record => record.type === 'tool/call').flatMap((record) => {
         const output = JSON.parse(record.data.arguments ?? '{}') as { operations?: Array<{ type: string }> }
         return output.operations?.some(operation => operation.type === 'add_section') ? [output.operations] : []
       }).at(-1)
       expect(operations).toEqual([
-        { type: 'repair_structure', section_index: 1, writable: false, must_answer: [] },
-        expect.objectContaining({ type: 'add_section', parent_position: 1, writable: true,
+        expect.objectContaining({ type: 'add_section', parent_position: 1,
           response_point_positions: Array.from({ length: 11 }, (_, index) => index) }),
       ])
       await expect(readFile(join(cwd, '.bid-harness/outline/initial-confirmed-outline.json'))).rejects.toMatchObject({ code: 'ENOENT' })
@@ -261,13 +324,13 @@ it('S3 父章局部修复失败后恢复原 Work，由新叶节承接响应点�
         },
         {
           "id": "SEC-002",
-          "parent_id": null,
+          "parent_id": "SEC-001",
           "response_points": 0,
           "writable": true,
         },
         {
           "id": "SEC-003",
-          "parent_id": "SEC-001",
+          "parent_id": null,
           "response_points": 0,
           "writable": true,
         },

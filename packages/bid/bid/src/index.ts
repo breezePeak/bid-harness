@@ -3411,11 +3411,11 @@ export class BidHostRuntime extends TypertRemoteService {
               business_bindings: request.business_bindings ?? [] } } }],
         } : request.action === 'bid_outline_regenerate_scope' ? {
           goal: '按用户要求深化选中目录', scope: { kind: 'sections', section_ids: request.section_ids },
-          steps: [{ description: request.feedback, scope: { source: 'task' }, call: { capability: 'outline.refine',
+          steps: [{ description: '按反馈深化选中目录', scope: { source: 'task' }, call: { capability: 'outline.refine',
             input: { feedback: request.feedback } } }],
         } : {
           goal: '按用户要求更新选中资料', scope: { kind: 'sections', section_ids: request.section_ids },
-          steps: [{ description: request.reason ?? '重新核对选中章节的资料依据和缺口', scope: { source: 'task' }, call: { capability: 'evidence.research',
+          steps: [{ description: '重新研究选中章节资料', scope: { source: 'task' }, call: { capability: 'evidence.research',
             input: { mode: request.mode, reason: request.reason ?? '重新核对该范围的资料',
               allow_outline_refinement: false } } }],
         }
@@ -3428,7 +3428,7 @@ export class BidHostRuntime extends TypertRemoteService {
         const { action: _action, ...input } = request
         return this.runCapabilityTaskFromTool(agent, bidCapabilityTaskSchema.parse({
           goal: '按用户要求更新写作计划', scope: { kind: 'project' }, steps: [{
-            description: input.update_kind === 'patch' ? input.summary : '按已确认要求建立章节写作安排和验收条件', scope: { source: 'task' },
+            description: input.update_kind === 'patch' ? '更新写作安排与验收条件' : '建立写作安排与验收条件', scope: { source: 'task' },
             call: { capability: 'writing.plan', input } }],
         }))
       }
@@ -3440,7 +3440,7 @@ export class BidHostRuntime extends TypertRemoteService {
           scope: request.reference.scope === 'paragraphs'
             ? { kind: 'paragraphs', reference: request.reference }
             : { kind: 'sections', section_ids: [request.reference.section_id] },
-          steps: [{ description: request.instruction, scope: { source: 'task' }, call: { capability: 'chapter.revise',
+          steps: [{ description: request.reference.scope === 'paragraphs' ? '按用户意见修订正文选区' : '按用户意见修订章节正文', scope: { source: 'task' }, call: { capability: 'chapter.revise',
             input: { instruction: request.instruction, reference: request.reference } } }],
         }))
       }
@@ -6154,7 +6154,7 @@ export class BidHostRuntime extends TypertRemoteService {
     const task = bidCapabilityTaskSchema.parse({ goal: parsed.data.instruction,
       scope: parsed.data.reference.scope === 'paragraphs' ? { kind: 'paragraphs', reference: parsed.data.reference }
         : { kind: 'sections', section_ids: [parsed.data.reference.section_id] },
-      steps: [{ description: parsed.data.instruction, scope: { source: 'task' },
+      steps: [{ description: parsed.data.reference.scope === 'paragraphs' ? '按用户意见修订正文选区' : '按用户意见修订章节正文', scope: { source: 'task' },
         call: { capability: 'chapter.revise', input: parsed.data } }] })
     const state = await withBidNativeTaskAuthorization(session, message, () => this.runCapabilityTask(agent, task,
       { session_id: String(session.id), message_id: String(message.id) }, BID_CAPABILITIES['chapter.revise'].requires))

@@ -20,12 +20,14 @@ export interface CompletedChapterQuote {
  * @param runtime 当前整书审核协议。
  * @param chapterBodies 当前已完成章节及正文身份。
  * @param sectionIds 模型输入的章节位置顺序；省略时使用正文 Map 的顺序。
+ * @param quotePositionOffset 当前审核已有依据的数量；新正文引用的位置接在其后。
  * @returns 本轮读取生成的引用；协议提交时据此绑定原文。
  */
 export function registerCompletedChapterReader<T>(
   runtime: ChapterProtocol<T>,
   chapterBodies: ReadonlyMap<string, CompletedChapterBody>,
   sectionIds: readonly string[] = [...chapterBodies.keys()],
+  quotePositionOffset = 0,
 ): ReadonlyMap<string, CompletedChapterQuote> {
   const quoteRefs = new Map<string, CompletedChapterQuote>()
   runtime.register({
@@ -49,7 +51,7 @@ export function registerCompletedChapterReader<T>(
       const ref = `DQ${quoteRefs.size + 1}`
       quoteRefs.set(ref, { section_id: sectionId, quote })
       return Promise.resolve({
-        quote_ref: ref, section_position: input.section_position, content_sha256: chapter.content_sha256,
+        quote_position: quotePositionOffset + quoteRefs.size - 1, section_position: input.section_position,
         start: input.start, end: input.start + quote.length, markdown: quote,
         truncated: input.start + quote.length < chapter.markdown.length,
       })

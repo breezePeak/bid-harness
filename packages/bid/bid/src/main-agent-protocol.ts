@@ -17,7 +17,7 @@ export interface MainAgentPrivateRuntime<T> {
 export interface MainAgentProtocolOptions {
   /** 当前内部任务独占的工具名。 */
   privateTools: readonly string[]
-  /** 内部任务允许调用的完整工具集合；省略时由阶段自己的 guard 约束。 */
+  /** 内部任务额外允许调用的工具；省略时只开放私有工具。 */
   internalTools?: readonly string[] | undefined
   /** 切换私有工具的模型可见性。 */
   setPrivateToolsEnabled?: ((enabled: boolean) => void) | undefined
@@ -49,8 +49,9 @@ export function installMainAgentProtocol(
   if (tools === undefined) throw new Error(`${options.label} requires tools service`)
   const owned = new Set<string>()
   const privateNames = new Set(options.privateTools)
-  const internalNames = options.internalTools === undefined ? undefined : new Set(options.internalTools)
+  const internalNames = new Set([...options.privateTools, ...options.internalTools ?? []])
   let disposed = false
+  const liftPresentation = tools.presentAs('native')
 
   const discardOwnedInbox = (): void => {
     for (const message of [...agent.inbox.nextStep, ...agent.inbox.nextTurn]) {
@@ -58,11 +59,15 @@ export function installMainAgentProtocol(
     }
   }
   options.setPrivateToolsEnabled?.(true)
+  const liftRestriction = tools.restrict({
+    allow: [...internalNames].filter(name => !privateNames.has(name)),
+    deny: tools.schemas(agent).map(tool => tool.name).filter(name => !internalNames.has(name)),
+  })
 
   const liftGuard = tools.guard((exec) => {
     if (exec.agent !== agent) return
     if (privateNames.has(exec.name)) return
-    if (internalNames !== undefined && !internalNames.has(exec.name)) {
+    if (!internalNames.has(exec.name)) {
       return `${options.label} 内部任务回合只允许当前阶段工具。`
     }
   })
@@ -76,6 +81,8 @@ export function installMainAgentProtocol(
       discardOwnedInbox()
       options.setPrivateToolsEnabled?.(true)
       liftGuard()
+      liftRestriction()
+      liftPresentation()
     },
   }
 }

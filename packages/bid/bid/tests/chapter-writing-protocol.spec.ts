@@ -17,6 +17,7 @@ import { createChapterProtocol } from '../src/chapter-writing-protocol.ts'
 import { attachGlobalComplianceReview, validateGlobalComplianceReview, type GlobalComplianceEvidence } from '../src/chapter-writing-global-review.ts'
 import { attachChapterWritingCompletionReview } from '../src/chapter-writing-completion-review.ts'
 import { attachBidTaskEvidenceReader } from '../src/bid-task-evidence-reader.ts'
+import { chapterModelPositions } from './fixtures/chapter-model-positions.ts'
 
 const roots: Context[] = []
 afterEach(async () => { await Promise.all(roots.splice(0).map(ctx => ctx.fiber.dispose())) })
@@ -32,7 +33,16 @@ async function harness() {
   await ctx.plugin(AgentLoop, { agents: [] })
   const agent = ctx.agentLoop.create(SessionId('protocol'), { provider: 'mock', model: 'mock' })
   let serial = 0
-  const call = (name: string, args: unknown) => ctx.tools.execute({ agent, name, arguments: args, callId: CallId(`call-${serial++}`), signal: new AbortController().signal })
+  let quoteOffset = 0
+  let readCount = 0
+  const call = async (name: string, args: unknown) => {
+    const result = await ctx.tools.execute({ agent, name, arguments: chapterModelPositions(args, quoteOffset),
+      callId: CallId(`call-${serial++}`), signal: new AbortController().signal })
+    if (name === 'read_completed_chapter' && !result.isError) {
+      quoteOffset = (result.value as { quote_position: number }).quote_position - readCount++
+    }
+    return result
+  }
   return { ctx, agent, call }
 }
 
@@ -250,6 +260,31 @@ const evidence: ChapterReviewEvidence[] = [
 const covered = (item_ref: string) => ({ item_ref, status: 'covered', evidence_quote_refs: ['Q1'], issue: null })
 
 describe('S5 Reviewer 分批记录', () => {
+  it('真实审核工具仅选择条目、原文和证据位置，拒绝原 R/Q/E 引用', async () => {
+    const { ctx, agent } = await harness()
+    const runtime = attachChapterReview(agent, reviewContext(), new Map([['Q1', '当前正文。']]), evidence, 0)
+    const schema = JSON.stringify(ctx.tools.schemas(agent))
+    for (const field of ['item_ref', 'evidence_quote_refs', 'claim_quote_ref', 'source_reference']) {
+      expect(schema).not.toContain('"' + field + '"')
+    }
+    const execute = (name: string, args: unknown) => ctx.tools.execute({ agent, name, arguments: args,
+      callId: CallId('raw-review-reference'), signal: new AbortController().signal })
+    for (const args of [
+      { item_ref: 'R1', status: 'covered', evidence_quote_refs: ['Q1'], issue: null },
+      { item_position: 0, status: 'covered', evidence_quote_positions: ['Q1'], issue: null },
+    ]) {
+      const result = await execute('review_coverage_items', { items: [args] })
+      expect(result.value).toMatchObject({ recorded: [], rejected: [expect.objectContaining({ index: 0 })] })
+    }
+    const claim = await execute('review_claims', { items: [{ claim_quote_ref: 'Q1', kind: 'project_fact',
+      status: 'supported', source_reference: 'E1', issue: null }] })
+    expect(claim.value).toMatchObject({ recorded: [], rejected: [expect.objectContaining({ index: 0 })] })
+    expect(runtime.captured()).toBeUndefined()
+    const accepted = await execute('review_coverage_items', { items: [{ item_position: 0,
+      status: 'covered', evidence_quote_positions: [0], issue: null }] })
+    expect(accepted.value).toMatchObject({ recorded: ['R1'], rejected: [] })
+    runtime.dispose()
+  })
   it('negative semantic criterion 可引用违规正文并判为 unmet', async () => {
     const { agent, call } = await harness()
     const context = emptyChapterContext(outlineFixture().sections[1]!)
@@ -474,6 +509,30 @@ describe('S5 Reviewer 分批记录', () => {
 })
 
 describe('S5 整书动态验收', () => {
+  it('真实整书验收工具拒绝 DQ 引用，只绑定读取返回的正文位置', async () => {
+    const { ctx, agent, call } = await harness()
+    const plan = writingPlanFixture(outlineFixture())
+    plan.document_acceptance = [{ id: 'AC-document', scope: { kind: 'document' }, description: '术语一致。',
+      priority: 'required', evaluator: { kind: 'semantic' } }]
+    const bodies = new Map([['SEC-1', { markdown: '本方案统一采用审计术语。', content_sha256: 'a'.repeat(64) }]])
+    const runtime = attachChapterWritingCompletionReview(agent, plan, [], bodies, [], 0)
+    await call('read_completed_chapter', { section_position: 0, start: 0, length: 20 })
+    const submit = (references: Record<string, unknown>) => ctx.tools.execute({ agent,
+      name: 'submit_chapter_writing_completion_review', arguments: {
+        action: 'complete', reason: '术语核验。', document_acceptance: [{ criterion_position: 0, status: 'met',
+          reason: '正文术语一致。', ...references }],
+      }, callId: CallId('direct-completion-position'), signal: new AbortController().signal })
+    expect(JSON.stringify(ctx.tools.schemas(agent))).not.toContain('evidence_quote_refs')
+    for (const references of [{ evidence_quote_refs: ['DQ1'] }, { evidence_quote_positions: ['DQ1'] },
+      { evidence_quote_positions: [99] }]) {
+      expect((await submit(references)).isError).toBe(true)
+      expect(runtime.captured()).toBeUndefined()
+    }
+    expect((await submit({ evidence_quote_positions: [0] })).isError).toBeFalsy()
+    expect(runtime.captured()?.document_acceptance_results[0]?.evidence_quotes).toEqual([
+      { section_id: 'SEC-1', quote: bodies.get('SEC-1')!.markdown.slice(0, 20) },
+    ])
+  })
   it('语义位置绑定实际验收身份，抄写 ID 与越界位置拒绝提交', async () => {
     const { ctx, agent, call } = await harness()
     const plan = writingPlanFixture(outlineFixture())
@@ -557,6 +616,32 @@ describe('S5 整书动态验收', () => {
 })
 
 describe('S5 文档级全局合规核验', () => {
+  it('真实全局核验工具拒绝 D/DQ 引用，只绑定冻结依据位置', async () => {
+    const { ctx, agent, call } = await harness()
+    const outline = { ...outlineFixture(), global_compliance_ids: ['GLOBAL-CONTENT'] }
+    const compliance = { schema_version: 1 as const, compliance_items: [{ id: 'GLOBAL-CONTENT', type: '材料',
+      raw_text: '正文包含审计方案', normalized_rule: '正文包含审计方案', severity: 'mandatory' as const, source_refs: [] }] }
+    const chapters = [{ section_id: 'SEC-1', title: '审计', markdown: '本方案实施安全审计。', candidate_sha256: 'a'.repeat(64) }]
+    const evidence: GlobalComplianceEvidence[] = [{ evidence_ref: 'D1', kind: 'material', file_id: 'file-1',
+      name: '审计资料.pdf', role: 'reference' }]
+    const runtime = attachGlobalComplianceReview(agent, outline, 'b'.repeat(64), compliance, chapters, evidence, [], 0)
+    await call('read_completed_chapter', { section_position: 0, start: 0, length: 20 })
+    const submit = (references: Record<string, unknown>) => ctx.tools.execute({ agent, name: 'review_global_compliance',
+      arguments: { compliance_position: 0, category: 'document_requirement', owners: [{ kind: 'document', section_position: null }],
+        status: 'pass', checked_section_positions: [0], affected_section_positions: [], issue: null, ...references },
+      callId: CallId('direct-global-position'), signal: new AbortController().signal })
+    expect(JSON.stringify(ctx.tools.schemas(agent))).not.toContain('evidence_refs')
+    for (const references of [{ evidence_refs: ['D1'] }, { evidence_refs: ['DQ1'] },
+      { evidence_positions: ['D1'] }, { evidence_positions: [99] }]) {
+      expect((await submit(references)).isError).toBe(true)
+      expect(runtime.captured()).toBeUndefined()
+    }
+    expect((await submit({ evidence_positions: [1] })).isError).toBeFalsy()
+    await call('finish_global_compliance_review', {})
+    expect(runtime.captured()?.items[0]?.evidence).toEqual([
+      { kind: 'chapter_quote', section_id: 'SEC-1', quote: chapters[0]!.markdown },
+    ])
+  })
   it('按需读取正文并用本轮引用提交，不把完整正文复制进任务提示', async () => {
     const { agent, call } = await harness()
     const outline = { ...outlineFixture(), global_compliance_ids: ['GLOBAL-CONTENT'] }
@@ -574,12 +659,12 @@ describe('S5 文档级全局合规核验', () => {
     const prompt = renderGlobalComplianceReviewTask(outline, compliance, chapters, evidence, [])
     expect(prompt).not.toContain(markdown)
     expect(prompt).not.toContain('"evidence_ref":"D1"')
-    expect(prompt).toContain('"evidence_ref":"D2"')
+    expect(prompt).toContain('"evidence_position":1')
     expect(prompt).toContain('read_completed_chapter')
 
     const runtime = attachGlobalComplianceReview(agent, outline, 'b'.repeat(64), compliance, chapters, evidence, [], 0)
     const read = await call('read_completed_chapter', { section_position: 0, start: 0, length: 20 })
-    expect(read.value).toMatchObject({ quote_ref: 'DQ1', section_position: 0, markdown: markdown.slice(0, 20) })
+    expect(read.value).toMatchObject({ quote_position: 2, section_position: 0, markdown: markdown.slice(0, 20) })
     await call('review_global_compliance', {
       compliance_position: 0, category: 'document_requirement',
       owners: [{ kind: 'chapter', section_position: 0 }, { kind: 'document', section_position: null }],

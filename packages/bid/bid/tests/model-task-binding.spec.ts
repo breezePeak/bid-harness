@@ -47,6 +47,20 @@ it('模型只选择真实章节位置，任务身份及目录编辑目标由程�
   expect(schema).not.toContain('"task_id":')
   expect(schema).not.toContain('"content_sha256":')
   expect(schema).not.toContain('"defer_content_migration":')
+  expect(schema).not.toContain('"writable":')
+})
+
+it('模型新增章节只给业务内容，程序确定叶节状态并拒绝模型填可写标记', async () => {
+  const { catalog, section } = await fixture()
+  const operation = { type: 'add_section', parent_position: section, sibling_position: 0,
+    title: '交付检查', purpose: '说明检查与交付办法', must_answer: ['明确检查与交付成果'] }
+  const task = (value: object) => ({ goal: '增加交付检查子章', scope: { kind: 'sections', section_positions: [section] },
+    allow_pending_content: true, steps: [{ description: '增加交付检查', scope: { source: 'task' },
+      call: { capability: 'outline.update', input: { operations: [value] } } }] })
+  expect(bindBidModelTask(task(operation), catalog).steps[0]?.call.input).toMatchObject({
+    operations: [{ parent_id: 'S2.3', writable: true, order: 1, must_answer: ['明确检查与交付成果'] }] })
+  expect(() => bindBidModelTask(task({ ...operation, writable: true }), catalog)).toThrow('BID_MODEL_TASK_PROGRAM_FIELD_FORBIDDEN')
+  expect(() => bindBidModelTask(task({ ...operation, must_answer: [] }), catalog)).toThrow()
 })
 
 it('已有章节的业务归属按对象位置绑定，拒绝身份抄写和越界选择', async () => {

@@ -215,7 +215,11 @@ export async function collectDocxExportSnapshot(
     signal?.throwIfAborted()
     const headingDepth = Math.min(6, depth)
     parts.push(`${'#'.repeat(headingDepth)} ${number} ${section.title}`)
-    if (!section.writable && section.summary !== undefined) parts.push(section.summary)
+    if (!section.writable && section.summary !== undefined) {
+      const summaryIssues = validateFlowchartAnchors(section.summary, [])
+      if (summaryIssues.length > 0) throw new Error(`目录概述不能提交绘图数据：${summaryIssues.join('；')}`)
+      parts.push(section.summary)
+    }
     const chapter = chapters.get(section.id)
     if (chapter === undefined || chapter.markdown.trim().length === 0) {
       if (section.writable) parts.push('（本节尚无已保存正文。）')

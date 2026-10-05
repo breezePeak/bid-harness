@@ -96,6 +96,16 @@ export function applyOutlineEdits(
     }),
   }))
   const byId = new Map(sections.map(section => [section.id, section]))
+  const updateParentKind = (parentId: string | null): void => {
+    const parent = parentId === null ? undefined : byId.get(parentId)
+    if (parent === undefined) return
+    parent.writable = !sections.some(section => section.parent_id === parentId)
+    if (!parent.writable) {
+      parent.must_answer = []
+      parent.scoring_response_point_ids = []
+      parent.scoring_response_points = []
+    }
+  }
   let nextId = sections.reduce((maximum, section) => Math.max(maximum, Number(section.id.match(/\d+$/u)?.[0] ?? 0)), 0)
   for (const operation of operations) {
     if (operation.type === 'update_section') {
@@ -173,7 +183,9 @@ export function applyOutlineEdits(
         byId.delete(item.id)
       }
     } else if (operation.type === 'delete_section') {
-      if (!byId.has(operation.section_id)) throw new Error(`unknown outline section ${operation.section_id}`)
+      const selected = byId.get(operation.section_id)
+      if (selected === undefined) throw new Error(`unknown outline section ${operation.section_id}`)
+      const originalParent = selected.parent_id
       const remove = new Set<string>([operation.section_id])
       for (let changed = true; changed;) {
         changed = false
@@ -189,6 +201,7 @@ export function applyOutlineEdits(
         const section = sections[index]
         if (section !== undefined && remove.has(section.id)) sections.splice(index, 1)
       }
+      updateParentKind(originalParent)
     } else {
       const section = byId.get(operation.section_id)
       if (section === undefined) throw new Error(`unknown outline section ${operation.section_id}`)
@@ -208,6 +221,7 @@ export function applyOutlineEdits(
         }
       }
       if (operation.parent_id !== null && descendants.has(operation.parent_id)) throw new Error('a section cannot move into its descendant')
+      const originalParent = section.parent_id
       const sourceSiblings = sections.filter(candidate => candidate.parent_id === section.parent_id && candidate.id !== section.id)
         .sort((left, right) => left.order - right.order || left.id.localeCompare(right.id))
       sourceSiblings.forEach((candidate, index) => { candidate.order = index + 1 })
@@ -216,6 +230,8 @@ export function applyOutlineEdits(
         .sort((left, right) => left.order - right.order || left.id.localeCompare(right.id))
       destinationSiblings.splice(Math.min(operation.order - 1, destinationSiblings.length), 0, section)
       destinationSiblings.forEach((candidate, index) => { candidate.order = index + 1 })
+      updateParentKind(originalParent)
+      updateParentKind(operation.parent_id)
     }
     normalizeSiblingOrders(sections)
     updateLevels(sections)

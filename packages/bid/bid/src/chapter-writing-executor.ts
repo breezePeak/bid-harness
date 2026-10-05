@@ -14,7 +14,7 @@ import { recordOnlySchemaVersion } from './schema-version.ts'
 import { safeRecoverableBidFailure } from './bid-recovery.ts'
 import type { BidManifest, BidWorkspace } from './index.ts'
 import { attachChapterPlan, CHAPTER_PLAN_TOOLS } from './chapter-writing-planning.ts'
-import { appendChapterWebReferences, bindChapterWriterInput, createChapterWriterReferences, mergeChapterWebMaterials, projectChapterWriterCandidate, renderChapterWriterReferences, type ChapterWriterReferences } from './chapter-writing-writer.ts'
+import { appendChapterWebReferences, bindChapterWriterInput, createChapterWriterReferences, loadChapterWriterChunkReferences, mergeChapterWebMaterials, projectChapterWriterCandidate, renderChapterWriterReferences, type ChapterWriterReferences } from './chapter-writing-writer.ts'
 import { normalizeChapterHeadings, validateChapterHeadings } from './chapter-headings.ts'
 import { indexChapterContentBlocks } from './chapter-content-reuse.ts'
 import { ensureChapterLocations, planChapterLocations, readChapterLocations, type ChapterLocation } from './chapter-storage.ts'
@@ -589,7 +589,7 @@ export function renderChapterSubagentTask(
     '每张 Markdown 表格都必须在紧邻上方保留一行简洁、准确的表题；新增表题只写名称不写编号，例如“表 技术偏离表”，编号由 Host 按正文顺序生成。已有表题保留，用户要求保留原文时连同已有表题的编号逐字保留，不自行删除或重新编号。缺失表题的提交会退回当前章节修复。',
     'Related Materials 来自 reference，只用于事实、参数、企业能力、技术依据和参考，不得大段照抄。Reference Bid Materials 是旧参考标书；reuse/adapt 可读取命中 chunk 的 index 和相邻 chunks 以取得完整方案，但必须清理旧项目名称、采购人、地点、日期、周期、数量、金额、环境和客户事实。',
     '最终必须调用 submit_chapter 返回完整 markdown 和语义 metadata；不要把 JSON 作为普通正文回复。资料引用错误在当前回合纠正；成功提交后等待审查意见，并在同一会话修改完整候选。正文不得保留 [M1]、[F1]、[W1] 等内部引用标记，也不得出现 REQ、SC、COM、RP、SEC、AC 等系统内部编号；需求对应表使用招标文件原有条款编号、需求名称或简要原文。资料使用记录通过 metadata 登记。',
-    '当章节存在明确的步骤顺序、角色流转、判断分支、整改回路、审批关系或质量闭环时，判断结构化流程图是否比纯文字更清晰；只在确有表达价值时填写 metadata.flowcharts。背景、理念、人员介绍、政策说明和参数罗列等说明性章节不要为了增加图表而生成流程图。流程图必须给出完整节点和连线，不得填写“此处插入流程图”等占位文字。每张流程图必须提供唯一语义 key，并在正文最适合展示该图的位置插入唯一的 {{flowchart:<key>}}，其中 <key> 必须与 metadata.flowcharts 对应项的 key 完全一致；如果正文需要引用流程图，使用 {{flow_ref:<key>}}。例如正文可写“项目质量控制流程如下。\n\n{{flowchart:quality-control-flow}}\n\n各环节发现的问题均进入整改复核闭环。”，metadata.flowcharts 对应项的 key 为 quality-control-flow。禁止只生成 metadata.flowcharts 而不插入 anchor，禁止把流程图统一放到章节结尾，禁止生成 FLOW-*、node id、图号、坐标、SVG、Visio XML 或 Word/OLE 内容，Host 会分配身份并完成布局。',
+    '当章节存在步骤顺序、角色流转、判断分支、整改回路或审批关系时，只在确有表达价值时填写 metadata.flowcharts。每张图只描述 title、可选 purpose、nodes 的 type/text 以及 edges 的 from_position/to_position/可选 label。节点位置从 0 开始；程序生成图和节点身份、方向与布局。按本章流程图数组位置在正文需要展示处写 {{flowchart:0}}，需要引用处写 {{flow_ref:0}}；保留原图时新图位置接在原图数量之后。引用 Dependency Flowcharts 中已完成依赖章节的图，使用 {{flow_ref:dependency:0}} 中的 reference_position。必须有对应正文锚点，不写 key、ID、方向、图号、坐标、SVG、Visio XML 或 Word/OLE 内容。',
     `Global Technical Context：${JSON.stringify(global)}`,
     `Global Consistency Notes：${JSON.stringify(globalConsistencyNotes)}`,
     `Confirmed Global Writing Contract：${JSON.stringify(context.writingPlan)}`,
@@ -1074,13 +1074,13 @@ function renderChapterReviewerTask(
     '先按 Current Chapter Path 和 Confirmed Outline Responsibilities 核对每段正文与当前、祖先和同级节点的主题关系及展开程度，再检查清单覆盖。structure_complete 同时要求本节承担正确职责、没有自创目录或侵入其他章节。结合证据原文语境判断内容是否适合当前任务，不凭标题或材料关键词判定归属。Host 明确列出的必须保留原文载体可完整展示跨节点整体关系，不能仅因原图、原表含有后续节点就判定 structure_complete=false 或要求删改原载体；范围检查针对其周围新增或可改内容。若原载体与当前任务确有无法同时满足的业务冲突，记录 assignment_conflicts，由 Main 调整分配。其他正文发现越界时将 structure_complete 设为 false，并在 blocking_issues 指出具体段落和应归属的章节；资料确有依据或清单已覆盖不能抵消放错章节的问题。',
     '若 must_answer、Writing Brief 或其他既定任务与目录职责冲突，明确记录该任务冲突，不要求 Writer 按错误位置扩写。允许本节概述相关主题并说明其与本节任务的关系；属于其他节点的内容由对应章节展开。',
     '全局要求不属于 R 覆盖项，不要求本章复述。逐项判断 conforms、violates 或 not_applicable：conforms/violates 引用适用正文，not_applicable 说明本章为何不适用且不代表整份文档已经满足。只有当前正文真实违反全局约束时才形成可执行修复意见。',
-    '逐项审查 Review Checklist 的固定 R；covered 必须至少引用一个当前 Q 且 issue=null，missing 不得引用 Q且必须说明具体 issue。Semantic Acceptance 逐项提交 criterion_position、met/unmet、reason 和可选 evidence_quote_refs；全局约束使用 compliance_position，任务冲突使用 related_section_positions；程序绑定实际身份。负向条件未满足时可引用违规句，全文性条件不因缺少单句引文而失效。',
+    '逐项审查 Review Checklist 的 item_position；covered 必须至少选择一个当前 evidence_quote_position 且 issue=null，missing 不得选择原文且必须说明具体 issue。Semantic Acceptance 逐项提交 criterion_position、met/unmet、reason 和可选 evidence_quote_positions；全局约束使用 compliance_position，任务冲突使用 related_section_positions；程序绑定实际身份。负向条件未满足时可引用违规句，全文性条件不因缺少单句引文而失效。',
     '正文包含 metadata.flowcharts 时，将其作为正文的一部分审核：核对流程图与正文步骤、角色、分支和整改闭环是否一致，检查关键评分响应流程是否遗漏、连线是否断裂、判断节点是否缺少分支或与招标要求矛盾。只报告业务问题，不操作布局坐标或生成 Visio/OOXML。',
-    '所有 evidence_quote_refs 与 claim_quote_ref 只填写当前 Quote Options 中的 Q；不得手抄或自造 quote。',
-    '只对实质影响方案、事实或承诺的声明登记 claim，使用 source_reference=E 编号或 null。supported 必须实际看到适用原文，来源存在本身不表示语义支持；unsupported 说明具体问题。',
+    '所有 evidence_quote_positions 与 claim_quote_position 只选择当前 Quote Options 的位置；不得手抄或自造引用身份。',
+    '只对实质影响方案、事实或承诺的声明登记 claim，source_position 选择 Evidence Pack 的位置或 null。supported 必须实际看到适用原文，来源存在本身不表示语义支持；unsupported 说明具体问题。',
     'Evidence Pack 中 tender 只证明 S2 已确认的招标事实和要求，reference 只证明原文适用的企业或技术事实，旧标书及 Web 只可作适用的技术参考。旧项目事实不能迁入本项目；handoff 仅传递决策，不能把无依据事实变成证据。未看到原文或截断部分不能宣称核验通过。',
     '明确作为本次拟采用方案提出的实施方法、职责分工、台账字段和质量控制措施，不因采购原文未逐项列出而成为 unsupported claim。审查其是否符合采购要求、是否自洽和可执行；合理方案设计不登记为需要来源证明的既有事实。若方案冒充既有人员设备或企业能力、违反采购要求、迁入旧项目条件或作出缺少支撑的硬承诺，应说明具体问题并要求修复。',
-    'set_review_summary 整体替换质量判断、正文修复问题、任务冲突和 external_input_gaps，可撤销误判。只有 Writer 能通过修改正文解决的问题才写入 blocking_issues。缺少必须由用户或项目资料提供的企业资质、证书、业绩证明、人员证件等信息时，将对应 R 记录为 missing，并在 external_input_gaps 中填写 item_ref、required_material 和 reason；不得要求 Writer 虚构、改写或反复处理。若所有未通过项都只能由这些外部输入解决，external_input_only 必须为 true；Host 会保留 attention 并跳过 Writer 修订。只要还存在任一 Writer 可修复问题，external_input_only 必须为 false。未登记为 external_input_gaps 的固定审核缺失、required 动态条件失败、quality=false、unsupported 或额外正文问题得到 repair；preferred 动态条件失败必须如实记录但不自动修订。finish 收集完整报告即可成功，不需要为结束而改成通过。',
+    'set_review_summary 整体替换质量判断、正文修复问题、任务冲突和 external_input_gaps，可撤销误判。只有 Writer 能通过修改正文解决的问题才写入 blocking_issues。缺少必须由用户或项目资料提供的企业资质、证书、业绩证明、人员证件等信息时，将对应审核项记录为 missing，并在 external_input_gaps 中填写 item_position、required_material 和 reason；不得要求 Writer 虚构、改写或反复处理。若所有未通过项都只能由这些外部输入解决，external_input_only 必须为 true；Host 会保留 attention 并跳过 Writer 修订。只要还存在任一 Writer 可修复问题，external_input_only 必须为 false。未登记为 external_input_gaps 的固定审核缺失、required 动态条件失败、quality=false、unsupported 或额外正文问题得到 repair；preferred 动态条件失败必须如实记录但不自动修订。finish 收集完整报告即可成功，不需要为结束而改成通过。',
     `Project：${JSON.stringify(modelContext(context.project))}`,
     renderChapterOutlineContext(context),
     `Current Chapter Blueprint：${JSON.stringify(context.section)}`,
@@ -1090,15 +1090,15 @@ function renderChapterReviewerTask(
     `Global Compliance：${JSON.stringify(modelContext(context.globalCompliance.map((item, position) => ({ ...item, position }))))}`,
     `Applicable Writing Contract：${JSON.stringify({ global: context.writingPlan, section: context.sectionWritingPlan })}`,
     '只审核当前章节的 task、用户要求和动态验收条件；全书级条件不得转成本章独立指标。Dynamic Host Acceptance Results 由 Host 按 evaluator 判别标签计算，Reviewer 不重新估算也不得覆盖。',
-    `Review Checklist：${JSON.stringify(buildChapterReviewChecklist(context))}`,
+    `Review Checklist：${JSON.stringify(buildChapterReviewChecklist(context).map(({ item_ref: _ref, id: _id, ...item }, item_position) => ({ ...item, item_position })))}`,
     `Current Chapter Answer Plan（仅是计划，须以候选原文与 Evidence Pack 独立复核）：${JSON.stringify(context.answerPlan ?? [])}`,
     `Semantic Acceptance：${JSON.stringify(context.sectionWritingPlan.acceptance_criteria.filter(item => item.evaluator.kind === 'semantic').map((item, position) => ({ ...item, position })))}`,
     `冲突章节位置：${JSON.stringify(context.outlineSections.map((item, position) => ({ position, title: item.title, purpose: item.purpose })))}`,
     `Dynamic Host Acceptance Results：${JSON.stringify(hostAcceptanceResults)}`,
-    `Evidence Pack：${JSON.stringify(evidence)}`,
+    `Evidence Pack：${JSON.stringify(evidence.map(({ source_ref: _ref, locator: _locator, ...source }, source_position) => ({ ...source, source_position })))}`,
     `Dependency Handoff：${JSON.stringify(dependencies)}`,
     `Writer Candidate：${JSON.stringify(candidate)}`,
-    `Quote Options：${JSON.stringify(Object.fromEntries(quotes))}`,
+    `Quote Options：${JSON.stringify([...quotes.values()].map((text, quote_position) => ({ quote_position, text })))}`,
     '审查正文是否仅把 reference 用作事实和技术参考；使用 reference_bid 时必须清除旧项目名称、采购人、地点、日期、周期、数量、金额、环境、客户事实和旧承诺。发现占位语、空泛重复、结构缺失或无依据的项目事实时给 repair。',
     '资料不支持真实项目数量、人员、设备或记录值时，不得要求 Writer 虚构数据或添加示例记录。只有正式字段、填写规则和控制要求的空白管理表不视为占位；带“示例、待补、XXX、最终填写”等内容的已填数据行视为占位。',
   ].join('\n')
@@ -1620,8 +1620,10 @@ export function renderGlobalComplianceReviewTask(
       '动态验收由所属 Reviewer 在对应协议中处理；本轮只核验固定的全局 Compliance。',
     ]),
     `Current Chapters：${JSON.stringify(chapters.map(({ title }, position) => ({ position, title })))}`,
-    `Material Evidence Options：${JSON.stringify(evidence.filter(item => item.kind === 'material'))}`,
-    '正文核验调用 read_completed_chapter 按 Current Chapters 的 position 分段读取；返回的 DQ 引用可作为当前正文依据。',
+    `Evidence Options：${JSON.stringify(evidence.flatMap((item, evidence_position) => item.kind === 'material'
+      ? [{ kind: item.kind, name: item.name, role: item.role, evidence_position }] : []))}`,
+    `Evidence Position Count：${String(evidence.length)}`,
+    '依据使用 evidence_positions 选择 Evidence Options 中的位置。正文核验调用 read_completed_chapter 按 Current Chapters 的 position 分段读取；返回的 quote_position 接在已有依据之后，可作为 evidence_positions 中的当前正文依据。不要抄写任何 D/DQ 引用身份。',
     '只使用 read_completed_chapter、review_global_compliance 和 finish_global_compliance_review。只提交 Pending Global Compliance；保留结果已由 Host 绑定当前正文版本。全部条目具有结果后调用 finish_global_compliance_review。合法 fail/pending 也必须正常提交，不能为了结束而改成 pass。',
   ].join('\n')
 }
@@ -2769,7 +2771,15 @@ async function runChapterWriting(
           throw new Error('BID_CHAPTER_INPUT_STALE')
         }
       }
-      let references = createChapterWriterReferences(context)
+      const dependencyFlowcharts = planned.depends_on.flatMap(dependency =>
+        (completed.get(dependency.section_id)?.candidate.metadata.flowcharts ?? []).map(chart => ({
+          chart, chapterTitle: contexts.get(dependency.section_id)?.section.title ?? '',
+        })))
+      let references = createChapterWriterReferences(context, dependencyFlowcharts)
+      await loadChapterWriterChunkReferences(workspace, references)
+      const preservedWriterFlowcharts = preservation?.preserveSeedFlowcharts === true
+        ? preservation.preservedContentBySectionId?.get(sectionId)?.flowcharts
+          ?? preservation.seedFlowchartsBySectionId?.get(sectionId) ?? [] : []
       const chapterWebSources = () => [...durableWebSources.values()].filter(source =>
         context.webMaterials.some(material => material.source_id === source.source_id)
         || source.chapter_context?.section_id === context.section.id)
@@ -2915,7 +2925,8 @@ async function runChapterWriting(
             responsePointCatalog: responsePointCatalog.points, outline, writingPlan })
           await resolveChapterReadLocations(workspace, manifest, webSources.sources, context)
           contexts.set(sectionId, context)
-          references = createChapterWriterReferences(context)
+          references = createChapterWriterReferences(context, dependencyFlowcharts)
+          await loadChapterWriterChunkReferences(workspace, references)
           await appendChapterWebReferences(workspace, references, chapterWebSources())
           const activeWriterId = activeWriterIds.get(sectionId)
           if (activeWriterId !== undefined) {
@@ -3114,7 +3125,7 @@ async function runChapterWriting(
             preserved.writerChildSessionId, reviewed.reviewerChildSessionId, false,
           )
         }
-        rejectedCandidate = projectChapterWriterCandidate(preserved.candidate, references)
+        rejectedCandidate = projectChapterWriterCandidate(preserved.candidate, references, preservedWriterFlowcharts)
         latestIssues = reviewed.issues
         firstAttempt = 1
       }
@@ -3306,7 +3317,7 @@ async function runChapterWriting(
                   })
                   stopAfterVisualIssue = true
                 } else {
-                  rejectedCandidate = projectChapterWriterCandidate(candidate, references)
+                  rejectedCandidate = projectChapterWriterCandidate(candidate, references, preservedWriterFlowcharts)
                   await run.assertImageInput()
                   pendingVisualPrompt = await renderChapterFlowchartVisualFollowup(agent, candidate, rejectedCandidate, rendered)
                   presentedRenderedHash = renderedHash
@@ -3353,7 +3364,7 @@ async function runChapterWriting(
               await updateBatchTask(sectionId, { status: 'reviewing' })
             }
             const reviewed = await reviewCandidate(candidate)
-            rejectedCandidate = projectChapterWriterCandidate(candidate, references)
+            rejectedCandidate = projectChapterWriterCandidate(candidate, references, preservedWriterFlowcharts)
             if (reviewed.review !== undefined && reviewed.reviewerChildSessionId !== undefined) {
               reviewedFallback = {
                 candidate,

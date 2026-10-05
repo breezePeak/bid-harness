@@ -18,6 +18,7 @@ import { TECHNICAL_DEVIATION_SECTION_ID, type OutlineArtifact, type OutlineSecti
 import type { ChapterWritingManifest } from '../src/chapter-writing-artifacts.ts'
 import { detectFlowchartExportEnvironment, type NativeVisioExport } from '../src/native-visio.ts'
 import { renderFlowchartImage } from '../src/flowchart-image.ts'
+import { bindFlowchartModelAnchors, bindFlowchartModelInputs } from '../src/flowchart.ts'
 
 const reads = vi.hoisted(() => ({ afterRead: undefined as ((path: string) => Promise<void>) | undefined }))
 vi.mock('node:fs/promises', async (importOriginal) => {
@@ -136,6 +137,43 @@ async function exportFixture() {
 }
 
 describe('Bid DOCX export', () => {
+  it('程序图键保持全书唯一，位置选择生成的跨章引用使用目标图编号', async () => {
+    const { workspace } = await exportFixture()
+    const semantic = [{ title: '程序流程', nodes: [{ type: 'start', text: '开始' }], edges: [] }]
+    const resource = bindFlowchartModelInputs('resource', semantic)
+    const delivery = bindFlowchartModelInputs('delivery', semantic)
+    try {
+      for (const [index, entry] of [
+        { spec: resource[0]!, body: bindFlowchartModelAnchors('{{flowchart:0}}\n\n跨章参见{{flow_ref:dependency:0}}。', resource, delivery) },
+        { spec: delivery[0]!, body: bindFlowchartModelAnchors('{{flowchart:0}}', delivery) },
+      ].entries()) {
+        const suffix = `000${index + 1}`
+        await writeFile(join(workspace.projectRoot, `chapters/sections/${suffix}.md`), entry.body)
+        const path = join(workspace.projectRoot, `chapters/meta/${suffix}.json`)
+        const metadata = JSON.parse(await readFile(path, 'utf8')) as Record<string, unknown>
+        await writeFile(path, JSON.stringify({ ...metadata, flowcharts: [entry.spec] }))
+      }
+      const snapshot = await collectDocxExportSnapshot(workspace)
+      expect(snapshot.markdown).toContain('跨章参见图 2。')
+      expect(snapshot.markdown.match(/```flowchart/gu)).toHaveLength(2)
+    } finally { await rm(workspace.root, { recursive: true, force: true }) }
+  })
+
+  it('正文和目录概述不能直接夹带流程图 JSON 绕过程序绑定', async () => {
+    const { workspace, outline } = await exportFixture()
+    const path = join(workspace.projectRoot, 'chapters/sections/0001.md')
+    const original = await readFile(path, 'utf8')
+    const raw = '```flowchart\n{"id":"FLOW-MODEL"}\n```'
+    try {
+      await writeFile(path, raw)
+      await expect(collectDocxExportSnapshot(workspace)).rejects.toThrow('正文不得直接提交 flowchart')
+      await writeFile(path, original)
+      await writeFile(join(workspace.projectRoot, 'outline/confirmed-outline.json'), JSON.stringify({ ...outline,
+        sections: outline.sections.map(section => section.id === 'root' ? { ...section, summary: raw } : section) }))
+      await expect(collectDocxExportSnapshot(workspace)).rejects.toThrow('目录概述不能提交绘图数据')
+    } finally { await rm(workspace.root, { recursive: true, force: true }) }
+  })
+
   it('复用到不同章节的同名流程图分别编号且不改写源正文', async () => {
     const { workspace } = await exportFixture()
     const bodies: string[] = []

@@ -1,4 +1,5 @@
 import { modelTaskArguments } from './model-task.ts'
+import { nestedModelSections } from './outline-model-tree.ts'
 /** 阶段交互的真实 Main Agent 工具循环；只脚本化外部模型回复。 */
 import { readFile, readdir, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -286,10 +287,12 @@ export async function runFullOutlineRegenerationLoop(ctx: Context, root: string)
       const sections = baseline.sections.filter(section => section.title !== '技术偏离表')
       return call('structured_output', { document_title: baseline.document_title,
         global_compliance_positions: baseline.global_compliance_positions,
-        sections: sections.map(({ position, sibling_position: _sibling, parent_position, ...section }) => ({ ...section,
+        sections: nestedModelSections(sections.map(({ position, sibling_position: _sibling, writable: _writable,
+          parent_position, ...section }) => ({
+          ...section,
           source_position: position, parent_position: parent_position === null ? null
             : sections.findIndex(parent => parent.position === parent_position), title: `${section.title}方案`,
-        })),
+        }))),
       })
     },
     answer('已提交位置候选。'),

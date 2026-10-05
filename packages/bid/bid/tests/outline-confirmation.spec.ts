@@ -66,6 +66,31 @@ describe('outline confirmation artifacts', () => {
     expect(outline.sections[0]!.writable).toBe(true)
     expect(() => applyOutlineEdits(split, [{ type: 'merge_sections', section_ids: ['SEC-001', 'SEC-002'], title: '无效', purpose: '无效' }])).toThrow()
   })
+  it('移动与删除子章后由程序更新父章类型，新增叶节仍须提供业务内容', () => {
+    const tree: OutlineArtifact = { ...outline, sections: [
+      { ...outline.sections[0]!, id: 'A', title: '组织安排', writable: false, must_answer: [] },
+      { ...outline.sections[0]!, id: 'B', title: '交付步骤', parent_id: 'A', level: 2 },
+      { ...outline.sections[0]!, id: 'C', title: '检查办法', order: 2, scoring_response_point_ids: ['RP-000001'],
+        scoring_response_points: [{ scoring_id: 'SCORE-1', response_point: '交付计划' }] },
+    ] }
+    const moved = applyOutlineEdits(tree, parseOutlineEditOperations([
+      { type: 'move_section', section_id: 'B', parent_id: 'C', order: 1 },
+      { type: 'update_section', section_id: 'A', must_answer: ['交付组织与检查职责'] },
+    ]))
+    expect(moved.sections.find(section => section.id === 'A')).toMatchObject({ writable: true,
+      must_answer: ['交付组织与检查职责'] })
+    expect(moved.sections.find(section => section.id === 'C')).toMatchObject({ writable: false,
+      must_answer: [], scoring_response_point_ids: [], scoring_response_points: [] })
+    const issues: StageValidationIssue[] = []
+    validateOutlineSharedStructure(moved.sections, issues)
+    expect(issues).toEqual([])
+    const deleted = applyOutlineEdits(tree, [{ type: 'delete_section', section_id: 'B' }])
+    expect(deleted.sections.find(section => section.id === 'A')).toMatchObject({ writable: true, must_answer: [] })
+    const missing: StageValidationIssue[] = []
+    validateOutlineSharedStructure(deleted.sections, missing)
+    expect(missing).not.toEqual([])
+    expect(tree.sections[0]).toMatchObject({ writable: false, must_answer: [] })
+  })
   it('parses only the complete durable confirmation record', () => {
     const hash = outlineArtifactSha256(outline)
     expect(parseOutlineConfirmationArtifact({ schema_version: 2, scope: 'technical_bid', decision: 'confirmed', source_outline_sha256: hash, confirmed_outline_sha256: hash, confirmed_draft_revision: 1, confirmed_draft_sha256: hash }))

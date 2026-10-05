@@ -15,7 +15,7 @@ import {
 } from '@deepseek-ai/dsh-bid'
 
 function completeSubmission(scoring = true) {
-  const source = (anchor_text: string) => [{ file_ref: 'T1', chunk: 'chunk_0001', anchor_text }]
+  const source = (anchor_text: string) => [{ file_position: 0, chunk_position: 0, anchor_text }]
   return {
     project_facts: [{ field: 'project_name', value: '审计平台', sources: source('项目名称：审计平台。') }],
     requirements: [{
@@ -62,6 +62,8 @@ describe('tender-analysis Agent executor', () => {
     const policies: Array<(exec: { name: string }) => string | undefined> = []
     const services = {
       tools: {
+        schemas: vi.fn(() => [...definitions.values()]),
+        presentAs: vi.fn(() => vi.fn()),
         restrict: vi.fn(() => liftRestriction),
         guard: vi.fn((next: (exec: { name: string }) => string | undefined) => { policies.push(next); return liftGuard }),
         register: vi.fn((definition: ToolDefinition) => {
@@ -110,7 +112,7 @@ describe('tender-analysis Agent executor', () => {
     expect(services.tools.register).toHaveBeenCalledTimes(2)
     expect(definitions.size).toBe(0)
     expect(liftGuard).toHaveBeenCalledTimes(3)
-    expect(liftRestriction).toHaveBeenCalledOnce()
+    expect(liftRestriction).toHaveBeenCalledTimes(3)
   })
 
   it('resubmits one corrected result after batch validation and keeps scoring in the final Artifact', async () => {
@@ -123,6 +125,8 @@ describe('tender-analysis Agent executor', () => {
     const definitions = new Map<string, ToolDefinition>()
     const services = {
       tools: {
+        schemas: vi.fn(() => [...definitions.values()]),
+        presentAs: vi.fn(() => vi.fn()),
         register: (definition: ToolDefinition) => {
           definitions.set(definition.name, definition)
           return () => { definitions.delete(definition.name) }

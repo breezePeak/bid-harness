@@ -43,7 +43,7 @@ const fields = {
 type CatalogKind = typeof fields[keyof typeof fields][1]
 const fieldMap: ReadonlyMap<string, readonly [string, CatalogKind]> = new Map(Object.entries(fields))
 const taskProgramFields = new Set(['task_id', 'content_assignments', 'assignments',
-  'writing_request_id', 'attempt_id', 'base_plan_version', 'defer_content_migration'])
+  'writing_request_id', 'attempt_id', 'base_plan_version', 'defer_content_migration', 'writable'])
 type CatalogEntry = { readonly id: string
   readonly label: string
   readonly issue?: { readonly issue_id: string; readonly status: string; readonly reference: object } }
@@ -231,6 +231,11 @@ export function bidModelTaskJsonSchema(schema: JsonSchemaNode): JsonSchemaNode {
           .map(name => name === 'order' ? 'sibling_position' : fieldMap.get(name)?.[0] ?? name)
       } else output[key] = visit(value)
     }
+    if ((record.properties as { type?: { const?: unknown } } | undefined)?.type?.const === 'add_section') {
+      const properties = output.properties as Record<string, object>
+      output.properties = { ...properties, must_answer: { ...properties.must_answer, minItems: 1 } }
+      output.required = [...new Set([...(output.required as string[]), 'must_answer'])]
+    }
     return output
   }
   return visit(schema) as JsonSchemaNode
@@ -259,6 +264,7 @@ function bindModelObjects(value: unknown, catalog: BidModelTaskCatalog): unknown
     const output: Record<string, unknown> = {}
     for (const [name, child] of Object.entries(record)) {
       if (name === 'defer_content_migration') throw new Error('BID_MODEL_TASK_PROGRAM_FIELD_FORBIDDEN')
+      if (name === 'writable') throw new Error('BID_MODEL_TASK_PROGRAM_FIELD_FORBIDDEN')
       if (name === 'order') throw new Error('BID_MODEL_TASK_PROGRAM_FIELD_FORBIDDEN')
       if (name === 'sibling_position') {
         output.order = position.parse(child) + 1
@@ -313,6 +319,7 @@ function bindModelObjects(value: unknown, catalog: BidModelTaskCatalog): unknown
       if (catalog.writingPlanVersion === undefined) throw new Error('BID_MODEL_WRITING_PLAN_REQUIRED')
       output.base_plan_version = catalog.writingPlanVersion
     }
+    if (record.type === 'add_section') output.writable = true
     return output
   }
   return visit(value)

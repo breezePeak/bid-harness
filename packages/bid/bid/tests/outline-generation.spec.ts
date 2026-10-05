@@ -30,6 +30,7 @@ import {
 import type { BidRunProgressInput } from '../src/control-plane-contract.ts'
 import { createTestBidRunContext } from '../src/run-coordinator.ts'
 import { createBidCapabilityDispatcher } from '../src/bid-capability-dispatcher.ts'
+import { nestedModelSections } from './fixtures/outline-model-tree.ts'
 
 const executeOutlineGeneration = (
   agent: Agent,
@@ -266,7 +267,12 @@ async function modelPositions(value: unknown, workspace: BidWorkspace, request: 
       return { ...object, field,
         value: Array.isArray(object.value) ? object.value.map(id => select(kind, id)) : select(kind, object.value) }
     }
-    return Object.fromEntries(Object.entries(object).map(([name, child]) => {
+    return Object.fromEntries(Object.entries(object).filter(([name]) => name !== 'writable').map(([name, child]) => {
+      if (name === 'issues' && Array.isArray(child)) return [name, child.map((issue: unknown) => {
+        if (issue === null || typeof issue !== 'object' || Array.isArray(issue)) return issue
+        const { severity: _severity, ...content } = issue as ModelObject
+        return content
+      })]
       if (name === 'order') return ['sibling_position', Number(child) - 1]
       if (name === 'framework_refs' && Array.isArray(child)) return [name, child.map((ref: ModelObject) => {
         const framework = business.frameworks?.find(item => (item.headings as ModelObject[]).some(heading =>
@@ -289,13 +295,13 @@ async function modelPositions(value: unknown, workspace: BidWorkspace, request: 
     const sections = (object.sections as ModelObject[]).filter(section => section.id !== 'dsh-technical-deviation-table')
     return { document_title: object.document_title,
       global_compliance_positions: (object.global_compliance_ids as unknown[]).map(id => select('compliance', id)),
-      sections: sections.map((section) => {
+      sections: nestedModelSections(sections.map((section) => {
         const { id, parent_id, level: _level, order: _order, scoring_response_points: _snapshots, ...semantic } = section
         return { ...compile({ ...semantic, framework_refs: section.framework_refs ?? [] }) as ModelObject,
           parent_position: parent_id === null ? null : sections.findIndex(item => item.id === parent_id),
           ...(request.label === '目录整本重生成' ? { source_position: actualOutline?.sections.find(item => item.title === sectionTitle(id))?.position } : {}),
         }
-      }) }
+      })) }
   }
   return Array.isArray(value) ? { operations: compile(value) } : compile(value)
 }
@@ -314,6 +320,7 @@ function modelAgent(
     write?: (args: Record<string, unknown>) => Promise<unknown>
     read?: (args: Record<string, unknown>) => Promise<unknown>
     structuredOutputs?: unknown[]
+    transformStructuredOutput?: (value: unknown, request: Record<string, unknown>) => unknown
   } = {},
 ) {
   const events: SessionEvent[] = options.sandboxMode === undefined ? [] : [{
@@ -333,9 +340,13 @@ function modelAgent(
   }
   const structuredOutputs = [...(options.structuredOutputs ?? [])]
   const subagentStart = vi.fn(async (_provider: string, request: Record<string, unknown>) => {
+    const modelOutput = async (value: unknown): Promise<unknown> => {
+      const compiled = await modelPositions(value, workspace, request)
+      return options.transformStructuredOutput === undefined ? compiled : options.transformStructuredOutput(compiled, request)
+    }
     const result = async () => {
       expect(request.toolFilter).toEqual({ allow: [] })
-      if (structuredOutputs.length > 0) return { stopReason: 'completed', structured: await modelPositions(structuredOutputs.shift(), workspace, request) }
+      if (structuredOutputs.length > 0) return { stopReason: 'completed', structured: await modelOutput(structuredOutputs.shift()) }
       if (request.label === '评分响应点分析' || request.label === '评分响应点语义复核') return {
         stopReason: 'completed', structured: await modelPositions(defaultResponseCandidate, workspace, request),
       }
@@ -347,9 +358,10 @@ function modelAgent(
       }, args => options.write?.(args) ?? Promise.resolve({}),
       args => options.read?.(args) ?? Promise.resolve({}))
       if (response === 'error' || response === 'aborted') return { stopReason: response }
-      if (response !== undefined) return { stopReason: 'completed', structured: await modelPositions(response, workspace, request) }
+      if (response !== undefined) return { stopReason: 'completed', structured: await modelOutput(response) }
       if (request.label === '目录质量复核') {
-        return { stopReason: 'completed', structured: submitted === undefined ? undefined : { operations: [], issues: submitted } }
+        return { stopReason: 'completed', structured: submitted === undefined ? undefined
+          : await modelOutput({ operations: [], issues: submitted }) }
       }
       return { stopReason: 'completed', structured: { operations: [] } }
     }
@@ -420,6 +432,31 @@ it('公共目录生成能力从正式分析输入生成并校验初步目录', a
   expect(result.result.changed_artifacts).toContain('outline/outline.json')
   expect(result.result.changed_artifacts).toContain('outline/draft.json')
   expect(result.result.changed_artifacts).toContain('outline/quality-report.json')
+})
+
+it.each([
+  ['id', 'model-identity'], ['parent_position', 10], ['writable', true],
+  ['requirement_positions', [999_999]], ['response_point_positions', [999_999]],
+  ['children', {}], ['purpose', 4],
+])('S3 实际 Host 接受入口拒绝深层子节点非法字段 %s', async (field, invalid) => {
+  const workspace = await fixture()
+  const { agent, subagentStart } = modelAgent(workspace, async () => {}, {
+    structuredOutputs: [reviewedOutline],
+    transformStructuredOutput: (reply, request) => {
+      if (request.label !== '初步目录生成') return reply
+      const root = ((reply as ModelObject).sections as ModelObject[])[0]!
+      const branch = (root.children as ModelObject[])[0]!
+      branch.children = [{ ...branch, children: [], [field]: invalid }]
+      return reply
+    },
+  })
+  await expect(executeOutlineGeneration(agent, workspace, buildBidStageTask('outline_generation')))
+    .rejects.toThrow('OUTLINE_GENERATION_CANDIDATE_INVALID')
+  expect(subagentStart).toHaveBeenCalledTimes(1)
+  const request = subagentStart.mock.calls[0]![1]
+  expect(JSON.stringify(request.outputSchema)).not.toContain('$ref')
+  expect(JSON.stringify(request.outputSchema)).not.toContain('"parent_position"')
+  await expect(readFile(join(workspace.projectRoot, 'outline/outline.json'))).rejects.toMatchObject({ code: 'ENOENT' })
 })
 
 describe('S3 候选错误分流', () => {
@@ -695,8 +732,8 @@ describe('S3 需求、合规、框架与结构局部修复', () => {
     const { agent, followup } = modelAgent(workspace, async (prompt, submitReview) => {
       if (prompt.includes('局部关联与结构修复')) {
         for (const text of [requirements.requirements[0]!.raw_text, scoring.scoring_items[0]!.raw_text, compliance.compliance_items[0]!.raw_text, 'framework_refs']) expect(prompt).toContain(text)
-        expect(prompt).toContain('writable=false、must_answer=[]')
-        expect(prompt).toContain('层级由程序根据 parent_position 派生')
+        expect(prompt).toContain('层级和 writable 由程序根据 parent_position 派生')
+        expect(prompt).toContain('父节点的 must_answer 和响应点由程序清空')
         expect(prompt).toContain('update_section 修改 response_point_positions 时')
         return { operations }
       } else {
@@ -832,7 +869,8 @@ describe('outline-generation Blueprint Quality Review', () => {
     expect(report).toMatchObject({ schema_version: 4, issues: [{ ...issue, code: 'OUTLINE_QUALITY_ADVISORY' }] })
     const request = subagentStart.mock.calls.find(call => call[1].label === '目录质量复核')![1]
     expect(JSON.stringify(request.outputSchema)).not.toContain('"code"')
-    expect(JSON.stringify(request.prompt)).toContain('不要生成问题代码或编号')
+    expect(JSON.stringify(request.outputSchema)).not.toContain('"severity"')
+    expect(JSON.stringify(request.prompt)).toContain('不要生成问题代码、编号、scope 或 severity')
     await expect(readFile(join(workspace.projectRoot, 'outline/quality-report.candidate.json'))).rejects.toMatchObject({ code: 'ENOENT' })
   })
 
@@ -857,6 +895,28 @@ describe('outline-generation Blueprint Quality Review', () => {
     await expect(validateOutlineGeneration(workspace, 'outline_generation', artifacts)).resolves.toEqual({ ok: true })
   })
 
+  it('目录质量复核拒绝模型填写固定建议级别，由 Host 生成正式记录', async () => {
+    const workspace = await fixture()
+    let injected = false
+    const { agent, subagentStart } = modelAgent(workspace, async () => {}, {
+      structuredOutputs: [reviewedOutline,
+        { operations: [], issues: [{ message: '确认交付安排。' }] },
+        { operations: [], issues: [{ message: '确认交付安排。' }] }],
+      transformStructuredOutput(value, request) {
+        if (request.label !== '目录质量复核' || injected) return value
+        injected = true
+        return { ...value as object, issues: [{ severity: 'advisory', message: '确认交付安排。' }] }
+      },
+    })
+    await executeOutlineGeneration(agent, workspace, buildBidStageTask('outline_generation'), { maxRepairAttempts: 1 })
+    const reviews = subagentStart.mock.calls.filter(call => call[1].label === '目录质量复核')
+    expect(reviews).toHaveLength(2)
+    expect(JSON.stringify(reviews[0]![1].outputSchema)).not.toContain('"severity"')
+    expect(JSON.stringify(reviews[1]![1].prompt)).toContain('Unrecognized key')
+    const report = parseOutlineQualityReport(JSON.parse(await readFile(join(workspace.projectRoot, 'outline/quality-report.json'), 'utf8')))
+    expect(report.issues).toEqual([{ message: '确认交付安排。', severity: 'advisory', code: 'OUTLINE_QUALITY_ADVISORY' }])
+  })
+
   it('目录质量复核使用独立预算，多轮无变化操作后稳定失败', async () => {
     const workspace = await fixture()
     const noOp = { operations: [{ type: 'update_section', section_id: 'SEC-SCHEDULE', title: '实施阶段与进度控制' }], issues: [] }
@@ -873,7 +933,7 @@ describe('outline-generation Blueprint Quality Review', () => {
     const task = renderOutlineGenerationTask({ id: 'session', session: { events: [] } } as unknown as Agent, workspace, buildBidStageTask('outline_generation'))
 
     expect(task).toContain('稳定评分响应点目录设计技术标详细写作 Blueprint')
-    expect(task).toContain('title、purpose、writable、must_answer、requirement_positions')
+    expect(task).toContain('title、purpose、must_answer、requirement_positions')
     expect(task).toContain('不返回 schema_version、scope 或任何 ID')
     expect(task).toContain('目录模式：无人工框架')
     expect(task).toContain('评分响应点和评分项为主要拆分依据')
@@ -990,7 +1050,7 @@ describe('outline-generation Blueprint Quality Review', () => {
     }
     expect(subagentPrompt(subagentStart.mock.calls[3]![1])).toContain('已有全局 Compliance 不因缺少章节而算遗漏')
     expect(subagentPrompt(subagentStart.mock.calls[3]![1])).toContain('不为此新增可写章节或分配给技术叶子')
-    expect(subagentPrompt(subagentStart.mock.calls[3]![1])).toContain('结构父节 writable=false 时 must_answer 必须保持 []')
+    expect(subagentPrompt(subagentStart.mock.calls[3]![1])).toContain('程序按父子关系生成 writable')
     expect(subagentPrompt(subagentStart.mock.calls[3]![1])).toContain('同一操作必须提交该可写章节完整且具体的 must_answer')
     expect(JSON.parse(await readFile(join(workspace.projectRoot, 'outline/outline.json'), 'utf8'))).toEqual(withTechnicalDeviation(generatedOutline(researchDrivenOutline)))
   })
@@ -1122,7 +1182,7 @@ describe('outline-generation Blueprint Quality Review', () => {
     const task = renderOutlineGenerationTask({ id: 'session', session: { events: [] } } as unknown as Agent, workspace, buildBidStageTask('outline_generation'))
     expect(task).toContain('索引重复引用不能替代正文拆分')
     expect(task).toContain('null 表示根')
-    expect(task).toContain('order 和层级由程序派生')
+    expect(task).toContain('order、层级和 writable 由程序派生')
   })
 
   it('allows one response point to be covered by multiple writable sections', () => {

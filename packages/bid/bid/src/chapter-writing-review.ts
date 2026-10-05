@@ -169,12 +169,16 @@ export function attachChapterReview(
   changedQuoteTexts: ReadonlySet<string> = new Set(),
 ): ChapterProtocol<ChapterReview> {
   const runtime = createChapterProtocol<ChapterReview>(agent, 'finish_chapter_review', maxContinuations)
+  const checklist = buildChapterReviewChecklist(context)
   const positions = createChapterObjectPositions([
     { canonical: 'criterion_id', model: 'criterion_position', ids: context.sectionWritingPlan.acceptance_criteria.filter(item => item.evaluator.kind === 'semantic').map(item => item.id) },
     { canonical: 'compliance_id', model: 'compliance_position', ids: context.globalCompliance.map(item => item.id) },
     { canonical: 'related_section_ids', model: 'related_section_positions', ids: context.outlineSections.map(item => item.id), many: true },
+    { canonical: 'item_ref', model: 'item_position', ids: checklist.map(item => item.item_ref) },
+    { canonical: 'evidence_quote_refs', model: 'evidence_quote_positions', ids: [...quotes.keys()], many: true },
+    { canonical: 'claim_quote_ref', model: 'claim_quote_position', ids: [...quotes.keys()] },
+    { canonical: 'source_reference', model: 'source_position', ids: evidence.map(item => item.source_ref) },
   ])
-  const checklist = buildChapterReviewChecklist(context)
   const coverage = new Map<string, z.infer<typeof coverageInput>>()
   const acceptance = new Map<string, z.infer<typeof acceptanceInput>>()
   const globalChecks = new Map<string, z.infer<typeof globalCheckInput>>()
@@ -201,14 +205,14 @@ export function attachChapterReview(
   try {
     runtime.register({
       name: 'review_coverage_items', description: '分批记录 R 项的实际正文覆盖。每项独立接受或报告错误；同一 R 后续合法条目覆盖已有判断。',
-      parameters: {
+      parameters: positions.schema({
         type: 'object', properties: { items: { type: 'array', items: {
           type: 'object', properties: { item_ref: stringParameter, status: { type: 'string', enum: ['covered', 'missing'] }, evidence_quote_refs: { type: 'array', items: stringParameter }, issue: nullableText },
           required: ['item_ref', 'status', 'evidence_quote_refs', 'issue'], additionalProperties: false,
         } } }, required: ['items'], additionalProperties: false,
-      },
+      }),
       execute: args => batch(args, (value) => {
-        const item = chapterToolArgs(coverageInput, value)
+        const item = chapterToolArgs(coverageInput, positions.bind(value))
         if (!checklist.some(entry => entry.item_ref === item.item_ref)) throw new ToolArgsError([`item_ref: 未知 ${item.item_ref}。`])
         for (const ref of item.evidence_quote_refs) quote(ref)
         if (item.status === 'covered' && (item.evidence_quote_refs.length === 0 || item.issue !== null)) throw new ToolArgsError([`${item.item_ref}: covered 至少引用一个 Q，issue 必须为 null。`])
@@ -270,14 +274,14 @@ export function attachChapterReview(
     })
     runtime.register({
       name: 'review_claims', description: '分批核验实质性事实、技术参数和承诺；只用当前 Q 原文及有资格的 E 来源，来源存在不等于语义支持。',
-      parameters: {
+      parameters: positions.schema({
         type: 'object', properties: { items: { type: 'array', items: {
           type: 'object', properties: { claim_quote_ref: stringParameter, kind: { type: 'string', enum: ['project_fact', 'technical_fact', 'commitment'] }, status: { type: 'string', enum: ['supported', 'unsupported'] }, source_reference: nullableText, issue: nullableText },
           required: ['claim_quote_ref', 'kind', 'status', 'source_reference', 'issue'], additionalProperties: false,
         } } }, required: ['items'], additionalProperties: false,
-      },
+      }),
       execute: args => batch(args, (value) => {
-        const item = chapterToolArgs(claimInput, value)
+        const item = chapterToolArgs(claimInput, positions.bind(value))
         quote(item.claim_quote_ref)
         const source = evidence.find(entry => entry.source_ref === item.source_reference)
         if (item.source_reference !== null && source === undefined) throw new ToolArgsError([`source_reference: 未知 ${item.source_reference}。`])
