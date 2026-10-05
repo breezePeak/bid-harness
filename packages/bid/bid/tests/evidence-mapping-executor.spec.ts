@@ -997,6 +997,12 @@ function mappingFixture(
       if (definition === undefined) throw new Error(`missing submission tool ${name}`)
       return definition
     },
+    reactivateSubmissionTools: (childId: SessionId) => {
+      const child = children.get(String(childId))
+      if (child === undefined || continuableSetup === undefined) throw new Error(`missing continuable child ${String(childId)}`)
+      setupDisposers.get(String(childId))?.()
+      setupDisposers.set(String(childId), continuableSetup(child.ctx))
+    },
     invokeSubmissionTool: async (childId: SessionId, name: string, args: unknown) => {
       const definition = submissionTools.get(String(childId))?.get(name)
       const child = children.get(String(childId))
@@ -5054,6 +5060,76 @@ describe('S4 / S5 共用 fetch 正文快照', () => {
 })
 
 describe('S4 实际工具统一依据对象表', () => {
+  it('双 Web 来源提交和同一 Child 工具重新激活均保留已有研究与材料位置', async () => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-s4-stable-web-positions-')))
+    const fixture = mappingFixture(workspace, await writeInputs(workspace))
+    const execution = executeEvidenceMapping(fixture.agent, workspace, buildBidStageTask('evidence_mapping'))
+    await vi.waitFor(() => { expect(fixture.starts).toHaveLength(2) })
+    const start = fixture.starts[0]!
+    const id = start.request.childId!
+    const child = fixture.children.get(String(id))!
+    const invoke = (name: string, args: unknown) => fixture.invokeSubmissionTool(id, name, args)
+    const urls = ['https://official.example/position-a', 'https://official.example/position-b']
+    await fixture.emitWeb(child, urls.map((url, index) => observation({
+      callId: `position-fetch-${index}`, name: 'web_fetch', arguments: { url }, callSeq: index * 2, resultSeq: index * 2 + 1,
+      value: { url, statusCode: 200, body: { kind: 'text', content: `来源 ${index + 1} 的技术说明。` }, truncated: false },
+    })))
+    const listed = await invoke('list_mapping_objects', {})
+    const objects = (listed.value as { objects: {
+      references: Array<{ id: string; kind: string; position: number }>
+      sources: Array<{ id: string; position: number }>
+    } }).objects
+    const web = objects.references.filter(item => item.kind === 'web_material')
+    expect(web).toHaveLength(2)
+    const [first, second] = web
+    if (first === undefined || second === undefined) throw new Error('缺少已读取的双 Web 来源')
+    expect(first.id).not.toBe(second.id)
+    expect(await invoke('submit_section_research_assessment', branchResearchAssessment())).toMatchObject({ isError: false })
+    const updated = await invoke('update_section_task', { section_id: 'SEC-1',
+      basis: { kind: 'section_responsibility', explanation: '按当前任务组织方案。', requirement_ids: [] },
+      writing_brief: { purpose: '说明技术方法与验证。', must_answer: ['说明实施方法'],
+        writing_notes: ['区分方案设计与项目事实'], suggested_tables: [], suggested_figures: [] },
+      writing_dimensions: ['技术响应'], missing_topics: [],
+    })
+    expect(updated.isError).toBe(false)
+    const checklist = (updated.value as { answer_checklist: Array<{ item_ref: string; text: string }> }).answer_checklist
+    expect(await invoke('update_section_task', { section_id: 'SEC-1',
+      basis: { kind: 'section_responsibility', explanation: '逐项说明方案与边界。', requirement_ids: [] },
+      answer_plan: checklist.map(item => ({ target_refs: [item.item_ref], mode: 'proposal',
+        content: `拟回应${item.text}。`, basis: [{ kind: 'section_responsibility' }], boundary: '不证明未经确认的事实。' })),
+    })).toMatchObject({ isError: false })
+    expect(await invoke('submit_section_structure_assessment', structureAssessment())).toMatchObject({ isError: false })
+    expect(await invoke('lock_section_outline', { comparison: '当前目录承接技术方法与验证责任。' })).toMatchObject({ isError: false })
+    const mapping = (position: number) => ({ section_position: 0, local_materials: [], web_materials: [{
+      chunk_positions: [position], usage: 'reference', summary: '用于技术方法参考。', supports: '支持当前章节技术方法。',
+    }] })
+    // 沿用同一模型步骤已经取得的位置，不让夹具按工具返回的新表重新选择来源。
+    const secondInput = mapping(second.position)
+    const firstInput = mapping(first.position)
+    const recorded = await invoke('submit_section_mapping', secondInput)
+    expect(recorded).toMatchObject({ isError: false, value: { objects: { references: objects.references } } })
+    fixture.reactivateSubmissionTools(id)
+    expect(await invoke('list_mapping_objects', {})).toMatchObject({ isError: false, value: {
+      objects: { references: objects.references, sources: objects.sources },
+    } })
+    const assessment = branchResearchAssessment()
+    const researched = await invoke('submit_section_research_assessment', { ...assessment,
+      key_findings: assessment.key_findings.map(finding => ({ ...finding, basis: [{ reference_position: first.position }] })),
+    })
+    expect(researched).toMatchObject({ isError: false, value: { key_findings: [{ basis: [{ kind: 'web_material', ref: first.id }] }] } })
+    expect(await invoke('submit_section_structure_assessment', structureAssessment())).toMatchObject({ isError: false })
+    expect(await invoke('lock_section_outline', { comparison: '研究依据更新后目录仍能承接技术责任。' })).toMatchObject({ isError: false })
+    expect(await invoke('submit_section_mapping', firstInput)).toMatchObject({ isError: false })
+    expect(await invoke('finish_mapping_task', {})).toMatchObject({ isError: false, value: { completed: true } })
+    start.complete()
+    fixture.starts[1]!.resolve()
+    await execution
+    const evidence = parseEvidenceMapArtifact(JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/evidence-map.json'), 'utf8')))
+    const sourceId = evidence.section_mappings.find(item => item.section_id === 'SEC-1')!.web_materials[0]!.source_id
+    const ledger = parseWebEvidenceSourcesArtifact(JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/web-evidence-sources.json'), 'utf8')))
+    expect(ledger.sources.find(source => source.source_id === sourceId)?.requested_url).toBe(urls[0])
+  })
+
   it('研究及 S2 计划只选择 references，Host 派生类别并拒绝模型重复标签和未读材料', async () => {
     const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-s4-reference-binding-')))
     const material = await writeInputs(workspace)

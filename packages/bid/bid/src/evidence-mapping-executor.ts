@@ -736,6 +736,15 @@ interface MappingSubmissionState {
   generation: number
   captured: { generation: number; value: MappingSubmission } | undefined
   everInstalled: boolean
+  /** 同一 Child 重新激活工具时保留所有已发出的位置。 */
+  readonly objectPositions: {
+    sections: string[]
+    reviews: string[]
+    findings: string[]
+    sources: string[]
+    targets: string[]
+    references: ReturnType<typeof mappingReferenceObjects>
+  }
   outlineBaseline: OutlineArtifact
   stagedOutline: OutlineArtifact
   acceptedOperations: OutlineEditOperation[]
@@ -1800,11 +1809,8 @@ function attachMappingSubmissionRuntime(
     schema: { type: 'object' as const },
     render: (_args: unknown, value: unknown) => [{ type: 'text' as const, text: JSON.stringify(value) }],
   }
-  const sectionObjects = state.stagedOutline.sections.map(section => section.id)
-  const reviewObjects: string[] = []
-  const findingObjects: string[] = []
-  const sourceObjects = mappingNavigationReferences(locations)
-  const targetObjects: string[] = []
+  const { sections: sectionObjects, reviews: reviewObjects, findings: findingObjects,
+    sources: sourceObjects, targets: targetObjects, references: referenceObjects } = state.objectPositions
   const registerObjects = (known: string[], current: readonly string[]) => {
     const existing = new Set(known)
     for (const id of current) if (!existing.has(id)) { known.push(id); existing.add(id) }
@@ -1819,6 +1825,17 @@ function attachMappingSubmissionRuntime(
       .flatMap(mapping => mapping.web_materials.flatMap(material => material.chunk_refs)),
     ...readWebChunkRefs(),
   ])
+  const referenceKeys = new Set(referenceObjects.map(item => JSON.stringify([item.kind, item.id])))
+  // Child 已发出的位置只追加，材料提交或覆盖不得改变已有引用的编号。
+  const currentReferenceObjects = () => {
+    for (const item of mappingReferenceObjects(task, inputs, locations, webReferences())) {
+      const key = JSON.stringify([item.kind, item.id])
+      if (referenceKeys.has(key)) continue
+      referenceKeys.add(key)
+      referenceObjects.push({ ...item, position: referenceObjects.length })
+    }
+    return referenceObjects
+  }
   const answerChecklists = () => mappingTaskWritingSections(state.stagedOutline, task).map((section) => {
     const mapping = currentSectionMapping(state, task, section.id)
     return { section_position: currentSectionObjects().indexOf(section.id),
@@ -1848,7 +1865,7 @@ function attachMappingSubmissionRuntime(
     const scoring = inputs.scoring.scoring_items.map(item => item.id)
     const compliance = inputs.compliance.compliance_items.map(item => item.id)
     const responsePoints = inputs.responsePoints.points.map(item => item.id)
-    const references = mappingReferenceObjects(task, inputs, locations, webReferences()).map(item => item.id)
+    const references = currentReferenceObjects().map(item => item.id)
     return [
       { canonical: 'section_id', model: 'section_position', ids: sections },
       { canonical: 'target_section_id', model: 'target_section_position', ids: sections },
@@ -1876,7 +1893,7 @@ function attachMappingSubmissionRuntime(
       position: currentSectionObjects().indexOf(section.id), id: section.id, title: section.title,
     })),
     ...mappingBusinessObjectView(task, inputs),
-    references: mappingReferenceObjects(task, inputs, locations, webReferences()),
+    references: [...currentReferenceObjects()],
     sources: currentSourceObjects().map((id, position) => ({ position, id })),
     targets: currentTargetObjects().map((id, position) => ({ position, id })),
     findings: state.researchAssessment?.key_findings.map(item => ({
@@ -1889,7 +1906,7 @@ function attachMappingSubmissionRuntime(
   })
   const register = (definition: Parameters<typeof childCtx.tools.register>[0]): void => {
     const referencePositions = () => createMappingReferencePositions(
-      mappingReferenceObjects(task, inputs, locations, webReferences()), topicDispositionBasisSchema.shape.kind.options)
+      currentReferenceObjects(), topicDispositionBasisSchema.shape.kind.options)
     disposers.push(childCtx.tools.register({ ...definition,
       parameters: createChapterObjectPositions(objectFields()).schema(referencePositions().schema(definition.parameters)),
       async execute(args, exec) {
@@ -4464,6 +4481,8 @@ async function executeEvidenceMappingRun(
           generation: 1,
           captured: undefined,
           everInstalled: false,
+          objectPositions: { sections: restoredOutline.sections.map(section => section.id), reviews: [], findings: [],
+            sources: mappingNavigationReferences(locations), targets: [], references: [] },
           outlineBaseline: parseOutlineArtifact(structuredClone(restoredOutline)),
           stagedOutline: restoredOutline,
           acceptedOperations: [],
