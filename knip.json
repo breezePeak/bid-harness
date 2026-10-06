@@ -212,6 +212,16 @@
         "tests/**/*.ts"
       ]
     },
+    "packages/bid/bid": {
+      "entry": [
+        "tests/**/*.spec.ts",
+        "tests/fixtures/generate-table-page-anchors.ts"
+      ],
+      "project": [
+        "src/**/*.ts",
+        "tests/**/*.ts"
+      ]
+    },
     "packages/typert/generator": {
       "entry": [
         "tests/**/*.spec.ts",
