@@ -18,6 +18,11 @@ export interface RenderedPdfPage {
   readonly data: Uint8Array
 }
 
+/** 普通文字锚点，或不依赖 PDF 单元格读取顺序的表格定位片段。 */
+export type PdfReviewAnchor = string | readonly string[]
+
+const normalizeAnchor = (value: string): string => value.normalize('NFKC').replace(/[\s\p{P}]+/gu, '')
+
 async function openPdf(bytes: Uint8Array) {
   const pdfjs = await import('pdfjs-dist/legacy/build/pdf.mjs')
   const standardFontDataUrl = new URL('./standard_fonts/', import.meta.resolve('pdfjs-dist/package.json')).href
@@ -73,9 +78,9 @@ export async function renderPdfPage(
 }
 
 /**
- * 按页面文字查找视觉块，并返回目标页及相邻页；文字不可定位时按块顺序确定中心页。
+ * 按页面文字查找视觉块并返回相邻页；表格片段无法匹配时拒绝按文档比例猜页。
  * @param bytes PDF 字节。
- * @param anchor 当前块的短文字锚点。
+ * @param anchor 当前块文字锚点，或表格的多个独立定位片段。
  * @param blockIndex 当前视觉块索引。
  * @param blockCount 视觉块总数。
  * @param limits 当前附件图片限制。
@@ -84,7 +89,7 @@ export async function renderPdfPage(
  */
 export async function renderPdfReviewPages(
   bytes: Uint8Array,
-  anchor: string,
+  anchor: PdfReviewAnchor,
   blockIndex: number,
   blockCount: number,
   limits: ImageAttachmentLimits,
@@ -94,20 +99,27 @@ export async function renderPdfReviewPages(
   const pdf = await openPdf(bytes)
   const pageCount = pdf.numPages
   let center = Math.min(pageCount, Math.max(1, Math.floor(blockIndex * pageCount / Math.max(1, blockCount)) + 1))
-  const needle = anchor.normalize('NFKC').replace(/\s+/gu, '').slice(0, 48)
+  const normalize = typeof anchor === 'string'
+    ? (value: string): string => value.normalize('NFKC').replace(/\s+/gu, '')
+    : normalizeAnchor
+  const needles = [...new Set((typeof anchor === 'string' ? [normalize(anchor).slice(0, 48)] : anchor.map(normalize)).filter(Boolean))]
+  let bestScore = 0
   try {
-    if (needle !== '') {
+    if (needles.length > 0) {
       for (let pageNumber = 1; pageNumber <= pageCount; pageNumber++) {
         const page = await pdf.getPage(pageNumber)
         try {
-          const text = (await page.getTextContent()).items
+          const text = normalize((await page.getTextContent()).items
             .map(item => 'str' in item ? item.str : '')
-            .join('')
-            .normalize('NFKC')
-            .replace(/\s+/gu, '')
-          if (text.includes(needle)) { center = pageNumber; break }
+            .join(''))
+          const score = needles.filter(needle => text.includes(needle)).length
+          if (score > bestScore) { bestScore = score; center = pageNumber }
+          if (typeof anchor === 'string' && score > 0) break
         } finally { page.cleanup() }
       }
+    }
+    if (typeof anchor !== 'string' && bestScore < Math.min(2, needles.length || 2)) {
+      throw new Error('PDF_VISUAL_TABLE_ANCHOR_NOT_FOUND')
     }
   } finally { await pdf.destroy() }
   const pageNumbers = [...new Set([center - 1, center, center + 1])]

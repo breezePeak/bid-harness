@@ -13,7 +13,7 @@ import { z } from 'zod'
 import type { FormatValues } from './docx-format-contract.ts'
 import { docxImageDimensions } from './docx-image.ts'
 import { renderDocxPdf } from './docx-pdf.ts'
-import { renderPdfReviewPages, type RenderedPdfPage } from './pdf-page-render.ts'
+import { renderPdfReviewPages, type PdfReviewAnchor, type RenderedPdfPage } from './pdf-page-render.ts'
 import type { BidWorkspace } from './index.ts'
 import { assertNoLinkedPath, within } from './workspace-path.ts'
 import { renderFlowchartSvg } from './flowchart.ts'
@@ -134,7 +134,7 @@ export interface VisualSensitiveBlock {
   readonly blockId: string
   readonly kind: VisualBlockKind
   readonly inputHash: string
-  readonly anchor: string
+  readonly anchor: PdfReviewAnchor
   readonly boundary: 'within-page' | 'overflow'
 }
 
@@ -279,7 +279,7 @@ export async function collectVisualSensitiveBlocks(
   const availableHeightPx = Math.max(0, (pageHeightMm(values) - Number(values['page.top']) - Number(values['page.bottom'])) * 96 / 25.4)
   return Promise.all(indexed.map(async (block): Promise<VisualSensitiveBlock> => {
     let contentIdentity: unknown
-    let anchor = block.heading
+    let anchor: PdfReviewAnchor = block.heading
     let renderedWidth = 0
     let renderedHeight = 0
     if (block.kind === 'image') {
@@ -297,8 +297,10 @@ export async function collectVisualSensitiveBlocks(
       contentIdentity = { spec, target: { width: Math.min(renderedWidth, availableWidthPx), height: renderedHeight } }
       anchor = typeof spec.title === 'string' && spec.title.trim() !== '' ? spec.title : block.heading
     } else {
-      contentIdentity = { table: canonicalNode(block.node), targetWidth: availableWidthPx * Number(values['table.width']) / 100 }
-      anchor = text(block.node).trim().slice(0, 48) || block.heading
+      anchor = [...new Set((block.node.children ?? []).slice(0, 3)
+        .flatMap(row => row.children ?? []).map(cell => text(cell).normalize('NFKC').replace(/[\s\p{P}]+/gu, '').slice(0, 4)).filter(Boolean))]
+      contentIdentity = { table: canonicalNode(block.node), targetWidth: availableWidthPx * Number(values['table.width']) / 100,
+        pageReview: { version: 2, anchor } }
       renderedWidth = availableWidthPx * Number(values['table.width']) / 100
     }
     const inputHash = hash(canonicalJson({
@@ -395,12 +397,13 @@ export async function reviewDocxVisualBlocks(
     }
   }
   let bytes = await render(adjustments)
+  let pdf: Uint8Array | undefined
   for (const block of misses) {
     const blockIndex = blocks.indexOf(block)
     let passed = false
     for (let adjustmentRound = 0; adjustmentRound <= 2; adjustmentRound++) {
       signal.throwIfAborted()
-      const pdf = await (options.renderPdf ?? renderDocxPdf)(bytes)
+      pdf ??= await (options.renderPdf ?? renderDocxPdf)(bytes)
       const pages = await (options.renderPages ?? renderPdfReviewPages)(
         pdf, block.anchor, blockIndex, blocks.length, reviewer.imageLimits, signal,
       )
@@ -441,6 +444,7 @@ export async function reviewDocxVisualBlocks(
       }
       adjustments[block.blockId] = adjustmentFor(block.kind, decision.adjustment)
       bytes = await render(adjustments)
+      pdf = undefined
     }
     if (!passed) throw new Error(`DOCX_VISUAL_REVIEW_FAILED:${block.blockId}`)
   }
@@ -489,6 +493,7 @@ export function createDocxVisualReviewer(ctx: Context, session: Session, signal?
         `只检查最终 Word 页面中的 ${input.block.kind} 块 ${input.block.blockId} 是否超界、裁切、重叠、变形或严重不可读。`,
         `程序边界检查：${input.block.boundary}。`,
         `允许调整：${allowedAdjustment(input.block.kind)}。`,
+        input.block.kind === 'table' ? `目标表定位片段：${typeof input.block.anchor === 'string' ? input.block.anchor : input.block.anchor.join('、')}。表格允许正常跨页延续和重复表头；分页边缘的行在相邻页继续不属于裁切。只检查目标表，不因相邻页的其他图表要求调整。` : '',
         input.adjustment === undefined ? '' : `当前调整：${JSON.stringify(input.adjustment)}。`,
         '只返回 JSON：通过时 {"status":"pass"}；需调整时 {"status":"adjust","reason":"简短原因","adjustment":{...}}。',
       ].filter(Boolean).join('\n')

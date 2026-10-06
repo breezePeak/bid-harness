@@ -111,6 +111,8 @@ S5 将 `execution-plan.json` 和 schema v4 `execution-log.json` 绑定当前 Wri
 
 Writer 使用私有 `submit_chapter` 提交完整候选，工具参数错误在当前回合纠正；每轮语义修复保留 Writer 身份并启动独立 Reviewer，引用和报告按当前候选重新生成。正文标题在审查前按确认目录统一编号；页面读取同一正文，Word 保留相同编号并调整文档标题层级。
 
+S6 按最终 Word 页面逐块审核流程图、表格和图片。同一版 DOCX 在一次导出中只转换一次 PDF；版式调整并重新生成 DOCX 后重新转换，后续审核读取调整后的页面。表格按多个单元格文字片段定位，找不到目标表时明确失败，不按全书比例猜页；正常跨页续表不视为裁切。表格定位规则参与输入摘要，旧定位结论失效；已通过的块按[视觉审核缓存](../../../.agents/notes/implemented/feature/2026-09-21-docx-visual-sensitive-review-cache.md)复用。
+
 Writer 在缺少真实项目数量、人员、设备或记录值时只保留正式字段和填写规则，不生成示例数据行。Reviewer 不得要求虚构或示例值，并把已填的“示例、待补、XXX、最终填写”等内容视为占位。
 
 S2 的 `project.json` 记录项目背景、建设目标、实施约束和项目技术重点；`scoring.json` 只保存评分原文、分值与简单规范化字段，不含评分响应点。纯商务、资格和报价评分不得进入 `scoring.json`。Validator 检查覆盖、严格 schema、来源文件、分块和引用行后，S2 停在 `tender_analysis/waiting_user`。

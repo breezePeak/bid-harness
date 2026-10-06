@@ -61,6 +61,22 @@ describe('S6 视觉敏感块审核缓存', () => {
     expect(model.review).not.toHaveBeenCalled()
   })
 
+  it('同版 Word 的多个视觉块共用一次 PDF 转换，每个块仍定位页面并审核', async () => {
+    const workspace = await fixture()
+    const markdown = `# 方案\n\n${flowchart('FLOW-A', '流程 A')}\n\n${flowchart('FLOW-B', '流程 B')}\n\n| 项 | 值 |\n| --- | --- |\n| C | 1 |`
+    const model = reviewer()
+    const renderedPdf = new Uint8Array([9])
+    const convert = vi.fn(async () => renderedPdf)
+    const locate = vi.fn(async (_bytes: Uint8Array) => pages())
+    await reviewDocxVisualBlocks(workspace, markdown, values, 'template-a', model, render(), signal, {
+      renderPdf: convert, renderPages: locate,
+    })
+    expect(convert).toHaveBeenCalledOnce()
+    expect(locate).toHaveBeenCalledTimes(3)
+    expect(model.review).toHaveBeenCalledTimes(3)
+    expect(locate.mock.calls.map(call => call[0])).toEqual([renderedPdf, renderedPdf, renderedPdf])
+  })
+
   it('首次流程图保存 PASS，同一联合输入第二次直接复用', async () => {
     const workspace = await fixture()
     const markdown = `# 方案\n\n${flowchart('FLOW-1', '审批流程')}`
@@ -136,11 +152,20 @@ describe('S6 视觉敏感块审核缓存', () => {
       { status: 'pass' },
     )
     const build = render()
+    const convert = vi.fn(async (bytes: Buffer) => new Uint8Array(bytes))
+    const locate = vi.fn(async (bytes: Uint8Array) => [{ page: 1, pageCount: 1, data: bytes }])
     const result = await reviewDocxVisualBlocks(workspace, markdown, values, 'template-a', model, build, signal, {
-      renderPdf: pdf, renderPages: pages,
+      renderPdf: convert, renderPages: locate,
     })
     expect(model.review).toHaveBeenCalledTimes(4)
     expect(build).toHaveBeenCalledTimes(3)
+    expect(convert).toHaveBeenCalledTimes(3)
+    expect(locate.mock.calls.map(call => Buffer.from(call[0]).toString('utf8'))).toEqual([
+      JSON.stringify({}),
+      JSON.stringify({ [model.review.mock.calls[0]![0].block.blockId]: { fontScale: 0.9 } }),
+      JSON.stringify({ [model.review.mock.calls[0]![0].block.blockId]: { fontScale: 0.9 } }),
+      JSON.stringify(result.adjustments),
+    ])
     expect(Object.values(result.adjustments)).toEqual(expect.arrayContaining([{ fontScale: 0.9 }, { scale: 0.8 }]))
   })
 
