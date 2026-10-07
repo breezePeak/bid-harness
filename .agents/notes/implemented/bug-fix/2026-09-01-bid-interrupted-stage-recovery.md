@@ -12,9 +12,9 @@ Host 把“项目状态存在 running 或 cancelling Run，但新进程没有对
 
 同一 Orchestrator 上的并发 `drive()` 仍共享已安装的 operation，不会把真正在执行的 Run 标记为中断。恢复不接管内存 Promise 或调度状态；各阶段 Executor 按持久检查点核对并复用已完成工作。
 
-Bid Preset 在 Agent 作用域注册 `/bid-reset-s2` 至 `/bid-reset-s5`。目标可以是当前或更早阶段，不能是未来阶段、S1 或 S6。Host 用可取消的独占操作记录串行化同一 Workspace 的项目写操作；重置先占用该记录，无论当前进程是否仍保留执行操作，都会取消并等待主 Agent、Subagent 和并发 Worker 全部静止，再按阶段所有权删除 Artifact、追加 `bid.stage.reset`。短暂且不可抢占的文件事务先自然结算。第二个并发重置会被拒绝，用户发起的取消不写入 `bid.stage.failed`。
+Bid Preset 在 Agent 作用域注册 `/bid-reset-s1` 至 `/bid-reset-s5`。目标可以是当前或更早阶段，不能是未来阶段或 S6；S1 入口与原资料保留规则由[S1 重置命令](../feature/2026-10-07-bid-reset-s1-command.md)补充。Host 用可取消的独占操作记录串行化同一 Workspace 的项目写操作；重置先占用该记录，无论当前进程是否仍保留执行操作，都会取消并等待主 Agent、Subagent 和并发 Worker 全部静止，再按阶段所有权删除 Artifact、追加 `bid.stage.reset`。短暂且不可抢占的文件事务先自然结算。第二个并发重置会被拒绝，用户发起的取消不写入 `bid.stage.failed`。
 
-重置后的状态与驱动由[单一任务状态机](../architecture/2026-09-22-bid-single-task-state.md)决定：S2～S4 回到 `ready` 并沿正常路径驱动，S5 回到 `waiting_user`。重置后没有独立的 `waiting_start` 状态、开始 Remote 或原生开始问题。
+重置后的状态与驱动由[单一任务状态机](../architecture/2026-09-22-bid-single-task-state.md)决定：S2～S4 回到 `ready` 并沿正常路径驱动，S1 与 S5 回到 `waiting_user`。重置后没有独立的 `waiting_start` 状态、开始 Remote 或原生开始问题。
 
 composer block 只禁止普通消息和依赖消息上下文的输入控件。前置加号执行人类命令，不经过 textarea，因此在 Bid 失败 block 下仍可打开；没有会话、会话已移除、父 Agent 离线或输入栏 inert 时仍禁用。命令生命周期和重置事件写入 Session，但命令文本不进入模型历史。
 
@@ -26,7 +26,7 @@ composer block 只禁止普通消息和依赖消息上下文的输入控件。�
 
 **只在浏览器把长时间 `running` 显示为可恢复。** 不采用，因为多个 Client 会产生不同的超时判断，项目状态与 Session 日志仍然保留错误的运行状态。
 
-**用一个带阶段参数的全局重置命令。** 不采用，因为它会在非 Bid Session 中暴露无效能力，并允许用户输入与当前状态无关的阶段名。作用域内的固定命令让菜单直接展示 S2–S5，Host 校验目标不得晚于当前阶段。
+**用一个带阶段参数的全局重置命令。** 不采用，因为它会在非 Bid Session 中暴露无效能力，并允许用户输入与当前状态无关的阶段名。作用域内的固定命令让菜单直接展示 S1–S5，Host 校验目标不得晚于当前阶段。
 
 **让重置请求等待用户确认后再返回。** 不采用，因为重置本身是确定性操作，跨请求等待确认会使 Host 与其他客户端无法观察已完成的回退状态。
 
@@ -34,4 +34,4 @@ composer block 只禁止普通消息和依赖消息上下文的输入控件。�
 
 ## Consequences
 
-Host 重启后，中断的 Bid Run 会稳定进入 `host_restart` 挂起；可继续的 S2～S5 Run 自动恢复，其他情况页面保持 Composer 可用，用户可以在聊天中明确要求继续，也可从 `+` 命令菜单把 S2～S5 重置到当前或更早阶段。运行中的阶段能在全部 Agent 工作停止后安全回退，不会与正在写入的 Worker 并发删除文件。项目状态文件负责跨 Session 进度，当前 Session 的日志负责执行记录和 Projection；恢复同步与锁归属见[Workspace 项目记录](../architecture/2026-09-03-bid-workspace-project.md)。
+Host 重启后，中断的 Bid Run 会稳定进入 `host_restart` 挂起；可继续的 S2～S5 Run 自动恢复，其他情况页面保持 Composer 可用，用户可以在聊天中明确要求继续，也可从 `+` 命令菜单把 S1～S5 重置到当前或更早阶段。运行中的阶段能在全部 Agent 工作停止后安全回退，不会与正在写入的 Worker 并发删除文件。项目状态文件负责跨 Session 进度，当前 Session 的日志负责执行记录和 Projection；恢复同步与锁归属见[Workspace 项目记录](../architecture/2026-09-03-bid-workspace-project.md)。

@@ -241,7 +241,7 @@ describe('the shipped Web composition', () => {
       expect(resolveSessionPreset(handle.agent.session)).toBe('bid')
       expect(toolNames(ctx, handle.agent)).toEqual(expect.arrayContaining(['web_search', 'web_fetch']))
       expect(ctx.commands.list(handle.agent).map(command => command.name)).toEqual(expect.arrayContaining([
-        'bid-reset-s2', 'bid-reset-s3', 'bid-reset-s4',
+        'bid-reset-s1', 'bid-reset-s2', 'bid-reset-s3', 'bid-reset-s4',
         'bid-reset-s5',
       ]))
       expect(projections.snapshot(handle.agent.session).values[BID_RUNTIME_PROJECTION_KEY]).toMatchObject({
@@ -268,6 +268,25 @@ describe('the shipped Web composition', () => {
       expect(handle.agent.session.events.some(event => event.type === 'user/message')).toBe(false)
     } finally {
       await handle.dispose()
+    }
+  })
+
+  it('在正式 Bid Preset 中提供 S1 资料上传重置命令', async () => {
+    const bidRoot = await mkdtemp(join(tmpdir(), 'dsh-bid-reset-s1-preset-'))
+    const handle = await ctx.agents.create({
+      sessionId: SessionId('preset-bid-reset-s1-command'),
+      meta: { agentPreset: 'bid', cwd: bidRoot },
+      setup: agentCtx => ctx.agentPresets.mount(agentCtx, 'bid').then(() => undefined),
+    })
+    try {
+      expect(resolveSessionPreset(handle.agent.session)).toBe('bid')
+      expect(ctx.commands.find(handle.agent, 'bid-reset-s1')).toMatchObject({
+        name: 'bid-reset-s1',
+        description: '回退资料上传阶段（S1）并等待重新上传，保留已上传资料',
+      })
+    } finally {
+      await handle.dispose()
+      await rm(bidRoot, { recursive: true, force: true })
     }
   })
 
