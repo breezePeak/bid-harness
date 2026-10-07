@@ -8,6 +8,8 @@ Chapter Reviewer 把缺少企业资质、证书、业绩证明或人员证件与
 
 ## Decision
 
+[恢复结算与必需页数门禁](2026-10-06-bid-recovery-settlement.md)限定本记录的风险交付规则：`required estimated_pages` 未达标或测量执行失败仍拒绝交付完成；纯任务分配冲突由 Main 修复，只有外部输入缺口进入用户问答。本记录继续拥有风险报告、Reviewer 名称及外部资料归属的独立理由。
+
 Chapter Reviewer 把问题分为正文可修复问题和外部资料缺口。只有 Writer 能通过修改当前正文解决的问题进入 `blocking_issues` 并产生 `repair`；缺少项目方才能提供的资质、证书、业绩或人员材料时，对应 R 保持 `missing`，并通过 `external_input_gaps` 记录所需材料和原因。单独存在外部资料缺口或任务分配冲突时，报告结论为 `attention`，调度器保存报告但不再调用 Writer。
 
 Reviewer 子任务名称只使用确认目录的真实章节号和固定后缀，例如 `3.1 - 审查`。正文修订轮次、Reviewer 重试次数和内部章节流水号只保留在执行日志字段中，不进入名称。

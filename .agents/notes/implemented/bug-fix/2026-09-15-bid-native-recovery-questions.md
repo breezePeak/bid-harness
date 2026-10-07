@@ -10,6 +10,8 @@ Status: implemented
 
 ## Decision
 
+答案保存与动作应用采用[恢复必须执行并结算](2026-10-06-bid-recovery-settlement.md)的独立状态；received 不代表 applied，临时应用故障复用原答案并受持久预算限制。
+
 Bid Host 复用 `ctx.userQuestions.ask()` 和现有 `QuestionComposer`，为用户主动停止的挂起 Run 提供继续、当前阶段重跑和停止三个合法选项；S1 只能继续或停止。阶段状态卡只显示状态、原因和进度，不注册恢复或开始按钮；普通消息不会被解释为该问题的答案。
 
 每个决策以 `session + stage + runId + decisionType` 组成稳定 `decisionKey`。Host 在提问前追加 `bid.run.decision.required`，保存完整原生问题；明确选项映射成功后追加 `bid.run.decision.received`，随后分别调用既有 `resumeCurrentRun`、挂起 Run 的 `resetStage` 加 `startStage`，或统一的 `agent.cancel({ kind: 'user' })`。自动重试仍由现有执行器预算处理，重试耗尽后的挂起不产生恢复问题。

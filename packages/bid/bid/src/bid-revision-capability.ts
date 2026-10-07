@@ -12,7 +12,7 @@ import { createRevisionBatch, readRevisionBatch, writeRevisionBatch, validateRev
 import { buildRevisionComparisonPath } from './chapter-revision-comparison.ts'
 import { buildParagraphRevisionReviewPath, readParagraphRevisionReview } from './chapter-paragraph-revision-artifacts.ts'
 import { buildChapterRevisionLineagePath } from './chapter-revision-lineage.ts'
-import { parseChapterReviewArtifact } from './chapter-writing-review-artifacts.ts'
+import { chapterCandidateSha256, parseChapterReviewArtifact } from './chapter-writing-review-artifacts.ts'
 import { assertNoLinkedPath, within } from './workspace-path.ts'
 import { BidStageExecutionError } from './control-plane-contract.ts'
 
@@ -138,8 +138,20 @@ export async function executeRevisionCapability(
     code: task.failure?.code ?? (task.status === 'conflict' ? 'BID_REVISION_CONFLICT' : 'BID_REVISION_TASK_FAILED'),
     message: task.failure?.message ?? task.status, artifact: task.section_id, path: task.task_id,
   })))
-  const missing = finished.tasks.filter(task => task.status === 'needs_input')
+  const waiting = finished.tasks.filter(task => task.status === 'needs_input')
+  const missing = waiting
     .map(task => task.section_id + '：' + (task.failure?.message ?? task.status))
+  const warnings = (await Promise.all(waiting.map(async (task) => {
+    const location = locations.get(task.section_id)
+    if (location === undefined) throw new Error('BID_CHAPTER_REVISION_CONTEXT_UNAVAILABLE')
+    const reviewPath = within(context.working.projectRoot, location.reviewPath)
+    const bodyPath = within(context.working.projectRoot, location.contentPath)
+    await assertNoLinkedPath(context.working.root, reviewPath)
+    await assertNoLinkedPath(context.working.root, bodyPath)
+    const review = parseChapterReviewArtifact(JSON.parse(await readFile(reviewPath, 'utf8')))
+    if (review.candidate_sha256 !== chapterCandidateSha256(await readFile(bodyPath, 'utf8'))) return []
+    return review.assignment_conflicts.map(conflict => `${task.section_id}：${conflict.task}；${conflict.basis}；关联章节：${conflict.related_section_ids.join('、')}`)
+  }))).flat()
   const changed: string[] = []
   for (const path of context.allowedWrites) {
     const current = await capabilityFileHash(context.working, path)
@@ -147,7 +159,7 @@ export async function executeRevisionCapability(
   }
   return { result: { target_section_ids: [...new Set(issues.map(issue => issue.section_id))],
     changed_artifacts: changed, change_summary: '已保存正文审批批次候选及逐项执行结果',
-    warnings: [], missing_topics: missing, needs_input: missing.length > 0 } }
+    warnings, missing_topics: missing, needs_input: missing.length > 0 } }
 }
 
 /**

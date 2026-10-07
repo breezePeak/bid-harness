@@ -41,7 +41,7 @@ interface HostInternals {
 const cleanup: Array<() => Promise<unknown>> = []
 afterEach(async () => { await Promise.allSettled(cleanup.splice(0).reverse().map(dispose => dispose())) })
 
-async function setup(stage: 'file_intake' | 'tender_analysis', withGoal = true) {
+async function setup(stage: 'file_intake' | 'tender_analysis', withGoal = true, modelStageRepairAttempts = 3) {
   const root = await mkdtemp(join(tmpdir(), 'dsh-bid-goal-'))
   cleanup.push(() => rm(root, { recursive: true, force: true }))
   const ctx = new Context()
@@ -63,7 +63,8 @@ async function setup(stage: 'file_intake' | 'tender_analysis', withGoal = true) 
   }
   const workspace = new BidWorkspace(root)
   await checkpointBidProjectState(workspace, { stage, status: 'waiting_user', run: null })
-  await ctx.plugin(BidHostRuntime)
+  // 配置加载的原始对象省略字段；Schemastery 在进入 Host 前补齐并校验默认值。
+  await ctx.plugin(BidHostRuntime, BidHostRuntime.Config({ modelStageRepairAttempts } as Parameters<typeof BidHostRuntime.Config>[0]))
   const handle = await ctx.agentLoop.createAgent(ctx, {
     sessionId: SessionId(`bid-goal-${stage}`),
     agentOptions: { provider: 'mock', model: 'mock' },
@@ -92,10 +93,11 @@ it.each(['file_intake', 'tender_analysis'] as const)('%s 默认运行不创建 G
   expect(agent.session.events.some(event => event.type === 'bid.goal.bound')).toBe(false)
   await operation.runs.suspend('retry_exhausted', safeRecoverableBidFailure(run.work, new Error('repair exhausted')))
   await host.finishOperation(agent.session, operation)
+  await vi.waitFor(() => { expect(steer).toHaveBeenCalledOnce() })
   await agent.whenIdle()
   expect(agent.session.events.some(event => event.type === 'bid.run.decision.required')).toBe(false)
   expect(agent.session.events.some(event => event.type === 'user/message' && event.data.content.some(block =>
-    block.type === 'text' && block.text.startsWith('当前阶段执行失败，失败状态已保存。')))).toBe(true)
+    block.type === 'text' && block.text.includes('repair exhausted')))).toBe(true)
   expect(steer).toHaveBeenCalledOnce()
   expect(agent.session.events.some(event => event.type === 'bid.goal.recovery.requested')).toBe(false)
   expect(agent.ctx.tools.schemas(agent).some(tool => tool.name === 'bid_recover_task')).toBe(stage === 'tender_analysis')
@@ -317,7 +319,7 @@ it('后续合法 Goal 轮次可修改未执行步骤，旧轮次与伪造来源�
 }, 15_000)
 
 it('无 Goal 时主 Agent 恢复原 Run；重复失败再次 steer，相同指令拒绝，不同方案可执行', async () => {
-  const { ctx, host, agent, workspace } = await setup('tender_analysis', false)
+  const { ctx, host, agent, workspace } = await setup('tender_analysis', false, 10)
   const steer = vi.spyOn(agent, 'steer')
   const payload = { stage: 'tender_analysis' }
   const inputs = buildBidStageTask('tender_analysis').inputs.map(path => ({ path, sha256: null }))
@@ -330,6 +332,8 @@ it('无 Goal 时主 Agent 恢复原 Run；重复失败再次 steer，相同指�
     code: 'BID_TENDER_ANALYSIS_SUBMISSION_INCOMPLETE', artifact: 'analysis/project.json', message: '项目字段缺失',
   }]))
   await host.finishOperation(agent.session, operation)
+  await vi.waitFor(() => { expect(steer).toHaveBeenCalledOnce() })
+  await agent.whenIdle()
   const gate = Promise.withResolvers<undefined>()
   const original = host as unknown as { automaticOrchestrator: (...args: unknown[]) => unknown }
   original.automaticOrchestrator = (_execution, _workspace, _signal, resumedOperation) => ({
@@ -372,13 +376,15 @@ it('无 Goal 时主 Agent 恢复原 Run；重复失败再次 steer，相同指�
     await expect(ctx.bid.resumeCurrentRun(agent.session, value.run_id, repeated.revision, undefined,
       { instruction: '  补齐项目字段并按原提交工具提交。  ' }))
       .rejects.toMatchObject({ code: 'BID_RECOVERY_DUPLICATE_INSTRUCTION' })
-    expect(steer).toHaveBeenCalledTimes(2)
+    expect(agent.session.events.some(event => event.type === 'bid.recovery.round'
+      && event.data.target.kind === 'run' && event.data.target.workId === descriptor.workId
+      && event.data.state === 'scheduled' && event.data.round >= 2)).toBe(true)
     const changed = await agent.ctx.tools.execute({ agent, name: 'bid_recover_task',
       arguments: { target: 'run', instruction: '先核对 chunk 原文，再逐字段补齐并提交。' },
       callId: CallId('changed-strategy'), signal: new AbortController().signal })
     expect(changed).toMatchObject({ isError: false, value: { accepted: true } })
     await vi.waitFor(() => { expect(host.inFlight.size).toBe(0) })
-    expect(steer).toHaveBeenCalledTimes(3)
+    expect(agent.session.events.filter(event => event.type === 'bid.recovery.round' && event.data.state === 'executing')).toHaveLength(2)
     expect(agent.session.events.filter(event => event.type === 'bid.recovery.requested')).toHaveLength(2)
     expect(ctx.get('goals')).toBeUndefined()
 
@@ -386,7 +392,7 @@ it('无 Goal 时主 Agent 恢复原 Run；重复失败再次 steer，相同指�
     gate.resolve(undefined)
 
   }
-})
+}, 15_000)
 
 
 it.each(['user_stop', 'awaiting_input', 'provider unavailable', 'quota exhausted', 'credential missing'] as const)(

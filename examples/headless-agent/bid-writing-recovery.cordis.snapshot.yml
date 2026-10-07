@@ -1,0 +1,26 @@
+# 无密钥恢复回放保留真实 Host、子会话、磁盘工具和 JSONL 持久化。
+- name: '@deepseek-ai/dsh-llm'
+- name: '@deepseek-ai/dsh-session'
+- name: '@deepseek-ai/dsh-session-persistence-jsonl'
+  config:
+    root: './.session-store'
+    compression: none
+- name: '@deepseek-ai/dsh-system-prompt'
+  config:
+    persona: test
+- name: '@deepseek-ai/dsh-tools'
+- name: '../../packages/bid/bid/tests/fixtures/evidence-mapping-loop.ts'
+- name: '@deepseek-ai/dsh-agent'
+- name: '@deepseek-ai/dsh-agent-loop'
+  config:
+    agents: []
+- name: '@deepseek-ai/dsh-subagent'
+- name: '@deepseek-ai/dsh-subagent-spawn-in-process'
+  config:
+    providerName: spawn
+- name: '@deepseek-ai/dsh-session-projection'
+- name: '@deepseek-ai/dsh-user-questions'
+- name: '../../packages/bid/bid/src/index.ts'
+  config:
+    chapterWritingMaxConcurrency: 1
+    modelStageRepairAttempts: 3

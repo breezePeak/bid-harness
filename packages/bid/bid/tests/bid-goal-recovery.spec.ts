@@ -6,7 +6,7 @@ import { afterEach, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import SessionStore from '@deepseek-ai/dsh-session'
 import { BidWorkspace } from '../src/index.ts'
-import { safeRecoverableBidFailure, bidRunRecoveryEligibility, bidRecoveryInstructionRepeated } from '../src/bid-recovery.ts'
+import { safeRecoverableBidFailure, bidRunRecoveryEligibility, bidRecoveryInstructionRepeated, bidWritingPlanRecoveryEligibility } from '../src/bid-recovery.ts'
 import { inspectBidStage } from '../src/stage-interaction.ts'
 import type { BidRunData, BidWorkDescriptor } from '../src/control-plane-contract.ts'
 import { BidStageExecutionError } from '../src/control-plane-contract.ts'
@@ -19,6 +19,21 @@ const work: BidWorkDescriptor = {
   kind: 'stage_execution', stage: 'outline_generation', workId: 's3-work',
   requestRef: 'requests/s3-work.json', requestSha256: '0'.repeat(64), inputFingerprint: '1'.repeat(64),
 }
+
+it.each(['TIMEOUT', 'TRANSPORT', 'SERVER', 'RATE_LIMIT'])('已保存写作要求的 %s 进入原计划恢复', async (code) => {
+  const ctx = new Context()
+  cleanup.push(() => ctx.fiber.dispose())
+  await ctx.plugin(SessionStore)
+  const session = ctx.sessions.create()
+  session.append('bid.writing_entry.changed', { view: {
+    phase: 'failed', owner_session_id: String(session.id),
+    request_state: 'answered', continuation: 'allowed', has_answer: true, has_plan: false,
+    processing_state: 'failed', answer_save_status: 'saved', can_retry_answer: false, durability: 'durable',
+    expected: { project_revision: 1, request_id: 'request', attempt_id: 'attempt', stop_id: null,
+      plan_version: null }, error: { code, message: '模型请求暂时失败' },
+  } })
+  expect(bidWritingPlanRecoveryEligibility(session)).toMatchObject({ eligible: true, attempts: 0 })
+})
 
 function run(runId: string): BidRunData {
   return { runId, epoch: 1, baseProjectRevision: 1, work, startedAt: 1, updatedAt: 1 }
@@ -34,13 +49,46 @@ it('keeps repairable candidate issues distinct from provider and input faults', 
   }]).recovery?.kind).toBe('blocked')
 })
 
+it('估算执行故障落盘保留安全 cause、错误码与失败阶段', () => {
+  const cause = Object.assign(new Error('格式读取暂时失败'), { code: 'EIO' })
+  const error = Object.assign(new BidStageExecutionError([{ code: 'EIO', artifact: 'word-export/default.config.json', message: '页数估算失败' }]), { cause })
+  expect(safeRecoverableBidFailure({ ...work, stage: 'chapter_writing' }, error)).toMatchObject({
+    cause: { code: 'EIO', message: '格式读取暂时失败' }, recovery: { kind: 'retry' },
+    issues: [{ artifact: 'word-export/default.config.json' }],
+  })
+})
+
+it.each([429, 503])('S4 Provider HTTP %s 的可重试 cause 保留状态码且不被通用 Provider 码阻断', (statusCode) => {
+  const cause = Object.assign(new Error('联网请求暂时失败'), { code: 'WEB_PROVIDER_ERROR', statusCode, retryable: true })
+  const error = new BidStageExecutionError([{ code: 'WEB_PROVIDER_ERROR', message: '联网请求已耗尽内层尝试预算' }])
+  error.cause = cause
+  expect(safeRecoverableBidFailure({ ...work, stage: 'evidence_mapping' }, error)).toMatchObject({
+    cause: { code: 'WEB_PROVIDER_ERROR', status: statusCode, retryable: true }, recovery: { kind: 'retry' },
+  })
+})
+
+it.each(['AUTH', 'QUOTA', 'EACCES'])('S4 可重试 Provider cause 不能覆盖 %s 阻断', (code) => {
+  const error = new BidStageExecutionError([
+    { code: 'WEB_PROVIDER_ERROR', message: '联网请求暂时失败' }, { code, message: '不能自动解除的故障' },
+  ])
+  error.cause = Object.assign(new Error('联网请求暂时失败'), { code: 'WEB_PROVIDER_ERROR', statusCode: 503, retryable: true })
+  expect(safeRecoverableBidFailure({ ...work, stage: 'evidence_mapping' }, error).recovery)
+    .toMatchObject({ kind: 'blocked', reason: '不能自动解除的故障' })
+})
+
+it('S4 HTTP 鉴权错误不因 retryable 标记而越过停止边界', () => {
+  const error = new BidStageExecutionError([{ code: 'WEB_PROVIDER_ERROR', message: '鉴权失败' }])
+  error.cause = Object.assign(new Error('鉴权失败'), { code: 'WEB_PROVIDER_ERROR', statusCode: 401, retryable: true })
+  expect(safeRecoverableBidFailure({ ...work, stage: 'evidence_mapping' }, error).recovery?.kind).toBe('blocked')
+})
+
 it.each(['QUOTA', 'AUTH', 'NO_ADAPTER', 'INVALID_REQUEST', 'PI_AI_ERROR'])('模型通道 %s 阻断自动恢复且保留真实原因', (code) => {
   const issues = [{ code, message: '模型通道不可用' }]
   expect(safeRecoverableBidFailure(work, new BidStageExecutionError(issues)))
     .toMatchObject({ issues, recovery: { kind: 'blocked', reason: '模型通道不可用' } })
 })
 
-it.each(['TRANSPORT', 'TIMEOUT', 'SERVER', 'EMPTY_RESPONSE', 'RATE_LIMIT'])
+it.each(['TRANSPORT', 'TIMEOUT', 'SERVER', 'EMPTY_RESPONSE', 'RATE_LIMIT', 'WEB_SEARCH_TIMEOUT'])
 ('模型通道 %s 预算耗尽后按原错误码恢复网络请求', (code) => {
   const mappingWork: BidWorkDescriptor = { ...work, stage: 'evidence_mapping' }
   const issues = [{ code, artifact: 'MAP-INIT-SEC-009', message: '模型响应通道暂时失败' }]
@@ -222,7 +270,7 @@ it.each(['OUTLINE_SHARED_WRITABLE_NOT_LEAF', 'OUTLINE_SHARED_RESPONSE_POINT_MISS
       .toBe('repair')
   })
 
-it('相同检查点连续出现时仍准入并要求改变策略', async () => {
+it('相同检查点连续出现时执行恢复预算耗尽并保留已尝试策略', async () => {
   const ctx = new Context()
   cleanup.push(() => ctx.fiber.dispose())
   await ctx.plugin(SessionStore)
@@ -236,8 +284,32 @@ it('相同检查点连续出现时仍准入并要求改变策略', async () => {
     target: { kind: 'run', workId: work.workId, runId: `run-${index}` },
     unit: work.workId, instruction: `策略 ${index}`, progressFingerprint: fingerprint,
   })
-  expect(bidRunRecoveryEligibility(session)).toMatchObject({ eligible: true, attempts: 3,
+  expect(bidRunRecoveryEligibility(session)).toMatchObject({ eligible: false, attempts: 3,
     sameProblemCount: 3, requiresStrategyChange: true, previousInstructions: ['策略 0', '策略 1', '策略 2'] })
+})
+
+it('恢复工具复用持久预算，配置增长不重置原 Work 上限', async () => {
+  const ctx = new Context()
+  cleanup.push(() => ctx.fiber.dispose())
+  await ctx.plugin(SessionStore)
+  const session = ctx.sessions.create()
+  const failure = safeRecoverableBidFailure(work, new Error('candidate rejected'))
+  session.append('bid.task.changed', { state: { stage: work.stage, status: 'suspended',
+    run: { ...run('run-budget'), cause: 'retry_exhausted', error: failure } } })
+  for (let index = 0; index < 3; index++) session.append('bid.recovery.requested', {
+    ownerSessionId: String(session.id), target: { kind: 'run', workId: work.workId, runId: `run-${index}` },
+    unit: work.workId, instruction: `策略 ${index}`, progressFingerprint: 'same',
+  })
+  session.append('bid.recovery.round', { ownerSessionId: String(session.id),
+    target: { kind: 'run', workId: work.workId, runId: 'run-budget' }, fingerprint: 'same',
+    round: 4, budget: 5, state: 'notified', reason: '仍需执行恢复' })
+  expect(bidRunRecoveryEligibility(session).eligible).toBe(true)
+  expect(bidRunRecoveryEligibility(session, 2).eligible).toBe(false)
+  for (let index = 3; index < 5; index++) session.append('bid.recovery.requested', {
+    ownerSessionId: String(session.id), target: { kind: 'run', workId: work.workId, runId: `run-${index}` },
+    unit: work.workId, instruction: `策略 ${index}`, progressFingerprint: 'same',
+  })
+  expect(bidRunRecoveryEligibility(session, 20).eligible).toBe(false)
 })
 
 it('records the digest of the exact failed candidate after a Run settles', async () => {

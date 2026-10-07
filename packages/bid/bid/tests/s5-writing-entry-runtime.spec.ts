@@ -133,6 +133,73 @@ async function waitForView(
 }
 
 describe('S5 写作入口运行时与完整工具链测试', () => {
+  it.each(['TIMEOUT', 'TRANSPORT'])('已保存要求后的 %s 通过真实 Main 工具续行并只提交一次计划', async (code) => {
+    const { ctx, workspace, createMainAgent, adapter } = await setupS5Fixture()
+    const agent = await createMainAgent(`transient-plan-${code}`)
+    let failed = false
+    let recovered = false
+    let inspected = false
+    let confirmed = false
+    adapter.handler = async function* (options) {
+      if (options.sessionId !== agent.id) { yield { type: 'finish', reason: { kind: 'stop' } }; return }
+      if (!failed) {
+        failed = true
+        yield { type: 'finish', reason: { kind: 'error', failure: { code, message: '暂态计划请求故障' } } }
+        return
+      }
+      if (!recovered && options.tools?.some(tool => tool.name === 'bid_recover_task')) {
+        recovered = true
+        yield { type: 'tool-call-delta', index: 0, id: CallId('transient-plan-recover'), name: 'bid_recover_task',
+          argumentsDelta: JSON.stringify({ target: 'writing_plan', instruction: '复用已保存的实施要求，重新提交失败的计划步骤。' }) }
+        yield { type: 'finish', reason: { kind: 'tool-calls' } }
+        return
+      }
+      if (recovered && !inspected) {
+        inspected = true
+        yield { type: 'tool-call-delta', index: 0, id: CallId('transient-plan-inspect'), name: 'bid_stage_inspect',
+          argumentsDelta: JSON.stringify({ view: 'task_contract_context' }) }
+        yield { type: 'finish', reason: { kind: 'tool-calls' } }
+        return
+      }
+      if (inspected && !confirmed) {
+        const block = options.messages.flatMap(message => message.content).find(item => item.type === 'tool-result'
+          && item.toolCallId === 'transient-plan-inspect')
+        if (block?.type !== 'tool-result') throw new Error('缺少真实计划上下文工具结果')
+        const text = block.content.filter(item => item.type === 'text').map(item => item.text).join('')
+        const input = JSON.parse(text) as { objects: { sections: { position: number; label: string }[] }
+          task_contract_context: { blueprint: { sections: { id: string; title: string; writable: boolean }[] } } }
+        confirmed = true
+        yield { type: 'tool-call-delta', index: 0, id: CallId('transient-plan-confirm'), name: 'bid_confirm_writing_plan',
+          argumentsDelta: JSON.stringify({ update_kind: 'initial', user_message_positions: [],
+            global_instructions: ['重点说明实施步骤。'], document_acceptance: [],
+            sections: input.task_contract_context.blueprint.sections.filter(section => section.writable).map(section => ({
+              section_position: input.objects.sections.find(item => item.label === section.title)!.position,
+              task: `编写 ${section.title}`, user_message_positions: [], writing_instructions: ['重点说明实施步骤。'], acceptance_criteria: [],
+            })) }) }
+        yield { type: 'finish', reason: { kind: 'tool-calls' } }
+        return
+      }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    }
+    const ask = vi.fn(async ({ questions }: { questions: AskUserQuestionItem[] }) => ({
+      answers: [{ id: questions[0]!.id, selected: [], custom: '重点说明实施步骤。' }],
+    }))
+    const dispose = ctx.userQuestions.registerProvider({ ask })
+    try {
+      await ctx.bid.requestWritingRequirements(agent.session, { mode: 'ensure' })
+      await vi.waitFor(async () => {
+        const request = JSON.parse(await readFile(join(workspace.projectRoot, 'chapters/writing-request.json'), 'utf8')) as WritingRequest
+        expect(request.state).toBe('consumed')
+        expect(JSON.stringify(request)).toContain('重点说明实施步骤。')
+      }, { timeout: 10_000 })
+      expect(ask).toHaveBeenCalledOnce()
+      expect(agent.session.events.filter(event => event.type === 'tool/call' && event.data.name === 'bid_confirm_writing_plan')).toHaveLength(1)
+      expect(agent.session.events.filter(event => event.type === 'bid.recovery.requested')).toHaveLength(1)
+      expect(agent.session.events.some(event => event.type === 'bid.writing_entry.changed' && event.data.view.error?.code === code)).toBe(true)
+      expect(await readFile(join(workspace.projectRoot, 'chapters/writing-plan.json'), 'utf8')).toContain('重点说明实施步骤。')
+    } finally { dispose() }
+  }, 20_000)
+
   it('运行中的 S5 只暴露带 policy 参数的流程图视觉策略工具', async () => {
     const { ctx, createMainAgent } = await setupS5Fixture()
     const agent = await createMainAgent('flowchart-policy-tool')

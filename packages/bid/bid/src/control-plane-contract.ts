@@ -114,6 +114,13 @@ export interface BidWorkDescriptor {
 export interface BidTaskFailure {
   readonly code?: string | undefined
   readonly message: string
+  /** 原执行异常的有界安全诊断；不保存 stack、文件字节或 Provider 原始响应。 */
+  readonly cause?: {
+    readonly code?: string | undefined
+    readonly message: string
+    readonly status?: number | undefined
+    readonly retryable?: boolean | undefined
+  } | undefined
   readonly issues?: readonly StageValidationIssue[] | undefined
   readonly recovery?: {
     readonly kind: 'retry' | 'repair' | 'blocked'

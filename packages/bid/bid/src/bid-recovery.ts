@@ -4,7 +4,7 @@ import type { BidRunData, BidRunProgress, BidTaskFailure, BidTaskState, BidWorkD
 import { BidStageExecutionError } from './control-plane-contract.ts'
 import type { Session } from '@deepseek-ai/dsh-session'
 import { BID_INITIAL_TASK_STATE, reduceBidTaskState } from './runtime-state.ts'
-import type { ModelStageExecutionOptions } from './model-stage-repair.ts'
+import { DEFAULT_MODEL_STAGE_REPAIR_ATTEMPTS, type ModelStageExecutionOptions } from './model-stage-repair.ts'
 import { safeBidRunError, sanitizeBidErrorText } from './safe-error.ts'
 
 type Recovery = NonNullable<BidTaskFailure['recovery']>
@@ -69,12 +69,12 @@ const BLOCKED_CODE = new RegExp(
   + 'CHAPTER_REVISION_(?:NOT_WRITABLE|SELECTION_INVALID|CONTEXT_UNAVAILABLE)|CREDENTIAL|QUOTA|PROVIDER|INFRASTRUCTURE|'
   + '^(?:AUTH|NO_ADAPTER|INVALID_REQUEST|PI_AI_ERROR)$|'
   + 'CONTEXT_WINDOW_EXCEEDED|FATAL|CORRUPTION|FINGERPRINT|SEMANTIC_BLOCKED|CATALOG_MISMATCH|'
-  + 'SCOPE_STALE|DEPENDENCY_STALE|STALE_BASE|PREVIOUS_TARGET_INVALID|INVARIANT|^EVIDENCE_MAPPING_GUARD_ERROR$', 'iu',
+  + 'SCOPE_STALE|DEPENDENCY_STALE|STALE_BASE|PREVIOUS_TARGET_INVALID|INVARIANT|DOCX_FORMAT_CORRUPT|^EVIDENCE_MAPPING_GUARD_ERROR$', 'iu',
 )
 const RETRY_CODE = new RegExp(
-  '^(?:ETIMEDOUT|ECONNRESET|EAI_AGAIN|TRANSPORT|TIMEOUT|SERVER|EMPTY_RESPONSE|RATE_LIMIT|'
+  '^(?:EIO|ETIMEDOUT|ECONNRESET|EAI_AGAIN|TRANSPORT|TIMEOUT|SERVER|EMPTY_RESPONSE|RATE_LIMIT|'
   + '(?:EVIDENCE_MAPPING|CHAPTER)_SUBAGENT_INFRASTRUCTURE_ERROR|'
-  + 'EVIDENCE_MAPPING_INFRASTRUCTURE_ERROR|WEB_PROVIDER_RATE_LIMITED|EVIDENCE_MAPPING_WEB_PROVIDER_BACKOFF)$', 'u',
+  + 'EVIDENCE_MAPPING_INFRASTRUCTURE_ERROR|WEB_PROVIDER_RATE_LIMITED|WEB_SEARCH_TIMEOUT|EVIDENCE_MAPPING_WEB_PROVIDER_BACKOFF)$', 'u',
 )
 const PROVIDER_FAILURE = new RegExp(
   '\\b(?:provider unavailable|model service unavailable|quota (?:exceeded|exhausted)|authentication failed|'
@@ -96,14 +96,19 @@ export function classifyBidRecovery(
   if (['BID_TASK_SCOPE_AUTHORIZATION_REQUIRED', 'BID_TASK_SOURCE_ISSUE_CHANGED'].includes(failure.code ?? '')) {
     return { kind: 'blocked', unit: work.workId, reason: failure.message }
   }
-  const blockedIssue = failure.issues?.find(issue => BLOCKED_CODE.test(issue.code))
+  const transientWebCause = failure.cause?.code === 'WEB_PROVIDER_ERROR' && failure.cause.retryable === true
+    && (failure.cause.status === undefined || failure.cause.status === 429 || failure.cause.status >= 500)
+  const retryCode = (code: string) => RETRY_CODE.test(code) || transientWebCause && code === 'WEB_PROVIDER_ERROR'
+  const blockedCode = (code: string) => BLOCKED_CODE.test(code) && !retryCode(code)
+  const blockedIssue = failure.issues?.find(issue => blockedCode(issue.code))
   const issue = blockedIssue ?? failure.issues?.[0]
   const unit = sanitizeBidErrorText(issue?.artifact ?? issue?.path ?? work.workId)
   const reason = sanitizeBidErrorText(issue?.message ?? failure.message)
-  const codes = [failure.code, ...failure.issues?.map(item => item.code) ?? []].filter((value): value is string => value !== undefined)
-  const kind = codes.some(value => BLOCKED_CODE.test(value) && !RETRY_CODE.test(value))
+  const codes = [failure.code, failure.cause?.code, ...failure.issues?.map(item => item.code) ?? []]
+    .filter((value): value is string => value !== undefined)
+  const kind = codes.some(blockedCode)
     || (codes.every(value => value === 'BID_EXECUTOR_ERROR') && PROVIDER_FAILURE.test(failure.message))
-    ? 'blocked' : codes.some(value => RETRY_CODE.test(value)) ? 'retry' : 'repair'
+    ? 'blocked' : codes.some(retryCode) ? 'retry' : 'repair'
   return { kind, unit, reason }
 }
 
@@ -150,9 +155,10 @@ export function bidRecoveryFingerprint(work: BidWorkDescriptor, failure: BidTask
 /**
  * Current run target and durable history shared by admission, inspect, and recovery.
  * @param session - Main Session containing the current Run and audit history.
+ * @param budget 原 Work 可执行的有限恢复次数。
  * @returns Exact target, history and reason for admission.
  */
-export function bidRunRecoveryEligibility(session: Session): {
+export function bidRunRecoveryEligibility(session: Session, budget?: number): {
   eligible: boolean
   reason: string
   attempts: number
@@ -189,6 +195,12 @@ export function bidRunRecoveryEligibility(session: Session): {
   if (run.error?.recovery === undefined || run.error.recovery.kind === 'blocked') {
     return { eligible: false, reason: run.error?.recovery?.reason ?? run.error?.message ?? '故障未被认定可自动恢复。', ...details }
   }
+  const settled = session.events.findLast(event => event.type === 'bid.recovery.round' && event.data.target.kind === 'run'
+    && event.data.target.workId === run.work.workId)
+  const storedBudget = settled?.type === 'bid.recovery.round' ? settled.data.budget : undefined
+  const limit = Math.min(budget ?? storedBudget ?? DEFAULT_MODEL_STAGE_REPAIR_ATTEMPTS, storedBudget ?? Infinity)
+  if (attempts >= limit) return { eligible: false, reason: 'BID_RECOVERY_BUDGET_EXHAUSTED: 原 Work 的执行恢复预算已耗尽。', ...details }
+  if (settled?.type === 'bid.recovery.round' && settled.data.state === 'blocked') return { eligible: false, reason: settled.data.reason, ...details }
   return { eligible: true, reason: run.error.recovery.reason, ...details }
 }
 
@@ -212,9 +224,10 @@ export function renderBidRecoveryContext(recovery: ModelStageExecutionOptions['r
 /**
  * Durable S5 answered-plan failure visible without opening its on-disk answer.
  * @param session - Main Session containing the writing-entry projection.
+ * @param budget 已保存请求可执行的有限计划恢复次数。
  * @returns Exact answered request and automatic recovery budget.
  */
-export function bidWritingPlanRecoveryEligibility(session: Session): {
+export function bidWritingPlanRecoveryEligibility(session: Session, budget?: number): {
   eligible: boolean
   reason: string
   attempts: number
@@ -237,7 +250,7 @@ export function bidWritingPlanRecoveryEligibility(session: Session): {
     && event.data.target.kind === 'writing_plan'
     && event.data.target.requestId === requestId ? [event.data] : [])
   const attempts = history.length
-  const fingerprint = createHash('sha256').update(JSON.stringify([requestId, attemptId, view?.error?.code])).digest('hex')
+  const fingerprint = createHash('sha256').update(JSON.stringify([requestId, view?.error?.code])).digest('hex')
   const sameProblemCount = history.slice().reverse().findIndex(event => event.progressFingerprint !== fingerprint)
   const repeated = sameProblemCount < 0 ? attempts : sameProblemCount
   const details = { attempts, target, fingerprint, sameProblemCount: repeated,
@@ -246,10 +259,27 @@ export function bidWritingPlanRecoveryEligibility(session: Session): {
     requiresStrategyChange: repeated > 0 }
   if (view?.phase !== 'failed' || view.request_state !== 'answered' || view.continuation !== 'allowed'
     || !view.has_answer || view.has_plan || view.owner_session_id !== String(session.id)
-    || !['BID_WRITING_PLAN_NOT_COMMITTED', 'BID_WRITING_PLAN_DISPATCH_FAILED'].includes(view.error?.code ?? '')) {
+    || !isBidWritingPlanRecoverableFailure(view.error)) {
     return { eligible: false, reason: view?.error?.message ?? 'S5 计划不满足自动修复条件。', ...details }
   }
+  const settled = session.events.findLast(event => event.type === 'bid.recovery.round' && event.data.target.kind === 'writing_plan'
+    && event.data.target.requestId === requestId)
+  const storedBudget = settled?.type === 'bid.recovery.round' ? settled.data.budget : undefined
+  const limit = Math.min(budget ?? storedBudget ?? DEFAULT_MODEL_STAGE_REPAIR_ATTEMPTS, storedBudget ?? Infinity)
+  if (attempts >= limit) return { eligible: false, reason: 'BID_RECOVERY_BUDGET_EXHAUSTED: 已保存写作要求的计划恢复预算已耗尽。', ...details }
+  if (settled?.type === 'bid.recovery.round' && settled.data.state === 'blocked') return { eligible: false, reason: settled.data.reason, ...details }
   return { eligible: true, reason: view.error?.message ?? '已保存答案的计划未提交。', ...details }
+}
+
+/**
+ * 按计划提交问题与模型错误分类判断恢复，鉴权、配额和输入错误优先阻断。
+ * @param failure 已保存写作要求后的真实执行错误。
+ * @returns 暂态执行故障或 Main 可纠正的提交问题是否可恢复。
+ */
+export function isBidWritingPlanRecoverableFailure(failure: { code: string; message: string } | null | undefined): boolean {
+  if (failure === undefined || failure === null) return false
+  return ['BID_WRITING_PLAN_NOT_COMMITTED', 'BID_WRITING_PLAN_DISPATCH_FAILED'].includes(failure.code)
+    || RETRY_CODE.test(failure.code) && !BLOCKED_CODE.test(failure.code)
 }
 
 /**

@@ -20,6 +20,7 @@ import { freezeBidTaskSource } from '../src/bid-task-source.ts'
 import { bidCapabilityTaskSchema, type BidCapabilityExecutionContext } from '../src/bid-capability-contract.ts'
 import { allowedRevisionCapabilityWrites, executeRevisionCapability, type CapabilityRevisionRunner } from '../src/bid-revision-capability.ts'
 import { buildParagraphRevisionReviewPath, createParagraphRevisionReviewArtifact } from '../src/chapter-paragraph-revision-artifacts.ts'
+import { parseChapterReviewArtifact } from '../src/chapter-writing-review-artifacts.ts'
 
 const disposals: Array<() => Promise<void>> = []
 afterEach(async () => { for (const dispose of disposals.splice(0)) await dispose() })
@@ -88,6 +89,28 @@ async function fixture() {
   })
   return { workspace, call, context, runner }
 }
+
+it('混合外部缺口与职责冲突只提问资料，结果警告保留内部冲突', async () => {
+  const { workspace, call, context, runner } = await fixture()
+  const partial: CapabilityRevisionRunner = async (input, candidate) => {
+    await runner({ ...input, tasks: input.tasks.slice(2) }, candidate)
+    const batch = (await readRevisionBatch(workspace, input.batchId))!
+    await writeRevisionBatch(workspace, { ...batch, tasks: batch.tasks.map(task => task.task_id === 'task-1'
+      ? { ...task, status: 'needs_input', failure: { code: 'CHAPTER_EXTERNAL_INPUT_REQUIRED', message: '缺企业证书', phase: 'reviewing' } }
+      : task.task_id === 'task-2' ? { ...task, status: 'blocked', failure: { code: 'DEPENDENCY_BLOCKED', message: '依赖缺资料', phase: 'reviewing' } } : task) })
+    const reviewPath = join(workspace.projectRoot, 'chapters/reviews/0001.json')
+    const review = parseChapterReviewArtifact(JSON.parse(await readFile(reviewPath, 'utf8')))
+    await writeFile(reviewPath, JSON.stringify({ ...review, verdict: 'attention',
+      assignment_conflicts: [{ task: '职责重复', basis: '与第二章业务范围冲突', related_section_ids: ['SEC-2'] }],
+      external_input_gaps: [{ item_ref: 'R1', required_material: '企业证书', reason: '必须由用户提供' }],
+    }))
+  }
+  const { result } = await executeRevisionCapability(call, context, partial)
+  expect(result.needs_input).toBe(true)
+  expect(result.missing_topics).toEqual(['SEC-1：缺企业证书'])
+  expect(result.warnings.join('；')).toContain('职责重复')
+  expect(result.warnings.join('；')).toContain('SEC-2')
+})
 
 it('过期项及其依赖保留冲突，独立任务完成后重入不再执行且正式队列保持 pending', async () => {
   const { workspace, call, context, runner } = await fixture()

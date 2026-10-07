@@ -24,6 +24,7 @@ import { estimateContent, estimateHeader, estimateMessage, ROLE_OVERHEAD } from 
 import { foldSurfaceTokens } from './surface-fold.ts'
 
 export type * from './types.ts'
+export { estimateMessage, estimateHeader } from './estimate.ts'
 
 interface MeasurementAnchor {
   readonly header: EpochHeader | undefined

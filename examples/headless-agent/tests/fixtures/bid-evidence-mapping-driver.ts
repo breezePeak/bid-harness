@@ -16,7 +16,9 @@ try {
   filesystem.internals.inspectTemp = async ({ tempPath }) => {
     stateFiles.add(basename(tempPath).replace(/\.tmp$/, ''))
   }
-  const { outcome } = await runEvidenceMappingLoop(ctx, process.cwd(), true)
+  const recovery = process.env.DSH_S4_RECOVERY_SCENARIO === 'backoff'
+  const { outcome } = await runEvidenceMappingLoop(ctx, process.cwd(), !recovery, false,
+    recovery ? { code: 'WEB_PROVIDER_RATE_LIMITED', statusCode: 429, failures: 1 } : undefined)
   if (outcome.status !== 'waiting_user') throw new Error(JSON.stringify(outcome))
   process.stdout.write(`${JSON.stringify({ ...outcome, state_files: [...stateFiles].sort() })}\n`)
 } finally {

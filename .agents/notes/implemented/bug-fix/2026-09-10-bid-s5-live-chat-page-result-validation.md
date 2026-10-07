@@ -8,6 +8,8 @@ S5 的消息准入曾在读取用户语义前取消写作并重开要求确认�
 
 ## Decision
 
+[恢复结算与必需页数门禁](2026-10-06-bid-recovery-settlement.md)拥有 `required estimated_pages` 的执行故障分类与预算耗尽后拒绝完成；本记录继续拥有实时对话、计划 mutation 和正文测量的独立理由。
+
 [`chapter_writing` 的首次整体要求门禁](../feature/2026-09-09-bid-s5-writing-requirements-gate.md)保持不变。[独立交互与执行通道](2026-09-14-bid-interaction-execution-lanes.md)拥有运行期消息准入、会话隔离和取消边界；本记录继续拥有 S5 计划 mutation 与正文页数校验。S5 运行中与完成后的普通消息进入发起消息的 Interaction Session，不取消写作、不创建询问标记，也不改变计划版本或完成状态；任一同项目 Interaction Session 的显式 Stop 会取消唯一活动 Run。主 Agent 在用户消息前接收可回放的 S5 交互规则，并通过运行态 `bid_stage_inspect` 读取有界的章节编号、真实 ID、执行状态、Writer/Reviewer 尝试、最近问题和正文篇幅快照。只有模型判断用户明确改变整体要求并调用 `bid_confirm_writing_plan` 时，Host 才进入既有版本化恢复路径。
 
 正文工作台、运行态 inspect 和显式 `estimated_pages` 条件共用 `estimateChapterWritingPages()`。该入口按正式导出顺序统计确认目录标题、父节点概述和已有叶节正文，并读取当前 `word-export/config.json` 的生效值；缺失正文保持为空，审核记录和聊天内容不参与计数。条件比较使用未取整值且不增加业务容差；测算异常产生 unavailable 结果，不能当作零页或达标。是否建立该条件及其优先级由 Main Agent 判断，Host 不从条件描述或用户原话推断。
@@ -28,4 +30,4 @@ S5 完成校验重新读取 `chapters/writing-plan.json` 并核对确认目录 H
 
 写作期间的普通对话不改变 S5 生命周期，完成态问答也不影响导出。显式变更由 Main Agent 提交当前计划的 patch 和影响范围；Host 在当前调度器中使目标章节及其强依赖下游失效，其他章节继续执行，迟到旧结果按计划版本、section epoch 和依赖身份拒绝提交。
 
-显式确定性条件成为正文结果约束而非计划说明。Writer 可修复的 required 条件不通过时，Main Agent 在同一运行实例内选择最小修订范围并进入有界补写；预算耗尽仍保留正文、测量和验收记录并完成 S5。定向测试覆盖未取整边界、普通消息不取消运行、完成态问答不重开门禁、required/preferred 分流、运行中计划失效，以及 DOCX 结构校验与动态验收的独立结果。
+显式确定性条件成为正文结果约束而非计划说明。Writer 可修复的 required 条件不通过时，Main Agent 在同一运行实例内选择最小修订范围并进入有界补写；预算耗尽保留正文、测量和验收记录，`required estimated_pages` 仍须满足才完成交付。定向测试覆盖未取整边界、普通消息不取消运行、完成态问答不重开门禁、required/preferred 分流、运行中计划失效，以及 DOCX 结构校验与动态验收的独立结果。

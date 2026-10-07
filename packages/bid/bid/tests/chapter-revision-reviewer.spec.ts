@@ -11,6 +11,7 @@ import { emptyChapterContext, outlineFixture } from './fixtures/chapter-writing-
 import { validateChapterReview } from '../src/chapter-writing-executor.ts'
 import { settleRevisionBatchIssues, type RevisionIssueCheck } from '../src/chapter-revision-batch.ts'
 import type { RevisionQueueArtifact } from '../src/chapter-revision-queue.ts'
+import { chapterModelPositions } from './fixtures/chapter-model-positions.ts'
 
 const roots: Context[] = []
 afterEach(async () => { await Promise.all(roots.splice(0).map(ctx => ctx.fiber.dispose())) })
@@ -26,7 +27,7 @@ async function harness() {
   await ctx.plugin(AgentLoop, { agents: [] })
   const agent = ctx.agentLoop.create(SessionId('reviewer-protocol'), { provider: 'mock', model: 'mock' })
   let serial = 0
-  const call = (name: string, args: unknown) => ctx.tools.execute({ agent, name, arguments: args, callId: CallId(`call-${serial++}`), signal: new AbortController().signal })
+  const call = (name: string, args: unknown) => ctx.tools.execute({ agent, name, arguments: chapterModelPositions(args), callId: CallId(`call-${serial++}`), signal: new AbortController().signal })
   return { ctx, agent, call }
 }
 

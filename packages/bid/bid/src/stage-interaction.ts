@@ -622,7 +622,7 @@ function renderIdleStageInteractionPrompt(
 function renderSuspendedRunPrompt(
   stage: string, runId: string, revision: number, workKind: string, cause: string, reason?: string,
 ): string {
-  const interrupted = cause !== 'user_stop' && cause !== 'awaiting_input'
+  const interrupted = cause !== 'awaiting_input'
   return [
     `当前 Bid 阶段：${stage}；Run 已挂起；suspended_run_id=${runId}；expected_project_revision=${String(revision)}。`,
     reason === undefined ? undefined : `中断原因：${reason}`,
@@ -631,7 +631,7 @@ function renderSuspendedRunPrompt(
       ? '等待输入须通过原生用户问题回答；普通聊天消息不能接管或放弃该问题。'
       : workKind === 'capability_task'
         ? cause === 'user_stop'
-          ? '原 Work 的继续、重跑或停止仍由原生用户问题处理。用户明确提出新目标时，先用 bid_project_inspect(object=task) 核对旧目标和步骤，再用 bid_run_task(supersede=true) 创建新 Work；Host 绑定旧 Run 和项目版本。'
+          ? '停止期间不自动续行。用户明确要求继续时无参数调用 bid_resume_current_run；程序重新验证当前 Run、授权和项目 revision。用户明确提出新目标时，先用 bid_project_inspect(object=task) 核对旧目标和步骤，再用 bid_run_task(supersede=true) 创建新 Work；Host 绑定旧 Run 和项目版本。'
           : '继续同一目标时先用 bid_project_inspect(object=task) 核对原目标和步骤，必要时 bid_plan_task 重规划，再 bid_recover_task；只继续被打断的原 Work 时用 bid_resume_current_run。用户明确提出新目标时，用 bid_run_task(supersede=true) 创建新 Work；Host 绑定旧 Run 和项目版本。'
         : interrupted
           ? '用户明确要求继续时无参数调用 bid_resume_current_run；程序绑定当前 Run 和项目 revision。内部可修复失败由主 Agent inspect 后调用 bid_recover_task，普通询问保持只读。'
@@ -703,7 +703,7 @@ export function installStageInteractionTools(
       const task = agent.session.events.reduce(reduceBidTaskState, BID_INITIAL_TASK_STATE)
       const suspended = task.status === 'suspended' ? task.run : undefined
       const repairable = bidRecoverableRun(agent.session, task)
-      const chatResume = suspended !== undefined && suspended.cause !== 'user_stop' && suspended.cause !== 'awaiting_input'
+      const chatResume = suspended !== undefined && suspended.cause !== 'awaiting_input'
       const stage = isBidMainSession(agent.session) ? task.stage : undefined
       const scope = stage === undefined ? undefined : `${stage}:${suspended === undefined ? task.status : `suspended:${suspended.runId}`}`
       const recoveryAvailable = bidRunRecoveryEligibility(agent.session).eligible
@@ -960,7 +960,8 @@ export function installStageInteractionTools(
                   modelCatalogs.delete(agent)
                   return result
                 }
-                const current = await collectBidModelTaskCatalog(catalogWorkspace, agent.session)
+                const current = query.object === 'task' && modelCatalogs.has(agent)
+                  ? catalog : await collectBidModelTaskCatalog(catalogWorkspace, agent.session)
                 modelCatalogs.set(agent, current)
                 return { ...result as object, objects: presentBidModelTaskCatalog(current,
                   query.object === 'chapters' ? query.section_ids : [], { page: raw.objects_page ?? ('page' in query ? query.page ?? 0 : 0),

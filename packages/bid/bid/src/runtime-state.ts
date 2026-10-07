@@ -38,6 +38,8 @@ export const bidRunProgressSchema: z.ZodType<BidRunProgress> = z.object({
 const bidTaskFailureSchema = z.object({
   code: z.string().optional(),
   message: z.string(),
+  cause: z.object({ code: z.string().optional(), message: z.string(), status: z.number().int().optional(),
+    retryable: z.boolean().optional() }).strict().optional(),
   issues: z.array(stageValidationIssueSchema).readonly().optional(),
   recovery: z.object({ kind: z.enum(['retry', 'repair', 'blocked']), unit: z.string().min(1), reason: z.string().min(1),
     candidateSha256: z.string().regex(/^[a-f0-9]{64}$/u).optional() }).strict().optional(),
@@ -260,6 +262,7 @@ function cloneRun(run: BidRunData): BidRunData {
 function cloneFailure(failure: BidTaskFailure): BidTaskFailure {
   return {
     ...failure,
+    ...failure.cause === undefined ? {} : { cause: { ...failure.cause } },
     ...failure.issues === undefined ? {} : { issues: failure.issues.map(cloneIssue) },
     ...failure.recovery === undefined ? {} : { recovery: { ...failure.recovery } },
   }

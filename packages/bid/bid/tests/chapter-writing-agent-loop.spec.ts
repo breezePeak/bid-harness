@@ -286,7 +286,7 @@ describe('S5 真实 DSH Child 接入', () => {
       expect(log.sections.every(section => section.status === 'completed' && section.attempts.every(attempt => attempt.accepted))).toBe(true)
       const requests = [...adapter.requests.values()]
       expect(requests.filter(item => item.role === 'plan').map(item => item.tools)).toEqual([
-        ['grep', 'read', 'web_fetch', 'web_search', ...CHAPTER_PLAN_TOOLS].sort(),
+        [...CHAPTER_PLAN_TOOLS].sort(),
       ])
       expect(requests.filter(item => item.role === 'writer')).toHaveLength(3)
       expect(requests.filter(item => item.role === 'review')).toHaveLength(4)

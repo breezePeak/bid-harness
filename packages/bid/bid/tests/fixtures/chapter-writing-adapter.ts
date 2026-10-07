@@ -29,6 +29,7 @@ export class ChapterAdapter extends LlmAdapter {
   writerGate?: Promise<void>
   onWriterStart?: () => void
   readonly publicRequestTools: string[][] = []
+  reviewSummary?: { readonly assignment_conflicts: readonly { task: string; basis: string; related_section_positions: number[] }[] }
   constructor(private readonly cancelWriter?: () => void, private readonly omitReviewFinish = false) { super() }
   override resolveModel(provider: string, model: string) { return Promise.resolve({ provider, id: model, name: model }) }
   async * stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
@@ -130,8 +131,16 @@ export class ChapterAdapter extends LlmAdapter {
         })) })
         break
       }
-      case 6: yield* call('set_review_summary', { quality_checks: quality, blocking_issues: [], assignment_conflicts: [], external_input_gaps: [], external_input_only: false }); break
-      case 7: yield* call('finish_chapter_review', {}); break
+      case 6: yield* call('set_review_summary', { quality_checks: quality, blocking_issues: [], assignment_conflicts: [], external_input_gaps: [], external_input_only: false,
+        ...this.reviewSummary }); break
+      case 7: {
+        const issues = [...prompt.matchAll(/【审批意见位置 (\d+)】/gu)]
+        yield* issues.length === 0 ? call('finish_chapter_review', {}) : call('review_revision_issues', { items: issues.map(item => ({
+          issue_position: Number(item[1]), status: 'satisfied', reason: '已执行审批意见；职责分配按单独冲突记录核验。',
+        })) })
+        break
+      }
+      case 8: yield* call('finish_chapter_review', {}); break
       default: throw new Error('Reviewer finish did not conclude the turn')
     }
   }

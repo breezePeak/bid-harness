@@ -27,24 +27,26 @@ DeepSeek 继续发送 Anthropic-compatible Messages 请求和 `web_search_202503
 
 缺少搜索能力时报 `UNSUPPORTED_CAPABILITY`；GPT 不兼容的 Responses 端点时报 `UNSUPPORTED_RESPONSES_API`；无效或未完成的搜索结果时报 `WEB_PROVIDER_ERROR`。取消沿调用信号传播，HTTP 重定向在联系目标前被拒绝。错误包含 Provider 信息，不回显认证头或实际密钥。
 
-## Model Experience
-
-### What the model sees
-
-辅助模型接收 `Perform a web search for the query: <query>` 和 Provider 所需的 hosted 工具定义。会话模型通过原 `web_search` 工具收到 URL、标题、日期和有来源的摘要；不会将辅助模型的生成答案当作网页原文。
-
-### Token effect
-
-每次搜索产生独立模型请求和服务端检索成本；`maxUses` 限制搜索次数。结果仍受 web 服务的来源数限制。
-
-### KV Cache effect
-
-搜索请求独立于会话缓存；工具结果按原调用链追加到会话上下文，不修改已有消息。
-
 ## Request logging
 
 Agent 内的搜索在发送前追加 `web/provider-search-llm-request`，保存 Provider、解析后的端点、可选协议版本和实际 JSON 请求体。认证头与密钥不进入事件。旧 `web/deepseek-search-llm-request` 类型保留以读取既有会话日志。直接在 Agent 外调用时没有关联会话。
 
+## Model Experience
+
+### Hosted 搜索上下文
+
+#### What the model sees
+
+辅助模型接收 `Perform a web search for the query: <query>` 和 Provider 所需的 hosted 工具定义。会话模型通过原 `web_search` 工具收到 URL、标题、日期和有来源的摘要；不会将辅助模型的生成答案当作网页原文。
+
+#### Token effect
+
+每次搜索产生独立模型请求和服务端检索成本；`maxUses` 限制搜索次数。结果仍受 web 服务的来源数限制。
+
+#### KV Cache effect
+
+搜索请求独立于会话缓存；工具结果按原调用链追加到会话上下文，不修改已有消息。
+
 ## Known Limitations and Deferred Work
 
-能力目录表示已安装实现，不探测远端账号或网关授权。兼容服务可能拒绝 hosted search，此时错误直接返回。旧配置迁移采用两个 namespace 的先写后删，不提供跨 namespace 事务；中断后可安全重试。旧静态组合在只读部署中需要由部署方将连接字段移动到 Provider。
+- 能力目录表示已安装实现，不探测远端账号或网关授权。兼容服务可能拒绝 hosted search，此时错误直接返回。旧配置迁移采用两个 namespace 的先写后删，不提供跨 namespace 事务；中断后可安全重试。旧静态组合在只读部署中需要由部署方将连接字段移动到 Provider。

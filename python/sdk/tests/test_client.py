@@ -57,6 +57,12 @@ for line in sys.stdin:
                 "ownerSessionId": params["sessionId"], "target": {"kind": "run", "workId": "work-1", "runId": "run-1"},
                 "unit": "outline/outline.json", "instruction": "核对原文并修正当前章节。", "progressFingerprint": "a" * 64,
             }}}}), flush=True)
+        print(json.dumps({"jsonrpc": "2.0", "method": "session.event", "params": {
+            "sessionId": params["sessionId"], "event": {"type": "bid.recovery.round", "data": {
+                "ownerSessionId": params["sessionId"], "target": {"kind": "run", "workId": "work-1", "runId": "run-1"},
+                "fingerprint": "a" * 64, "round": 1, "budget": 3, "dispatchAttempts": 1, "state": "notified",
+                "messageId": "recovery-message-1", "nextAt": 100, "reason": "原失败已保存，等待 Main 实际恢复。",
+            }}}}), flush=True)
         print(json.dumps({
             "jsonrpc": "2.0",
             "method": "session.event",
@@ -135,6 +141,11 @@ for line in sys.stdin:
     assert next(event["data"] for event in result.events if event["type"] == "bid.recovery.requested") == {
         "ownerSessionId": "main", "target": {"kind": "run", "workId": "work-1", "runId": "run-1"},
         "unit": "outline/outline.json", "instruction": "核对原文并修正当前章节。", "progressFingerprint": "a" * 64,
+    }
+    assert next(event["data"] for event in result.events if event["type"] == "bid.recovery.round") == {
+        "ownerSessionId": "main", "target": {"kind": "run", "workId": "work-1", "runId": "run-1"},
+        "fingerprint": "a" * 64, "round": 1, "budget": 3, "dispatchAttempts": 1, "state": "notified",
+        "messageId": "recovery-message-1", "nextAt": 100, "reason": "原失败已保存，等待 Main 实际恢复。",
     }
 
     dumped_env = json.loads(env_dump.read_text())
@@ -974,7 +985,7 @@ for line in sys.stdin:
     (module_dir / "__init__.py").write_text(
         f"""
 def resolve_bundled_launch_args(mode=None):
-    return ({str(runtime)!r},)
+    return ({sys.executable!r}, {str(runtime)!r})
 
 
 def bundled_default_config_path():

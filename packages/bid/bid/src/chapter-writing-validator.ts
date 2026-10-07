@@ -408,7 +408,9 @@ export async function validateChapterWriting(
   let estimate: Awaited<ReturnType<typeof estimateChapterWritingPages>> | undefined
   if (hasPageCriteria) {
     try { estimate = await estimateChapterWritingPages(workspace, outline) } catch (error) {
-      if (needsPages) reject(issues, 'CHAPTER_WRITING_HOST_ACCEPTANCE_UNAVAILABLE', `estimated_pages 无法测量：${error instanceof Error ? error.message : String(error)}`, COMPLETION_REVIEW)
+      if (needsPages) reject(issues, error instanceof Error && 'code' in error && typeof error.code === 'string'
+        ? error.code : 'CHAPTER_WRITING_HOST_ACCEPTANCE_UNAVAILABLE',
+      `estimated_pages 无法测量：${error instanceof Error ? error.message : String(error)}`, COMPLETION_REVIEW)
     }
   }
   if (estimate !== undefined && completion !== undefined
@@ -431,6 +433,13 @@ export async function validateChapterWriting(
       ...(pages === undefined ? {} : { estimatedPages: pages }),
     })
   })
+  if (mode === 'delivery') for (const criterion of allCriteria) {
+    if (criterion.priority !== 'required' || criterion.evaluator.kind !== 'deterministic'
+      || criterion.evaluator.metric !== 'estimated_pages') continue
+    const result = [...documentHostResults, ...sectionHostResults].find(item => item.criterion_id === criterion.id)
+    if (result?.status !== 'met') reject(issues, 'CHAPTER_WRITING_REQUIRED_ACCEPTANCE_UNMET',
+      `${criterion.id} 未满足：${result?.message ?? '缺少页数测量结果。'}`, COMPLETION_REVIEW)
+  }
   for (const section of writingPlan.sections) {
     const review = chapterReviews.get(section.section_id)
     if (review === undefined) continue

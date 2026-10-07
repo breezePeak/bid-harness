@@ -45,6 +45,7 @@ export const BID_SESSION_EVENT_TYPES = [
   'bid.goal.bound',
   'bid.goal.recovery.requested',
   'bid.recovery.requested',
+  'bid.recovery.round',
   'bid.capability.input.required',
   'bid.capability.input.received',
 ] as const
@@ -237,6 +238,31 @@ declare module '@deepseek-ai/dsh-session/types' {
       unit: string
       instruction: string
       progressFingerprint: string
+    }
+    /**
+     * Host 对一次失败纠正轮的持久结算；预算按原 Work 或已保存写作请求累计。
+     * @param ownerSessionId 拥有原授权的主会话。
+     * @param target 程序绑定的原 Work 与当前 Run，或写作请求。
+     * @param fingerprint 原失败与有效检查点指纹。
+     * @param round 已安排的纠正轮数。
+     * @param budget 此恢复链的有限轮数上限。
+     * @param dispatchAttempts 当前轮持久化确认或派发的失败次数；不增加业务纠正轮数。
+     * @param state 派发、执行及核验后的结算结果。
+     * @param messageId 当前轮对应的模型消息身份。
+     * @param nextAt 下次允许派发的宿主时间。
+     * @param reason 真实失败、已执行动作或具体 blocker。
+     */
+    'bid.recovery.round': {
+      ownerSessionId: string
+      target: { kind: 'run'; workId: string; runId: string } | { kind: 'writing_plan'; requestId: string; attemptId: string }
+      fingerprint: string
+      round: number
+      budget: number
+      dispatchAttempts?: number
+      state: 'scheduled' | 'notified' | 'executing' | 'no_effect' | 'failed' | 'recovered' | 'waiting_input' | 'cancelled' | 'blocked'
+      messageId?: string
+      nextAt?: number
+      reason: string
     }
     /**
      * 旧版 Goal 绑定，仅用于历史日志回放；运行时不再生产或消费。

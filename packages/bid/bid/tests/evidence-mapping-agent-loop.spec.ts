@@ -5,6 +5,7 @@ import { Context } from '@deepseek-ai/cordis'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import LlmRuntime from '@deepseek-ai/dsh-llm'
+import { CONTEXT_WINDOW_EXCEEDED_CODE } from '@deepseek-ai/dsh-llm'
 import SessionStore from '@deepseek-ai/dsh-session'
 import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import SubagentRuntime from '@deepseek-ai/dsh-subagent'
@@ -17,6 +18,95 @@ import IntegrationFileSystem, { runEvidenceMappingLoop } from './fixtures/eviden
 import { runFullOutlineRegenerationLoop, runStageInteractionLoop } from './fixtures/stage-interaction-loop.ts'
 
 describe('S4 Web evidence through a real Agent Tool loop', () => {
+  it.each(['exhausted', 'server_exhausted', 'user', 'race', 'overflow'] as const)('真实 Agent 取消与网络恢复边界：%s', async (scenario) => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-bid-s4-stop-loop-'))
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    await ctx.plugin(SessionStore)
+    await ctx.plugin(JsonlSessionPersistence, { root: join(root, '.session-store'), compression: 'none' })
+    await ctx.plugin(SystemPrompt, { persona: 'test' })
+    await ctx.plugin(ToolRuntime)
+    await ctx.plugin(IntegrationFileSystem)
+    await ctx.plugin(AgentRegistry)
+    await ctx.plugin(AgentLoop, { agents: [] })
+    await ctx.plugin(SubagentRuntime)
+    await ctx.plugin(spawn, { providerName: 'spawn' })
+    const controller = new AbortController()
+    const endings: unknown[] = []
+    ctx.on('session/event', (_session, event) => {
+      if (event.type === 'turn/end') endings.push(event.data.reason)
+    }, { global: true })
+    if (scenario === 'user') ctx.on('tools/result', (exec) => {
+      if (exec.name === 'web_search') {
+        exec.agent?.cancel({ kind: 'user' })
+        controller.abort(new Error('用户明确停止'))
+      }
+    }, { global: true })
+    if (scenario === 'race') ctx.on('agent/cancel-requested', ({ agent: child, cause }) => {
+      if (cause.kind === 'hook' && cause.reason === 'evidence-mapping-web-provider-backoff') {
+        child.cancel({ kind: 'user' })
+        controller.abort(new Error('退避同时用户明确停止'))
+      }
+    }, { global: true })
+    try {
+      const { workspace, outcome, requests } = await runEvidenceMappingLoop(ctx, root, false, false, {
+        code: scenario === 'server_exhausted' ? 'WEB_PROVIDER_ERROR' : 'WEB_PROVIDER_RATE_LIMITED',
+        statusCode: scenario === 'server_exhausted' ? 503 : 429, failures: scenario === 'overflow' ? 0 : 2,
+        maxRetries: 1, signal: controller.signal, reviewOverflow: scenario === 'overflow',
+      })
+      expect(outcome.status).toBe('failed')
+      const log = JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/evidence-mapping-log.json'), 'utf8')) as {
+        tasks: Array<{ attempts: Array<{ accepted: boolean; issues: Array<{ code: string }> }> }>
+      }
+      if (scenario === 'exhausted' || scenario === 'server_exhausted') {
+        expect(log.tasks[0]?.attempts).toHaveLength(2)
+        const code = scenario === 'server_exhausted' ? 'WEB_PROVIDER_ERROR' : 'WEB_PROVIDER_RATE_LIMITED'
+        expect(log.tasks[0]?.attempts.every(attempt => attempt.issues[0]?.code === code)).toBe(true)
+        expect(outcome).toMatchObject({ failure: { cause: { code, retryable: true,
+          status: scenario === 'server_exhausted' ? 503 : 429 }, recovery: { kind: 'retry' } } })
+      } else if (scenario === 'overflow') {
+        expect(endings).toContainEqual({ kind: 'error', error: { code: CONTEXT_WINDOW_EXCEEDED_CODE, message: '注入的 provider context overflow' } })
+        expect(JSON.stringify(outcome)).toContain(CONTEXT_WINDOW_EXCEEDED_CODE)
+        expect(requests.filter(request => request.system?.includes('技术标目录轻量复核 Subagent'))).toHaveLength(1)
+      } else {
+        expect(controller.signal.aborted).toBe(true)
+        expect(requests.filter(request => request.messages.some(message => message.content.some(block => block.type === 'text' && block.text.includes('Mapping Task：'))))).toHaveLength(1)
+        expect(log.tasks[0]?.attempts).toHaveLength(1)
+      }
+    } finally { await ctx.fiber.dispose() }
+  }, 20_000)
+  it.each([
+    ['WEB_PROVIDER_RATE_LIMITED', 429], ['WEB_PROVIDER_ERROR', 503], ['WEB_SEARCH_TIMEOUT', undefined],
+  ] as const)('真实 Child aborted 保留 %s 根因并有界恢复', async (code, statusCode) => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-bid-s4-backoff-loop-'))
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    await ctx.plugin(SessionStore)
+    await ctx.plugin(JsonlSessionPersistence, { root: join(root, '.session-store'), compression: 'none' })
+    await ctx.plugin(SystemPrompt, { persona: 'test' })
+    await ctx.plugin(ToolRuntime)
+    await ctx.plugin(IntegrationFileSystem)
+    await ctx.plugin(AgentRegistry)
+    await ctx.plugin(AgentLoop, { agents: [] })
+    await ctx.plugin(SubagentRuntime)
+    await ctx.plugin(spawn, { providerName: 'spawn' })
+    const endings: unknown[] = []
+    ctx.on('session/event', (_session, event) => {
+      if (event.type === 'turn/end') endings.push(event.data.reason)
+    }, { global: true })
+    try {
+      const { workspace, outcome } = await runEvidenceMappingLoop(ctx, root, false, false, { code, statusCode, failures: 1 })
+      expect(endings).toContainEqual({ kind: 'aborted', reason: { kind: 'hook', reason: 'evidence-mapping-web-provider-backoff' } })
+      expect(outcome, JSON.stringify(outcome)).toMatchObject({ status: 'waiting_user' })
+      const log = JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/evidence-mapping-log.json'), 'utf8')) as {
+        tasks: Array<{ attempts: Array<{ accepted: boolean; issues: Array<{ code: string; message: string }> }> }>
+      }
+      expect(log.tasks[0]?.attempts).toMatchObject([
+        { accepted: false, issues: [{ code }] }, { accepted: true },
+      ])
+      expect(log.tasks[0]?.attempts[0]?.issues[0]?.message).toContain('注入的联网故障')
+    } finally { await ctx.fiber.dispose() }
+  }, 20_000)
   it('整本重生成由无文件工具 Child 选择位置，Host 保留身份并保存 Draft 后等待确认', async () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-bid-full-regeneration-'))
     const ctx = new Context()

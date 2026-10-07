@@ -97,6 +97,7 @@ async function fixture() {
       chapterWritingCompletionRepairRounds: 1,
       wordFormatMaxTokens: 8192, wordFormatTimeoutMs: 120000, trustedHosts: [], webSearchEnabled: true, bidderName: '' } satisfies Config,
     inFlight: new Map(),
+    recoveryTasks: new Set<Promise<unknown>>(),
     writingEntryStops: new Map(),
     pendingRunDecisions: new Map(),
     pendingRunDecisionControllers: new Map(),

@@ -198,6 +198,7 @@ function contextOf(logs: readonly { content: string; header: Record<string, unkn
   return {
     sessionIds: logs.flatMap(log => typeof log.header.id === 'string' ? [log.header.id] : []),
     cwd,
+    cwdAliases: [cwd.replaceAll('\\', '/')],
   }
 }
 
@@ -214,7 +215,7 @@ async function hydrateReplayFixtures(scenario: SdkScenario, cwd: string): Promis
   await mkdir(root, { recursive: true })
   return Promise.all(fixtureFiles(scenario).map(async (source) => {
     const destination = join(root, basename(source))
-    await writeFile(destination, (await readFile(source, 'utf8')).replaceAll('{{cwd}}', cwd))
+    await writeFile(destination, (await readFile(source, 'utf8')).replaceAll('{{cwd}}', cwd.replaceAll('\\', '/')))
     return destination
   }))
 }

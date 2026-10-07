@@ -8,7 +8,7 @@ import { join, relative, resolve } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
 import { Context } from '@deepseek-ai/cordis'
 import LocalFileSystem from '@deepseek-ai/dsh-fs-local'
-import { CallId, LlmAdapter, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
+import { CallId, CONTEXT_WINDOW_EXCEEDED_CODE, HarnessError, LlmAdapter, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import { SessionId, type Session } from '@deepseek-ai/dsh-session'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { SearchError } from '@deepseek-ai/dsh-tool-fs-search'
@@ -64,6 +64,7 @@ function reviewPendingMappingItems(options: GenerateOptions): StreamChunk[] {
 
 class ScriptedAdapter extends LlmAdapter {
   interactive = false
+  reviewOverflow = false
   readonly requests: GenerateOptions[] = []
   readonly reviewScript: ScriptStep[] = []
   constructor(
@@ -80,6 +81,11 @@ class ScriptedAdapter extends LlmAdapter {
 
   async * stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
     this.requests.push(options)
+    if (this.reviewOverflow && options.system?.includes('技术标目录轻量复核 Subagent')) {
+      this.reviewOverflow = false
+      yield { type: 'finish', reason: { kind: 'error', failure: { code: CONTEXT_WINDOW_EXCEEDED_CODE, message: '注入的 provider context overflow' } } }
+      return
+    }
     const verification = options.messages.flatMap(message => message.content)
       .find(block => block.type === 'text' && block.text.includes('核验输入：'))
     if (verification?.type === 'text') {
@@ -117,7 +123,11 @@ export default LocalFileSystem
  * @param root 隔离工作区。
  * @param sourceUrls 本场景允许的固定外部来源。
  */
-export function registerIntegrationTools(ctx: Context, root: string, sourceUrls: string | readonly string[]): void {
+export function registerIntegrationTools(ctx: Context, root: string, sourceUrls: string | readonly string[], webFailure?: {
+  code: string
+  statusCode?: number | undefined
+  remaining: number
+}): void {
   const urls = typeof sourceUrls === 'string' ? [sourceUrls] : [...sourceUrls]
   let searchIndex = 0
   ctx.provide('web', {
@@ -170,9 +180,14 @@ export function registerIntegrationTools(ctx: Context, root: string, sourceUrls:
       } },
       render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }],
     },
-    execute: async () => ({
-      sources: urls.length === 0 ? [] : [{ url: urls[Math.min(searchIndex++, urls.length - 1)]! }], truncated: false,
-    }),
+    execute: async () => {
+      if (webFailure !== undefined && webFailure.remaining-- > 0) {
+        throw Object.assign(new HarnessError('注入的联网故障', webFailure.code), {
+          statusCode: webFailure.statusCode, retryAfter: '0',
+        })
+      }
+      return { sources: urls.length === 0 ? [] : [{ url: urls[Math.min(searchIndex++, urls.length - 1)]! }], truncated: false }
+    },
   })))
   ctx.effect(() => ctx.tools.register(defineTool({
     name: 'web_fetch', description: 'Fetch one public technical source.', parameters: { url: { type: 'string', required: true } },
@@ -379,7 +394,15 @@ function researchAssessment(sufficient: boolean, affectsBlueprint: boolean) {
  * @param repair - 搜索错误后调整查询，跨 Child 轮次抓取 URL，并修复目录 Schema。
  * @returns 阶段结果、Host、工作区及模型实际请求。
  */
-export async function runEvidenceMappingLoop(ctx: Context, root: string, repair: boolean, interactive = false) {
+export async function runEvidenceMappingLoop(ctx: Context, root: string, repair: boolean, interactive = false,
+  fault?: {
+    code: string
+    statusCode?: number | undefined
+    failures: number
+    maxRetries?: number
+    signal?: AbortSignal
+    reviewOverflow?: boolean
+  }) {
   const sessionId = SessionId('s3-real-loop')
   const workspace = new BidWorkspace(root)
   const s2 = await prepareS2(workspace)
@@ -424,6 +447,8 @@ export async function runEvidenceMappingLoop(ctx: Context, root: string, repair:
     hidden_heading_pressure: false, topic_dispositions: [{ finding_index: 1, placement: 'within_section', reason: '段落和角色权限表可完整表达授权与追溯关系，无需隐藏正式子标题。' }],
   }
   const childScript: ScriptStep[] = [
+    ...Array.from({ length: fault?.failures ?? 0 }, (_, index) =>
+      toolCall(`fault-search-${String(index)}`, 'web_search', { queries: ['注入网络故障'] })),
     toolCall('read-forbidden-tender', 'read', { file_path: `${workspacePath}/${tender.chunksPath}/chunk_0001.md` }),
     toolCall('read-forbidden-framework', 'read', { file_path: `${workspacePath}/${framework.chunksPath}/chunk_0001.md` }),
     ...(repair ? [
@@ -485,8 +510,10 @@ export async function runEvidenceMappingLoop(ctx: Context, root: string, repair:
   ]
   const parentScript: ScriptStep[] = []
   const adapter = new ScriptedAdapter(sessionId, parentScript, childScript)
+  adapter.reviewOverflow = fault?.reviewOverflow === true
   ctx.effect(() => ctx.llm.registerAdapter(['mock'], adapter))
-  registerIntegrationTools(ctx, root, [sourceUrl, unusedSourceUrl])
+  registerIntegrationTools(ctx, root, [sourceUrl, unusedSourceUrl], fault === undefined ? undefined
+    : { code: fault.code, statusCode: fault.statusCode, remaining: fault.failures })
   const agent = ctx.agentLoop.create(sessionId, { provider: 'mock', model: 'mock' }, { cwd: root, ...(interactive ? { agentPreset: 'bid' } : {}) })
   // Loader 装配的 Host 必须完成项目初始化，才能设置本场景的 S4 起点。
   const host = ctx.get('bid') as unknown as { inFlight: ReadonlyMap<unknown, { session: Session; done: Promise<void> }> } | undefined
@@ -499,7 +526,11 @@ export async function runEvidenceMappingLoop(ctx: Context, root: string, repair:
   agent.session.append('bid.stage.completed', { stage: 'outline_generation', status: 'completed', artifacts: [] })
   const orchestrator = new BidOrchestrator(
     agent.session,
-    { canExecute: stage => stage === 'evidence_mapping', execute: (task, run) => executeEvidenceMapping(agent, workspace, task, { maxRepairAttempts: repair ? 1 : 0, maxConcurrency: 2, run }) },
+    { canExecute: stage => stage === 'evidence_mapping', execute: (task, run) => executeEvidenceMapping(agent, workspace, task, {
+      maxRepairAttempts: repair ? 1 : 0, maxConcurrency: 2,
+      ...(fault?.maxRetries === undefined ? {} : { maxInfrastructureRetryAttempts: fault.maxRetries }),
+      run: fault?.signal === undefined ? run : { ...run, signal: AbortSignal.any([run.signal, fault.signal]) },
+    }) },
     { validate: (stage, artifacts) => validateEvidenceMapping(workspace, stage, artifacts) },
   )
 

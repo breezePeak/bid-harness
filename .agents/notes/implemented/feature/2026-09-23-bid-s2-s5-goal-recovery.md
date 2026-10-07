@@ -14,7 +14,7 @@ Bid 的阶段执行由 Host 和执行子代理持有，主交互 Agent 保持可
 
 Host 将执行器和最终校验的实际问题分类并保存在 Run failure 中。主 Agent 通过 `bid_stage_inspect(view="recovery")` 读取有界诊断，再用 `bid_recover_task` 提交当前目标的改进指令。Host 在原项目锁内复核 Goal、Run 或写作请求身份、输入指纹、停止状态和预算，持久化一次恢复事件，然后复用原 Run 恢复或已回答写作计划的派发入口。工具在新 Run 的 running 检查点持久化后返回；S2～S5 的真实执行模型只接收与失败单元匹配的指令，正式产物仍经原提交和校验流程。
 
-接管历史与指纹按[持续恢复规则](../bug-fix/2026-09-28-bid-host-recovery-continuation.md)用于要求改变策略，不设置 Bid 次数预算。用户停止、等待输入、输入身份冲突、提供方与权限故障不取得自动接管权；Host 重启按原检查点续行。Goal 的暂停、清除和完成约束主会话的自动续行；S1 文件处理和 S6 独立导出不由这个目标恢复。
+接管历史与指纹按[持续恢复规则](../bug-fix/2026-09-28-bid-host-recovery-continuation.md)用于要求改变策略，当前 Bid 次数预算与无 Goal 调度由[恢复结算](../bug-fix/2026-10-06-bid-recovery-settlement.md)拥有。用户停止、等待输入、输入身份冲突、提供方与权限故障不取得自动接管权；Host 重启按原检查点续行。旧 Goal 的暂停、清除和完成约束旧主会话自动续行；S1 文件处理和 S6 独立导出不由这个目标恢复。
 
 ## Alternatives considered
 

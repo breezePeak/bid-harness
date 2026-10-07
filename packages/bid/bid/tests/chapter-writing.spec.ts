@@ -21,6 +21,7 @@ import {
   renderChapterSubagentTask,
   renderChapterExecutionPlanTask,
   resolveWritingPreparationSectionIds,
+  executeDocumentReview,
   validateChapterCandidate,
   type ChapterWritingCommand,
   type ChapterWritingControl,
@@ -69,16 +70,24 @@ import { createTestBidRunContext } from '../src/run-coordinator.ts'
 import { executeWritingCapability, validateWritingCapability } from '../src/bid-writing-capability.ts'
 import { createBidCapabilityDispatcher } from '../src/bid-capability-dispatcher.ts'
 import { validateDocumentReviewCapability } from '../src/bid-document-review-capability.ts'
-import { BidStageAttentionRequiredError } from '../src/control-plane-contract.ts'
+import { BidStageAttentionRequiredError, BidStageExecutionError } from '../src/control-plane-contract.ts'
 
 type SectionResearch = typeof import('../src/evidence-mapping-executor.ts').executeSectionResearch
 const sectionResearchHook = vi.hoisted(() => ({ run: undefined as SectionResearch | undefined }))
+const formatReadHook = vi.hoisted(() => ({ error: undefined as Error | undefined }))
+vi.mock('../src/docx-format-store.ts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/docx-format-store.ts')>()
+  return { ...actual, readDocxFormat: ((...args: Parameters<typeof actual.readDocxFormat>) => {
+    if (formatReadHook.error !== undefined) return Promise.reject(formatReadHook.error)
+    return actual.readDocxFormat(...args)
+  }) satisfies typeof actual.readDocxFormat }
+})
 vi.mock('../src/evidence-mapping-executor.ts', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/evidence-mapping-executor.ts')>()
   return { ...actual, executeSectionResearch: ((...args: Parameters<SectionResearch>) =>
     (sectionResearchHook.run ?? actual.executeSectionResearch)(...args)) satisfies SectionResearch }
 })
-afterEach(() => { sectionResearchHook.run = undefined })
+afterEach(() => { sectionResearchHook.run = undefined; formatReadHook.error = undefined })
 
 const executeChapterWriting = (
   agent: Agent,
@@ -96,6 +105,143 @@ const executeChapterWriting = (
 }
 
 const source = [{ file_id: 'tender', chunk: 'corpus/tender/chunks/0001.md', line_start: 1, line_end: 1 }]
+
+it.each(['EACCES', 'EIO', 'corrupt'])('required 页数测量 %s 失败保留 cause 和候选，修复后只重新验收', async (kind) => {
+  const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-page-measure-failure-')))
+  const outline = await writeInputs(workspace)
+  const first = fixtureAgent(workspace, outline)
+  await executeChapterWriting(first.agent, workspace, buildBidStageTask('chapter_writing'))
+  const manifest = parseChapterWritingManifest(JSON.parse(await readFile(join(workspace.projectRoot, 'chapters/manifest.json'), 'utf8')))
+  const retained = await Promise.all(manifest.chapters.map(async chapter => ({
+    ...chapter, body: await readFile(join(workspace.projectRoot, chapter.content_path), 'utf8'),
+  })))
+  const path = join(workspace.projectRoot, 'chapters/writing-plan.json')
+  const plan = parseWritingPlan(JSON.parse(await readFile(path, 'utf8')))
+  await writeFile(path, JSON.stringify({ ...plan, document_acceptance: [{
+    id: 'AC-000005', scope: { kind: 'document' }, description: '必须得到有效页数。', priority: 'required',
+    evaluator: { kind: 'deterministic', metric: 'estimated_pages', min: 0, max: null },
+  }] }))
+  const corruptPath = join(workspace.projectRoot, 'word-export/default.config.json')
+  const cause = Object.assign(new Error('格式读取故障'), { code: kind })
+  if (kind === 'corrupt') {
+    await mkdir(join(workspace.projectRoot, 'word-export'), { recursive: true })
+    await writeFile(corruptPath, '{损坏')
+  } else formatReadHook.error = cause
+  const failed = fixtureAgent(workspace, outline)
+  const error = await executeDocumentReview(failed.agent, workspace, createTestBidRunContext(), 0).catch((failure: unknown) => failure)
+  expect(error).toBeInstanceOf(BidStageExecutionError)
+  expect(error).not.toBeInstanceOf(BidStageAttentionRequiredError)
+  const syntaxError: unknown = expect.any(SyntaxError)
+  const corruptCause: unknown = expect.objectContaining({ cause: syntaxError })
+  expect(error).toMatchObject({ issues: [expect.objectContaining({
+    code: kind === 'corrupt' ? 'BID_DOCX_FORMAT_CORRUPT' : kind, artifact: 'chapters/completion-review.json',
+  })], cause: kind === 'corrupt' ? corruptCause : cause })
+  expect(failed.starts).toHaveLength(0)
+  for (const chapter of retained) {
+    expect(await readFile(join(workspace.projectRoot, chapter.content_path), 'utf8')).toBe(chapter.body)
+    expect(chapterCandidateSha256(chapter.body)).toBe(chapter.review_sha256)
+  }
+  formatReadHook.error = undefined
+  if (kind === 'corrupt') await unlink(corruptPath)
+  const resumed = fixtureAgent(workspace, outline)
+  await executeDocumentReview(resumed.agent, workspace, createTestBidRunContext(), 0)
+  expect(resumed.starts).toHaveLength(0)
+  const completion = parseChapterWritingCompletionState(JSON.parse(await readFile(join(workspace.projectRoot, 'chapters/completion-review.json'), 'utf8')))
+  expect(completion.completion?.pages).toBeGreaterThan(0)
+  expect(completion.completion?.document_acceptance_results).toContainEqual(expect.objectContaining({ status: 'met' }))
+})
+
+it.each(['conflict', 'external', 'mixed'])('审批批次 %s 按具体原因结算并保留审核上下文', async (kind) => {
+  const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-revision-attention-class-')))
+  const outline = await writeInputs(workspace)
+  await executeChapterWriting(fixtureAgent(workspace, outline).agent, workspace, buildBidStageTask('chapter_writing'))
+  const { addRevisionIssue, readRevisionQueue } = await import('../src/chapter-revision-queue.ts')
+  const { createRevisionBatch, readRevisionBatch, writeRevisionBatch } = await import('../src/chapter-revision-batch.ts')
+  const body = await readFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), 'utf8')
+  const queue = addRevisionIssue(await readRevisionQueue(workspace), { section_id: 'SEC-1', scope: 'chapter',
+    reference: { scope: 'chapter', base_content_sha256: chapterContentSha256(body) },
+    instruction: '按审批意见修订当前章', suggestion: null }, '章节1', 1)
+  const issue = queue.issues[0]!
+  const plan = { issue_ids: [issue.issue_id], expected_queue_revision: queue.revision,
+    tasks: [{ task_id: 'task-1', section_id: 'SEC-1', issue_ids: [issue.issue_id], depends_on: [] }] }
+  const { batch } = createRevisionBatch(queue, plan, 'BATCH-ATTENTION', 1, [])
+  await writeRevisionBatch(workspace, batch)
+  const input = { batchId: batch.batch_id, tasks: [{ ...plan.tasks[0]!, issues: [{
+    issue_id: issue.issue_id, instruction: issue.instruction, suggestion: null, scope: 'chapter' as const,
+    reference_text: null, start: null, end: null,
+  }] }] }
+  const fixture = fixtureAgent(workspace, outline)
+  fixture.reviewerResult.mockImplementation(request => ({ ...reviewFrom(request), verdict: 'attention',
+    assignment_conflicts: kind === 'external' ? [] : [{ task: '职责重复', basis: '与第二章职责冲突', related_section_ids: ['SEC-2'] }],
+    external_input_gaps: kind === 'conflict' ? [] : [{ item_ref: 'R1', required_material: '企业证书', reason: '必须由用户提供' }],
+    ...(kind === 'conflict' ? {} : { must_answer_coverage: reviewFrom(request).must_answer_coverage.map(item => ({ ...item,
+      status: 'missing', evidence_quotes: [], issue: '企业证书缺失' })) }),
+    external_input_only: kind !== 'conflict', revision_issue_checks: [{ issue_id: issue.issue_id,
+      status: kind === 'conflict' ? 'satisfied' : 'needs_input', reason: kind === 'conflict' ? '措辞已修订' : '需要企业证书' }],
+  }))
+  const work = { ...createTestBidRunContext().work, kind: 'capability_task' as const, stage: 'chapter_writing' as const }
+  await executeChapterWriting(fixture.agent, workspace, buildBidStageTask('chapter_writing'), {
+    maxRepairAttempts: 0, revisionBatch: input, documentReview: 'defer', run: createTestBidRunContext({ work }),
+  })
+  const saved = (await readRevisionBatch(workspace, batch.batch_id))!
+  const expectedMessage: unknown = expect.stringContaining(kind === 'conflict' ? '职责重复' : '企业证书')
+  expect(saved.tasks[0]).toMatchObject({ status: kind === 'conflict' ? 'failed' : 'needs_input', failure: {
+    code: kind === 'conflict' ? 'CHAPTER_WRITING_ASSIGNMENT_CONFLICT' : 'CHAPTER_EXTERNAL_INPUT_REQUIRED',
+    message: expectedMessage,
+  } })
+  if (kind !== 'conflict') expect(saved.tasks[0]?.failure?.message).not.toContain('职责重复')
+  const review = parseChapterReviewArtifact(JSON.parse(await readFile(join(workspace.projectRoot, 'chapters/reviews/0001.json'), 'utf8')))
+  expect(review.assignment_conflicts).toHaveLength(kind === 'external' ? 0 : 1)
+  expect(review.external_input_gaps).toHaveLength(kind === 'conflict' ? 0 : 1)
+})
+
+it.each(['conflict', 'external', 'mixed'])('普通写作 %s 与修订一致，仅为真实外部缺口返回 needs_input', async (kind) => {
+  const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-writing-attention-class-')))
+  const outline = await writeInputs(workspace)
+  const fixture = fixtureAgent(workspace, outline)
+  fixture.reviewerResult.mockImplementation(request => ({ ...reviewFrom(request), verdict: 'attention',
+    assignment_conflicts: kind === 'external' ? [] : [{ task: '职责重复', basis: '与第二章职责冲突', related_section_ids: ['SEC-2'] }],
+    external_input_gaps: kind === 'conflict' ? [] : [{ item_ref: 'R1', required_material: '企业证书', reason: '必须由用户提供' }],
+    ...(kind === 'conflict' ? {} : { must_answer_coverage: reviewFrom(request).must_answer_coverage.map(item => ({ ...item,
+      status: 'missing', evidence_quotes: [], issue: '企业证书缺失' })) }), external_input_only: kind !== 'conflict',
+  }))
+  const execution = executeWritingCapability({ capability: 'chapter.write', input: { instruction: '编写当前章节' } }, {
+    canonical: workspace, working: workspace, agent: fixture.agent, run: createTestBidRunContext(), sectionIds: new Set(['SEC-1']),
+    stepDirectory: workspace.root, inputSources: new Map(), baselineHashes: new Map(), allowedWrites: new Set(),
+    stepId: 'attention', rootWorkId: 'attention', authorization: { session_id: 'main', message_id: 'writing' }, inputSha256: '0'.repeat(64),
+  }, { maxRepairAttempts: 0, maxConcurrency: 1, webSearchEnabled: false })
+  if (kind === 'conflict') await expect(execution).rejects.toMatchObject({ issues: [expect.objectContaining({ code: 'CHAPTER_WRITING_ASSIGNMENT_CONFLICT' })] })
+  else {
+    const { result } = await execution
+    expect(result.needs_input).toBe(true)
+    expect(result.missing_topics).toContain('SEC-1: 企业证书')
+    expect(result.missing_topics.join('；')).not.toContain('职责重复')
+    if (kind === 'mixed') expect(result.warnings.join('；')).toContain('职责重复')
+  }
+})
+
+it('章级 required 页数执行失败保留 EIO cause，拒绝发布旧候选的替代正文', async () => {
+  const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-section-page-measure-failure-')))
+  const outline = await writeInputs(workspace)
+  await executeChapterWriting(fixtureAgent(workspace, outline).agent, workspace, buildBidStageTask('chapter_writing'))
+  const bodyPath = join(workspace.projectRoot, 'chapters/sections/0001.md')
+  const before = await readFile(bodyPath, 'utf8')
+  const planPath = join(workspace.projectRoot, 'chapters/writing-plan.json')
+  const plan = parseWritingPlan(JSON.parse(await readFile(planPath, 'utf8')))
+  plan.sections[0]!.acceptance_criteria.push({ id: 'AC-000008', scope: { kind: 'section', section_id: 'SEC-1' },
+    description: '本章必须得到有效页数', priority: 'required', evaluator: { kind: 'deterministic', metric: 'estimated_pages', min: 0, max: null } })
+  await writeFile(planPath, JSON.stringify(plan))
+  const cause = Object.assign(new Error('临时磁盘读取失败'), { code: 'EIO' })
+  formatReadHook.error = cause
+  const fixture = fixtureAgent(workspace, outline)
+  const error = await executeWritingCapability({ capability: 'chapter.write', input: { instruction: '保留正文并重验当前章节' } }, {
+    canonical: workspace, working: workspace, agent: fixture.agent, run: createTestBidRunContext(), sectionIds: new Set(['SEC-1']),
+    stepDirectory: workspace.root, inputSources: new Map(), baselineHashes: new Map(), allowedWrites: new Set(),
+    stepId: 'measure', rootWorkId: 'measure', authorization: { session_id: 'main', message_id: 'writing' }, inputSha256: '0'.repeat(64),
+  }, { maxRepairAttempts: 0, maxConcurrency: 1, webSearchEnabled: false }).catch((failure: unknown) => failure)
+  expect(error).toMatchObject({ code: 'EIO', cause, issues: [expect.objectContaining({ code: 'EIO' })] })
+  expect(await readFile(bodyPath, 'utf8')).toBe(before)
+})
 
 it('技术偏离表读取全部 Requirement 但保持空 coverage ownership', () => {
   const base = outlineFixture()
@@ -1643,7 +1789,7 @@ describe('chapter-writing executor', () => {
     await expect(validateDocumentReviewCapability(context)).rejects.toThrow('GLOBAL_COMPLIANCE_OUTLINE_HASH_INVALID')
   })
 
-  it('required 确定性条件未满足且修订预算耗尽时完成阶段并保留风险', async () => {
+  it('required 确定性条件未满足且修订预算耗尽时拒绝完成并保留验收结果', async () => {
     const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-s5-page-target-')))
     const outline = await writeInputs(workspace)
     const fixture = fixtureAgent(workspace, outline, {}, true, () => true, (_attempt, request) => ({
@@ -1663,9 +1809,9 @@ describe('chapter-writing executor', () => {
       }],
     })}\n`)
 
-    const artifacts = await executeChapterWriting(fixture.agent, workspace, buildBidStageTask('chapter_writing'), {
+    await expect(executeChapterWriting(fixture.agent, workspace, buildBidStageTask('chapter_writing'), {
       maxRepairAttempts: 0, maxCompletionRepairRounds: 0, maxConcurrency: 3,
-    })
+    })).rejects.toMatchObject({ issues: [expect.objectContaining({ code: 'CHAPTER_WRITING_REQUIRED_ACCEPTANCE_UNMET' })] })
     const completionPrompt = JSON.stringify(fixture.followup.mock.calls.at(-1)?.[0])
     expect(completionPrompt).toContain('AC-000005')
     expect(completionPrompt).toContain('unmet')
@@ -1676,7 +1822,15 @@ describe('chapter-writing executor', () => {
     expect(completion.completion?.document_acceptance_results).toContainEqual(expect.objectContaining({
       criterion_id: 'AC-000005', status: 'unmet',
     }))
-    await expect(validateChapterWriting(workspace, 'chapter_writing', artifacts)).resolves.toEqual({ ok: true })
+    const artifacts = ([
+      ['execution-plan', 'chapter_execution_plan'], ['execution-log', 'chapter_execution_log'],
+      ['manifest', 'chapter_manifest'], ['global-compliance-review', 'global_compliance_review'],
+      ['completion-review', 'chapter_completion_review'],
+    ] as const).map(([path, type]) => ({ stage: 'chapter_writing' as const, type, path: `chapters/${path}.json` }))
+    await expect(validateChapterWriting(workspace, 'chapter_writing', artifacts)).resolves.toMatchObject({
+      ok: false, issues: [expect.objectContaining({ code: 'CHAPTER_WRITING_REQUIRED_ACCEPTANCE_UNMET' })],
+    })
+    await expect(validateChapterWriting(workspace, 'chapter_writing', artifacts, 'review_report')).resolves.toEqual({ ok: true })
   })
 
   it('审查错误宣称通过时仍按实际内容缺口修订，保留问题并继续其他章节', async () => {

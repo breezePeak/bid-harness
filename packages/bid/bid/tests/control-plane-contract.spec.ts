@@ -80,6 +80,7 @@ describe('bid control-plane public contract', () => {
       'bid.goal.bound',
       'bid.goal.recovery.requested',
       'bid.recovery.requested',
+      'bid.recovery.round',
       'bid.capability.input.required',
       'bid.capability.input.received',
     ])

@@ -45,7 +45,11 @@ S6 只对流程图、表格和图片执行最终页面视觉审核；标题、�
 
 自动恢复检查全部错误项；目录范围或依赖失效、目标无效、权限、数据损坏与不变量错误优先阻断，不因同时出现候选校验问题而重试。
 
-默认 S1～S6 流程不创建或绑定 Goal，模型工具目录隐藏 `create_goal`。执行器错误和局部修复耗尽记录带诊断的失败状态，保留原 Work 及已完成检查点并自动唤醒主 Agent；内部执行问题不保存为挂起。主 Agent 从严格对应的原 Run 失败通知取得恢复身份，用 `bid_stage_inspect(view="recovery")` 分析错误，再用 `bid_recover_task(instruction=...)` 在原 Work 提交修复方案。Provider、额度、凭证、输入及权限阻断保留明确原因，不开放自动修改。Host 在失败落盘并释放项目锁后以有界 plugin notice 调用 `steer()` 唤醒主 Agent。能力步骤接收恢复指令，不改变原任务输入身份。S5 已保存回答的计划失败复用该入口，不重复询问用户。Host 重启自动续行失败保存当前 Run 诊断并通知主 Agent。Host 只负责接纳、输入与权限校验、检查点续行和正式发布；主 Agent 不能代替用户确认。用户停止仍使用原生 Run 决策，等待输入仍使用原问题。
+默认 S1～S6 流程不创建或绑定 Goal，模型工具目录隐藏 `create_goal`。执行器错误和局部修复耗尽记录带诊断的失败状态，保留原 Work 及已完成检查点并自动唤醒主 Agent；内部执行问题不保存为挂起。主 Agent 从严格对应的原 Run 失败通知取得恢复身份，用 `bid_stage_inspect(view="recovery")` 分析错误，再用 `bid_recover_task(instruction=...)` 在原 Work 提交修复方案。Provider 配置、额度、凭证、输入及权限阻断保留明确原因，不开放自动修改；已确认的暂态网络错误保留状态码和 cause，按有限预算恢复。Host 在失败落盘并释放项目锁后以有界 plugin notice 调用 `steer()` 唤醒主 Agent。能力步骤接收恢复指令，不改变原任务输入身份。S5 已保存回答的计划失败复用该入口，不重复询问用户。Host 重启自动续行失败保存当前 Run 诊断并通知主 Agent。Host 只负责接纳、输入与权限校验、检查点续行和正式发布；主 Agent 不能代替用户确认。用户停止仍使用原生 Run 决策，等待输入仍使用原问题。
+
+`bid.recovery.round` 在原 Session 持久化失败指纹、目标、消息身份、预算和结算。Host 在 Main 回合结束后核验真实恢复动作；只回复文字时按退避安排下一轮，执行后仍失败时要求改变策略。纠正轮、原 Work 的执行恢复及同轮通知确认重试分别受 `modelStageRepairAttempts` 限制；新 Run、重复事件及重启不清零，配置提高也不扩大已记录预算。终点明确区分恢复、等待具体输入、用户停止和阻断。通知已落盘但尚未派发时复用原消息身份；终止报告也保留派发记录。原生决策与能力输入另以 `runs/<workId>/input-<hash>.json` 保存答案及应用状态；收到答案不等于续行成功，临时应用失败复用原答案，已经接纳的 Run 只补结算。停止期间不自动恢复；用户新消息明确要求继续后，Host 重新核验当前授权与检查点。
+
+S4 执行日志保存首次基础设施重试预算和每次失败的模型或 Web 通道；检查点恢复从日志还原已消耗次数。重启、换 Provider 或提高配置均不扩大原预算，已完成章节继续复用原检查点。
 
 后台 Execution Agent 直接调用 `ask_user_question` 会在工具执行前被拒绝；Host 将有界的问题原文写入原 Run 的失败记录，取消并结算后台执行。项目锁释放后，主 Agent 收到失败通知，可检查原任务并决定修复或向用户提问。问题不会只挂在 Execution 子会话等待用户，Host 不替主 Agent 选择业务处理方式。
 
@@ -115,7 +119,7 @@ Main Agent 通过只读 `bid_stage_inspect` 读取有界阶段快照。快照包
 
 用户确认修改建议后，Main Agent 在同一回合提交包含必要目录、资料、正文和复核步骤的任务。`outline.update.defer_content_migration` 只允许将迁移延后到同一任务的 `chapter.reorganize`，随后必须安排 `chapter.write` 或 `chapter.review`；缺少后续步骤时接纳入口返回可修正的错误。仅用户明确只改目录或暂缓正文时，任务才设置 `allow_pending_content=true`。Host 发布前拒绝本次新增的未迁移正文，保留正式产物及候选检查点，不将中间目录结果报告为完整修改。
 
-普通消息只由模型判断问答或受控修改，不按关键词、引用或发送方式触发业务动作。`bid_pause_stage` 只暂停后续模型、Child、Writer 和 Reviewer 任务调度，已经运行的任务继续收敛；`bid_resume_stage` 释放当前 operation 的调度门。任一同项目 Interaction Session 的聊天原生 Stop 通过 `agent/cancel-requested` 同时取消当前公开回复与唯一活动 Run；Host 先退休提交权限，再关闭调度、取消 Execution Session 后台任务并持久化挂起。系统异常挂起后不提出恢复选项，用户在聊天中明确要求继续时，Main Agent 无参数调用 `bid_resume_current_run`，程序绑定并核对 Run 身份和项目 revision 后继续原 Work。用户主动停止后的继续、当前阶段重跑和停止仍由 DSH 原生用户提问处理。
+普通消息只由模型判断问答或受控修改，不按关键词、引用或发送方式触发业务动作。`bid_pause_stage` 只暂停后续模型、Child、Writer 和 Reviewer 任务调度，已经运行的任务继续收敛；`bid_resume_stage` 释放当前 operation 的调度门。任一同项目 Interaction Session 的聊天原生 Stop 通过 `agent/cancel-requested` 同时取消当前公开回复与唯一活动 Run；Host 先退休提交权限，再关闭调度、取消 Execution Session 后台任务并持久化挂起。系统异常挂起后不提出恢复选项，用户在聊天中明确要求继续时，Main Agent 无参数调用 `bid_resume_current_run`，程序绑定并核对 Run 身份和项目 revision 后继续原 Work。用户主动停止后可回答原生 Run 问题，或通过停止之后的新用户消息授权继续；历史消息和 Goal 轮次不能替代这项新授权。当前阶段重跑和停止仍由 DSH 原生用户提问处理。
 
 S4 最终目录确认后，Host 在同一项目操作中直接进入 S5，不再询问整体写作意见。首次启动前根据最终确认目录保存 schema v3 默认 Writing Plan，覆盖全部可写叶节，用户消息引用、用户要求和动态验收条件为空；已有当前目录的有效计划则继续复用。计划在创建 S5 Work 前保存，使执行输入指纹包含实际计划。该流程不依赖浏览器是否打开，也不受手动／自动确认模式影响。
 
@@ -173,6 +177,8 @@ Reviewer 通过 `review_coverage_items` 和 `review_claims` 分批 upsert，通�
 
 Host 从记录确定 verdict：Writer 可修复的固定审核失败或 `required` 动态条件未满足为 `repair`；`preferred` 未满足只保留独立 coverage；外部资料缺口或章节职责冲突在没有正文修复问题时为 `attention`。成功 finish 表示报告收集完整，可以是 pass、repair 或 attention。Reviewer 子任务使用确认目录中的真实章节号命名，例如 `3.1 - 审查`，不把内部流水号和修订轮次写入名称。正文问题使用相同有界修复预算回到原 Writer；`attention` 不触发 Writer，`repair` 耗尽后保留最近的合法已审候选和真实风险，均不阻断阶段完成或导出。
 
+修订能力把纯任务分配冲突交给 Main 在原 Work 纠正；只有 `external_input_gaps` 或明确的 `revision_issue_checks.needs_input` 才创建问题，混合原因保留冲突且只询问外部缺口。显式 `required estimated_pages` 是确定性质量门禁：估算异常保留错误码与安全 cause 并进入执行失败，实际不足在修复预算耗尽后仍拒绝交付完成。快速估算不需要 LibreOffice；权限、损坏和临时 I/O 故障分别按真实原因分类，已验收正文与 hash 保留。
+
 全部章节完成后，现有 Main Agent 先完成文档级合规审核，再逐项验收当前计划的章节与整书条件。全局审核任务只携带章节身份、材料依据和待核验条目；Main Agent 通过私有只读工具按 Section 分段读取当前正文，并以本轮生成的引用提交原文依据，单次读取最多 12000 个字符。Main Agent 对 `semantic` 条件判断 met/unmet，显式 `deterministic` 条件服从 Host 测量；只有整书条件能够由正文改写满足时才从 Reviewer 已判定为 `pass` 的章节中选择最小充分集合，调度器复用原 Writer 后重新执行章节审核、全局审核和整书验收。`repair` 和 `attention` 已是章节级修订收敛后的风险结论，整书验收不得再次选择对应章节。外部资料缺口、不适合继续改写的风险、无进展和修订轮次耗尽都写入完成账本并结束 S5，不把审核结论当成阶段门禁。完成账本绑定计划版本、Word 格式版本、正文 Hash 和每轮修改前后身份。
 
 私有工具通过 in-process 的 `subagent/child-setup` 在 Child 发布前安装，以真实 Agent 和本次章节尝试隔离。finish 调用 `concludeTurn()`，只在权威 `tools/result`（嵌套调用同时等待外层结果）成功后确认；结束或释放后不能修改结果。Writer、Reviewer 均为 fresh-context 一层 Child，默认章节并发为 3，强依赖等待、弱关联不阻塞。路径、持久化字段和版本不变；M/F/W/R/Q/E 不进入外部 Artifact。
@@ -204,7 +210,7 @@ Writer 在缺少真实项目数量、人员、设备或记录值时只保留正�
 
 #### Token effect
 
-文件清单按每份导入文档增加固定字段；S4 当前上下文只随单个 Section 子树增长，全书部分只随轻量职责索引增长，Final Check 详细上下文随 pending 项增长；S5 上下文随确认目录、适用任务条件和章节身份增长。旧标标题按完整顺序提供，不重复每个标题的祖先路径；全局合规审核与整书验收均按需读取正文分块，不在任务提示中复制完整正文。
+文件清单按每份导入文档增加固定字段；S4 全局目录审查共享职责索引，详细资料不逐叶复制 siblings。每次请求按完整输入估算 token，并扣除模型 Header、工具和输出余量；超限时详细审查分片，跨片职责按完整索引或片间配对复核，单对象仍放不下时明确报错。Final Check 详细上下文随 pending 项增长；S5 上下文随确认目录、适用任务条件和章节身份增长。旧标标题按完整顺序提供，不重复每个标题的祖先路径；全局合规审核与整书验收均按需读取正文分块，不在任务提示中复制完整正文。
 
 #### KV Cache effect
 
@@ -234,9 +240,7 @@ Writer 在缺少真实项目数量、人员、设备或记录值时只保留正�
 
 #### What the model sees
 
-章节完成后的用户修订通过 `reviseChapter` 定位执行日志中的原 Writer。批量修订在同一原 parent 下续写各章节的原 Writer；目标 Writer 属于不同 parent 时，Host 在模型运行前拒绝整批执行。章节引用绑定完整正文 SHA-256，段落引用另带 UTF-16 起止位置与原文；会话恢复失败或选区身份不一致时，Host 在模型运行前拒绝修订。
-
-能力任务要求保留迁移原文时，普通写作与整章修订共用 Host 从冻结来源和当前正文解析的保留块及原图定义。Writer 使用当前块位置引用原文，提交和最终验收按同一映射展开，Reviewer 接收相同的只读原文与原图要求。批次修订保留范围外已完成强依赖的交接输入，不能把它们替换为空依赖。
+章节完成后的用户修订通过 `reviseChapter` 定位执行日志中的原 Writer。批量修订在同一原 parent 下续写各章节的原 Writer；目标 Writer 属于不同 parent 时，Host 在模型运行前拒绝整批执行。章节引用绑定完整正文 SHA-256，段落引用另带 UTF-16 起止位置与原文；会话恢复失败或选区身份不一致时，Host 在模型运行前拒绝修订。能力任务要求保留迁移原文时，普通写作与整章修订共用 Host 从冻结来源和当前正文解析的保留块及原图定义。Writer 使用当前块位置引用原文，提交和最终验收按同一映射展开，Reviewer 接收相同的只读原文与原图要求。批次修订保留范围外已完成强依赖的交接输入，不能把它们替换为空依赖。
 
 ##### Paragraph-only revision task
 

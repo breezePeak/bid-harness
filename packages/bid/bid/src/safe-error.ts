@@ -36,7 +36,21 @@ export function safeBidRunError(
   issues?: readonly StageValidationIssue[],
   recovery?: BidTaskFailure['recovery'],
 ): BidTaskFailure {
-  const candidate = error as { code?: unknown; message?: unknown }
+  const candidate = error as { code?: unknown; message?: unknown; cause?: unknown }
+  const original = candidate.cause as {
+    code?: unknown
+    message?: unknown
+    status?: unknown
+    statusCode?: unknown
+    retryable?: unknown
+  } | null | undefined
+  const status = original?.status ?? original?.statusCode
+  const cause = original === undefined || original === null ? undefined : {
+    message: sanitizeBidErrorText(typeof original.message === 'string' ? original.message : '执行异常未提供安全消息。'),
+    ...(typeof original.code === 'string' && /^[A-Za-z0-9_.:-]{1,128}$/u.test(original.code) ? { code: original.code } : {}),
+    ...(typeof status === 'number' && Number.isInteger(status) ? { status } : {}),
+    ...(typeof original.retryable === 'boolean' ? { retryable: original.retryable } : {}),
+  }
   const code = typeof candidate.code === 'string' && /^[A-Za-z0-9_.:-]{1,128}$/u.test(candidate.code)
     ? candidate.code
     : 'BID_EXECUTOR_ERROR'
@@ -46,6 +60,7 @@ export function safeBidRunError(
   return {
     code,
     message,
+    ...(cause === undefined ? {} : { cause }),
     ...(recovery === undefined ? {} : { recovery: {
       kind: recovery.kind,
       unit: sanitizeBidErrorText(recovery.unit),

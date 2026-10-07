@@ -12,6 +12,7 @@
     { "path": "../../goal/goal" },
     { "path": "../../goal/goal-round-driver" },
     { "path": "../../session/session-projection" },
+    { "path": "../../llm/token-meter" },
     { "path": "../../subagent/subagent" },
     { "path": "../../preset/agent-presets" },
     { "path": "../../host/apiproxy" },

@@ -36,6 +36,7 @@ import {
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { prepareBidStageContextTransition } from '../src/stage-context.ts'
 import { inspectBidStage, isBidMainSession } from '../src/stage-interaction.ts'
+import { bidRecoverableRun } from '../src/bid-recovery.ts'
 import { parseChapterExecutionLog, parseOrMigrateChapterExecutionLog } from '../src/chapter-writing-plan-artifacts.ts'
 import { chapterContentSha256 } from '../src/chapter-revision.ts'
 import { readBidChapterCommandJournal } from '../src/chapter-command-journal.ts'
@@ -62,10 +63,19 @@ import { validateOutlineSharedCoverage, validateOutlineSharedStructure } from '.
 import { seedConversation, seedProjectArtifacts } from './fixtures/project-session.ts'
 import { seedCapabilityProject } from './capability-fixture.ts'
 import { readPendingCapabilityRequests } from '../src/bid-capability-queue.ts'
+import * as inputRecovery from '../src/bid-input-recovery.ts'
+import * as capabilityInput from '../src/bid-capability-task.ts'
+import { ChapterAdapter } from './fixtures/chapter-writing-adapter.ts'
+import { writeInputs as writeChapterInputs } from './fixtures/chapter-writing-inputs.ts'
+import { executeChapterWriting } from '../src/chapter-writing-executor.ts'
 
 interface HostExecution {
   readonly inFlight: Map<string, unknown>
   readonly docxInFlight: Set<string>
+  readonly recoveryTasks: Set<Promise<unknown>>
+  readonly writingEntryStops: Map<string, { done: Promise<void> }>
+  readonly pendingRunDecisions: Map<string, Promise<void>>
+  readonly pendingCapabilityInputs: Map<string, Promise<void>>
   beginOperation(session: Session): unknown
   withDocxOperation<T>(session: Session, execute: (workspace: BidWorkspace) => Promise<T>): Promise<T>
   automaticOrchestrator(agent: Agent, workspace: BidWorkspace, signal?: AbortSignal): BidOrchestrator
@@ -85,10 +95,12 @@ async function settleCapabilityOperations(ctx: Context): Promise<void> {
 async function resumeRun(ctx: Context, session: Session) {
   if (session.header.cwd === undefined) throw new Error('Bid test Session has no workspace')
   const state = await readBidProjectState(new BidWorkspace(session.header.cwd))
-  if (state === undefined || state.run === null) throw new Error('Bid test project has no Run')
-  const run = state.run
+  const run = state?.status === 'running' ? state.run
+    : state === undefined ? undefined : bidRecoverableRun(session, state)
+  if (state === undefined || run === undefined) throw new Error('Bid test project has no recoverable Work')
   try {
-    const value = await (ctx as Context & { bid: BidHostRuntime }).bid.resumeCurrentRun(session, run.runId, state.revision)
+    const value = await (ctx as Context & { bid: BidHostRuntime }).bid.resumeCurrentRun(session, run.runId, state.revision,
+      undefined, state.status === 'failed' ? { instruction: '核对原失败问题并继续原 Work 的未完成部分。' } : undefined)
     return { ok: true as const, value }
   } catch (error: unknown) {
     return { ok: false as const, error: { code: 'BID_OPERATION_IN_PROGRESS', message: String(error) } }
@@ -228,12 +240,14 @@ async function fixture(options: {
   readonly realOrchestrator?: boolean
   readonly withPreset?: boolean
   readonly withPersistence?: boolean
+  readonly repairAttempts?: number
   readonly root?: string
 } = {}) {
   const root = options.root ?? await mkdtemp(join(tmpdir(), 'dsh-project-session-'))
   disposals.push(() => rm(root, { recursive: true, force: true }))
   const ctx = new Context()
-  disposals.push(() => ctx.fiber.dispose())
+  let disposeHost = () => ctx.fiber.dispose()
+  disposals.push(() => disposeHost())
   await ctx.plugin(LlmRuntime)
   const adapter = new ProjectSessionAdapter()
   ctx.effect(() => ctx.llm.registerAdapter(['mock'], adapter))
@@ -271,9 +285,29 @@ async function fixture(options: {
   await ctx.plugin(SubagentRuntime)
   await ctx.plugin(spawn, { providerName: 'spawn' })
   await ctx.plugin(SessionProjectionRegistry)
-  await ctx.plugin(BidHostRuntime)
+  const config = BidHostRuntime.Config((options.repairAttempts === undefined
+    ? {} : { modelStageRepairAttempts: options.repairAttempts }) as Parameters<typeof BidHostRuntime.Config>[0])
+  const bidFiber = await ctx.plugin(BidHostRuntime, config)
   const workspace = new BidWorkspace(root)
   const host = ctx.bid as unknown as HostExecution
+  const settleHost = async (includeQuestions = false) => {
+    await vi.waitFor(() => {
+      expect(host.inFlight.size).toBe(0)
+      expect(host.docxInFlight.size).toBe(0)
+      expect(host.recoveryTasks.size).toBe(0)
+      expect(host.writingEntryStops.size).toBe(0)
+      if (includeQuestions) {
+        expect(host.pendingRunDecisions.size).toBe(0)
+        expect(host.pendingCapabilityInputs.size).toBe(0)
+      }
+    }, { timeout: 20_000 })
+    await new Promise<void>((resolve) => { setImmediate(resolve) })
+  }
+  disposeHost = async () => {
+    await settleHost()
+    await ctx.fiber.dispose()
+    await settleHost(true)
+  }
   adapter.isExecutionSession = sessionId => [...host.inFlight.values()].some(candidate =>
     (candidate as { executionSessionId?: string }).executionSessionId === sessionId)
   const executeStage = vi.fn<BidStageExecutorPort['execute']>(async () => [])
@@ -308,10 +342,182 @@ async function fixture(options: {
     })
     return handle.agent
   }
-  return { ctx, workspace, fresh, host, executor, executeStage, validator, adapter }
+  return { ctx, workspace, fresh, host, executor, executeStage, validator, adapter, bidFiber }
 }
 
 describe('Workspace 项目与独立 Session', () => {
+  it('真实 Host 的修订纯职责冲突交 Main 执行恢复，同 Work 无用户问题且门禁前正文保持不变', async () => {
+    const { ctx, workspace, fresh, adapter } = await fixture({ withPersistence: true, withPreset: true })
+    const outline = await writeChapterInputs(workspace)
+    await workspace.import([{ name: 'reference.md', role: 'reference', bytes: new TextEncoder().encode('已核验的项目实施参考资料。') }])
+    for (const name of ['grep', 'read'] as const) ctx.tools.register({ name, description: name,
+      parameters: { type: 'object' }, output: { schema: { type: 'object' }, render: () => [] }, execute: async () => ({}) })
+    const seed = new ChapterAdapter()
+    ctx.llm.registerAdapter(['seed-writing'], seed)
+    const seedAgent = ctx.agentLoop.create(SessionId('parent'), { provider: 'seed-writing', model: 'mock' }, { cwd: workspace.root })
+    await executeChapterWriting(seedAgent, workspace, buildBidStageTask('chapter_writing'), {
+      maxRepairAttempts: 1, maxConcurrency: 1, run: createTestBidRunContext(),
+    })
+    await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'completed' })
+    const agent = await fresh('revision-attention-recovery-host')
+    const bodyPath = join(workspace.projectRoot, 'chapters/sections/0001.md')
+    const before = await readFile(bodyPath, 'utf8')
+    const added = await ctx.bid.addRevisionIssue(agent.session, { section_id: 'SEC-1', scope: 'chapter',
+      reference: { scope: 'chapter', base_content_sha256: chapterContentSha256(before) }, instruction: '核对本章职责并改进措辞', suggestion: null })
+    if (!added.ok) throw new Error(JSON.stringify(added))
+    const issue = added.value.issues[0]!
+    const message = createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: '核对本章职责并改进措辞。' }] })
+    agent.session.append('turn/start', { turn: 1 })
+    agent.session.append('user/message', message, { surfaceOp: 'append' })
+    const chapter = new ChapterAdapter()
+    chapter.reviewSummary = { assignment_conflicts: [{ task: '职责重复', basis: '当前任务与第二章职责重叠',
+      related_section_positions: [outline.sections.findIndex(item => item.id === 'SEC-2')] }] }
+    const original = adapter.stream.bind(adapter)
+    vi.spyOn(adapter, 'stream').mockImplementation((options) => {
+      if (adapter.mainSessionIds.has(String(options.sessionId))) {
+        delete chapter.reviewSummary
+        return original(options)
+      }
+      return chapter.stream(options)
+    })
+    const ask = vi.spyOn(ctx.userQuestions, 'ask')
+    adapter.script.push(toolCall('bid_recover_task', { target: 'run', instruction: '当前章保持已确认职责，移除重复分配后只重新审核原候选。' }), answer('已验证原候选恢复。'))
+    const builtin = (ctx.bid as unknown as { builtInCapabilityDispatcher: CapabilityTaskDispatcher }).builtInCapabilityDispatcher
+    ctx.bid.registerCapabilityTaskDispatcher({ ...builtin, verifyTask: executorTestVerifier })
+    const initial = await ctx.bid.runCapabilityTask(agent, { goal: '核对本章职责并改进措辞', issue_ids: [issue.issue_id],
+      scope: { kind: 'sections', section_ids: ['SEC-1'] }, steps: [{ description: '修订当前章', scope: { source: 'task' },
+        call: { capability: 'chapter.revision_batch', input: { issue_ids: [issue.issue_id], tasks: [{
+          task_id: 'task-1', section_id: 'SEC-1', issue_ids: [issue.issue_id], depends_on: [],
+        }] } } }] }, { session_id: String(agent.id), message_id: String(message.id) }, ['chapters/execution-log.json'])
+    expect(initial).toMatchObject({ status: 'failed', failure: { issues: [expect.objectContaining({ code: 'CHAPTER_WRITING_ASSIGNMENT_CONFLICT' })] } })
+    expect(await readFile(bodyPath, 'utf8')).toBe(before)
+    await vi.waitFor(() => { expect(agent.session.events.some(event => event.type === 'bid.run.notice' && event.data.kind === 'completed')).toBe(true) }, { timeout: 20_000 })
+    await settleCapabilityOperations(ctx)
+    const starts = agent.session.events.filter(event => event.type === 'bid.run.started')
+    expect(starts).toHaveLength(2)
+    const first = starts[0]!, resumed = starts[1]!
+    if (first.type !== 'bid.run.started' || resumed.type !== 'bid.run.started') throw new Error('缺少 Run 身份')
+    expect(resumed.data.run.work).toEqual(first.data.run.work)
+    expect(resumed.data.run.resumeOf?.runId).toBe(first.data.run.runId)
+    expect(ask).not.toHaveBeenCalled()
+    expect(ctx.get('goals')).toBeUndefined()
+    expect((await ctx.bid.getRevisionQueue(agent.session)).issues[0]?.status).toBe('completed')
+  }, 30_000)
+
+  it('真实 Host 的 required 页数损坏配置结算 failed blocked，不提用户问题或发布候选', async () => {
+    const { ctx, workspace, fresh, adapter } = await fixture({ withPersistence: true, withPreset: true })
+    await writeChapterInputs(workspace)
+    for (const name of ['grep', 'read'] as const) ctx.tools.register({ name, description: name,
+      parameters: { type: 'object' }, output: { schema: { type: 'object' }, render: () => [] }, execute: async () => ({}) })
+    const seed = new ChapterAdapter()
+    ctx.llm.registerAdapter(['seed-writing'], seed)
+    const seedAgent = ctx.agentLoop.create(SessionId('parent'), { provider: 'seed-writing', model: 'mock' }, { cwd: workspace.root })
+    await executeChapterWriting(seedAgent, workspace, buildBidStageTask('chapter_writing'), {
+      maxRepairAttempts: 1, maxConcurrency: 1, run: createTestBidRunContext(),
+    })
+    const bodyPath = join(workspace.projectRoot, 'chapters/sections/0001.md')
+    const body = await readFile(bodyPath, 'utf8')
+    const manifestPath = join(workspace.projectRoot, 'chapters/manifest.json')
+    const manifest = await readFile(manifestPath, 'utf8')
+    const planPath = join(workspace.projectRoot, 'chapters/writing-plan.json')
+    const plan = parseWritingPlan(JSON.parse(await readFile(planPath, 'utf8')))
+    await writeFile(planPath, JSON.stringify({ ...plan, document_acceptance: [{ id: 'AC-000005', scope: { kind: 'document' },
+      description: '必须得到有效页数', priority: 'required', evaluator: { kind: 'deterministic', metric: 'estimated_pages', min: 0, max: null } }] }))
+    await mkdir(join(workspace.projectRoot, 'word-export'), { recursive: true })
+    await writeFile(join(workspace.projectRoot, 'word-export/default.config.json'), '{损坏')
+    await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'completed' })
+    const agent = await fresh('page-estimate-corruption-host')
+    const message = createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: '重新审核整书页数。' }] })
+    agent.session.append('turn/start', { turn: 1 })
+    agent.session.append('user/message', message, { surfaceOp: 'append' })
+    const chapter = new ChapterAdapter()
+    chapter.requests.set('parent', { role: 'plan', tools: [], steps: 2 })
+    const original = adapter.stream.bind(adapter)
+    vi.spyOn(adapter, 'stream').mockImplementation(options => adapter.mainSessionIds.has(String(options.sessionId))
+      ? original(options) : chapter.stream({ ...options, sessionId: SessionId('parent') }))
+    adapter.script.push(answer('格式配置已损坏，不能自动重试或宣称页数通过。'))
+    const ask = vi.spyOn(ctx.userQuestions, 'ask')
+    const builtin = (ctx.bid as unknown as { builtInCapabilityDispatcher: CapabilityTaskDispatcher }).builtInCapabilityDispatcher
+    ctx.bid.registerCapabilityTaskDispatcher({ ...builtin, verifyTask: executorTestVerifier })
+    const state = await ctx.bid.runCapabilityTask(agent, { goal: '重新审核整书页数', scope: { kind: 'project' }, steps: [{
+      description: '重新审核整书页数', scope: { source: 'task' }, call: { capability: 'document.review', input: { reason: '重新审核整书页数' } },
+    }] }, { session_id: String(agent.id), message_id: String(message.id) }, ['chapters/execution-log.json'])
+    expect(state).toMatchObject({ status: 'failed', failure: { code: 'BID_DOCX_FORMAT_CORRUPT', recovery: { kind: 'blocked' } } })
+    await settleCapabilityOperations(ctx)
+    expect(await readFile(bodyPath, 'utf8')).toBe(body)
+    expect(await readFile(manifestPath, 'utf8')).toBe(manifest)
+    expect(ask).not.toHaveBeenCalled()
+    expect(agent.session.events.filter(event => event.type === 'bid.run.started')).toHaveLength(1)
+    expect(agent.session.events.some(event => event.type === 'bid.run.notice' && event.data.kind === 'completed')).toBe(false)
+    expect((await readBidProjectState(workspace))?.status).toBe('failed')
+  }, 30_000)
+
+  it('无 Goal 的首轮文字回复后 Host 继续纠正并验证原 Work 已推进', async () => {
+    const { ctx, workspace, fresh, executor, adapter } = await fixture({ withPersistence: true })
+    await seedProjectArtifacts(workspace)
+    await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'completed' })
+    const agent = await fresh('recovery-without-goal')
+    const host = ctx.bid as unknown as {
+      beginOperation(session: Session): { runs: BidRunCoordinator }
+      prepareOperation(operation: unknown): Promise<unknown>
+      finishOperation(session: Session, operation: unknown): Promise<void>
+    }
+    const work = await persistStageExecutionWork(workspace, 'outline_generation')
+    const operation = host.beginOperation(agent.session)
+    await host.prepareOperation(operation)
+    await operation.runs.start(work)
+    adapter.script.push(answer('我已看到失败。'), toolCall('bid_recover_task', {
+      target: 'run', instruction: '核对原检查点，仅补全当前目录缺失的字段。',
+    }), answer('已核验恢复。'))
+    executor.canExecute = stage => stage === 'outline_generation'
+    const ask = vi.spyOn(ctx.userQuestions, 'ask')
+    await operation.runs.suspend('retry_exhausted', {
+      code: 'OUTLINE_GENERATION_CANDIDATE_INVALID', message: '目录字段缺失',
+      recovery: { kind: 'repair', unit: 'outline/outline.json', reason: '目录字段缺失' },
+    })
+    await host.finishOperation(agent.session, operation)
+    await vi.waitFor(() => {
+      const starts = agent.session.events.filter(event => event.type === 'bid.run.started' && event.data.run.work.workId === work.workId)
+      expect(starts).toHaveLength(2)
+      expect(runtime(agent.session).status).not.toBe('failed')
+    }, { timeout: 10_000 })
+    expect(ask).not.toHaveBeenCalled()
+    expect(ctx.get('goals')).toBeUndefined()
+  })
+
+  it('无有效动作的相同失败有界结算，重启不清空纠正预算', async () => {
+    const { ctx, workspace, fresh, adapter } = await fixture({ withPersistence: true })
+    await seedProjectArtifacts(workspace)
+    await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'completed' })
+    const agent = await fresh('recovery-exhaustion')
+    const host = ctx.bid as unknown as {
+      beginOperation(session: Session): { runs: BidRunCoordinator }
+      prepareOperation(operation: unknown): Promise<unknown>
+      finishOperation(session: Session, operation: unknown): Promise<void>
+    }
+    const work = await persistStageExecutionWork(workspace, 'outline_generation')
+    const operation = host.beginOperation(agent.session)
+    await host.prepareOperation(operation)
+    await operation.runs.start(work)
+    adapter.script.push(...Array.from({ length: 5 }, () => answer('我已看到失败。')))
+    await operation.runs.suspend('retry_exhausted', {
+      code: 'OUTLINE_GENERATION_CANDIDATE_INVALID', message: '目录字段缺失',
+      recovery: { kind: 'repair', unit: 'outline/outline.json', reason: '目录字段缺失' },
+    })
+    await host.finishOperation(agent.session, operation)
+    await vi.waitFor(() => {
+      expect(adapter.requests.filter(request => request.sessionId === agent.id).length).toBeGreaterThanOrEqual(3)
+      expect(JSON.stringify(agent.session.events)).toContain('BID_RECOVERY_BUDGET_EXHAUSTED')
+    }, { timeout: 10_000 })
+    await ctx.sessions.flush(agent.session)
+    await ctx.fiber.dispose()
+    const restarted = await fixture({ withPersistence: true, root: workspace.root })
+    const restored = await restarted.fresh('recovery-exhaustion')
+    await new Promise(resolve => setTimeout(resolve, 500))
+    expect(restarted.adapter.requests).toHaveLength(0)
+    expect(runtime(restored.session)).toMatchObject({ status: 'failed', failure: { code: 'OUTLINE_GENERATION_CANDIDATE_INVALID' } })
+  })
+
   it('模型切换后后台执行代理和资料子代理继承当前请求路由', async () => {
     const { ctx, workspace, fresh, adapter } = await fixture()
     await seedProjectArtifacts(workspace)
@@ -367,17 +573,21 @@ describe('Workspace 项目与独立 Session', () => {
         call: { capability: 'chapter.review', input: { reason: '审核章节' } } }] },
     { session_id: String(owner.id), message_id: String(message.id) }, ['chapters/execution-log.json'])
     const before = await readBidProjectState(workspace)
-    if (before?.status !== 'suspended') throw new Error('测试任务没有挂起')
+    if (before?.status !== 'failed') throw new Error('测试任务没有保存失败')
+    const failedRun = bidRecoverableRun(owner.session, before)
+    if (failedRun === undefined) throw new Error('测试任务没有原 Work 恢复身份')
     const observer = await fresh('resume-observer')
-    await expect(ctx.bid.resumeCurrentRun(observer.session, before.run.runId, before.revision))
-      .rejects.toMatchObject({ code: 'BID_RESUME_OWNER_SESSION_REQUIRED' })
+    await expect(ctx.bid.resumeCurrentRun(observer.session, failedRun.runId, before.revision, undefined,
+      { instruction: '在原授权范围重新审核章节。' }))
+      .rejects.toMatchObject({ code: 'BID_RESUME_NOT_ALLOWED' })
     expect(await readBidProjectState(workspace)).toEqual(before)
     expect(execute).toHaveBeenCalledTimes(1)
-    await expect(ctx.bid.resumeCurrentRun(owner.session, before.run.runId, before.revision))
+    await expect(ctx.bid.resumeCurrentRun(owner.session, failedRun.runId, before.revision, undefined,
+      { instruction: '在原授权范围重新审核章节。' }))
       .resolves.toMatchObject({ status: 'completed' })
     expect(execute).toHaveBeenCalledTimes(2)
     expect(owner.session.events.filter(event => event.type === 'bid.run.started')
-      .map(event => event.data.run.work.workId)).toEqual([before.run.work.workId, before.run.work.workId])
+      .map(event => event.data.run.work.workId)).toEqual([failedRun.work.workId, failedRun.work.workId])
   })
 
   it('Host 重启自动续行失败保存诊断并唤醒主 Agent', async () => {
@@ -439,67 +649,102 @@ describe('Workspace 项目与独立 Session', () => {
     } finally { unregister() }
   })
 
-  it('能力任务等待原生补充输入后续行原 Work', async () => {
-    const { ctx, workspace, fresh, host } = await fixture()
-    await seedProjectArtifacts(workspace)
-    await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'completed' })
-    const agent = await fresh('capability-native-input-main')
-    const message = createUserMessage({ content: [{ type: 'text', text: '审核当前章节并补齐问题' }], source: { kind: 'user' } })
-    agent.session.append('turn/start', { turn: 1 })
-    agent.session.append('user/message', message, { surfaceOp: 'append' })
-    const reply = Promise.withResolvers<AskUserQuestionAnswer>()
-    let question: AskUserQuestionItem | undefined
-    const provider = ctx.userQuestions.registerProvider({ ask: async ({ questions }) => {
-      question = questions[0]
-      return reply.promise
-    } })
-    const execute = vi.fn<CapabilityTaskDispatcher['execute']>(async (_call, context) => {
-      if (context.inputAnswer === undefined) return { result: { target_section_ids: [], changed_artifacts: [],
-        change_summary: '需要确认审核重点', warnings: [], missing_topics: ['请明确审核重点'], needs_input: true } }
-      await context.run.commits.writeJson(join(context.working.projectRoot, 'chapters/local-review.json'), {
-        answer: context.inputAnswer.custom,
+  it.each(['normal', 'checkpoint_read', 'question', 'answer_save', 'resume', 'confirmation'] as const)(
+    '能力任务输入桥接 %s 故障后持久复用答案且只续行原 Work 一次', async (fault) => {
+      const { ctx, workspace, fresh, host } = await fixture()
+      await seedProjectArtifacts(workspace)
+      await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'completed' })
+      const agent = await fresh('capability-native-input-main')
+      const message = createUserMessage({ content: [{ type: 'text', text: '审核当前章节并补齐问题' }], source: { kind: 'user' } })
+      agent.session.append('turn/start', { turn: 1 })
+      agent.session.append('user/message', message, { surfaceOp: 'append' })
+      const reply = Promise.withResolvers<AskUserQuestionAnswer>()
+      let question: AskUserQuestionItem | undefined
+      const questionIds: string[] = []
+      let injected = false
+      const transient = (): Error => Object.assign(new Error('输入桥接暂态故障'), { code: 'EIO' })
+      if (fault === 'checkpoint_read') vi.spyOn(capabilityInput, 'readCapabilityAwaitingInput').mockRejectedValueOnce(transient())
+      if (fault === 'answer_save') {
+        const save = inputRecovery.writeBidInputRecovery
+        vi.spyOn(inputRecovery, 'writeBidInputRecovery').mockImplementation(async (current, record) => {
+          if (!injected && record.phase === 'answered' && record.answer !== undefined) {
+            injected = true
+            throw transient()
+          }
+          await save(current, record)
+        })
+      }
+      const resume = ctx.bid.resumeCurrentRun.bind(ctx.bid)
+      const resumed = vi.spyOn(ctx.bid, 'resumeCurrentRun')
+      if (fault === 'resume') resumed.mockRejectedValueOnce(Object.assign(new Error('项目锁暂被占用'), { code: 'BID_OPERATION_IN_PROGRESS' }))
+      if (fault === 'confirmation') resumed.mockImplementation(async (...args) => {
+        const result = await resume(...args)
+        if (!injected) { injected = true; throw transient() }
+        return result
       })
-      return { result: { target_section_ids: [], changed_artifacts: ['chapters/local-review.json'],
-        change_summary: '审核完成', warnings: [], missing_topics: [], needs_input: false } }
-    })
-    const unregister = ctx.bid.registerCapabilityTaskDispatcher({ verifyTask: executorTestVerifier,
-      allowedWrites: async () => new Set(['chapters/local-review.json']), execute, validate: async () => {},
-    })
-    try {
-      await expect(ctx.bid.runCapabilityTask(agent, {
-        goal: '审核当前章节并补齐问题', scope: { kind: 'project' }, steps: [{ description: '审核当前章节', scope: { source: 'task' },
-          call: { capability: 'chapter.review', input: { reason: '审核当前章节' } } }],
-      }, { session_id: String(agent.session.id), message_id: String(message.id) }, ['chapters/execution-log.json']))
-        .resolves.toMatchObject({ status: 'suspended', run: { cause: 'awaiting_input' } })
-      await vi.waitFor(() => { expect(question?.id).toContain('capability:') })
-      const awaiting = await readBidProjectState(workspace)
-      if (awaiting?.status !== 'suspended') throw new Error('缺少等待输入的 Run')
-      const replacement = createUserMessage({ content: [{ type: 'text', text: '换一个审核任务' }], source: { kind: 'user' } })
-      agent.session.append('turn/start', { turn: 2 })
-      agent.session.append('user/message', replacement, { surfaceOp: 'append' })
-      await expect(ctx.bid.runCapabilityTask(agent, {
-        goal: '换一个审核任务', scope: { kind: 'project' }, steps: [{ description: '核对新任务', scope: { source: 'task' },
-          call: { capability: 'chapter.review', input: { reason: '核对新任务' } } }],
-      }, { session_id: String(agent.session.id), message_id: String(replacement.id) }, ['chapters/execution-log.json'],
-      undefined, { run_id: awaiting.run.runId, expected_project_revision: awaiting.revision }))
-        .rejects.toThrow('BID_CAPABILITY_SUPERSEDE_NOT_ALLOWED')
-      expect((await readBidProjectState(workspace))?.status).toBe('suspended')
-      reply.resolve({ answers: [{ id: question?.id ?? '', selected: [], custom: '重点核对质量控制' }] })
-      await vi.waitFor(() => {
-        expect(agent.session.events.filter(event => event.type === 'bid.capability.input.received')).toHaveLength(1)
-        expect(agent.session.events.filter(event => event.type === 'bid.run.notice' && event.data.kind === 'completed'))
-          .toHaveLength(1)
-        expect(host.inFlight.size).toBe(0)
-      }, { timeout: 10_000 })
-      expect(execute).toHaveBeenCalledTimes(2)
-      expect(await readFile(join(workspace.projectRoot, 'chapters/local-review.json'), 'utf8'))
-        .toContain('重点核对质量控制')
-    } finally {
-      reply.resolve({ answers: [{ id: question?.id ?? '', selected: ['稍后补充'] }] })
-      unregister()
-      provider()
-    }
-  })
+      const provider = ctx.userQuestions.registerProvider({ ask: async ({ questions }) => {
+        question = questions[0]
+        if (question !== undefined) questionIds.push(question.id)
+        if (fault === 'question' && !injected) { injected = true; throw transient() }
+        return reply.promise
+      } })
+      const execute = vi.fn<CapabilityTaskDispatcher['execute']>(async (_call, context) => {
+        if (context.inputAnswer === undefined) return { result: { target_section_ids: [], changed_artifacts: [],
+          change_summary: '需要确认审核重点', warnings: [], missing_topics: ['请明确审核重点'], needs_input: true } }
+        await context.run.commits.writeJson(join(context.working.projectRoot, 'chapters/local-review.json'), {
+          answer: context.inputAnswer.custom,
+        })
+        return { result: { target_section_ids: [], changed_artifacts: ['chapters/local-review.json'],
+          change_summary: '审核完成', warnings: [], missing_topics: [], needs_input: false } }
+      })
+      const unregister = ctx.bid.registerCapabilityTaskDispatcher({ verifyTask: executorTestVerifier,
+        allowedWrites: async () => new Set(['chapters/local-review.json']), execute, validate: async () => {},
+      })
+      try {
+        await expect(ctx.bid.runCapabilityTask(agent, {
+          goal: '审核当前章节并补齐问题', scope: { kind: 'project' }, steps: [{ description: '审核当前章节', scope: { source: 'task' },
+            call: { capability: 'chapter.review', input: { reason: '审核当前章节' } } }],
+        }, { session_id: String(agent.session.id), message_id: String(message.id) }, ['chapters/execution-log.json']))
+          .resolves.toMatchObject({ status: 'suspended', run: { cause: 'awaiting_input' } })
+        await vi.waitFor(() => { expect(question?.id).toContain('capability:') })
+        const awaiting = await readBidProjectState(workspace)
+        if (awaiting?.status !== 'suspended') throw new Error('缺少等待输入的 Run')
+        const replacement = createUserMessage({ content: [{ type: 'text', text: '换一个审核任务' }], source: { kind: 'user' } })
+        agent.session.append('turn/start', { turn: 2 })
+        agent.session.append('user/message', replacement, { surfaceOp: 'append' })
+        await expect(ctx.bid.runCapabilityTask(agent, {
+          goal: '换一个审核任务', scope: { kind: 'project' }, steps: [{ description: '核对新任务', scope: { source: 'task' },
+            call: { capability: 'chapter.review', input: { reason: '核对新任务' } } }],
+        }, { session_id: String(agent.session.id), message_id: String(replacement.id) }, ['chapters/execution-log.json'],
+        undefined, { run_id: awaiting.run.runId, expected_project_revision: awaiting.revision }))
+          .rejects.toThrow('BID_CAPABILITY_SUPERSEDE_NOT_ALLOWED')
+        expect((await readBidProjectState(workspace))?.status).toBe('suspended')
+        reply.resolve({ answers: [{ id: question?.id ?? '', selected: [], custom: '重点核对质量控制' }] })
+        await vi.waitFor(() => {
+          expect(agent.session.events.filter(event => event.type === 'bid.capability.input.received')).toHaveLength(1)
+          expect(agent.session.events.filter(event => event.type === 'bid.run.notice' && event.data.kind === 'completed'))
+            .toHaveLength(1)
+          expect(host.inFlight.size).toBe(0)
+        }, { timeout: 10_000 })
+        expect(execute).toHaveBeenCalledTimes(2)
+        expect(new Set(questionIds).size).toBe(1)
+        expect(questionIds).toHaveLength(fault === 'question' ? 2 : 1)
+        expect(resumed).toHaveBeenCalledTimes(fault === 'resume' ? 2 : 1)
+        expect(agent.session.events.filter(event => event.type === 'bid.run.started'
+        && event.data.run.resumeOf?.runId === awaiting.run.runId)).toHaveLength(1)
+        await vi.waitFor(async () => {
+          const journal = await inputRecovery.readBidInputRecovery(workspace,
+            inputRecovery.bindBidInputRecovery(String(agent.id), awaiting.run, 'capability', awaiting.run.runId), 20)
+          expect(journal).toMatchObject({ phase: 'applied', answer: { custom: '重点核对质量控制' } })
+        })
+        expect(await readFile(join(workspace.projectRoot, 'chapters/local-review.json'), 'utf8'))
+          .toContain('重点核对质量控制')
+      } finally {
+        reply.resolve({ answers: [{ id: question?.id ?? '', selected: ['稍后补充'] }] })
+        unregister()
+        provider()
+      }
+    }, 20_000)
 
   it('能力步骤运行中停止后不发布结果且保留用户停止边界', async () => {
     const { ctx, workspace, fresh, host } = await fixture({ withPersistence: true })
@@ -534,6 +779,7 @@ describe('Workspace 项目与独立 Session', () => {
       released.resolve(undefined)
       await stopping
       await running
+      await vi.waitFor(() => { expect(host.pendingRunDecisions.size).toBe(0) })
       expect(await readBidProjectState(workspace)).toMatchObject({ status: 'suspended', run: { cause: 'user_stop' } })
       await expect(readFile(join(workspace.projectRoot, 'chapters/local-review.json')))
         .rejects.toMatchObject({ code: 'ENOENT' })
@@ -637,7 +883,7 @@ describe('Workspace 项目与独立 Session', () => {
     expect(third.adapter.requests.filter(request => request.sessionId !== again.session.id)).toHaveLength(0)
   })
 
-  it('Run 登记后内部错误保留挂起 Work，新 Session 保留非重启失败边界', async () => {
+  it('Run 登记后内部错误保留失败 Work，新 Session 保留非重启失败边界', async () => {
     const first = await fixture({ withPersistence: true })
     await seedProjectArtifacts(first.workspace)
     await checkpointBidProjectState(first.workspace, { stage: 'chapter_writing', status: 'completed' })
@@ -654,20 +900,20 @@ describe('Workspace 项目与独立 Session', () => {
       { session_id: String(agent.session.id), message_id: String(message.id) },
       ['chapters/execution-log.json'], async () => { throw new Error('登记后中断') }))
       .rejects.toThrow('登记后中断')
-    expect(await readBidProjectState(first.workspace)).toMatchObject({ status: 'suspended' })
+    expect(await readBidProjectState(first.workspace)).toMatchObject({ status: 'failed', failure: { message: '登记后中断' } })
     await expect(readFile(join(first.workspace.projectRoot, 'chapters/local-review.json')))
       .rejects.toMatchObject({ code: 'ENOENT' })
     await first.ctx.fiber.dispose()
 
     const second = await fixture({ root: first.workspace.root, withPersistence: true })
     const restored = await second.fresh('capability-admission-restart')
-    expect(await readBidProjectState(second.workspace)).toMatchObject({ status: 'suspended' })
+    expect(await readBidProjectState(second.workspace)).toMatchObject({ status: 'failed', failure: { message: '登记后中断' } })
     expect(restored.session.events.filter(event => event.type === 'bid.run.started')).toHaveLength(1)
     await expect(readFile(join(second.workspace.projectRoot, 'chapters/local-review.json')))
       .rejects.toMatchObject({ code: 'ENOENT' })
   })
 
-  it('首个能力步骤后内部错误保留挂起 Run，失败后等待原生恢复决策', async () => {
+  it('首个能力步骤后内部错误保留原 Work，失败交给 Main 修复', async () => {
     const first = await fixture({ withPersistence: true })
     await seedProjectArtifacts(first.workspace)
     await checkpointBidProjectState(first.workspace, { stage: 'chapter_writing', status: 'completed' })
@@ -702,7 +948,7 @@ describe('Workspace 项目与独立 Session', () => {
         { description: '审核全书', scope: { source: 'task' }, call: { capability: 'document.review', input: { reason: '审核全书' } } },
       ] }, { session_id: String(agent.session.id), message_id: String(message.id) },
     ['chapters/execution-log.json'])
-    expect(result).toMatchObject({ status: 'suspended' })
+    expect(result).toMatchObject({ status: 'failed', failure: { message: '整书审核前中断' } })
     expect(calls).toEqual(['chapter.review', 'document.review'])
     await expect(readFile(join(first.workspace.projectRoot, 'chapters/local-review.json')))
       .rejects.toMatchObject({ code: 'ENOENT' })
@@ -710,7 +956,7 @@ describe('Workspace 项目与独立 Session', () => {
 
     const second = await fixture({ root: first.workspace.root, withPersistence: true })
     const restored = await second.fresh('capability-step-restart')
-    expect(await readBidProjectState(second.workspace)).toMatchObject({ status: 'suspended' })
+    expect(await readBidProjectState(second.workspace)).toMatchObject({ status: 'failed', failure: { message: '整书审核前中断' } })
     expect(restored.session.events.filter(event => event.type === 'bid.run.started')).toHaveLength(1)
     expect(calls).toEqual(['chapter.review', 'document.review'])
   })
@@ -1096,7 +1342,7 @@ describe('Workspace 项目与独立 Session', () => {
       expect(await readPendingCapabilityRequests(workspace, prior.run.work.workId)).toHaveLength(1)
       release.resolve(undefined)
       await settleCapabilityOperations(ctx)
-      expect(await readBidProjectState(workspace)).toMatchObject({ status: 'suspended' })
+      expect(await readBidProjectState(workspace)).toMatchObject({ status: 'failed' })
       expect(agent.session.events.some(event => event.type === 'bid.run.notice' && event.data.kind === 'completed')).toBe(false)
     } finally { release.resolve(undefined); unregister() }
   })
@@ -1222,7 +1468,7 @@ describe('Workspace 项目与独立 Session', () => {
       query: { object: 'writing_plan', source: 'candidate' },
     }, callId: CallId('candidate-catalog-inspect'), signal: new AbortController().signal })
     expect(query).toMatchObject({ isError: false, value: { available: true, data: { plan_version: plan.plan_version + 1 } } })
-    const recovery = await ctx.tools.execute({ agent, name: 'bid_stage_inspect', arguments: { view: 'recovery' },
+    const recovery = await ctx.tools.execute({ agent, name: 'bid_project_inspect', arguments: { query: { object: 'task' } },
       callId: CallId('candidate-catalog-recovery'), signal: new AbortController().signal })
     expect(recovery).toMatchObject({ isError: false })
     const args = { edit: 'replace_pending', steps: [{ description: '更新写作要求', scope: { source: 'task' },
@@ -1410,6 +1656,69 @@ describe('Workspace 项目与独立 Session', () => {
     expect(agent.session.events.filter(event => event.type === 'bid.run.notice' && event.data.kind === 'completed'
       && event.data.workId !== running.run.work.workId)).toHaveLength(1)
     expect(agent.session.events.filter(event => event.type === 'user/message' && event.data.source.kind === 'user')).toHaveLength(1)
+  }, 20_000)
+
+  it('项目锁释放后 Bid 插件卸载仍等待排队能力的尾部确认，不再接纳新操作', async () => {
+    const { ctx, workspace, fresh, host, executor, executeStage, bidFiber } = await fixture()
+    await seedCapabilityProject(workspace, 'complete')
+    await checkpointBidProjectState(workspace, { stage: 'evidence_mapping', status: 'failed' })
+    const agent = await fresh('queued-capability-dispose')
+    const stageGate = Promise.withResolvers<never[]>()
+    executor.canExecute = stage => stage === 'evidence_mapping'
+    executeStage.mockImplementationOnce(() => stageGate.promise)
+    const retry = resumeRun(ctx, agent.session)
+    const entered = Promise.withResolvers<undefined>()
+    const tailGate = Promise.withResolvers<undefined>()
+    const readRequest = capabilityInput.findCapabilityTaskRequest
+    let gated = false
+    const read = vi.spyOn(capabilityInput, 'findCapabilityTaskRequest').mockImplementation(async (...args) => {
+      const request = await readRequest(...args)
+      if (!gated && request !== null && host.inFlight.size === 0
+        && agent.session.events.some(event => event.type === 'bid.run.completed'
+          && event.data.run.work.workId === request.workId)) {
+        gated = true
+        entered.resolve(undefined)
+        await tailGate.promise
+      }
+      return request
+    })
+    let disposal: Promise<void> | undefined
+    try {
+      await vi.waitFor(() => { expect(runtime(agent.session).status).toBe('running') })
+      const message = createUserMessage({ content: [{ type: 'text', text: '更正第一条招标要求' }], source: { kind: 'user' } })
+      agent.session.append('turn/start', { turn: 1 })
+      agent.session.append('user/message', message, { surfaceOp: 'append' })
+      const queued = await ctx.tools.execute({ agent, name: 'bid_run_task', arguments: await modelTaskArguments(agent, { task: {
+        goal: '更正第一条招标要求', scope: { kind: 'project' }, steps: [{ description: '修订第一条招标要求的实施边界', scope: { source: 'task' },
+          call: { capability: 'tender.update', input: { operations: [{ type: 'update_requirement',
+            requirement_id: 'REQ-1', fields: { normalized_requirement: '明确实施边界' } }] } } }],
+      } }), callId: CallId('queued-capability-dispose'), signal: new AbortController().signal })
+      expect(queued.value).toMatchObject({ accepted: true, queued: true })
+      stageGate.resolve([])
+      await expect(retry).resolves.toMatchObject({ ok: true })
+      await entered.promise
+      expect(host.inFlight.size).toBe(0)
+      const revision = (await readBidProjectState(workspace))?.revision
+      let disposed = false
+      disposal = bidFiber.dispose().then(() => { disposed = true })
+      await new Promise<void>((resolve) => { setImmediate(resolve) })
+      expect(disposed).toBe(false)
+      tailGate.resolve(undefined)
+      await disposal
+      expect(host.recoveryTasks.size).toBe(0)
+      expect(host.inFlight.size).toBe(0)
+      expect((await readBidProjectState(workspace))?.revision).toBe(revision)
+    } finally {
+      stageGate.resolve([])
+      tailGate.resolve(undefined)
+      await retry
+      await disposal
+      await vi.waitFor(() => {
+        expect((host as unknown as { queuedDrains: Set<string> }).queuedDrains.size).toBe(0)
+        expect(host.inFlight.size).toBe(0)
+      })
+      read.mockRestore()
+    }
   }, 20_000)
 
   it('S4 reset 后 inspect 从 S3 已确认目录恢复章节摘要但不伪造 Draft', async () => {
@@ -1658,9 +1967,9 @@ describe('Workspace 项目与独立 Session', () => {
     const confirmation = await ctx.bid.confirmTenderAnalysis(b.session, [{ type: 'update_project', fields: { project_name: '项目 B' } }])
     expect(confirmation).toMatchObject({
       ok: true,
-      value: { stage: 'outline_generation', status: 'suspended', run: {
-        error: { issues: [{ code: 'OUTLINE_GENERATION_SUBMISSION_INCOMPLETE', message: '模拟 S3 模型失败' }] },
-      } },
+      value: { stage: 'outline_generation', status: 'failed', run: null,
+        failure: { issues: [{ code: 'OUTLINE_GENERATION_SUBMISSION_INCOMPLETE', message: '模拟 S3 模型失败' }] },
+      },
     })
     expect(JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/project.json'), 'utf8'))).toMatchObject({ project_name: '项目 B' })
     const unchangedOrigin = parseTenderScoringArtifact(JSON.parse(await readFile(scoringOriginPath, 'utf8')))
@@ -1865,7 +2174,7 @@ describe('Workspace 项目与独立 Session', () => {
     expect(review?.issues).toEqual(expect.arrayContaining([expect.objectContaining({
       source: 'review_execution', title: '章节审核执行失败', detail: 'Chapter Reviewer 未正常完成：error。',
     })]))
-  }, 30000)
+  }, 60000)
 
   it('S5 工作台将文档级缺口和递交待确认与章节状态分开投影', async () => {
     const { ctx, workspace, fresh } = await fixture()
@@ -2662,7 +2971,7 @@ describe('Workspace 项目与独立 Session', () => {
     executor.execute.mockRejectedValueOnce(new Error('mapping transport failed'))
 
     await expect(resumeRun(ctx, agent.session)).resolves.toMatchObject({ ok: true })
-    expect(runtime(agent.session)).toMatchObject({ stage: 'evidence_mapping', status: 'suspended' })
+    expect(runtime(agent.session)).toMatchObject({ stage: 'evidence_mapping', status: 'failed', failure: { message: 'mapping transport failed' } })
     expect(drainChildren).not.toHaveBeenCalled()
     expect(drainDescendants).not.toHaveBeenCalled()
   })
@@ -2729,7 +3038,10 @@ describe('Workspace 项目与独立 Session', () => {
   it('后台 Execution 提问由 Main Agent 接管，不在子会话等待用户', async () => {
     const { ctx, workspace, fresh, host, executor, executeStage, adapter } = await fixture()
     await seedProjectArtifacts(workspace)
-    await checkpointBidProjectState(workspace, { stage: 'evidence_mapping', status: 'failed' })
+    const paused = await checkpointBidProjectState(workspace, { stage: 'evidence_mapping', status: 'failed' })
+    if (paused.status !== 'suspended') throw new Error('测试初态没有暂停 Run')
+    await checkpointStoredBidProjectState(workspace, { stage: paused.stage, status: 'suspended',
+      run: { ...paused.run, cause: 'user_stop' } })
     const agent = await fresh('execution-question-main')
     await agent.whenIdle()
     const ask = vi.fn(async () => ({ answers: [] }))
@@ -2758,31 +3070,48 @@ describe('Workspace 项目与独立 Session', () => {
       expect(ask).not.toHaveBeenCalled()
       expect(adapter.requests.filter(request => String(request.sessionId) === String(agent.id))).toHaveLength(initialMainRequests)
       expect(runtime(agent.session)).toMatchObject({ stage: 'evidence_mapping', status: 'running' })
-      adapter.script.push(answer('原任务已挂起，我会检查并决定如何恢复。'))
+      adapter.script.push(answer('原任务已失败，我会检查问题并接管用户提问。'))
       stageGate.resolve([])
       const settled = await retry
-      expect(settled, JSON.stringify(settled)).toMatchObject({ ok: true, value: { stage: 'evidence_mapping', status: 'suspended' } })
-      expect(runtime(agent.session)).toMatchObject({ stage: 'evidence_mapping', status: 'suspended',
-        run: { cause: 'executor_error', error: { issues: [{ code: 'BID_EXECUTION_QUESTION_REQUIRES_MAIN_AGENT' }] } } })
+      expect(settled, JSON.stringify(settled)).toMatchObject({ ok: true, value: { stage: 'evidence_mapping', status: 'failed' } })
+      expect(runtime(agent.session)).toMatchObject({ stage: 'evidence_mapping', status: 'failed',
+        failure: { issues: [{ code: 'BID_EXECUTION_QUESTION_REQUIRES_MAIN_AGENT' }] } })
+      await vi.waitFor(() => {
+        expect(adapter.requests.filter(request => String(request.sessionId) === String(agent.id)).at(-1)?.messages)
+          .toEqual(expect.arrayContaining([expect.objectContaining({ content: expect.arrayContaining([
+            expect.objectContaining({ type: 'text', text: expect.stringContaining('是否现在启动目录编辑任务？') }),
+          ]) })]))
+      })
       await agent.whenIdle()
       expect(adapter.requests.filter(request => String(request.sessionId) === String(agent.id)).at(-1)?.messages)
         .toEqual(expect.arrayContaining([expect.objectContaining({ content: expect.arrayContaining([
           expect.objectContaining({ type: 'text', text: expect.stringContaining('是否现在启动目录编辑任务？') }),
         ]) })]))
       expect(agent.session.deriveMessages().at(-1)?.content)
-        .toContainEqual({ type: 'text', text: '原任务已挂起，我会检查并决定如何恢复。' })
+        .toContainEqual({ type: 'text', text: '原任务已失败，我会检查问题并接管用户提问。' })
     } finally {
       stageGate.resolve([])
       await retry
     }
   })
 
-  it('S2 Execution 不因 Child 报告启动模型回合，挂起后 Main Agent 读取 Host 错误摘要', async () => {
+  it('S2 Execution 不因 Child 报告启动模型回合，失败后 Main Agent 读取 Host 错误摘要', async () => {
     const { ctx, workspace, fresh, host, executor, executeStage, adapter } = await fixture()
     await seedProjectArtifacts(workspace)
-    await checkpointBidProjectState(workspace, { stage: 'tender_analysis', status: 'failed' })
+    const paused = await checkpointBidProjectState(workspace, { stage: 'tender_analysis', status: 'failed' })
+    if (paused.status !== 'suspended') throw new Error('测试初态没有暂停 Run')
+    await checkpointStoredBidProjectState(workspace, { stage: paused.stage, status: 'suspended',
+      run: { ...paused.run, cause: 'user_stop' } })
+    ctx.effect(() => ctx.userQuestions.registerProvider({ ask: async ({ questions }) => ({
+      answers: [{ id: questions[0]!.id, selected: ['停止任务'] }],
+    }) }))
     const agent = await fresh('quiet-host-child-report')
     await agent.whenIdle()
+    await vi.waitFor(() => {
+      expect(host.pendingRunDecisions.size).toBe(0)
+      expect(host.inFlight.size).toBe(0)
+      expect(host.writingEntryStops.size).toBe(0)
+    })
     const initialMainRequests = adapter.requests.filter(request => String(request.sessionId) === String(agent.id)).length
     const stageGate = Promise.withResolvers<never[]>()
     void stageGate.promise.catch(() => {})
@@ -2830,7 +3159,7 @@ describe('Workspace 项目与独立 Session', () => {
     await agent.whenIdle()
     expect(adapter.requests.filter(request => String(request.sessionId) === String(agent.id))).toHaveLength(initialMainRequests)
 
-    adapter.script.push(answer('招标分析提交不完整，Run 已挂起，可修正后恢复。'))
+    adapter.script.push(answer('招标分析提交不完整，Run 已失败，可修正后沿原 Work 恢复。'))
     stageGate.reject(new BidStageExecutionError([
       { code: 'TENDER_ANALYSIS_SUBMISSION_INCOMPLETE', message: '招标分析缺少必需记录。' },
       { code: 'SECOND_ISSUE', message: '第二条关键问题。' },
@@ -2838,16 +3167,24 @@ describe('Workspace 项目与独立 Session', () => {
       { code: 'FOURTH_ISSUE', message: '这条不应进入 Main Agent 摘要。' },
     ]))
     await expect(retry).resolves.toMatchObject({ ok: true, value: {
-      stage: 'tender_analysis', status: 'suspended',
+      stage: 'tender_analysis', status: 'failed',
     } })
-    expect(agent.session.events.find(event => event.type === 'bid.run.notice')).toMatchObject({
-      data: { stage: 'tender_analysis', kind: 'interrupted', severity: 'error' },
+    const failedRun = bidRecoverableRun(agent.session, runtime(agent.session))
+    if (failedRun === undefined) throw new Error('执行失败没有保留原 Run')
+    expect(agent.session.events.findLast(event => event.type === 'bid.run.notice')).toMatchObject({
+      data: { noticeId: `run:${failedRun.runId}:failed`, runId: failedRun.runId,
+        stage: 'tender_analysis', kind: 'interrupted', severity: 'error' },
     })
     expect(ctx.sessionProjections.snapshot(agent.session).values['bid.runtime']).toMatchObject({
-      task: { stage: 'tender_analysis', status: 'suspended' },
+      task: { stage: 'tender_analysis', status: 'failed' },
       allowedActions: ['send_message'],
     })
 
+    await vi.waitFor(() => {
+      const latest = adapter.requests.findLast(candidate => String(candidate.sessionId) === String(agent.id))
+      expect(latest?.messages.flatMap(message => message.content)
+        .some(block => block.type === 'text' && block.text.includes('TENDER_ANALYSIS_SUBMISSION_INCOMPLETE'))).toBe(true)
+    })
     await agent.whenIdle()
 
     const request = adapter.requests.findLast(candidate => String(candidate.sessionId) === String(agent.id))
@@ -2856,15 +3193,14 @@ describe('Workspace 项目与独立 Session', () => {
     expect(requestText).toContain('当前阶段执行失败，失败状态已保存。')
     expect(requestText).toContain('Host execution update:')
     expect(requestText).toContain('阶段：tender_analysis')
-    expect(requestText).toContain('状态：suspended')
-    expect(requestText).toContain('原因：retry_exhausted')
+    expect(requestText).toContain('状态：failed')
     expect(requestText).toContain('错误：BID_EXECUTOR_ERROR')
     expect(requestText).toContain('TENDER_ANALYSIS_SUBMISSION_INCOMPLETE')
     expect(requestText).toContain('THIRD_ISSUE')
     expect(requestText).not.toContain('FOURTH_ISSUE')
     expect(requestText).not.toContain('普通 Child 进度')
     expect(agent.session.deriveMessages().at(-1)?.content)
-      .toContainEqual({ type: 'text', text: '招标分析提交不完整，Run 已挂起，可修正后恢复。' })
+      .toContainEqual({ type: 'text', text: '招标分析提交不完整，Run 已失败，可修正后沿原 Work 恢复。' })
   })
 
   it.each(['session', 'remote'] as const)('%s Stop 同时取消当前回复与 S4 execution lane', async (entry) => {
@@ -2936,7 +3272,7 @@ describe('Workspace 项目与独立 Session', () => {
     })
   })
 
-  it('S4 重试耗尽后 project-state、Session 与客户端 Projection 同步为挂起', async () => {
+  it('S4 重试耗尽后 project-state、Session 与客户端 Projection 同步保存失败', async () => {
     const { ctx, workspace, fresh, executor, validator } = await fixture()
     await seedProjectArtifacts(workspace)
     await checkpointBidProjectState(workspace, { stage: 'evidence_mapping', status: 'failed' })
@@ -2951,19 +3287,16 @@ describe('Workspace 项目与独立 Session', () => {
     }] })
 
     await expect(ctx.bid.resumeCurrentRun(agent.session, before.run.runId, before.revision))
-      .resolves.toMatchObject({ stage: 'evidence_mapping', status: 'suspended' })
+      .resolves.toMatchObject({ stage: 'evidence_mapping', status: 'failed' })
     expect(await readBidProjectState(workspace)).toMatchObject({
       stage: 'evidence_mapping',
-      status: 'suspended',
-      run: {
-        work: { stage: 'evidence_mapping' },
-        cause: 'retry_exhausted',
-        error: { issues: [{ code: 'EVIDENCE_MAPPING_TASK_FAILED', message: 'SEC-401 映射重试耗尽。' }] },
-      },
+      status: 'failed', run: null,
+      failure: { issues: [{ code: 'EVIDENCE_MAPPING_TASK_FAILED', message: 'SEC-401 映射重试耗尽。' }] },
     })
-    expect(runtime(agent.session)).toMatchObject({ stage: 'evidence_mapping', status: 'suspended' })
+    expect(runtime(agent.session)).toMatchObject({ stage: 'evidence_mapping', status: 'failed' })
+    expect(bidRecoverableRun(agent.session, runtime(agent.session))?.work).toEqual(before.run.work)
     expect(ctx.sessionProjections.snapshot(agent.session).values['bid.runtime']).toMatchObject({
-      task: { stage: 'evidence_mapping', status: 'suspended', run: { cause: 'retry_exhausted' } },
+      task: { stage: 'evidence_mapping', status: 'failed', failure: { issues: [{ code: 'EVIDENCE_MAPPING_TASK_FAILED' }] } },
     })
   })
 
@@ -3147,7 +3480,7 @@ describe('Workspace 项目与独立 Session', () => {
   })
 
   it('S1 挂起后从 durable raw request 重新装载原始上传字节', async () => {
-    const { ctx, workspace, fresh } = await fixture({ realOrchestrator: true })
+    const { ctx, workspace, fresh, host } = await fixture({ realOrchestrator: true })
     const bytes = new TextEncoder().encode('技术要求：恢复时必须读取原始上传。')
     const workId = 'file-intake-resume-work'
     const bytesRef = `requests/${workId}/files/0001`
@@ -3171,6 +3504,11 @@ describe('Workspace 项目与独立 Session', () => {
     await expect(readFile(join(workspace.projectRoot, work.requestRef), 'utf8'))
       .resolves.toContain('bytes_ref')
     const agent = await fresh('file-intake-resume')
+    await vi.waitFor(() => {
+      expect(host.pendingRunDecisions.size).toBe(0)
+      expect(host.inFlight.size).toBe(0)
+    })
+    expect((await readBidProjectState(workspace))?.revision).toBe(suspended.revision)
     const restored = Promise.withResolvers<readonly { name: string; bytes: Uint8Array }[]>()
     const resumedImport = vi.spyOn(BidWorkspace.prototype, 'import').mockImplementation(async (files) => {
       restored.resolve(files)
@@ -3341,6 +3679,231 @@ describe('Workspace 项目与独立 Session', () => {
       resume.mockRestore()
     }
   })
+
+  it('已收到原生继续答案后临时锁冲突会复用答案续行一次', async () => {
+    const { ctx, workspace, fresh, executor } = await fixture({ withPersistence: true })
+    await seedProjectArtifacts(workspace)
+    const suspended = await checkpointBidProjectState(workspace, { stage: 'evidence_mapping', status: 'failed' })
+    if (suspended.status !== 'suspended') throw new Error('测试项目没有挂起 Run')
+    await checkpointStoredBidProjectState(workspace, { stage: suspended.stage, status: 'suspended',
+      run: { ...suspended.run, cause: 'user_stop' } })
+    executor.canExecute = stage => stage === 'evidence_mapping'
+    const resume = vi.spyOn(ctx.bid, 'resumeCurrentRun')
+      .mockRejectedValueOnce(Object.assign(new Error('项目锁暂被占用'), { code: 'BID_OPERATION_IN_PROGRESS' }))
+    const asked = vi.fn(async ({ questions }: { questions: AskUserQuestionItem[] }) => ({
+      answers: [{ id: questions[0]!.id, selected: ['继续未完成任务（推荐）'] }],
+    }))
+    const dispose = ctx.userQuestions.registerProvider({ ask: asked })
+    try {
+      const agent = await fresh('native-recovery-retry')
+      await vi.waitFor(() => { expect(executor.execute).toHaveBeenCalledOnce() }, { timeout: 5_000 })
+      expect(asked).toHaveBeenCalledOnce()
+      expect(resume).toHaveBeenCalledTimes(2)
+      expect(agent.session.events.filter(event => event.type === 'bid.run.started'
+        && event.data.run.resumeOf?.runId === suspended.run.runId)).toHaveLength(1)
+      expect(agent.session.events.filter(event => event.type === 'bid.run.decision.received')).toHaveLength(1)
+    } finally { dispose() }
+  })
+
+  it('重启复用持久继续答案和原预算，不重复提问', async () => {
+    const first = await fixture({ withPersistence: true })
+    await seedProjectArtifacts(first.workspace)
+    const suspended = await checkpointBidProjectState(first.workspace, { stage: 'evidence_mapping', status: 'failed' })
+    if (suspended.status !== 'suspended') throw new Error('测试项目没有挂起 Run')
+    await checkpointStoredBidProjectState(first.workspace, { stage: suspended.stage, status: 'suspended',
+      run: { ...suspended.run, cause: 'user_stop' } })
+    const question = Promise.withResolvers<AskUserQuestionAnswer>()
+    const asked = vi.fn(async ({ questions }: { questions: AskUserQuestionItem[] }) => {
+      return question.promise.then(() => ({ answers: [{ id: questions[0]!.id, selected: ['继续未完成任务（推荐）'] }] }))
+    })
+    const release = first.ctx.userQuestions.registerProvider({ ask: asked })
+    const resume = vi.spyOn(first.ctx.bid, 'resumeCurrentRun').mockImplementation(async () => {
+      const host = first.ctx.bid as unknown as { pendingRunDecisionControllers: Map<string, AbortController> }
+      for (const controller of host.pendingRunDecisionControllers.values()) controller.abort(new Error('测试重启'))
+      throw Object.assign(new Error('接纳前模拟进程退出'), { code: 'EIO' })
+    })
+    const agent = await first.fresh('durable-input-restart')
+    await vi.waitFor(() => { expect(asked).toHaveBeenCalledOnce() })
+    question.resolve({ answers: [] })
+    await vi.waitFor(() => { expect(resume).toHaveBeenCalledOnce() })
+    await first.ctx.sessions.flush(agent.session)
+    const required = agent.session.events.find(event => event.type === 'bid.run.decision.required')
+    if (required?.type !== 'bid.run.decision.required') throw new Error('缺少持久问题')
+    const binding = inputRecovery.bindBidInputRecovery(String(agent.id), suspended.run, 'decision', required.data.decisionKey)
+    const before = await inputRecovery.readBidInputRecovery(first.workspace, binding, 20)
+    expect(before).toMatchObject({ phase: 'applying', attempts: 1, decision: 'continue' })
+    release()
+    resume.mockRestore()
+    await first.ctx.fiber.dispose()
+    const restarted = await fixture({ withPersistence: true, root: first.workspace.root })
+    restarted.executor.canExecute = stage => stage === 'evidence_mapping'
+    const repeatAsk = vi.spyOn(restarted.ctx.userQuestions, 'ask')
+    const restored = await restarted.fresh('durable-input-restart')
+    await vi.waitFor(() => { expect(restarted.executor.execute).toHaveBeenCalledOnce() })
+    expect(repeatAsk).not.toHaveBeenCalled()
+    expect(restored.session.events.filter(event => event.type === 'bid.run.decision.received')).toHaveLength(1)
+    await vi.waitFor(async () => {
+      const after = await inputRecovery.readBidInputRecovery(restarted.workspace, binding, 20)
+      expect(after).toMatchObject({ phase: 'applied', attempts: 2, budget: before.budget, decision: 'continue' })
+    })
+  }, 20_000)
+
+  it('用户停止期间不自动恢复，新聊天先读取项目再继续原 Run 一次', async () => {
+    const { ctx, workspace, fresh, executor, adapter } = await fixture()
+    await seedProjectArtifacts(workspace)
+    const suspended = await checkpointBidProjectState(workspace, { stage: 'evidence_mapping', status: 'failed' })
+    if (suspended.status !== 'suspended') throw new Error('测试项目没有挂起 Run')
+    await checkpointStoredBidProjectState(workspace, { stage: suspended.stage, status: 'suspended',
+      run: { ...suspended.run, cause: 'user_stop' } })
+    const pending = Promise.withResolvers<AskUserQuestionAnswer>()
+    const release = ctx.userQuestions.registerProvider({ ask: async () => pending.promise })
+    try {
+      const agent = await fresh('stopped-explicit-chat')
+      executor.canExecute = stage => stage === 'evidence_mapping'
+      await new Promise(resolve => setTimeout(resolve, 100))
+      expect(executor.execute).not.toHaveBeenCalled()
+      adapter.script.push(toolCall('bid_resume_current_run', {}), answer('继续原工作。'))
+      adapter.onRequest = () => {
+        delete adapter.onRequest
+        const host = ctx.bid as unknown as { beginOperation(session: Session): unknown
+          prepareOperation(operation: unknown): Promise<unknown>
+          finishOperation(session: Session, operation: unknown): Promise<void> }
+        adapter.requestGate = (async () => {
+          const operation = host.beginOperation(agent.session)
+          try { await host.prepareOperation(operation) } finally { await host.finishOperation(agent.session, operation) }
+        })()
+      }
+      agent.followup(createUserMessage({ content: [{ type: 'text', text: '继续原任务' }], source: { kind: 'user' } }))
+      await agent.whenIdle()
+      await vi.waitFor(() => { expect(executor.execute).toHaveBeenCalledOnce() })
+      expect(agent.session.events.filter(event => event.type === 'bid.run.started'
+        && event.data.run.resumeOf?.runId === suspended.run.runId)).toHaveLength(1)
+    } finally { pending.resolve({ answers: [] }); release() }
+  }, 20_000)
+
+  it('单次预算内动作已生效但确认失败只补 applied，重启不重复执行', async () => {
+    const { ctx, workspace, fresh, executor } = await fixture({ withPersistence: true, repairAttempts: 1 })
+    await seedProjectArtifacts(workspace)
+    const suspended = await checkpointBidProjectState(workspace, { stage: 'evidence_mapping', status: 'failed' })
+    if (suspended.status !== 'suspended') throw new Error('测试项目没有挂起 Run')
+    await checkpointStoredBidProjectState(workspace, { stage: suspended.stage, status: 'suspended',
+      run: { ...suspended.run, cause: 'user_stop' } })
+    executor.canExecute = stage => stage === 'evidence_mapping'
+    const resume = ctx.bid.resumeCurrentRun.bind(ctx.bid)
+    const resumed = vi.spyOn(ctx.bid, 'resumeCurrentRun').mockImplementation(async (...args) => {
+      await resume(...args)
+      throw Object.assign(new Error('动作完成后的回执确认失败'), { code: 'EIO' })
+    })
+    const asked = vi.fn(async ({ questions }: { questions: AskUserQuestionItem[] }) => ({
+      answers: [{ id: questions[0]!.id, selected: ['继续未完成任务（推荐）'] }],
+    }))
+    const release = ctx.userQuestions.registerProvider({ ask: asked })
+    try {
+      const agent = await fresh('input-confirm-budget-one')
+      await vi.waitFor(() => { expect(executor.execute).toHaveBeenCalledOnce() })
+      const required = agent.session.events.find(event => event.type === 'bid.run.decision.required')
+      if (required?.type !== 'bid.run.decision.required') throw new Error('缺少持久问题')
+      const binding = inputRecovery.bindBidInputRecovery(String(agent.id), suspended.run, 'decision', required.data.decisionKey)
+      await vi.waitFor(async () => {
+        expect(await inputRecovery.readBidInputRecovery(workspace, binding, 20))
+          .toMatchObject({ phase: 'applied', attempts: 1, budget: 1 })
+      })
+      expect(resumed).toHaveBeenCalledOnce()
+      await ctx.sessions.flush(agent.session)
+      release()
+      resumed.mockRestore()
+      await ctx.fiber.dispose()
+      const restarted = await fixture({ withPersistence: true, root: workspace.root, repairAttempts: 1 })
+      await restarted.fresh('input-confirm-budget-one')
+      expect(restarted.executor.execute).not.toHaveBeenCalled()
+      expect(await inputRecovery.readBidInputRecovery(restarted.workspace, binding, 20))
+        .toMatchObject({ phase: 'applied', attempts: 1, budget: 1 })
+    } finally { release() }
+  }, 20_000)
+
+  it('Bid 插件卸载等待在途答案落盘收口，之后不再应用输入', async () => {
+    const { ctx, workspace, fresh, bidFiber } = await fixture({ withPersistence: true })
+    await seedProjectArtifacts(workspace)
+    const suspended = await checkpointBidProjectState(workspace, { stage: 'evidence_mapping', status: 'failed' })
+    if (suspended.status !== 'suspended') throw new Error('测试项目没有挂起 Run')
+    await checkpointStoredBidProjectState(workspace, { stage: suspended.stage, status: 'suspended',
+      run: { ...suspended.run, cause: 'user_stop' } })
+    const entered = Promise.withResolvers<undefined>()
+    const gate = Promise.withResolvers<undefined>()
+    const releaseFlush = ctx.on('session/flush', async (session) => {
+      if (session.events.some(event => event.type === 'bid.run.decision.received')) {
+        entered.resolve(undefined)
+        await gate.promise
+      }
+    }, { global: true })
+    const resume = vi.spyOn(ctx.bid, 'resumeCurrentRun')
+    const release = ctx.userQuestions.registerProvider({ ask: async ({ questions }) => ({
+      answers: [{ id: questions[0]!.id, selected: ['继续未完成任务（推荐）'] }],
+    }) })
+    let disposal: Promise<void> | undefined
+    try {
+      await fresh('input-dispose-quiescence')
+      await entered.promise
+      let disposed = false
+      disposal = bidFiber.dispose().then(() => { disposed = true })
+      await new Promise<void>((resolve) => { setImmediate(resolve) })
+      expect(disposed).toBe(false)
+      gate.resolve(undefined)
+      await disposal
+      expect(resume).not.toHaveBeenCalled()
+    } finally { gate.resolve(undefined); await disposal; release(); releaseFlush() }
+  }, 20_000)
+
+  it.each(['missing_checkpoint', 'identity_conflict', 'settlement_flush'] as const)(
+    '能力输入桥接 %s 结算具体阻断，不保留无问题的 awaiting', async (fault) => {
+      const { ctx, workspace, fresh } = await fixture({ withPersistence: true })
+      await seedProjectArtifacts(workspace)
+      await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'completed' })
+      const agent = await fresh(`input-block-${fault}`)
+      const message = createUserMessage({ content: [{ type: 'text', text: '审核当前章节' }], source: { kind: 'user' } })
+      agent.session.append('turn/start', { turn: 1 })
+      agent.session.append('user/message', message, { surfaceOp: 'append' })
+      const ask = vi.spyOn(ctx.userQuestions, 'ask')
+      const read = capabilityInput.readCapabilityAwaitingInput
+      vi.spyOn(capabilityInput, 'readCapabilityAwaitingInput').mockImplementation(async (current, workId, requestSha256) => {
+        const path = join(current.projectRoot, 'runs', workId, 'task-checkpoint.json')
+        if (fault === 'identity_conflict') {
+          const value = JSON.parse(await readFile(path, 'utf8')) as { request_sha256: string }
+          value.request_sha256 = '0'.repeat(64)
+          await writeFile(path, JSON.stringify(value))
+        } else await rm(path)
+        return read(current, workId, requestSha256)
+      })
+      let flushFailed = false
+      const releaseFlush = ctx.on('session/flush', (session) => {
+        const state = runtime(session)
+        if (fault === 'settlement_flush' && session === agent.session && !flushFailed
+          && state.status === 'suspended' && state.run.error?.recovery?.unit === 'native_input') {
+          flushFailed = true
+          throw Object.assign(new Error('阻断状态落盘暂态失败'), { code: 'EIO' })
+        }
+      }, { global: true })
+      const release = ctx.bid.registerCapabilityTaskDispatcher({ verifyTask: executorTestVerifier,
+        allowedWrites: async () => new Set(), validate: async () => {}, execute: async () => ({ result: {
+          target_section_ids: [], changed_artifacts: [], change_summary: '审核资料缺失',
+          warnings: [], missing_topics: ['请补充审核重点'], needs_input: true,
+        } }),
+      })
+      try {
+        await ctx.bid.runCapabilityTask(agent, { goal: '审核当前章节', scope: { kind: 'project' }, steps: [{
+          description: '审核章节', scope: { source: 'task' }, call: { capability: 'chapter.review', input: { reason: '审核章节' } },
+        }] }, { session_id: String(agent.id), message_id: String(message.id) }, ['chapters/execution-log.json'])
+        await vi.waitFor(async () => {
+          const saved = await readBidProjectState(workspace)
+          expect(saved).toMatchObject({ status: 'suspended', run: { cause: 'executor_error',
+            error: { recovery: { kind: 'blocked', unit: 'native_input' } } } })
+        }, { timeout: 5_000 })
+        expect(ask).not.toHaveBeenCalled()
+        expect(agent.session.events.filter(event => event.type === 'bid.run.started')).toHaveLength(1)
+        expect(agent.session.events.some(event => event.type === 'bid.capability.input.required')).toBe(false)
+        if (fault === 'settlement_flush') expect(flushFailed).toBe(true)
+      } finally { release(); releaseFlush() }
+    }, 20_000)
 
   it('用户主动停止后的原生重跑选项通过 reset 在同一操作驱动当前阶段', async () => {
     const { ctx, workspace, fresh } = await fixture()
@@ -3793,12 +4356,13 @@ describe('Workspace 项目与独立 Session', () => {
     await settleCapabilityOperations(ctx)
     const state = await readBidProjectState(workspace)
     expect(JSON.stringify(state)).not.toContain('BID_CHAPTER_REVISION_MULTI_PARENT_UNSUPPORTED')
-    if (state?.run === null || state?.run === undefined) throw new Error('批次没有保留原 Work')
-    const checkpoint = JSON.parse(await readFile(join(workspace.projectRoot, 'runs', state.run.work.workId, 'task-checkpoint.json'), 'utf8')) as {
+    const failedRun = state === undefined ? undefined : bidRecoverableRun(agent.session, state)
+    if (failedRun === undefined) throw new Error('批次没有保留原 Work')
+    const checkpoint = JSON.parse(await readFile(join(workspace.projectRoot, 'runs', failedRun.work.workId, 'task-checkpoint.json'), 'utf8')) as {
       steps: Array<{ step_id: string; input_sha256: string }>
     }
     const step = checkpoint.steps[0]!
-    const batchRoot = join(workspace.projectRoot, 'runs', state.run.work.workId, 'work', '.bid-harness',
+    const batchRoot = join(workspace.projectRoot, 'runs', failedRun.work.workId, 'work', '.bid-harness',
       'runs', step.step_id + '-' + step.input_sha256.slice(0, 12), 'work', '.bid-harness', 'chapters/revisions/batches')
     const [batchFile] = await readdir(batchRoot)
     const batch = await readFile(join(batchRoot, batchFile!), 'utf8')

@@ -5,6 +5,8 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-fs'
 import { CallId, CONTEXT_WINDOW_EXCEEDED_CODE, EMPTY_RESPONSE_CODE } from '@deepseek-ai/dsh-llm'
+import { estimateHeader } from '@deepseek-ai/dsh-token-meter'
+import { buildOutlineReviewRequests, OutlineReviewContextTooLargeError } from './outline-review-context.ts'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { JsonSchemaNode, ObjectJsonSchema, ToolExecution, ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { ToolArgsError, validateJsonSchemaValue } from '@deepseek-ai/dsh-tools'
@@ -167,7 +169,7 @@ export interface EvidenceMappingExecutionOptions extends ModelStageExecutionOpti
   webSearchEnabled?: boolean
   /** Maximum Mapping Subagents that may run simultaneously. */
   maxConcurrency?: number
-  /** Maximum automatic retries for a transient Mapping Subagent infrastructure failure. */
+  /** 同一研究链的基础设施自动重试上限；恢复后只允许降低已保存的上限。 */
   maxInfrastructureRetryAttempts?: number
   /** 公共步骤的同一输入候选已由 Host 验证并重新打开。 */
   resumeCandidate?: boolean
@@ -192,9 +194,11 @@ class MappingSubagentInfrastructureError extends BidStageExecutionError {
     readonly taskId?: string,
     readonly retryAfterMs = 0,
     readonly provider?: MappingInfrastructureProvider,
+    cause?: unknown,
   ) {
     super(issues)
     this.name = 'MappingSubagentInfrastructureError'
+    this.cause = cause
   }
 }
 
@@ -236,7 +240,11 @@ function webInfrastructureFailure(
   return new MappingSubagentInfrastructureError([{
     code: issueCode,
     message: `${captured.exec.name} 的联网 Provider 失败${status}：${captured.result.error.message}`,
-  }], transient, false, taskId, retryAfterMilliseconds(info?.retryAfter), captured.exec.name as typeof MAPPING_AGENT_TOOLS[number])
+  }], transient, false, taskId, retryAfterMilliseconds(info?.retryAfter), captured.exec.name as typeof MAPPING_AGENT_TOOLS[number],
+  Object.assign(new Error(captured.result.error.message), {
+    name: info?.name ?? 'WebProviderError', code: issueCode, retryable: transient,
+    ...(statusCode === undefined ? {} : { statusCode, status: statusCode }),
+  }))
 }
 
 class FinalReviewTaskTooLargeError extends Error {
@@ -496,6 +504,8 @@ const evidenceMappingExecutionLogSchema = z.object({
   }).strict().optional(),
   failure: z.array(z.object({ code: z.string(), message: z.string() }).strict()).optional(),
   max_concurrency: z.number().int().positive(),
+  /** 同一研究链的预算上限，不随恢复或 Provider 配置提高。 */
+  max_infrastructure_retry_attempts: z.number().int().min(0).max(8).optional(),
   observed_max_concurrency: z.number().int().nonnegative(),
   tasks: z.array(z.object({
     task_id: z.string().min(1),
@@ -507,11 +517,16 @@ const evidenceMappingExecutionLogSchema = z.object({
       attempt: z.number().int().positive(),
       stop_reason: z.string(),
       accepted: z.boolean(),
+      /** 程序识别的失败通道，恢复次数不依赖诊断文案或当前 Provider ID。 */
+      infrastructure_provider: z.enum(['subagent', ...MAPPING_AGENT_TOOLS]).optional(),
       issues: z.array(z.object({ code: z.string(), message: z.string() }).strict()),
       warnings: z.array(z.object({ code: z.string(), message: z.string() }).strict()),
     }).strict().superRefine((attempt, context) => {
       if (attempt.accepted && attempt.issues.length > 0) {
         context.addIssue({ code: 'custom', path: ['issues'], message: 'accepted attempt cannot retain rejection issues' })
+      }
+      if (attempt.infrastructure_provider !== undefined && (attempt.accepted || attempt.stop_reason !== 'infrastructure-error')) {
+        context.addIssue({ code: 'custom', path: ['infrastructure_provider'], message: '基础设施 Provider 只能属于未接受的基础设施失败 attempt' })
       }
     })),
     final_child_session_id: z.string().nullable(),
@@ -3048,7 +3063,8 @@ async function waitForMappingChildReply(agent: Agent, eventStart: number, signal
   while (true) {
     signal.throwIfAborted()
     await waitForMappingChildIdle(agent, signal)
-    throwForFailedTurn(agent, eventStart)
+    const ending = agent.session.events.slice(eventStart).findLast(event => event.type === 'turn/end')
+    if (ending !== undefined && ['error', 'aborted', 'blocked', 'interrupted'].includes(ending.data.reason.kind)) return
     if (agent.session.events.slice(eventStart).some(event => event.type === 'assistant/message')) return
     signal.throwIfAborted()
     if (Date.now() >= deadline) throw new Error('evidence-mapping-child-reply-timeout')
@@ -3734,6 +3750,7 @@ export async function reviewRefinedOutline(
 ): Promise<{ outline: OutlineArtifact; blockingIssues: OutlineStructureIssue[] }> {
   const subagents = agent.ctx.get('subagents')
   if (subagents === undefined) throw new Error('Bid outline review requires subagents service')
+  const reviewSubagents = subagents
   const candidatePath = join(workspace.projectRoot, REFINED_OUTLINE_CANDIDATE_PATH)
   const qualityPath = join(workspace.projectRoot, QUALITY_CANDIDATE_PATH)
   await Promise.all([removeAttemptPath(candidatePath), removeAttemptPath(qualityPath)])
@@ -3760,8 +3777,8 @@ export async function reviewRefinedOutline(
         hidden_heading_pressure: item.structureAssessment.hidden_heading_pressure,
       }]),
       structural_changes: related.flatMap(item => item.outlineOperations ?? []),
-      parent: inputs.outline.sections.filter(item => item.id === section.parent_id).map(duty),
-      siblings: inputs.outline.sections.filter(item => item.parent_id === section.parent_id && item.id !== section.id).map(duty),
+      parent_position: inputs.outline.sections.findIndex(item => item.id === section.parent_id),
+      sibling_group: section.parent_id,
       requirements: inputs.requirements.requirements.filter(item => section.requirement_ids.includes(item.id))
         .map(({ id, normalized_requirement }) => ({ id, normalized_requirement })),
       scoring: inputs.scoring.scoring_items.filter(item => section.scoring_ids.includes(item.id))
@@ -3769,7 +3786,7 @@ export async function reviewRefinedOutline(
       response_points: inputs.responsePoints.points.filter(item => section.scoring_response_point_ids?.includes(item.id)),
     }
   })
-  const review = [
+  const instructions = [
     '当前阶段：evidence_mapping / Outline Review',
     '目录结构和 Writing Brief 已由各 Section 任务研究后合并；父节点正式总述在 Final Check 中根据最终任务生成和复核。',
     '只检查整本目录的业务层级、章节边界和 Requirement/Scoring/Response Point/Compliance 覆盖是否合理；不重新检索或重生成整本目录。',
@@ -3782,97 +3799,150 @@ export async function reviewRefinedOutline(
     '区分“同一方法内部的处理步骤”与“需要分别论证的技术任务”：每个步骤都能列出输入、输出和责任，不能仅据此认定需要正式章节。核对它们是否仍对同一对象运用同一方法、形成同一成果，并尝试用段落衔接、步骤列表和表格完整表达。若这些表达足够，保留叶子；若不足，blocking issue 必须指出实际方法或成果责任的差异及具体定位障碍，不能只罗列 writing_dimensions 或偏好更多标题。例行登记、过程质量记录和结果交接也不自动获得独立章节。',
     '通过结构化输出返回语义复核结果；issues 只返回具体建议 message。具体结构问题、任务越界和职责冲突必须在 blocking_issues 中返回全书职责索引的 section_position 与业务理由 reason，Host 绑定章节并只重开所属子树。全书覆盖依据均须核对，核对记录由程序生成。不要生成问题代码、编号、scope 或 severity。不能把资料命中当作扩大章节任务的依据。',
     '在本章职责内，允许依据资料提出作业方法和组织建议；招标未逐字指定步骤不等于禁止设计方案。区分方案建议与已确认项目事实，不能把旧项目的具体流程、责任主体或承诺当成本项目既定条件。',
-    `Structure Review Cards：${JSON.stringify(cards)}`,
-    `全书覆盖依据：${JSON.stringify({
+  ].join('\n')
+  const reviewContext = {
+    instructions, cards,
+    coverage: {
       requirements: inputs.requirements.requirements.map(({ id, normalized_requirement }) => ({ id, text: normalized_requirement })),
       scoring: inputs.scoring.scoring_items.map(({ id, criterion }) => ({ id, text: criterion })),
       response_points: inputs.responsePoints.points,
       compliance: inputs.compliance.compliance_items,
-    })}`,
-    `全书职责索引：${JSON.stringify(inputs.outline.sections.map(({ id, parent_id, title, purpose, writable }, position) => ({ position, id, parent_id, title, purpose, writable })))}`,
-    `S3→S4 结构 diff：${JSON.stringify(outlineStructureDifferences(initialOutline, inputs.outline))}`,
-    `实际 Outline Operations：${JSON.stringify(researchResults.flatMap(item => item.outlineOperations === undefined ? [] : [{
+    },
+    index: inputs.outline.sections.map(({ id, parent_id, title, purpose, must_answer, writable }, position) =>
+      ({ position, id, parent_id, title, purpose, must_answer, writable })),
+    differences: outlineStructureDifferences(initialOutline, inputs.outline),
+    operations: researchResults.flatMap(item => item.outlineOperations === undefined ? [] : [{
       task_id: item.task.task_id, section_ids: item.task.section_ids, operations: item.outlineOperations,
-    }]))}`,
-  ].join('\n')
+    }]),
+  }
   const hostIssues: StageValidationIssue[] = []
   validateOutlineSharedStructure(inputs.outline.sections, hostIssues)
   validateOutlineSharedCoverage(inputs.outline, inputs.requirements, inputs.scoring, inputs.compliance, inputs.responsePoints, hostIssues)
   await validateOutlineFrameworkRefs(workspace, inputs.outline, hostIssues)
   if (hostIssues.length > 0) throw new BidStageExecutionError(hostIssues)
-  let repairIssues: StageValidationIssue[] = []
-  for (let attempt = 0; attempt <= maxRepairAttempts; attempt++) {
-    signal.throwIfAborted()
-    const run = await subagents.start('spawn', {
-      label: `S4 · 全局目录复核${attempt === 0 ? '' : ` · 修复 ${attempt}`}`,
-      parent: agent,
-      prompt: [{ type: 'text', text: [review, ...attempt === 0 ? [] : [
-        '上一份质量报告未通过校验。只修复报告字段并重新返回完整报告。',
-        ...renderStageRepairIssues(repairIssues),
-      ]].join('\n') }],
-      signal,
-      outputSchema: outlineQualityOutputSchema(),
-      toolFilter: { allow: [] },
-      maxDepth: 1,
-      persona: '你是技术标目录轻量复核 Subagent。只审查 Host 注入的目录，不检索资料、不调用工具、不派生其他 Agent，并通过结构化输出返回质量报告。',
-    })
-    let quality: OutlineQualityReport | undefined
-    let blockingIssues: OutlineStructureIssue[] = []
-    const issues: StageValidationIssue[] = []
-    try {
-      const result = await run.result
-      if (result.stopReason !== 'completed') issues.push({
-        code: 'OUTLINE_REFINEMENT_REVIEW_STOP_REASON_INVALID',
-        message: `目录复核 Subagent 未正常完成：${result.stopReason}。${result.diagnostic ?? ''}`,
-        artifact: QUALITY_PATH,
-      })
-      else if (result.structured === undefined) issues.push({
-        code: 'OUTLINE_REFINEMENT_STRUCTURED_MISSING', message: '目录复核 Subagent 未返回结构化质量报告。', artifact: QUALITY_PATH,
-      })
-      else try {
-        const violations = validateJsonSchemaValue(outlineQualityOutputSchema(), result.structured)
-        if (violations.length > 0) throw new ToolArgsError(violations)
-        const { blocking_issues: blocking, issues: advisory, ...report } = result.structured as Record<string, unknown>
-        blockingIssues = (blocking as Array<{ section_position: number; reason: string }>).map((issue) => {
-          const section = inputs.outline.sections[issue.section_position]
-          if (section === undefined) throw new ToolArgsError(['section_position: 未知目录位置。'])
-          return { section_id: section.id, reason: issue.reason, code: 'OUTLINE_STRUCTURE_REVIEW' }
-        })
-        quality = parseOutlineQualityReport({
-          ...report,
-          checked_requirement_ids: inputs.requirements.requirements.map(item => item.id),
-          checked_scoring_ids: inputs.scoring.scoring_items.map(item => item.id),
-          checked_scoring_response_point_ids: inputs.responsePoints.points.map(item => item.id),
-          issues: (advisory as Pick<OutlineQualityIssue, 'message'>[])
-            .map(issue => ({ ...issue, severity: 'advisory', code: 'OUTLINE_QUALITY_ADVISORY' })),
-          scope: 'technical_bid',
-          schema_version: OUTLINE_QUALITY_REPORT_SCHEMA_VERSION,
-          reviewed_section_ids: inputs.outline.sections.map(section => section.id),
-        })
-      } catch (error) {
-        if (error instanceof ToolArgsError) {
-          issues.push({ code: 'OUTLINE_REFINEMENT_SCHEMA_INVALID', message: error.message, artifact: QUALITY_PATH })
-        } else {
-          if (!(error instanceof ZodError)) throw error
-          issues.push(...error.issues.map(issue => ({
-            code: 'OUTLINE_REFINEMENT_SCHEMA_INVALID', message: issue.message, artifact: QUALITY_PATH, path: issue.path.join('.'),
-          })))
-        }
+  const persona = '你是技术标目录轻量复核 Subagent。只审查 Host 注入的目录，不检索资料、不调用工具、不派生其他 Agent，并通过结构化输出返回质量报告。'
+  const llm = agent.ctx.get('llm')
+  const metadata = llm === undefined || agent.options.provider === undefined || agent.options.model === undefined ? undefined
+    : await llm.resolveModelInfo(agent.options.provider, agent.options.model, signal)
+  const outputTokens = Math.min(agent.options.maxTokens ?? metadata?.defaultMaxTokens ?? 2_048, 2_048)
+  const envelopeTokens = estimateHeader({ config: { provider: agent.options.provider ?? 'unknown', model: agent.options.model ?? 'unknown' },
+    system: persona, tools: [{ name: 'structured_output', description: '返回目录质量报告。', parameters: { ...outlineQualityOutputSchema() } }] })
+  let inputBudgetTokens = Math.min(FINAL_REVIEW_PROMPT_CHAR_BUDGET / 4,
+    (metadata?.context?.contextWindow ?? 16_384) - outputTokens - envelopeTokens - 1_024)
+  let lastOverflow: unknown
+  let previousRequests: string[] = []
+  for (let contextAttempt = 0; contextAttempt <= 2; contextAttempt++) {
+    let requests: ReturnType<typeof buildOutlineReviewRequests>
+    try { requests = buildOutlineReviewRequests(reviewContext, inputBudgetTokens) } catch (error) {
+      if (!(error instanceof OutlineReviewContextTooLargeError)) throw error
+      throw new MappingSubagentInfrastructureError([{ code: CONTEXT_WINDOW_EXCEEDED_CODE, message: error.message }], false, true,
+        undefined, 0, 'subagent', lastOverflow ?? error)
+    }
+    if (lastOverflow !== undefined && JSON.stringify(requests.map(item => item.prompt)) === JSON.stringify(previousRequests)) {
+      throw new MappingSubagentInfrastructureError([{ code: CONTEXT_WINDOW_EXCEEDED_CODE,
+        message: '目录审查单个对象无法继续缩减，保留原上下文超限原因。' }], false, true, undefined, 0, 'subagent', lastOverflow)
+    }
+    previousRequests = requests.map(item => item.prompt)
+    const collected: Array<{ quality: OutlineQualityReport; blockingIssues: OutlineStructureIssue[] }> = []
+    let overflow: unknown
+    for (const [requestIndex, reviewRequest] of requests.entries()) {
+      try { collected.push(await reviewOne(reviewRequest.prompt, requestIndex)) } catch (error) {
+        if (!isContextOverflow(error)) throw error
+        overflow = error
+        break
       }
-      if (quality !== undefined) validateOutlineGenerationQuality(
-        inputs.outline, quality, inputs.requirements, inputs.scoring, inputs.responsePoints, issues,
-      )
-    } finally {
-      await run.dispose()
     }
-    if (issues.length === 0 && quality !== undefined) {
-      await writeJson(qualityPath, quality, commits)
-      return { outline: inputs.outline, blockingIssues }
+    if (overflow !== undefined) {
+      lastOverflow = overflow
+      inputBudgetTokens = Math.floor(inputBudgetTokens / 2)
+      continue
     }
-    repairIssues = issues
-    if (attempt === maxRepairAttempts) throw new BidStageExecutionError(issues)
+    const quality = { ...collected.map(item => item.quality).reduce(first => first),
+      issues: [...new Map(collected.flatMap(item => item.quality.issues).map(issue => [issue.message, issue])).values()] }
+    await writeJson(qualityPath, quality, commits)
+    return { outline: inputs.outline, blockingIssues: [...new Map(collected.flatMap(item => item.blockingIssues)
+      .map(issue => [`${issue.section_id}:${issue.reason}`, issue])).values()] }
   }
-  throw new Error('evidence-mapping-outline-review-unreachable')
+  throw new MappingSubagentInfrastructureError([{ code: CONTEXT_WINDOW_EXCEEDED_CODE,
+    message: '目录审查缩减上下文预算后仍超限，已耗尽两轮分片调整。' }], false, true, undefined, 0, 'subagent', lastOverflow)
+
+  async function reviewOne(review: string, requestIndex: number):
+  Promise<{ quality: OutlineQualityReport; blockingIssues: OutlineStructureIssue[] }> {
+    let repairIssues: StageValidationIssue[] = []
+    for (let attempt = 0; attempt <= maxRepairAttempts; attempt++) {
+      signal.throwIfAborted()
+      const run = await reviewSubagents.start('spawn', {
+        label: `S4 · 全局目录复核 · 分片 ${String(requestIndex + 1)}${attempt === 0 ? '' : ` · 修复 ${attempt}`}`,
+        parent: agent,
+        prompt: [{ type: 'text', text: [review, ...attempt === 0 ? [] : [
+          '上一份质量报告未通过校验。只修复报告字段并重新返回完整报告。',
+          ...renderStageRepairIssues(repairIssues),
+        ]].join('\n') }],
+        signal,
+        agentOptions: { maxTokens: outputTokens },
+        outputSchema: outlineQualityOutputSchema(),
+        toolFilter: { allow: [] },
+        maxDepth: 1,
+        persona,
+      })
+      let quality: OutlineQualityReport | undefined
+      let blockingIssues: OutlineStructureIssue[] = []
+      const issues: StageValidationIssue[] = []
+      try {
+        const result = await run.result
+        if (result.stopReason !== 'completed' && run.localAgent !== undefined) throwForFailedTurn(run.localAgent, 0)
+        if (result.stopReason !== 'completed') issues.push({
+          code: 'OUTLINE_REFINEMENT_REVIEW_STOP_REASON_INVALID',
+          message: `目录复核 Subagent 未正常完成：${result.stopReason}。${result.diagnostic ?? ''}`,
+          artifact: QUALITY_PATH,
+        })
+        else if (result.structured === undefined) issues.push({
+          code: 'OUTLINE_REFINEMENT_STRUCTURED_MISSING', message: '目录复核 Subagent 未返回结构化质量报告。', artifact: QUALITY_PATH,
+        })
+        else try {
+          const violations = validateJsonSchemaValue(outlineQualityOutputSchema(), result.structured)
+          if (violations.length > 0) throw new ToolArgsError(violations)
+          const { blocking_issues: blocking, issues: advisory, ...report } = result.structured as Record<string, unknown>
+          blockingIssues = (blocking as Array<{ section_position: number; reason: string }>).map((issue) => {
+            const section = inputs.outline.sections[issue.section_position]
+            if (section === undefined) throw new ToolArgsError(['section_position: 未知目录位置。'])
+            return { section_id: section.id, reason: issue.reason, code: 'OUTLINE_STRUCTURE_REVIEW' }
+          })
+          quality = parseOutlineQualityReport({
+            ...report,
+            checked_requirement_ids: inputs.requirements.requirements.map(item => item.id),
+            checked_scoring_ids: inputs.scoring.scoring_items.map(item => item.id),
+            checked_scoring_response_point_ids: inputs.responsePoints.points.map(item => item.id),
+            issues: (advisory as Pick<OutlineQualityIssue, 'message'>[])
+              .map(issue => ({ ...issue, severity: 'advisory', code: 'OUTLINE_QUALITY_ADVISORY' })),
+            scope: 'technical_bid',
+            schema_version: OUTLINE_QUALITY_REPORT_SCHEMA_VERSION,
+            reviewed_section_ids: inputs.outline.sections.map(section => section.id),
+          })
+        } catch (error) {
+          if (error instanceof ToolArgsError) {
+            issues.push({ code: 'OUTLINE_REFINEMENT_SCHEMA_INVALID', message: error.message, artifact: QUALITY_PATH })
+          } else {
+            if (!(error instanceof ZodError)) throw error
+            issues.push(...error.issues.map(issue => ({
+              code: 'OUTLINE_REFINEMENT_SCHEMA_INVALID', message: issue.message, artifact: QUALITY_PATH, path: issue.path.join('.'),
+            })))
+          }
+        }
+        if (quality !== undefined) validateOutlineGenerationQuality(
+          inputs.outline, quality, inputs.requirements, inputs.scoring, inputs.responsePoints, issues,
+        )
+      } finally {
+        await run.dispose()
+      }
+      if (issues.length === 0 && quality !== undefined) {
+        return { quality, blockingIssues }
+      }
+      repairIssues = issues
+      if (attempt === maxRepairAttempts) throw new BidStageExecutionError(issues)
+    }
+    throw new Error('evidence-mapping-outline-review-unreachable')
+  }
 }
 
 /**
@@ -3893,7 +3963,7 @@ async function executeEvidenceMappingRun(
 ): Promise<{ artifacts: StageArtifact[]; outline: OutlineArtifact; evidence: EvidenceMapArtifact }> {
   if (task.stage !== 'evidence_mapping') throw new Error('evidence-mapping-executor-stage-invalid')
   const maxConcurrency = options.maxConcurrency ?? DEFAULT_EVIDENCE_MAPPING_MAX_CONCURRENCY
-  const maxInfrastructureRetryAttempts = options.maxInfrastructureRetryAttempts
+  let maxInfrastructureRetryAttempts = options.maxInfrastructureRetryAttempts
     ?? DEFAULT_EVIDENCE_MAPPING_INFRASTRUCTURE_RETRY_ATTEMPTS
   if (!Number.isSafeInteger(maxConcurrency) || maxConcurrency < 1 || maxConcurrency > 8) {
     throw new Error('evidence-mapping-max-concurrency-invalid')
@@ -4196,6 +4266,9 @@ async function executeEvidenceMappingRun(
       checkpoint = { tasks: checkpoint.tasks.filter(item => reusable.has(item.task_id)) }
       delete savedLog.failure
       savedLog.max_concurrency = maxConcurrency
+      maxInfrastructureRetryAttempts = Math.min(savedLog.max_infrastructure_retry_attempts ?? maxInfrastructureRetryAttempts,
+        maxInfrastructureRetryAttempts)
+      savedLog.max_infrastructure_retry_attempts = maxInfrastructureRetryAttempts
       executionLog = savedLog
       if (plan.tasks.some(item => item.phase === 'final_check') && resumeCandidateEvidence === undefined) throw new Error('evidence-mapping-resume-evidence-map-missing')
       if (plan.tasks.some(item => item.phase === 'final_check')) currentCandidateEvidence = resumeCandidateEvidence
@@ -4221,6 +4294,7 @@ async function executeEvidenceMappingRun(
     executionLog = {
       schema_version: 5,
       max_concurrency: maxConcurrency,
+      max_infrastructure_retry_attempts: maxInfrastructureRetryAttempts,
       observed_max_concurrency: 0,
       tasks: plan.tasks.map(item => ({ task_id: item.task_id, title: item.title, phase: item.phase, status: 'pending', attempts: [], final_child_session_id: null, active_child_session_id: null })),
     }
@@ -4412,6 +4486,13 @@ async function executeEvidenceMappingRun(
   const providerFor = (name: typeof MAPPING_AGENT_TOOLS[number]): string => name === 'web_search'
     ? webPreflight?.search.selectedProviderId ?? 'web_search'
     : webPreflight?.fetch.selectedProviderId ?? 'web_fetch'
+  // Provider 配置变更仍继承同一研究链的失败次数；旧记录按所属 Task 保守计入模型通道。
+  for (const taskLog of executionLog.tasks) for (const attempt of taskLog.attempts) {
+    if (attempt.accepted || attempt.stop_reason !== 'infrastructure-error') continue
+    const provider = attempt.infrastructure_provider ?? 'subagent'
+    const key = infrastructureRetryKey(provider === 'subagent' ? provider : providerFor(provider), taskLog.task_id)
+    infrastructureRetries.set(key, (infrastructureRetries.get(key) ?? 0) + 1)
+  }
   const waitForProviderCooldown = async (): Promise<void> => {
     const waits = [...providerCooldownUntil.values()].map(until => Math.max(0, until - Date.now()))
     const delay = Math.max(0, ...waits)
@@ -4419,6 +4500,14 @@ async function executeEvidenceMappingRun(
     signal.throwIfAborted()
   }
   const capturedByChild = new Map<string, Map<string, CapturedWebResult>>()
+  const backoffFailures = new Map<string, MappingSubagentInfrastructureError>()
+  const externalChildCancellations = new Map<string, unknown>()
+  const liftCancellationObserver = agent.ctx.on('agent/cancel-requested', ({ agent: child, cause }) => {
+    if (child.session.header.parentSession !== agent.id || child.status === 'idle') return
+    if (cause.kind !== 'hook' || cause.reason !== 'evidence-mapping-web-provider-backoff') {
+      externalChildCancellations.set(String(child.id), cause)
+    }
+  }, { global: true })
   const guardFailures = new Map<string, unknown>()
   const liftChildReadGuard = agent.ctx.on('agent/created', ({ agent: child }) => {
     if (child.session.header.origin !== 'subagent' || child.session.header.parentSession !== agent.id) return
@@ -4451,6 +4540,7 @@ async function executeEvidenceMappingRun(
     if (request === undefined || log === undefined) return
     const webFailure = webInfrastructureFailure({ exec, result }, request.task.task_id)
     if (webFailure?.retryable) {
+      backoffFailures.set(String(childId), webFailure)
       const provider = providerFor(exec.name as typeof MAPPING_AGENT_TOOLS[number])
       const delay = Math.max(webFailure.retryAfterMs, MAPPING_INFRASTRUCTURE_RETRY_BASE_DELAY_MS)
       providerCooldownUntil.set(provider, Math.max(providerCooldownUntil.get(provider) ?? 0, Date.now() + delay))
@@ -4804,19 +4894,29 @@ async function executeEvidenceMappingRun(
               signal.throwIfAborted()
               if (attempt === 0) await waitForMappingChildIdle(child, signal)
               else await waitForMappingChildReply(child, outputEventStart, signal)
-              throwForFailedTurn(child, outputEventStart)
               if (guardFailures.has(String(started.childId))) throw guardFailures.get(String(started.childId))
+              if (externalChildCancellations.has(String(started.childId))) throw new Error('evidence-mapping-child-cancelled', {
+                cause: externalChildCancellations.get(String(started.childId)),
+              })
+              const ending = child.session.events.slice(outputEventStart).findLast(event => event.type === 'turn/end')
+              const internalBackoff = ending?.data.reason.kind === 'aborted'
+                && ending.data.reason.reason.kind === 'hook'
+                && ending.data.reason.reason.reason === 'evidence-mapping-web-provider-backoff'
+                && backoffFailures.has(String(started.childId))
+              if (ending?.data.reason.kind === 'aborted' && !internalBackoff) throwForFailedTurn(child, outputEventStart)
               const captured = capturedByChild.get(String(started.childId)) ?? new Map<string, CapturedWebResult>()
               const fetchedSnapshots: WebEvidenceSnapshot[] = []
               const snapshots = availableSnapshots()
               const newCaptured = [...captured.entries()].filter(([callId]) => !observedCallIds.has(callId))
               for (const [callId] of newCaptured) observedCallIds.add(callId)
-              const webFailure = newCaptured.map(([, result]) => webInfrastructureFailure(result, mappingTask.task_id))
-                .find((error): error is MappingSubagentInfrastructureError => error !== undefined)
+              const webFailure = backoffFailures.get(String(started.childId))
+                ?? newCaptured.map(([, result]) => webInfrastructureFailure(result, mappingTask.task_id))
+                  .find((error): error is MappingSubagentInfrastructureError => error !== undefined)
               if (webFailure !== undefined) {
                 log.attempts.push({
                   child_session_id: String(started.childId), attempt: attemptBase + attempt + 1,
                   stop_reason: 'infrastructure-error', accepted: false,
+                  infrastructure_provider: webFailure.provider ?? 'subagent',
                   issues: webFailure.issues.map(({ code, message }) => ({ code, message })), warnings: [],
                 })
                 log.status = 'failed'
@@ -4825,6 +4925,7 @@ async function executeEvidenceMappingRun(
                 reportMappingProgress('章节资料映射遇到基础设施错误')
                 throw webFailure
               }
+              throwForFailedTurn(child, outputEventStart)
               if (mappingTask.phase === 'final_check' && submissionRequest.state.captured === undefined) {
                 const completed = await completeMappingSubmission(
                   workspace, runInputs, mappingTask, submissionRequest.state,
@@ -4929,6 +5030,7 @@ async function executeEvidenceMappingRun(
               if (turnFailure !== undefined) {
                 log.attempts.push({ child_session_id: String(started.childId), attempt: attemptBase + attempt + 1,
                   stop_reason: 'infrastructure-error', accepted: false,
+                  infrastructure_provider: turnFailure.provider ?? 'subagent',
                   issues: turnFailure.issues.map(({ code, message }) => ({ code, message })), warnings: [] })
                 log.status = 'failed'
                 log.active_child_session_id = null
@@ -4938,7 +5040,8 @@ async function executeEvidenceMappingRun(
               }
               const detail = error instanceof Error ? error.message : String(error)
               latestIssues = [{ code: 'EVIDENCE_MAPPING_SUBAGENT_INFRASTRUCTURE_ERROR', message: `Mapping Subagent 结果通道发生基础设施错误：${detail}` }]
-              log.attempts.push({ child_session_id: String(started.childId), attempt: attemptBase + attempt + 1, stop_reason: 'infrastructure-error', accepted: false, issues: latestIssues, warnings: [] })
+              log.attempts.push({ child_session_id: String(started.childId), attempt: attemptBase + attempt + 1,
+                stop_reason: 'infrastructure-error', accepted: false, infrastructure_provider: 'subagent', issues: latestIssues, warnings: [] })
               log.status = 'failed'
               log.active_child_session_id = null
               await persistLog()
@@ -4983,6 +5086,7 @@ async function executeEvidenceMappingRun(
         }
         if (log.attempts.length === attemptBase) log.attempts.push({
           child_session_id: null, attempt: attemptBase + 1, stop_reason: 'infrastructure-error', accepted: false,
+          infrastructure_provider: 'subagent',
           issues: [{ code: 'EVIDENCE_MAPPING_SUBAGENT_INFRASTRUCTURE_ERROR', message: error instanceof Error ? error.message : String(error) }],
           warnings: [],
         })
@@ -5481,6 +5585,7 @@ async function executeEvidenceMappingRun(
   } finally {
     liftSubmissionSetup()
     liftObserver()
+    liftCancellationObserver()
     liftChildReadGuard()
     await Promise.all([criticalStateWrites, progressLogWrites])
   }
@@ -5584,6 +5689,8 @@ export async function executeEvidenceMapping(
         log = {
           schema_version: 5,
           max_concurrency: options.maxConcurrency ?? DEFAULT_EVIDENCE_MAPPING_MAX_CONCURRENCY,
+          max_infrastructure_retry_attempts: options.maxInfrastructureRetryAttempts
+            ?? DEFAULT_EVIDENCE_MAPPING_INFRASTRUCTURE_RETRY_ATTEMPTS,
           observed_max_concurrency: 0, tasks: [],
         }
       }
@@ -5593,6 +5700,7 @@ export async function executeEvidenceMapping(
     } catch (logError) {
       agent.ctx.logger.warn(`S4 资料映射失败日志写入失败：${logError instanceof Error ? logError.message : String(logError)}`)
     }
-    throw new BidStageExecutionError(issues)
+    if (error instanceof BidStageExecutionError) throw error
+    throw Object.assign(new BidStageExecutionError(issues), { cause: error })
   }
 }

@@ -245,7 +245,7 @@ export async function executeWritingCapability(
     code: 'CHAPTER_WRITING_ASSIGNMENT_CONFLICT', artifact: item.sectionId,
     message: `${item.sectionId}：${conflict.task}；${conflict.basis}`,
   })))
-  if (call.capability !== 'chapter.review' && conflicts.length > 0 && attention === undefined
+  if (call.capability !== 'chapter.review' && conflicts.length > 0
     && reviews.every(item => item.review.external_input_gaps.length === 0
       && !item.review.revision_issue_checks?.some(check => check.status === 'needs_input'))) {
     throw new BidStageExecutionError(conflicts)
@@ -256,9 +256,12 @@ export async function executeWritingCapability(
     .flatMap(entry => entry.unresolved_topics.map(topic => `${entry.section_id}: ${topic}`)),
   ...reviews.flatMap(item => item.review.external_input_gaps.map(gap =>
     `${item.sectionId}: ${gap.required_material}`)),
+  ...reviews.flatMap(item => item.review.revision_issue_checks?.filter(check => check.status === 'needs_input')
+    .map(check => `${item.sectionId}: ${check.reason}`) ?? []),
   ...attention?.issues.map(issue => issue.message) ?? []]
   const needsInput = attention !== undefined
-    || call.capability !== 'chapter.review' && reviews.some(item => item.review.verdict === 'attention')
+    || call.capability !== 'chapter.review' && reviews.some(item => item.review.external_input_gaps.length > 0
+      || item.review.revision_issue_checks?.some(check => check.status === 'needs_input'))
   return { result: {
     target_section_ids: ids, changed_artifacts: changed,
     change_summary: call.capability === 'chapter.review'
@@ -266,7 +269,7 @@ export async function executeWritingCapability(
       : needsInput ? `已保留可用章节候选，仍需补充 ${missingTopics.slice(0, 3).join('；')}`
         : `已编写并审核 ${String(ids.length)} 个章节`,
     warnings: [...affected].map(id => `强依赖章节 ${id} 的交接需要重新核查；本次未改写其正文。`)
-      .concat(reviewConcerns),
+      .concat(reviewConcerns, conflicts.map(conflict => conflict.message)),
     missing_topics: missingTopics,
     needs_input: needsInput,
   } }

@@ -13,7 +13,7 @@ it.each(['tender_analysis', 'outline_generation', 'evidence_mapping'])('%s é»˜è®
   })
   expect(JSON.parse(result.stdout)).toEqual({
     noAutomaticGoal: true, decision: false, phase: 'complete', rounds: 1,
-    goalPrompt: true, stagePrompt: true, calls: ['bid_stage_inspect', 'bid_recover_task', 'bid_stage_inspect', 'update_goal'],
+    goalPrompt: true, stagePrompt: true, calls: ['bid_stage_inspect', 'bid_recover_task', 'bid_stage_inspect', 'get_goal', 'update_goal'],
     recoveryEvents: 1, legacyEvents: 0, createGoalVisible: false,
     startedRuns: stage === 'tender_analysis' ? 2 : stage === 'outline_generation' ? 3 : 4,
   })

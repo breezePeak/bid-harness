@@ -105,6 +105,11 @@ function runTurn(sessionId: string): void {
       ownerSessionId: sessionId, target: { kind: 'run', workId: 'work-1', runId: 'run-1' },
       unit: 'outline/outline.json', instruction: '核对原文并修正当前章节。', progressFingerprint: 'a'.repeat(64),
     })
+    event(sessionId, 'bid.recovery.round', {
+      ownerSessionId: sessionId, target: { kind: 'run', workId: 'work-1', runId: 'run-1' },
+      fingerprint: 'a'.repeat(64), round: 1, budget: 3, dispatchAttempts: 1, state: 'notified',
+      messageId: 'recovery-message-1', nextAt: 100, reason: '原失败已保存，等待 Main 实际恢复。',
+    })
   }
   event(sessionId, 'assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text } })
   if (env.FAKE_MALFORMED_MESSAGE !== undefined) {

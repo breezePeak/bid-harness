@@ -1794,6 +1794,15 @@ export async function executeDocumentReview(
   }, [{ stage: 'chapter_writing', type: 'global_compliance_review', path: GLOBAL_REVIEW_PATH }], true)
 }
 
+function pageEstimateFailure(cause: unknown, artifact: string): BidStageExecutionError {
+  const code = cause instanceof Error && 'code' in cause && typeof cause.code === 'string'
+    ? cause.code : 'CHAPTER_WRITING_PAGE_ESTIMATE_UNAVAILABLE'
+  return Object.assign(new BidStageExecutionError([{
+    code, message: `正文和审核结果已保留，但 estimated_pages 验收条件无法测量：${cause instanceof Error ? cause.message : String(cause)}`,
+    artifact,
+  }]), { cause, code })
+}
+
 async function reviewWritingPlanCompletion(
   agent: Agent,
   workspace: BidWorkspace,
@@ -1813,11 +1822,17 @@ async function reviewWritingPlanCompletion(
   const locations = await readChapterLocations(workspace)
   const positions = new Map(buildOutlineView(outline.sections).map(item => [item.section.id, item.number]))
   type Estimate = Awaited<ReturnType<typeof estimateChapterWritingPages>>
-  const measure = async (): Promise<{ estimate?: Estimate; reason?: string }> => {
+  const measure = async (): Promise<{ estimate?: Estimate; error?: unknown }> => {
     try { return { estimate: await estimateChapterWritingPages(workspace, outline) } } catch (error) {
-      return { reason: error instanceof Error ? error.message : String(error) }
+      return { error }
     }
   }
+  const unmetRequiredPages = (results: ChapterWritingCompletionDecision['document_acceptance_results']): StageValidationIssue[] => results
+    .filter(result => result.status !== 'met' && writingPlan.document_acceptance.some(criterion =>
+      criterion.id === result.criterion_id && criterion.priority === 'required'
+      && criterion.evaluator.kind === 'deterministic' && criterion.evaluator.metric === 'estimated_pages'))
+    .map(result => ({ code: 'CHAPTER_WRITING_REQUIRED_ACCEPTANCE_UNMET',
+      message: `${result.criterion_id} 未满足：${result.reason}`, artifact: COMPLETION_REVIEW_PATH, path: result.criterion_id }))
   const snapshot = async (estimate?: Estimate) => {
     const contents = new Map<string, string>()
     const sections = await Promise.all(worklist.map(async (section) => {
@@ -1856,11 +1871,7 @@ async function reviewWritingPlanCompletion(
   ].some(item => item.priority === 'required'
     && item.evaluator.kind === 'deterministic' && item.evaluator.metric === 'estimated_pages')
   if (requiresPageEstimate(writingPlan) && measured.estimate === undefined) {
-    throw new BidStageAttentionRequiredError([{
-      code: 'CHAPTER_WRITING_PAGE_ESTIMATE_UNAVAILABLE',
-      message: `正文和审核结果已保留，但 estimated_pages 验收条件无法测量：${measured.reason ?? '未知测量错误'}`,
-      artifact: COMPLETION_REVIEW_PATH,
-    }])
+    throw pageEstimateFailure(measured.error, COMPLETION_REVIEW_PATH)
   }
   let current = await snapshot(measured.estimate)
   let recovery: ChapterWritingCompletionState = {
@@ -1873,7 +1884,11 @@ async function reviewWritingPlanCompletion(
     if (!forceReview && saved.completion?.plan_version === writingPlan.plan_version
       && saved.completion.format_revision === formatRevision
       && saved.completion.format_template_id === formatTemplateId
-      && saved.completion.document_sha256 === current.documentSha256) return completedArtifacts()
+      && saved.completion.document_sha256 === current.documentSha256) {
+      const issues = unmetRequiredPages(saved.completion.document_acceptance_results)
+      if (issues.length > 0) throw new BidStageExecutionError(issues)
+      return completedArtifacts()
+    }
     const last = saved.rounds.at(-1)
     if (saved.confirmed_outline_sha256 === outlineHash
       && (last === undefined || last.plan_version === writingPlan.plan_version
@@ -1904,6 +1919,8 @@ async function reviewWritingPlanCompletion(
       },
     }
     await writeJson(join(workspace.projectRoot, COMPLETION_REVIEW_PATH), recovery, options.run.commits)
+    const issues = unmetRequiredPages(decision.document_acceptance_results)
+    if (!forceReview && issues.length > 0) throw new BidStageExecutionError(issues)
     return completedArtifacts()
   }
   while (true) {
@@ -1919,7 +1936,7 @@ async function reviewWritingPlanCompletion(
     const unavailable = hostResults.filter(result => result.status === 'unavailable'
       && allCriteria.find(criterion => criterion.id === result.criterion_id)?.priority === 'required')
     if (unavailable.length > 0) {
-      throw new BidStageAttentionRequiredError(unavailable.map(item => ({
+      throw new BidStageExecutionError(unavailable.map(item => ({
         code: 'CHAPTER_WRITING_HOST_ACCEPTANCE_UNAVAILABLE',
         message: `${item.criterion_id} 无法验收：${item.message}`,
         artifact: COMPLETION_REVIEW_PATH,
@@ -1993,11 +2010,7 @@ async function reviewWritingPlanCompletion(
     }))
     const afterMeasurement = await measure()
     if (requiresPageEstimate(appliedPlan) && afterMeasurement.estimate === undefined) {
-      throw new BidStageAttentionRequiredError([{
-        code: 'CHAPTER_WRITING_PAGE_ESTIMATE_UNAVAILABLE',
-        message: `正文和审核结果已保留，但 estimated_pages 验收条件无法测量：${afterMeasurement.reason ?? '未知测量错误'}`,
-        artifact: COMPLETION_REVIEW_PATH,
-      }])
+      throw pageEstimateFailure(afterMeasurement.error, COMPLETION_REVIEW_PATH)
     }
     const afterSnapshot = await snapshot(afterMeasurement.estimate)
     recovery = { ...recovery, rounds: [...recovery.rounds, {
@@ -2877,13 +2890,18 @@ async function runChapterWriting(
         await logWrites
         if (batchTask !== undefined) {
           const missing = review.revision_issue_checks?.filter(item => item.status === 'needs_input') ?? []
-          const needsInput = review.verdict === 'attention' || missing.length > 0
+          const needsInput = review.external_input_gaps.length > 0 || missing.length > 0
+          const conflicts = review.assignment_conflicts.map(item =>
+            `${item.task}；${item.basis}；关联章节：${item.related_section_ids.join('、')}`)
           const satisfied = review.verdict === 'pass' && batchTask.issue_ids.every(id =>
             review.revision_issue_checks?.some(item => item.issue_id === id && item.status === 'satisfied'))
           await updateBatchTask(sectionId, { status: needsInput ? 'needs_input' : satisfied ? 'completed' : 'failed',
             failure: satisfied ? null : {
-              code: needsInput ? 'CHAPTER_EXTERNAL_INPUT_REQUIRED' : 'BID_REVISION_REVIEW_INCOMPLETE',
-              message: [...missing.map(item => item.reason), ...review.blocking_issues].join('；') || '审批意见未全部满足。',
+              code: needsInput ? 'CHAPTER_EXTERNAL_INPUT_REQUIRED'
+                : conflicts.length > 0 ? 'CHAPTER_WRITING_ASSIGNMENT_CONFLICT' : 'BID_REVISION_REVIEW_INCOMPLETE',
+              message: (needsInput
+                ? [...review.external_input_gaps.map(item => `${item.required_material}：${item.reason}`), ...missing.map(item => item.reason)]
+                : [...conflicts, ...review.blocking_issues]).join('；') || '审批意见未全部满足。',
               phase: 'reviewing',
             } })
         }
@@ -2972,7 +2990,13 @@ async function runChapterWriting(
           try {
             estimatedPages = (await estimateChapterCandidatePages(workspace, outline, context.section.id, candidate.markdown))
               .sections.get(context.section.id)?.pages
-          } catch { /* 估算不可用由 Host 验收结果显式保留。 */ }
+          } catch (cause) {
+            if (context.sectionWritingPlan.acceptance_criteria.some(item => item.priority === 'required'
+              && item.evaluator.kind === 'deterministic' && item.evaluator.metric === 'estimated_pages')) {
+              throw pageEstimateFailure(cause, context.reviewPath)
+            }
+            // preferred 页数条件保留 unavailable，不阻断已授权正文。
+          }
         }
         const hostAcceptanceResults = evaluateHostAcceptanceCriteria(context.sectionWritingPlan.acceptance_criteria, {
           markdown: candidate.markdown,
@@ -3564,7 +3588,11 @@ async function runChapterWriting(
       } else if (!inputBlocked.has(settled.sectionId)) failures.set(settled.sectionId, settled.error)
     }
     if (failures.size > 0 && revisionBatch === undefined) {
-      throw new Error([...failures.entries()].map(([sectionId, error]) => `${sectionId}: ${String(error)}`).join('; '))
+      const errors = [...failures.values()]
+      if (errors.length === 1) throw errors[0]
+      throw Object.assign(new BidStageExecutionError([...failures].flatMap(([sectionId, error]) =>
+        error instanceof BidStageExecutionError ? error.issues : [{ code: 'CHAPTER_WRITING_FAILED', artifact: sectionId,
+          message: error instanceof Error ? error.message : String(error) }])), { cause: new AggregateError(errors, '多个章节执行失败。') })
     }
   } catch (error: unknown) {
     controller.abort()

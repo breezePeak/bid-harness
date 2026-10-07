@@ -788,10 +788,17 @@ export async function runMainTaskPlanningLoop(ctx: Context, root: string,
   await agent.whenIdle()
   const host = ctx.bid as unknown as { readonly inFlight: Map<string, { readonly done: Promise<unknown> }> }
   const settle = async () => {
-    while (host.inFlight.size > 0) {
+    const deadline = Date.now() + 60_000
+    while (Date.now() < deadline) {
       await Promise.all([...host.inFlight.values()].map(operation => operation.done))
       await agent.whenIdle()
+      const current = await readBidProjectState(workspace)
+      if (current?.status === 'completed') return
+      const round = agent.session.events.findLast(event => event.type === 'bid.recovery.round')
+      if (round?.type === 'bid.recovery.round' && ['blocked', 'waiting_input', 'cancelled'].includes(round.data.state)) return
+      await new Promise<void>((resolve) => { setTimeout(resolve, 20) })
     }
+    throw new Error('真实任务链未在有界恢复期限内结算。')
   }
   await settle()
   if (fault === 'published_correction') {

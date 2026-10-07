@@ -26,10 +26,11 @@ function tool(name: string, args: object): StreamChunk[] {
 
 class GoalRecoveryAdapter extends LlmAdapter {
   readonly requests: GenerateOptions[] = []
-  goalRef: { id: string; revision: number } | undefined
+  goalEnabled = false
   runId = ''
   goalInspected = false
   goalCompleted = false
+  goalRead = false
   constructor(private readonly parentId: SessionId) { super() }
   override resolveModel(provider: string, model: string): Promise<{ provider: string; id: string; name: string }> {
     return Promise.resolve({ provider, id: model, name: model })
@@ -40,12 +41,20 @@ class GoalRecoveryAdapter extends LlmAdapter {
       return
     }
     this.requests.push(options)
-    if (this.goalRef !== undefined && !this.goalInspected) {
+    if (this.goalEnabled && !this.goalInspected) {
       this.goalInspected = true
       yield* tool('bid_stage_inspect', { view: 'summary' })
-    } else if (this.goalRef !== undefined && !this.goalCompleted) {
+    } else if (this.goalEnabled && !this.goalRead) {
+      this.goalRead = true
+      yield* tool('get_goal', {})
+    } else if (this.goalEnabled && !this.goalCompleted) {
+      const result = options.messages.flatMap(message => message.content).findLast(block => block.type === 'tool-result' && block.toolCallId === 'get_goal')
+      if (result?.type !== 'tool-result') throw new Error('显式 Goal 缺少当前身份读取结果')
+      const content = result.content.find(block => block.type === 'text')
+      if (content?.type !== 'text') throw new Error('显式 Goal 缺少当前状态')
+      const current = JSON.parse(content.text) as { goal: { id: string; revision: number } }
       this.goalCompleted = true
-      yield* tool('update_goal', { action: 'complete', goal_id: this.goalRef.id, revision: this.goalRef.revision })
+      yield* tool('update_goal', { action: 'complete', goal_id: current.goal.id, revision: current.goal.revision })
     } else if (this.requests.length === 1) yield* tool('bid_stage_inspect', { view: 'recovery' })
     else if (this.requests.length === 2) yield* tool('bid_recover_task', {
       target: 'run', instruction: '核对原文来源，针对当前失败单元补齐缺失内容。',
@@ -120,6 +129,14 @@ try {
   await agent.whenIdle()
   await Promise.allSettled(host.recoveryTasks)
   await agent.whenIdle()
+  if (!stale) {
+    const deadline = Date.now() + 10_000
+    while (!agent.session.events.some(event => event.type === 'bid.recovery.round' && ['blocked', 'recovered', 'waiting_input'].includes(event.data.state))) {
+      if (Date.now() > deadline) throw new Error('默认 Bid 纠正轮未结算')
+      await new Promise<void>(resolve => setTimeout(resolve, 20))
+    }
+    await agent.whenIdle()
+  }
   if (stale) {
     const rejected: boolean[] = []
     for (const instruction of ['重试当前任务', '换一种方法修复', '再次检查后继续']) {
@@ -143,9 +160,9 @@ try {
     const off = ctx.on('goal/changed', ({ agent: changed }) => {
       if (changed === agent && ctx!.goals.get(agent)?.phase === 'complete') completed.resolve(undefined)
     }, { global: true })
+    adapter.goalEnabled = true
     const command = await ctx.commands.execute(agent, '/goal 确认当前 Bid 阶段的失败状态', [], new AbortController().signal)
     if (command === undefined) throw new Error('原生 /goal 命令未注册')
-    adapter.goalRef = ctx.goals.get(agent)
     const timeout = Promise.withResolvers<never>()
     const timer = setTimeout(() =>{  timeout.reject(new Error('显式 Goal 未完成')) }, 10_000)
     try {

@@ -178,9 +178,13 @@ async function parseStateFile(path: string): Promise<DocxFormatState | undefined
     throw error
   }
   let value: unknown
-  try { value = JSON.parse(raw) } catch { throw new Error('保存的 Word 格式配置不是有效 JSON，请恢复配置文件。') }
+  try { value = JSON.parse(raw) } catch (cause) {
+    throw Object.assign(new Error('保存的 Word 格式配置不是有效 JSON，请恢复配置文件。', { cause }), { code: 'BID_DOCX_FORMAT_CORRUPT' })
+  }
   const parsed = stateSchema.safeParse(value)
-  if (!parsed.success) throw new Error('保存的 Word 格式配置版本过旧或已损坏，请重新上传模板。')
+  if (!parsed.success) throw Object.assign(new Error('保存的 Word 格式配置版本过旧或已损坏，请重新上传模板。', {
+    cause: parsed.error,
+  }), { code: 'BID_DOCX_FORMAT_CORRUPT' })
   return parsed.data
 }
 

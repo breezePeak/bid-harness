@@ -243,6 +243,9 @@ describe('S5 原生提问专项测试 (H01-H24)', () => {
       await vi.waitFor(async () => {
         const record = JSON.parse(await readFile(join(workspace.projectRoot, 'chapters/writing-request.json'), 'utf8')) as WritingRequest
         expect(record.state).toBe('answered')
+        expect(record.request_id).toBe(questionId)
+        expect(record.owner_session_id).toBe(String(agent.id))
+        expect(record.continuation).toBe('allowed')
         expect(record.answer).toEqual({
           question_id: questionId,
           kind: 'no_additional_requirements',
@@ -250,9 +253,14 @@ describe('S5 原生提问专项测试 (H01-H24)', () => {
         })
       })
 
-      await vi.waitFor(() => {
-        expect(agent.session.events.some(e => e.type === 'user/message'
-          && e.data.content.some(c => c.type === 'text' && c.text.includes(questionId)))).toBe(true)
+      await vi.waitFor(async () => {
+        const record = JSON.parse(await readFile(join(workspace.projectRoot, 'chapters/writing-request.json'), 'utf8')) as WritingRequest
+        const notice = agent.session.events.find(event => event.type === 'user/message'
+          && String(event.data.id) === record.processing?.message_id)
+        if (notice?.type !== 'user/message') throw new Error('已保存授权尚未交给原主 Agent')
+        expect(notice.data.source).toMatchObject({ kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'instructions' })
+        expect(notice.data.content.some(block => block.type === 'text'
+          && block.text.includes('Host 已保存 S5 初始原生问答。'))).toBe(true)
       })
     } finally {
       dispose()
@@ -372,10 +380,18 @@ describe('S5 原生提问专项测试 (H01-H24)', () => {
 
       // 已回答的不应再次调用 ask
       expect(askCalled).toBe(false)
-      // 应该向 agent 派发 followup 引导其完成 plan 提交
-      await vi.waitFor(() => {
-        expect(agent.session.events.some(e => e.type === 'user/message'
-          && e.data.content.some(c => c.type === 'text' && c.text.includes('answered-req-123')))).toBe(true)
+      await vi.waitFor(async () => {
+        const record = JSON.parse(await readFile(join(workspace.projectRoot, 'chapters/writing-request.json'), 'utf8')) as WritingRequest
+        expect(record.request_id).toBe(answeredRecord.request_id)
+        expect(record.owner_session_id).toBe(String(agent.id))
+        expect(record.continuation).toBe('allowed')
+        expect(record.answer).toEqual(answeredRecord.answer)
+        const notice = agent.session.events.find(event => event.type === 'user/message'
+          && String(event.data.id) === record.processing?.message_id)
+        if (notice?.type !== 'user/message') throw new Error('已保存回答尚未交给原主 Agent')
+        expect(notice.data.source).toMatchObject({ kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'instructions' })
+        expect(notice.data.content.some(block => block.type === 'text'
+          && block.text.includes('Host 已保存 S5 初始原生问答。'))).toBe(true)
       })
     } finally {
       dispose()

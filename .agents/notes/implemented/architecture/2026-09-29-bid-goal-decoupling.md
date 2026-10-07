@@ -8,6 +8,8 @@ Status: implemented
 
 ## Decision
 
+失败后的纠正调度、有限预算和执行结算由[恢复必须执行并结算](../bug-fix/2026-10-06-bid-recovery-settlement.md)部分替代；Goal 隔离、当前回合授权与正式提交边界继续适用。
+
 默认 Bid 流程不创建 Goal。后台 Run 在局部修复耗尽后保存失败和检查点，再将失败通知交给当前主 Agent；通过 steer 在空闲时启动回合、运行中进入安全 step。可修复失败由主 Agent 使用阶段诊断和 bid_recover_task 的 instruction 处理；blocked 失败只唤醒主 Agent 说明阻断，不提供恢复工具或自动重试。已回答的 S5 Writing Plan 失败复用保存的回答。Host 继续校验原 Run、project revision、输入身份和正式提交，用户停止与待确认问题保留原入口。
 
 显式 `/goal` 使用原生 Driver 和当前阶段公共工具，Bid Agent 对本地注册的 create_goal 安装精确 deny，模型工具视图不展示它；执行守卫也拒绝直接调用。Bid 只注册项目占用 Busy Gate；等待不消耗轮次，项目释放后重新请求同项目的 Driver。Bid 停止、重置和完成不更新 Goal；Goal 更新也不操作 Bid。Host 重启只按 Bid 持久状态恢复，不从历史绑定恢复 Goal activation。
@@ -28,6 +30,6 @@ Status: implemented
 
 ## Consequences
 
-主 Agent 通过现有恢复工具指导原执行器，不需要 Goal 绑定；模型的错误决策仍受 Host 的输入、范围和正式确认约束。恢复指纹历史归 Bid 自己的审计事件所有，不受 Goal 总轮数限制，也不增加 Host 自动重试循环；失败通知要求具体改进，是否继续由主 Agent 判断。只有出现独立、可说明的用户目标需求时才使用原生 Goal。
+主 Agent 通过现有恢复工具指导原执行器，不需要 Goal 绑定；模型的错误决策仍受 Host 的输入、范围和正式确认约束。恢复指纹历史与预算归 Bid 自己的审计事件所有，不受 Goal 总轮数限制；失败通知要求具体改进，Host 核验实际动作并有界续行。只有出现独立、可说明的用户目标需求时才使用原生 Goal。
 
 定向测试覆盖无 Goal 默认执行、停止与完成的生命周期隔离、Busy Gate、真实 Goal 能力执行和计划补丁、当前回合授权、伪造插件消息及原 Run 重启。真实 S4 集成场景在无 Goal 时唤醒主 Agent 并保留七个完成检查点；Loader 无密钥回放覆盖失败通知、当前阶段工具和显式 Goal 提前完成。
