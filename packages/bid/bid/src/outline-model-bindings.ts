@@ -43,8 +43,17 @@ export const outlineModelRepairOperationSchema = z.union([
     parent_position: position.nullable().optional(), sibling_position: position.optional() }).strict(),
 ])
 
-/** 仅修响应点时使用相同位置绑定，但保留原入口允许的三类操作。 */
-export const outlineModelResponsePointRepairOperationSchema = z.union([modelUpdate, modelAdd, modelSplit])
+const [responseUpdate, responseAdd, responseSplit] = outlineRepairOperationSchema.options
+const responseReferences = { response_point_positions: positions.optional() }
+/** 响应点修复只开放正式操作支持的语义字段和响应点位置。 */
+export const outlineModelResponsePointRepairOperationSchema = z.union([
+  z.object({ ...semanticFields(responseUpdate.shape), section_position: position, ...responseReferences }).strict(),
+  z.object({ ...semanticFields(responseAdd.shape), parent_position: position.nullable(),
+    sibling_position: position, ...responseReferences }).strict(),
+  z.object({ ...semanticFields(responseSplit.shape), section_position: position,
+    children: z.array(z.object({ ...semanticFields(responseSplit.shape.children.element.shape),
+      response_point_positions: positions }).strict()).min(2) }).strict(),
+])
 
 const [editUpdate, editAdd, editDelete, editSplit, editMerge, editMove] = outlineEditOperationSchema.options
 /** 局部重生成只允许结构与正文指导位置操作，不授予业务关联修改权限。 */

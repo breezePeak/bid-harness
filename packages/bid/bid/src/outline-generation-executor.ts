@@ -500,7 +500,9 @@ export function renderOutlineGenerationRepairTask(
     JSON.stringify(outlineModelInputView(inputs)),
     '当前目录（包含 purpose、must_answer 和已有关联）：' + JSON.stringify(outlineModelView(context.outline, inputs)),
     '未被可写叶子覆盖的响应点及所属评分原文：' + JSON.stringify(missing),
-    ...(context.associations === undefined ? [] : [
+    ...(responsePointsOnly ? [
+      '只使用 update_section、add_section 或 split_section 修复响应点及具体写作要求；业务关联只提交 response_point_positions，不修改需求、评分、合规、框架关联或 origin。',
+    ] : context.associations === undefined ? [] : [
       '按问题选择 requirement_positions、scoring_positions、compliance_positions、framework_refs、origin 或 global_compliance_positions；新增或拆分章节时明确分配必要关联。已有全局覆盖的材料核验 Compliance 不分配给技术叶子。结构错误使用 move/add/delete/split/merge 或 repair_structure；层级和 writable 由程序根据 parent_position 派生。父节点的 must_answer 和响应点由程序清空，其要求仍须分配给合适的可写叶节。不得返回 writable。重复身份只能提交 regenerate_id=true，由程序分配新编号。',
     ]),
     ...renderStageRepairIssues(issues), context.failure ?? '',

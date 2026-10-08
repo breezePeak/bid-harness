@@ -12,6 +12,40 @@ import { expect, it } from 'vitest'
 
 const fixtureDir = fileURLToPath(new URL('./bid-outline-generation-snapshots/', import.meta.url))
 
+it('S3 叶节响应点缺项通过专用修复协议补齐并等待确认', async () => {
+  const configPath = fileURLToPath(new URL('../bid-evidence-mapping.cordis.snapshot.yml', import.meta.url))
+  const result = await runLoaderSmoke({
+    label: 'S3 响应点局部修复', tempDirPrefix: 'dsh-s3-response-repair-snapshot-',
+    binScript: fileURLToPath(new URL('./fixtures/bid-outline-generation-driver.ts', import.meta.url)),
+    configPath, binArgs: [configPath, 'missing-response-point'], mode: 'src',
+    tsconfigPath: fileURLToPath(new URL('../../../tsconfig.json', import.meta.url)),
+    inspect: async (cwd) => {
+      const store = join(cwd, '.session-store')
+      const paths = (await readdir(store, { recursive: true })).filter(path => path.endsWith('.jsonl'))
+      const logs = await Promise.all(paths.map(async path => readFile(join(store, path), 'utf8')))
+      const repairLog = logs.find(content => content.includes('"id":"repair-outline-response-point"'))
+      if (repairLog === undefined) throw new Error('缺少响应点修复 Child 日志')
+      expect(repairLog).toContain('局部响应点修复')
+      expect(repairLog).toContain('业务关联只提交 response_point_positions')
+      expect(repairLog).not.toContain('按问题选择 requirement_positions')
+      const header = JSON.parse(repairLog.split('\n')[0]!) as SessionHeader
+      const transcript = normalizeSessionSnapshot(repairLog, {
+        sessionIds: [header.parentSession!, header.id], cwd, cwdAliases: [cwd.replaceAll('\\', '/')],
+      })
+      const path = join(fixtureDir, 'response-point-repair-child.expected.jsonl')
+      if (process.env.DSH_SNAPSHOT === 'refresh') await writeFile(path, transcript)
+      expect(transcript).toBe(await readFile(path, 'utf8'))
+    },
+  })
+  const actual = JSON.parse(result.stdout) as Awaited<ReturnType<typeof runOutlineGenerationLoop>>
+  expect(actual.outcome).toMatchObject({ stage: 'outline_generation', status: 'waiting_user' })
+  expect(actual.untouchedUnchanged).toBe(true)
+  expect(actual.outline.sections.find(section => section.id === 'SEC-001')).toMatchObject({
+    scoring_response_point_ids: Array.from({ length: 11 }, (_, index) => 'RP-' + String(index + 1).padStart(6, '0')),
+    writing_notes: ['明确审计留存期限与追溯责任。'],
+  })
+}, LOADER_SMOKE_TEST_TIMEOUT_MS)
+
 it('S3 一次生成响应点和目录、质量复核修改后等待用户确认', async () => {
   const result = await runLoaderSmoke({
     label: 'S3 有界目录生成', tempDirPrefix: 'dsh-s3-outline-snapshot-',

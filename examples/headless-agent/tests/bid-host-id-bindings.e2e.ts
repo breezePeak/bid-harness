@@ -1,5 +1,5 @@
 /** 真实 S3 模型只选择业务位置，程序生成目录和响应点身份并保存完整复核。 */
-import { mkdir, mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
@@ -196,10 +196,31 @@ describe.skipIf(!process.env.DEEPSEEK_API_KEY && !process.env.DSH_BID_EVAL_PROVI
       expect(modelValues.some(value => Object.hasOwn(value, 'sections'))).toBe(true)
       expect(modelValues.some(value => Object.hasOwn(value, 'operations'))).toBe(true)
       expect(modelValues.flatMap(canonicalFields)).toEqual([])
+      const missingPoint = catalog.points[0]!
+      const incomplete = structuredClone(outline)
+      for (const section of incomplete.sections) {
+        section.scoring_response_point_ids = section.scoring_response_point_ids?.filter(id => id !== missingPoint.id)
+        section.scoring_response_points = section.scoring_response_points.filter(point =>
+          point.scoring_id !== missingPoint.scoring_id || point.response_point !== missingPoint.text)
+      }
+      await writeFile(join(workspace.projectRoot, 'outline/outline.json'), JSON.stringify(incomplete))
+      await rm(join(workspace.projectRoot, 'outline/quality-report.json'))
+      await rm(join(workspace.projectRoot, 'outline/draft.json'))
+      const repairStart = submissions.length
+      const repairedArtifacts = await executeOutlineGeneration(agent, workspace, buildBidStageTask('outline_generation'),
+        { maxRepairAttempts: 1, run: createTestBidRunContext({ signal }) })
+      await expect(validateOutlineGeneration(workspace, 'outline_generation', repairedArtifacts)).resolves.toEqual({ ok: true })
+      const repairedOutline = parseOutlineArtifact(await read('outline/outline.json'))
+      expect(repairedOutline.sections.some(section => section.writable
+        && section.scoring_response_point_ids?.includes(missingPoint.id))).toBe(true)
+      const repairValues = submissions.slice(repairStart).map(value => JSON.parse(value) as Record<string, unknown>)
+      expect(repairValues.some(value => Array.isArray(value.operations) && value.operations.length > 0)).toBe(true)
+      expect(repairValues.flatMap(canonicalFields)).toEqual([])
       report.status = 'passed'
       report.catalog = catalog
       report.outline = outline
       report.quality = quality
+      report.repaired_outline = repairedOutline
     } catch (error) {
       report.status = 'failed'
       report.failure = error instanceof Error ? error.message : String(error)

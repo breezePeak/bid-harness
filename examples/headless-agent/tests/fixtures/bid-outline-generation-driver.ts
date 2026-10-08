@@ -6,7 +6,8 @@ import { runFullOutlineRegenerationLoop } from '../../../../packages/bid/bid/tes
 const configPath = process.argv[2]
 if (configPath === undefined) throw new Error('缺少 S3 回放配置路径')
 const scenario = process.argv[3] ?? 'normal'
-if (scenario !== 'normal' && scenario !== 'structural-parent' && scenario !== 'full-regeneration') throw new Error('未知 S3 回放场景')
+if (scenario !== 'normal' && scenario !== 'structural-parent' && scenario !== 'full-regeneration'
+  && scenario !== 'missing-response-point') throw new Error('未知 S3 回放场景')
 const ctx = await boot('bid-outline-generation-snapshot', configPath)
 try {
   const result = scenario === 'full-regeneration' ? await runFullOutlineRegenerationLoop(ctx, process.cwd())

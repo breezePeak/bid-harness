@@ -774,10 +774,11 @@ export async function runChapterWritingLoop(ctx: Context, root: string) {
  * 通过真实工具循环验证 S3 初稿遗漏后的局部续修与用户确认停点。
  * @param ctx Loader 组装的 Agent、工具及持久化服务。
  * @param root 场景隔离工作区。
- * @param scenario 可写父章首次修复失败后，是否恢复原 Work 并迁移响应点。
+ * @param scenario 正常生成、叶节响应点缺项，或父章修复失败后的原 Work 恢复。
  * @returns 阶段失败与重试结果、正式产物及实际模型任务数。
  */
-export async function runOutlineGenerationLoop(ctx: Context, root: string, scenario: 'normal' | 'structural-parent' = 'normal') {
+export async function runOutlineGenerationLoop(ctx: Context, root: string,
+  scenario: 'normal' | 'structural-parent' | 'missing-response-point' = 'normal') {
   const workspace = new BidWorkspace(root)
   await prepareS2(workspace)
   const outline = parseOutlineArtifact(JSON.parse(await readFile(join(workspace.projectRoot, 'outline/initial-confirmed-outline.json'), 'utf8')))
@@ -829,6 +830,13 @@ export async function runOutlineGenerationLoop(ctx: Context, root: string, scena
     for (const [attempt, operations] of attempts.entries()) repairScript.push(
       toolCall(`repair-outline-${attempt + 1}`, 'structured_output', { operations }),
     )
+  }
+  if (scenario === 'missing-response-point') {
+    candidate.sections[0]!.response_point_positions = pointIds.slice(0, -1).map((_id, index) => index)
+    repairScript.push(toolCall('repair-outline-response-point', 'structured_output', { operations: [
+      { type: 'update_section', section_position: 1, response_point_positions: pointIds.map((_id, index) => index),
+        must_answer: section.must_answer, writing_notes: ['明确审计留存期限与追溯责任。'] },
+    ] }))
   }
   const childScript = [
     toolCall('response-points-analysis', 'structured_output', responseCandidate),

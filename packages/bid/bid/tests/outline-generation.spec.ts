@@ -1472,6 +1472,8 @@ describe('S3 确定性规范化与局部续修', () => {
       if (prompt.includes('局部响应点修复')) {
         for (const text of [catalog.points[1]!.text, scoring.scoring_items[0]!.raw_text, '项目组织与职责', 'must_answer']) expect(prompt).toContain(text)
         expect(prompt).toContain('response_point_positions')
+        expect(prompt).toContain('业务关联只提交 response_point_positions')
+        expect(prompt).not.toContain('按问题选择 requirement_positions')
         expect(prompt).not.toContain('SEC-ORGANIZATION')
         return { operations: repairSchedule }
       } else {

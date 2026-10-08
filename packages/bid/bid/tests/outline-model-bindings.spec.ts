@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import type { z } from 'zod'
 import { bindOutlineModelCandidate, bindOutlineModelCandidateRepairs, bindOutlineModelRepairOperations,
   bindOutlineModelStructuralOperations, outlineModelInputView, outlineModelView, outlineModelRepairOperationSchema,
+  outlineModelResponsePointRepairOperationSchema,
   type OutlineModelBindingInputs } from '../src/outline-model-bindings.ts'
 import { outlineModelCandidateSchema } from '../src/outline-generation-artifacts.ts'
 import { bindScoringResponsePointModelCandidate, createScoringResponsePointCatalog,
@@ -196,6 +197,30 @@ describe('S3 程序绑定身份', () => {
     expect(() => bindOutlineModelRepairOperations([{ type: 'repair_structure', section_index: 1, id: 'invented' }], outline(), inputs)).toThrow()
     const repaired = bindOutlineModelRepairOperations([{ type: 'repair_structure', section_index: 1, regenerate_id: true }], outline(), inputs)
     expect(repaired).toEqual([{ type: 'repair_structure', section_index: 1, id: 'SEC-004' }])
+  })
+
+  it.each([
+    { type: 'update_section', section_position: 1, must_answer: ['明确组织岗位职责'], response_point_positions: [0] },
+    { type: 'add_section', parent_position: 0, sibling_position: 2, title: '组织职责', purpose: '说明组织职责',
+      must_answer: ['明确组织岗位职责'], response_point_positions: [0] },
+    { type: 'split_section', section_position: 1, children: [
+      { title: '组织职责', purpose: '说明组织职责', must_answer: ['明确组织岗位职责'], response_point_positions: [0] },
+      { title: '进度控制', purpose: '说明进度控制', must_answer: ['明确进度控制措施'], response_point_positions: [1] },
+    ] },
+  ])('响应点修复 $type 的模型输出能经正式操作器应用，并拒绝范围外关联', (operation) => {
+    const original = outline()
+    const accepted = outlineModelResponsePointRepairOperationSchema.parse(operation)
+    const bound = bindOutlineModelRepairOperations([accepted], original, inputs, true)
+    const result = applyOutlineModelRepair(original, bound, catalog, scoring)
+    expect(result.sections.some(section => section.writable && section.scoring_response_point_ids?.includes('RP-000001'))).toBe(true)
+    for (const field of ['origin', 'requirement_positions', 'scoring_positions', 'compliance_positions', 'framework_refs']) {
+      const value = field === 'origin' ? 'generated' : []
+      const invalid = operation.type === 'split_section'
+        ? { ...operation, children: operation.children.map(child => ({ ...child, [field]: value })) }
+        : { ...operation, [field]: value }
+      expect(outlineModelResponsePointRepairOperationSchema.safeParse(invalid).success).toBe(false)
+      expect(() => bindOutlineModelRepairOperations([invalid], original, inputs, true)).toThrow()
+    }
   })
 
   it('局部重生成仅绑定结构位置，业务引用写入被拒绝', () => {
