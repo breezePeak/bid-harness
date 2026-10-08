@@ -1226,13 +1226,13 @@ describe('BidStagePanel', () => {
     expect(panel.querySelector('[data-active="true"]')).toBeNull()
   })
 
-  it('计划读取失败标记旧状态，切换会话不显示前一会话计划', async () => {
+  it('计划读取失败标记旧状态，切换会话不显示前一会话计划或额外错误提示', async () => {
     const main = projection({ runtime: { stage: 'evidence_mapping', status: 'completed' } })
     const plan: BidCapabilityPlanView = { workId: 'source-plan', title: '评分目录修复', scope: 'project', status: 'running',
       steps: [{ id: 'fix', capability: 'outline.update', description: '将评分章节移至顶层', status: 'running', detail: null }] }
     const view = render(<BidStagePanel {...props(main, { getCapabilityTaskPlan: async () => plan })} />)
     await screen.findByTestId('bid-capability-plan')
-    const unreadable = async (): Promise<BidCapabilityPlanView | null> => { throw new Error('连接中断') }
+    const unreadable = vi.fn(async (): Promise<BidCapabilityPlanView | null> => { throw new Error('连接中断') })
     view.rerender(<BidStagePanel {...props(main, { getCapabilityTaskPlan: unreadable })} />)
     await screen.findByText('更新暂不可用，显示上次状态')
     expect(screen.getByTestId('bid-capability-plan').textContent).toContain('将评分章节移至顶层')
@@ -1240,11 +1240,24 @@ describe('BidStagePanel', () => {
     view.rerender(<BidStagePanel {...props(main, { sessionId: 'session_other' as BidStagePanelProps['sessionId'],
       getCapabilityTaskPlan: unreadable })} />)
     expect(screen.queryByTestId('bid-capability-plan')).toBeNull()
-    await screen.findByText('任务计划暂时无法读取，请查看任务轨迹。')
+    await waitFor(() => { expect(unreadable).toHaveBeenCalledTimes(2) })
+    expect(screen.queryByText('任务计划暂时无法读取，请查看任务轨迹。')).toBeNull()
     view.rerender(<BidStagePanel {...props(main, { getCapabilityTaskPlan: async () => ({ ...plan, status: 'completed',
       steps: [{ ...plan.steps[0]!, status: 'completed', detail: '层级已核验' }] }) })} />)
     await waitFor(() => { expect(screen.queryByText('任务计划暂时无法读取，请查看任务轨迹。')).toBeNull() })
     expect(screen.queryByTestId('bid-capability-plan')).toBeNull()
+  })
+
+  it('S2 能力计划首次读取失败时仍显示正常阶段计划', async () => {
+    const getCapabilityTaskPlan = vi.fn(async (): Promise<BidCapabilityPlanView | null> => { throw new Error('连接中断') })
+    render(<BidStagePanel {...props(projection({
+      runtime: { stage: 'tender_analysis', status: 'running' },
+      run: { progress: { phase: 'collecting', summary: '正在提取招标信息', updatedAt: 2 } },
+    }), { getCapabilityTaskPlan })} />)
+    await waitFor(() => { expect(getCapabilityTaskPlan).toHaveBeenCalledOnce() })
+    expect(screen.getByTestId('bid-stage-plan').textContent).toContain('计划 · S2 招标分析')
+    expect(screen.getByTestId('bid-stage-plan').textContent).toContain('整理项目、技术、评分与合规信息')
+    expect(screen.queryByText('任务计划暂时无法读取，请查看任务轨迹。')).toBeNull()
   })
 
   it('S5 完成后只显示独立 S6 任务，S5 修改时保留两个真实计划', async () => {

@@ -45,7 +45,6 @@ export const zh = {
   'capability.status.failed': '执行失败',
   'capability.status.suspended': '已挂起',
   'capability.status.stale': '更新暂不可用，显示上次状态',
-  'capability.unavailable': '任务计划暂时无法读取，请查看任务轨迹。',
   'plan.progress.completed': '{count} 已完成',
   'plan.progress.active': '{count} 正在进行',
   'plan.progress.unfinished': '{count} 未收尾',

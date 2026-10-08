@@ -1142,8 +1142,7 @@ export function BidStagePanel({
       }] }}
       testId="bid-capability-plan"
     />
-  ) : capabilitySnapshot?.sessionId === sessionId && capabilitySnapshot.stale
-    ? <p role="status">{t('capability.unavailable')}</p> : null
+  ) : null
   const exportPlan = docxExport?.status === 'running' ? (
     <div>
       <PlanListPanel
