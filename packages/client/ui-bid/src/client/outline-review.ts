@@ -116,6 +116,7 @@ export function outlineDropOperation(outline: OutlineArtifact, sourceId: string,
   const titles = new Set<string>()
   for (const section of moved.sections) {
     if (section.writable === parents.has(section.id)) return null
+    if (section.writable && section.must_answer.length === 0) return null
     const key = `${section.parent_id}\u0000${section.title.normalize('NFKC').toLocaleLowerCase().replace(/[^\p{L}\p{N}]/gu, '')}`
     if (titles.has(key)) return null
     titles.add(key)

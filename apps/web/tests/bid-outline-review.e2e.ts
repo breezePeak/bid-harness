@@ -10,6 +10,10 @@ import {
   checkpointBidProjectState,
   createScoringResponsePointCatalog,
   outlineArtifactSha256,
+  parseEvidenceMapArtifact,
+  parseScoringResponsePointCatalog,
+  parseTenderRequirementsArtifact,
+  sectionVisibleRequirements,
   TECHNICAL_DEVIATION_SECTION_ID,
   type BidStage,
   type BidTaskState,
@@ -20,14 +24,15 @@ import { resolveSessionPreset } from '@deepseek-ai/dsh-agent-presets'
 import { launchWebScaffold } from './scaffold.ts'
 import { connectFreshWorkspaceZh, saveFailureShot, ZH_BROWSER_LOCALE } from './support.ts'
 import { seedProjectArtifacts } from '../../../packages/bid/bid/tests/fixtures/project-session.ts'
+import { ensureTechnicalDeviationSection } from '../../../packages/bid/bid/src/outline-generation-normalization.ts'
+import { buildSectionAnswerChecklist } from '../../../packages/bid/bid/src/section-answer-plan.ts'
 
 type PublishedTask = { readonly stage: BidStage; readonly status: 'running' | 'waiting_user' | 'completed' }
 
 class OutlineFinalCheckAdapter extends LlmAdapter {
-  private step = 0
-
   override async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
-    const step = this.step++
+    const step = options.messages.flatMap(message => message.content)
+      .filter(block => block.type === 'tool-call' && ['list_review_items', 'review_items', 'finish_final_check'].includes(block.name)).length
     let name = 'finish_final_check'
     let args: object = {}
     if (step === 0) name = 'list_review_items'
@@ -36,14 +41,21 @@ class OutlineFinalCheckAdapter extends LlmAdapter {
         if (block.type !== 'tool-result') return []
         return block.content.flatMap((content) => {
           if (content.type !== 'text') return []
-          const value = JSON.parse(content.text) as { pending_items?: Array<{ review_ref: string }> }
-          return value.pending_items ?? []
+          const value = JSON.parse(content.text) as {
+            pending_items?: Array<{ review_ref: string }>
+            objects?: { reviews: Array<{ id: string; position: number }> }
+          }
+          return value.pending_items?.map((item) => {
+            const review = value.objects?.reviews.find(review => review.id === item.review_ref)
+            if (review === undefined) throw new Error('待审项缺少当前审核对象位置')
+            return { review_position: review.position, decision: 'keep', reason: '当前章节要求与已确认目录一致。' }
+          }) ?? []
         })
       })
       name = 'review_items'
-      args = { items: pending.map(item => ({ review_ref: item.review_ref, decision: 'keep', reason: '当前章节要求与已确认目录一致。' })) }
+      args = { items: pending }
     }
-    if (step > 2) {
+    if (step > 2 || !options.tools?.some(tool => tool.name === 'finish_final_check')) {
       yield { type: 'block-start', index: 0, blockType: 'text' }
       yield { type: 'block-end', index: 0, block: { type: 'text', text: '目录复核完成。' } }
       yield { type: 'finish', reason: { kind: 'stop' } }
@@ -373,21 +385,28 @@ it('S4 经真实确认进入 S5 后，BidDetails 从持久化最终版本恢复�
       'outline/quality-report.json': { schema_version: 3, scope: 'technical_bid', checked_requirement_ids: ['REQ-1'], checked_scoring_ids: ['SCORE-1'], checked_scoring_response_point_ids: ['RP-000001'], reviewed_section_ids: ['SEC-1'], issues: [] },
       'analysis/web-evidence-sources.json': { stage: 'evidence_mapping', sources: [] },
     })) await writeFile(join(workspace.projectRoot, path), JSON.stringify(value))
-    const evidenceMap = JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/evidence-map.json'), 'utf8')) as {
-      section_mappings: Array<{
-        section_id: string
-        local_materials: unknown[]
-        web_materials: unknown[]
-        missing_topics: string[]
-        writing_dimensions: string[]
-      }>
-    }
+    const evidenceMap = parseEvidenceMapArtifact(JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/evidence-map.json'), 'utf8')))
     evidenceMap.section_mappings.unshift({ section_id: TECHNICAL_DEVIATION_SECTION_ID,
       local_materials: [], web_materials: [], missing_topics: [], writing_dimensions: ['逐项说明技术响应与偏离'] })
+    const sections = ensureTechnicalDeviationSection(finalOutline.sections)
+    const requirements = parseTenderRequirementsArtifact(JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/requirements.json'), 'utf8')))
+    const responsePoints = parseScoringResponsePointCatalog(JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/scoring-response-points.json'), 'utf8')))
+    for (const mapping of evidenceMap.section_mappings) {
+      const section = sections.find(section => section.id === mapping.section_id)
+      if (section === undefined) throw new Error('资料映射缺少当前目录章节')
+      mapping.answer_plan = [{
+        targets: buildSectionAnswerChecklist({ section, requirements: sectionVisibleRequirements(section, requirements),
+          responsePoints: responsePoints.points.filter(point => section.scoring_response_point_ids?.includes(point.id)),
+          compliance: [] }).map(item => item.target),
+        mode: 'proposal', content: `按已确认职责落实${section.purpose}，逐项回应招标要求。`,
+        basis: [{ kind: 'section_responsibility', section_id: section.id }],
+        boundary: '拟定方案不证明未经确认的交付参数或企业能力。',
+      }]
+    }
     await writeFile(join(workspace.projectRoot, 'analysis/evidence-map.json'), JSON.stringify(evidenceMap))
     for (const path of ['chapters/writing-plan.json', 'chapters/execution-log.json', 'chapters/manifest.json']) {
       const artifact = JSON.parse(await readFile(join(workspace.projectRoot, path), 'utf8')) as Record<string, unknown>
-      artifact.confirmed_outline_sha256 = outlineArtifactSha256(finalOutline)
+      artifact.confirmed_outline_sha256 = outlineArtifactSha256({ ...finalOutline, sections })
       await writeFile(join(workspace.projectRoot, path), JSON.stringify(artifact))
     }
     await rm(join(workspace.projectRoot, 'outline/confirmed-outline.json'))

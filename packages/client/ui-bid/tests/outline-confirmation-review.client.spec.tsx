@@ -229,7 +229,13 @@ describe('目录拖拽与差异', () => {
     expect(outlineDropOperation(moved, 'SEC-004', 'SEC-001', 'inside')).toMatchObject({ parent_id: 'SEC-001', order: 1 })
     expect(outlineDropOperation(outline, 'SEC-001', 'SEC-002', 'inside')).toBeNull()
     expect(outlineDropOperation(outline, 'SEC-001', 'SEC-002', 'before')).toBeNull()
-    expect(outlineDropOperation(outline, 'SEC-004', 'SEC-003', 'inside')).toBeNull()
+    const nested = outlineDropOperation(outline, 'SEC-004', 'SEC-003', 'inside')!
+    expect(nested).toEqual({ type: 'move_section', section_id: 'SEC-004', parent_id: 'SEC-003', order: 1 })
+    const nestedOutline = applyOutlineEdits(outline, [nested])
+    expect(nestedOutline.sections.find(section => section.id === 'SEC-003')).toMatchObject({ writable: false, must_answer: [] })
+    expect(nestedOutline.sections.find(section => section.id === 'SEC-004')).toMatchObject({
+      ...outline.sections[3]!, parent_id: 'SEC-003', order: 1,
+    })
     expect(outlineDropOperation(outline, 'REQ-01', 'SEC-001', 'inside')).toBeNull()
     expect(outlineDropOperation(outline, 'SEC-001', 'REQ-01', 'inside')).toBeNull()
     expect(outlineDropOperation(testOutline, 'SEC-002', 'SEC-003', 'after')).toBeNull()
