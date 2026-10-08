@@ -268,10 +268,10 @@ function stepCandidateWorkspace(working: BidWorkspace, parent: BidWorkDescriptor
 }
 
 /**
- * 读取当前能力步骤的私有资料映射工作区；其他步骤不复用项目根目录的旧日志。
+ * 读取同一 Work 当前或最近完成的研究步骤工作区；不复用项目根目录的旧日志。
  * @param canonical 项目正式工作区。
  * @param work 当前能力 Work。
- * @returns 当前资料映射步骤的私有工作区；不适用时返回 null。
+ * @returns 同 Work 的研究步骤私有工作区；未执行研究时返回 null。
  */
 export async function activeCapabilityMappingWorkspace(
   canonical: BidWorkspace, work: BidWorkDescriptor,
@@ -288,10 +288,12 @@ export async function activeCapabilityMappingWorkspace(
   if (checkpoint.work_id !== work.workId || checkpoint.request_sha256 !== work.requestSha256) {
     throw new Error('BID_CAPABILITY_CHECKPOINT_IDENTITY_MISMATCH')
   }
+  const mappingStep = (record: z.infer<typeof stepRecordSchema>) =>
+    record.step.call.capability === 'outline.refine' || record.step.call.capability === 'evidence.research'
   const step = checkpoint.steps.find(record =>
     (record.status === 'running' || record.status === 'awaiting_input')
-    && (record.step.call.capability === 'outline.refine' || record.step.call.capability === 'evidence.research'))
-  if (step === undefined || (step.status !== 'running' && step.status !== 'awaiting_input')) return null
+    && mappingStep(record)) ?? checkpoint.steps.findLast(record => record.status === 'completed' && mappingStep(record))
+  if (step === undefined || step.status === 'pending') return null
   try {
     const working = new BidWorkspace(bidWorkRoot(canonical, work), canonical.config)
     return stepCandidateWorkspace(working, work, step.step_id, step.input_sha256).workspace
@@ -714,6 +716,28 @@ async function saveCheckpoint(
 }
 
 /**
+ * 核对同一用户授权的相同补丁，包括追加后工具重新计算的末尾索引。
+ * @param checkpoint 原 Work 的当前步骤记录。
+ * @param authorization 本次用户授权。
+ * @param fromIndex 工具绑定的后缀起点。
+ * @param steps 本次语义步骤。
+ * @param restartPending 是否重新迁移未发布候选。
+ * @returns 当前最后补丁是否已接纳相同请求。
+ */
+export function capabilityPlanPatchRepeated(checkpoint: CapabilityTaskCheckpoint,
+  authorization: CapabilityTaskRequest['authorization'], fromIndex: number,
+  steps: readonly BidCapabilityStep[], restartPending?: true): boolean {
+  const existing = checkpoint.plan_patches.at(-1)
+  return existing !== undefined && existing.authorization.session_id === authorization.session_id
+    && existing.authorization.message_id === authorization.message_id
+    && existing.restart_pending === restartPending
+    && (existing.from_index === fromIndex || fromIndex === checkpoint.steps.length
+      && existing.from_index + existing.steps.length === checkpoint.steps.length)
+    && JSON.stringify(existing.steps.map(step => storedStepSchema.parse(step)))
+      === JSON.stringify(steps.map(step => storedStepSchema.parse(step)))
+}
+
+/**
  * 替换未完成步骤后缀或追加已发布结果的纠正；保留已完成步骤及不可变请求。
  * @param run 当前 Run 的检查点写入权限。
  * @param canonical 正式项目。
@@ -754,6 +778,9 @@ export async function patchCapabilityTaskSteps(
       && event.data.source.kind === 'user')
   if (restartPending && !restartAuthorized) throw new Error('BID_CAPABILITY_CANDIDATE_RESTART_UNAUTHORIZED')
   const checkpoint = await readCapabilityTaskCheckpoint(canonical, working, run, request, session)
+  if (checkpoint !== null && capabilityPlanPatchRepeated(checkpoint, authorization, fromIndex, steps, restartPending)) {
+    return checkpoint
+  }
   if (published !== undefined && (checkpoint === null || fromIndex !== checkpoint.steps.length || steps.length === 0
     || checkpoint.steps.some(step => step.status !== 'completed') || published.work_id !== run.work.workId
     || published.request_sha256 !== run.work.requestSha256 || published.goal_met !== true)) {
@@ -762,12 +789,6 @@ export async function patchCapabilityTaskSteps(
   if (checkpoint === null || checkpoint.steps.some((step, index) => step.status === 'awaiting_input'
     || step.status === 'running' && (!(recoverable || restartAuthorized) || index < fromIndex))) {
     throw new Error('BID_CAPABILITY_PLAN_PATCH_NOT_READY')
-  }
-  const existing = checkpoint.plan_patches.at(-1)
-  if (existing?.authorization.message_id === authorization.message_id
-    && existing.restart_pending === restartPending
-    && existing.from_index === fromIndex && JSON.stringify(existing.steps) === JSON.stringify(steps)) {
-    return checkpoint
   }
   if (!Number.isSafeInteger(fromIndex) || fromIndex < 0 || fromIndex > checkpoint.steps.length
     || checkpoint.steps.slice(fromIndex).some(step => step.status !== 'pending' && !((recoverable || restartAuthorized) && step.status === 'running')

@@ -1,7 +1,6 @@
 import { lstat, readFile } from 'node:fs/promises'
 import { posix } from 'node:path'
 import { evidenceChunkId, parseDocumentChunkIndex, type DocumentChunkEntry } from './document-chunk.ts'
-import type { LocalEvidenceMaterial } from './evidence-mapping-artifacts.ts'
 import type { BidManifest, BidWorkspace, ManifestFile } from './index.ts'
 import { assertNoLinkedPath, within } from './workspace-path.ts'
 
@@ -23,7 +22,7 @@ export interface ResolvedEvidenceChunk {
 export async function resolveEvidenceChunk(
   workspace: BidWorkspace,
   manifest: BidManifest,
-  material: Pick<LocalEvidenceMaterial, 'source_kind' | 'file_id' | 'chunk'>,
+  material: { source_kind: ManifestFile['role']; file_id: string; chunk: string },
 ): Promise<ResolvedEvidenceChunk> {
   const file = manifest.files.find(candidate => String(candidate.id) === material.file_id
     && candidate.role === material.source_kind)

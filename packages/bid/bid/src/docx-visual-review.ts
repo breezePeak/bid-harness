@@ -1,4 +1,4 @@
-/** S6 视觉敏感块的稳定指纹、项目缓存和最终 Word 页面审核。 */
+/** S6 视觉敏感块的稳定指纹、页面缓存和最终 DOCX 验收集合。 */
 import { createHash } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import type { Context } from '@deepseek-ai/cordis'
@@ -71,7 +71,10 @@ export interface VisualReviewState {
   readonly blockId: string
   readonly kind: VisualBlockKind
   readonly inputHash: string
+  /** 目标页与相邻页的页码、总页数和 PNG 摘要。 */
   readonly outputHash?: string | undefined
+  /** 此结论最后一次匹配的完整 DOCX 字节摘要。 */
+  readonly documentHash?: string | undefined
   readonly status: 'pending' | 'passed' | 'failed'
   readonly adjustment?: VisualBlockAdjustment | undefined
   readonly reviewedAt?: string | undefined
@@ -94,13 +97,14 @@ const stateSchema = z.strictObject({
   kind: z.enum(['flowchart', 'table', 'image']),
   inputHash: z.string().regex(/^sha256:[a-f\d]{64}$/u),
   outputHash: z.string().regex(/^sha256:[a-f\d]{64}$/u).optional(),
+  documentHash: z.string().regex(/^sha256:[a-f\d]{64}$/u).optional(),
   status: z.enum(['pending', 'passed', 'failed']),
   adjustment: adjustmentSchema.optional(),
   reviewedAt: z.string().optional(),
   reviewVersion: z.string().min(1),
   summary: z.string().max(240).optional(),
 })
-const cacheSchema = z.strictObject({ version: z.literal(1), entries: z.array(stateSchema) })
+const cacheSchema = z.strictObject({ version: z.literal(2), entries: z.array(stateSchema) })
 const decisionSchema = z.union([
   z.strictObject({ status: z.literal('pass'), reason: z.string().max(240).optional() }),
   z.strictObject({ status: z.literal('adjust'), reason: z.string().min(1).max(240), adjustment: adjustmentSchema }),
@@ -127,6 +131,19 @@ export interface VisualReviewExecutionOptions {
   readonly renderPdf?: (docx: Buffer) => Promise<Uint8Array>
   readonly renderPages?: typeof renderPdfReviewPages
   readonly now?: () => string
+}
+
+/** 只在全部视觉块对应同一最终 DOCX 时产生的导出结果。 */
+export interface VisualReviewResult {
+  readonly bytes: Buffer
+  readonly adjustments: VisualReviewAdjustments
+  /** 完整最终 DOCX 字节摘要；每个 reviews 项的 documentHash 与它相同。 */
+  readonly outputHash: string
+  readonly reviews: readonly (VisualReviewState & {
+    readonly status: 'passed'
+    readonly outputHash: string
+    readonly documentHash: string
+  })[]
 }
 
 /** 已规范化并完成联合输入摘要的视觉块。 */
@@ -340,7 +357,7 @@ async function readCache(workspace: BidWorkspace): Promise<VisualReviewState[]> 
 async function writeCache(workspace: BidWorkspace, entries: readonly VisualReviewState[]): Promise<void> {
   const path = within(workspace.projectRoot, DOCX_VISUAL_REVIEW_CACHE_PATH)
   await assertNoLinkedPath(workspace.root, path)
-  const cache = cacheSchema.parse({ version: 1, entries })
+  const cache = cacheSchema.parse({ version: 2, entries })
   await writeFileAtomic(path, `${JSON.stringify(cache, null, 2)}\n`, { mode: 0o600, dirMode: 0o700 })
 }
 
@@ -356,12 +373,14 @@ function adjustmentFor(kind: VisualBlockKind, adjustment: VisualBlockAdjustment)
 
 function pagesHash(pages: readonly RenderedPdfPage[]): string {
   const digest = createHash('sha256')
-  for (const page of pages) digest.update(String(page.page)).update(page.data)
+  for (const page of pages) {
+    digest.update(canonicalJson({ page: page.page, pageCount: page.pageCount, bytes: page.data.length })).update(page.data)
+  }
   return `sha256:${digest.digest('hex')}`
 }
 
 /**
- * 复用 passed 缓存，或渲染最终 Word 页面并按块审核、调整和复验。
+ * 将缓存与当前页面图片比较，按块审核；任何调整后重新检查全部块的页面。
  * @param workspace 持久化项目级审核缓存的工作区。
  * @param markdown 正式导出的完整 Markdown。
  * @param values 已确认的 Word 格式。
@@ -370,7 +389,7 @@ function pagesHash(pages: readonly RenderedPdfPage[]): string {
  * @param render 使用指定块级调整生成最终 DOCX 的回调。
  * @param signal 取消信号。
  * @param options 可替换的 PDF 页面渲染和时钟。
- * @returns 审核通过的 DOCX 与实际应用的调整。
+ * @returns 审核通过的 DOCX、实际调整和绑定最终字节摘要的验收集合；每块累计两次调整后仍不通过则拒绝导出。
  */
 export async function reviewDocxVisualBlocks(
   workspace: BidWorkspace,
@@ -381,74 +400,93 @@ export async function reviewDocxVisualBlocks(
   render: (adjustments: VisualReviewAdjustments) => Promise<Buffer>,
   signal: AbortSignal,
   options: VisualReviewExecutionOptions = {},
-): Promise<{ readonly bytes: Buffer; readonly adjustments: VisualReviewAdjustments }> {
+): Promise<VisualReviewResult> {
   const blocks = await collectVisualSensitiveBlocks(workspace, markdown, values, templateHash)
   let cache = await readCache(workspace)
   const adjustments: Record<string, VisualBlockAdjustment> = {}
-  const misses: VisualSensitiveBlock[] = []
   for (const block of blocks) {
     const cached = cache.find(entry => entry.blockId === block.blockId
       && entry.inputHash === block.inputHash
       && entry.reviewVersion === DOCX_VISUAL_REVIEW_VERSION
       && entry.status === 'passed')
-    if (cached === undefined) misses.push(block)
-    else if (cached.adjustment !== undefined) {
-      try { adjustments[block.blockId] = adjustmentFor(block.kind, cached.adjustment) } catch { misses.push(block) }
+    if (cached?.adjustment !== undefined) {
+      try { adjustments[block.blockId] = adjustmentFor(block.kind, cached.adjustment) } catch { /* 无效历史调整不应用；当前页面仍须审核。 */ }
     }
   }
+  signal.throwIfAborted()
   let bytes = await render(adjustments)
-  let pdf: Uint8Array | undefined
-  for (const block of misses) {
-    const blockIndex = blocks.indexOf(block)
-    let passed = false
-    for (let adjustmentRound = 0; adjustmentRound <= 2; adjustmentRound++) {
+  const adjustmentCounts = new Map<string, number>()
+  // 每块的调整次数在整次导出内累计；跨块分页变化不会刷新预算。
+  for (;;) {
+    const documentHash = hash(bytes)
+    const reviews: VisualReviewResult['reviews'][number][] = []
+    let pdf: Uint8Array | undefined
+    let changed = false
+    for (const [blockIndex, block] of blocks.entries()) {
       signal.throwIfAborted()
       pdf ??= await (options.renderPdf ?? renderDocxPdf)(bytes)
       const pages = await (options.renderPages ?? renderPdfReviewPages)(
         pdf, block.anchor, blockIndex, blocks.length, reviewer.imageLimits, signal,
       )
+      const outputHash = pagesHash(pages)
+      const adjustment = adjustments[block.blockId]
+      const state = {
+        blockId: block.blockId,
+        kind: block.kind,
+        inputHash: block.inputHash,
+        outputHash,
+        documentHash,
+        ...(adjustment === undefined ? {} : { adjustment }),
+        reviewVersion: DOCX_VISUAL_REVIEW_VERSION,
+      }
+      const cached = cache.find(entry => entry.blockId === block.blockId
+        && entry.inputHash === block.inputHash
+        && entry.reviewVersion === DOCX_VISUAL_REVIEW_VERSION
+        && entry.status === 'passed'
+        && entry.outputHash === outputHash
+        && canonicalJson(entry.adjustment ?? null) === canonicalJson(adjustment ?? null))
+      if (cached !== undefined) {
+        reviews.push({ ...cached, ...state, status: 'passed' })
+        continue
+      }
       const decision = decisionSchema.parse(await reviewer.review({
         block,
         pages,
-        ...(adjustments[block.blockId] === undefined ? {} : { adjustment: adjustments[block.blockId] }),
+        ...(adjustment === undefined ? {} : { adjustment }),
       }))
+      signal.throwIfAborted()
+      const reviewedAt = options.now?.() ?? new Date().toISOString()
       if (decision.status === 'pass') {
-        const state: VisualReviewState = {
-          blockId: block.blockId,
-          kind: block.kind,
-          inputHash: block.inputHash,
-          outputHash: pagesHash(pages),
-          status: 'passed',
-          ...(adjustments[block.blockId] === undefined ? {} : { adjustment: adjustments[block.blockId] }),
-          reviewedAt: options.now?.() ?? new Date().toISOString(),
-          reviewVersion: DOCX_VISUAL_REVIEW_VERSION,
-        }
-        cache = withState(cache, state)
-        await writeCache(workspace, cache)
-        passed = true
-        break
+        const passed: VisualReviewResult['reviews'][number] = { ...state, status: 'passed', reviewedAt }
+        reviews.push(passed)
+        cache = withState(cache, passed)
+        continue
       }
-      if (adjustmentRound === 2) {
+      const nextAdjustment = adjustmentFor(block.kind, decision.adjustment)
+      const adjustmentCount = adjustmentCounts.get(block.blockId) ?? 0
+      if (adjustmentCount === 2) {
         cache = withState(cache, {
-          blockId: block.blockId,
-          kind: block.kind,
-          inputHash: block.inputHash,
+          ...state,
           status: 'failed',
-          adjustment: adjustmentFor(block.kind, decision.adjustment),
-          reviewedAt: options.now?.() ?? new Date().toISOString(),
-          reviewVersion: DOCX_VISUAL_REVIEW_VERSION,
+          reviewedAt,
           summary: decision.reason,
         })
         await writeCache(workspace, cache)
-        break
+        throw new Error(`DOCX_VISUAL_REVIEW_FAILED:${block.blockId}`)
       }
-      adjustments[block.blockId] = adjustmentFor(block.kind, decision.adjustment)
+      adjustmentCounts.set(block.blockId, adjustmentCount + 1)
+      adjustments[block.blockId] = nextAdjustment
       bytes = await render(adjustments)
-      pdf = undefined
+      changed = true
+      break
     }
-    if (!passed) throw new Error(`DOCX_VISUAL_REVIEW_FAILED:${block.blockId}`)
+    if (changed) continue
+    signal.throwIfAborted()
+    for (const state of reviews) cache = withState(cache, state)
+    if (reviews.length > 0) await writeCache(workspace, cache)
+    signal.throwIfAborted()
+    return { bytes, adjustments, outputHash: documentHash, reviews }
   }
-  return { bytes, adjustments }
 }
 
 function allowedAdjustment(kind: VisualBlockKind): string {

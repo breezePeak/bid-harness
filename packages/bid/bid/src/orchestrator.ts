@@ -198,7 +198,7 @@ export class BidOrchestrator {
     const state = this.state
     const policy = getBidStagePolicy(state.stage)
     if (policy.executor !== 'program' || (state.status !== 'ready'
-      && !(state.stage === 'file_intake' && state.status === 'waiting_user'))) {
+      && !(state.stage === 'file_intake' && (state.status === 'waiting_user' || state.status === 'failed')))) {
       throw new BidOrchestratorError(
         'BID_PROGRAM_STAGE_NOT_ALLOWED',
         `cannot run Bid program stage ${JSON.stringify(state.stage)} while status is ${JSON.stringify(state.status)}`,
@@ -476,7 +476,7 @@ export class BidOrchestrator {
       const recovery = stage === 'file_intake' || stage === 'docx_export' ? undefined
         : safeRecoverableBidFailure(work, failure, validation.issues).recovery
       await this.runs.suspend(recovery?.kind === 'repair' ? 'retry_exhausted' : 'executor_error', {
-        ...failure, recovery,
+        ...failure, ...(recovery === undefined ? {} : { recovery }),
       })
       return 'failed'
     }

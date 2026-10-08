@@ -1,6 +1,7 @@
 /** Live S4 Web research assets shared by concurrent Mapping Children. */
 import { lstat, readFile } from 'node:fs/promises'
 import { join } from 'node:path'
+import { WebError } from '@deepseek-ai/dsh-llm'
 import { ToolArgsError, type ToolExecutionResult, type ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { ZodError } from 'zod'
 import type { BidWorkspace } from './index.ts'
@@ -117,7 +118,11 @@ export class S4WebResearchPool {
 
   private async fetchAndRegister(url: string, exec: ToolRunContext): Promise<{ asset: WebResearchAsset; reused: boolean }> {
     const result = await this.rawFetch(url, exec)
-    if (result.isError) throw new ToolArgsError([`url: Web 获取失败：${result.error.message}`])
+    if (result.isError) throw new WebError(`Web 获取失败：${result.error.message}`, result.error.info?.code ?? 'WEB_FETCH_FAILED', {
+      cause: result.error,
+      ...(result.error.info?.statusCode === undefined ? {} : { statusCode: result.error.info.statusCode }),
+      ...(result.error.info?.retryAfter === undefined ? {} : { retryAfter: result.error.info.retryAfter }),
+    })
     const snapshot = webEvidenceSnapshotFromFetch(url, result.value)
     if (snapshot === undefined) throw new ToolArgsError(['url: Web 获取未返回 HTTP 2xx 非空正文。'])
     const existing = this.assets.get(snapshot.source.source_id)

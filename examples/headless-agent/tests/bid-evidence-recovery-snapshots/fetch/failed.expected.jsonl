@@ -10,10 +10,10 @@
 {"type":"request/header","data":{"header":{"config":{"provider":"mock","model":"mock"},"system":"{{system}}","tools":"{{tools}}"},"reason":"initial"}}
 {"type":"request/context","data":{"provider":"mock","model":"mock"}}
 {"type":"assistant/chunk","data":{"turn":1,"step":1,"chunk":{"type":"block-start","index":0,"blockType":"tool-call"}}}
-{"type":"assistant/chunk","data":{"turn":1,"step":1,"chunk":{"type":"block-end","index":0,"block":{"type":"tool-call","id":"fault-search-0","name":"web_search","arguments":"{\"queries\":[\"注入网络故障\"]}"}}}}
+{"type":"assistant/chunk","data":{"turn":1,"step":1,"chunk":{"type":"block-end","index":0,"block":{"type":"tool-call","id":"fault-fetch-0","name":"web_fetch","arguments":"{\"url\":\"https://official.example/standard\"}"}}}}
 {"type":"assistant/chunk","data":{"turn":1,"step":1,"chunk":{"type":"finish","reason":{"kind":"tool-calls"}}}}
-{"type":"assistant/message","data":{"turn":1,"step":1,"message":{"role":"assistant","content":[{"type":"tool-call","id":"fault-search-0","name":"web_search","arguments":"{\"queries\":[\"注入网络故障\"]}"}],"source":{"kind":"model","provider":"mock","model":"mock"},"id":"{{sessionId}}"}},"sourceEventSeqs":[10,11,12],"surfaceOp":"append"}
-{"type":"tool/call","data":{"turn":1,"step":1,"callId":"fault-search-0","name":"web_search","arguments":"{\"queries\":[\"注入网络故障\"]}"}}
-{"type":"tool/result","data":{"turn":1,"step":1,"message":{"source":{"kind":"tool","callId":"fault-search-0"},"content":[{"type":"tool-result","toolCallId":"fault-search-0","content":[{"type":"text","text":"Error: 注入的联网故障"}],"isError":true}],"role":"user","id":"{{sessionId}}"},"error":{"name":"HarnessError","code":"WEB_PROVIDER_RATE_LIMITED","statusCode":429,"retryAfter":"0"}},"sourceEventSeqs":[14],"surfaceOp":"append"}
+{"type":"assistant/message","data":{"turn":1,"step":1,"message":{"role":"assistant","content":[{"type":"tool-call","id":"fault-fetch-0","name":"web_fetch","arguments":"{\"url\":\"https://official.example/standard\"}"}],"source":{"kind":"model","provider":"mock","model":"mock"},"id":"{{sessionId}}"}},"sourceEventSeqs":[10,11,12],"surfaceOp":"append"}
+{"type":"tool/call","data":{"turn":1,"step":1,"callId":"fault-fetch-0","name":"web_fetch","arguments":"{\"url\":\"https://official.example/standard\"}"}}
+{"type":"tool/result","data":{"turn":1,"step":1,"message":{"source":{"kind":"tool","callId":"fault-fetch-0"},"content":[{"type":"tool-result","toolCallId":"fault-fetch-0","content":[{"type":"text","text":"Error: Web 获取失败：注入的联网故障"}],"isError":true}],"role":"user","id":"{{sessionId}}"},"error":{"name":"WebError","code":"WEB_PROVIDER_RATE_LIMITED","statusCode":429,"retryAfter":"0"}},"sourceEventSeqs":[14],"surfaceOp":"append"}
 {"type":"step/end","data":{"turn":1,"step":1}}
 {"type":"turn/end","data":{"turn":1,"reason":{"kind":"aborted","reason":{"kind":"hook","reason":"evidence-mapping-web-provider-backoff"}}}}

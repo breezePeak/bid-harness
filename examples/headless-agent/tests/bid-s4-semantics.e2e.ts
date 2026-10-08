@@ -329,6 +329,7 @@ describe.skipIf(!process.env.DEEPSEEK_API_KEY && !process.env.DSH_BID_EVAL_PROVI
           taskOperations: [], researchCandidates: { local_material_refs: [], web_source_ids: [] }, snapshots: [], fetchedSnapshots: [],
           researchAssessment: {
             sufficient_for_blueprint: true,
+            evidence_requirement: { kind: 'not_required', reason: '当前任务依据招标范围提出实施方案，不声明外部事实或已有企业能力。' },
             diagnostics: { tender_and_response_points: scenario.scope, technical_approach: scenario.procedure,
               evidence_and_inferences: '技术责任来自样例，实施细节属于专业方案建议。', project_specific_quality_risks: '任务资料完整、一致且成果可复核。' },
             unresolved_gaps: [],

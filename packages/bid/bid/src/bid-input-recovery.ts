@@ -13,14 +13,19 @@ const journalSchema = z.object({
   work_id: z.string().min(1), request_sha256: z.string().regex(/^[a-f0-9]{64}$/u),
   run_id: z.string().min(1), question_key: z.string().min(1),
   kind: z.enum(['decision', 'capability']),
-  phase: z.enum(['pending', 'reading_checkpoint', 'asking', 'answered', 'applying', 'applied', 'failed', 'blocked']),
+  phase: z.enum(['pending', 'reading_checkpoint', 'asking', 'answered', 'applying', 'accepted', 'applied', 'failed', 'blocked']),
   attempts: z.number().int().nonnegative(), budget: z.number().int().min(1).max(20),
+  preparation_failures: z.number().int().nonnegative().default(0),
+  application: z.object({ id: z.string().regex(/^[a-f0-9]{64}$/u), attempt: z.number().int().positive(),
+    accepted_run: z.object({ run_id: z.string().min(1), epoch: z.number().int().positive() }).strict().optional() }).strict().optional(),
   decision: z.enum(['continue', 'restart_stage', 'stop']).optional(),
   answer: z.object({ id: z.string().min(1), selected: z.array(z.string()), custom: z.string().max(4000).optional() }).strict().optional(),
   error: z.object({ code: z.string(), message: z.string(), phase: z.string() }).strict().optional(),
-}).strict()
+}).strict().refine(record => record.application === undefined || record.application.attempt === record.attempts,
+  '应用标识必须绑定当前持久执行次数。').refine(record => record.phase !== 'accepted'
+    || record.application?.accepted_run !== undefined, '已接纳状态必须保存实际 Run 身份。')
 
-/** 一个原 Run 的输入应用记录；答案写入成功之后才发布 received。 */
+/** 一个原 Run 的输入应用记录；attempts 只计开始应用，准备失败独立计数，接纳身份先于 applied 保存。 */
 export type BidInputRecovery = z.infer<typeof journalSchema>
 
 /** 程序从原 Run 绑定记录身份，模型不提供标识或预算。 */
@@ -58,7 +63,8 @@ export async function readBidInputRecovery(workspace: BidWorkspace, binding: Bid
   await assertNoLinkedPath(workspace.root, path)
   let raw: string
   try { raw = await readFile(path, 'utf8') } catch (error: unknown) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { schema_version: 1, ...binding, phase: 'pending', attempts: 0, budget }
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { schema_version: 1, ...binding,
+      phase: 'pending', attempts: 0, preparation_failures: 0, budget }
     throw error
   }
   const record = journalSchema.parse(JSON.parse(raw))

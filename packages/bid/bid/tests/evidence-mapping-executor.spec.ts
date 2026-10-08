@@ -318,6 +318,7 @@ function branchResearchAssessment(
 ) {
   return {
     sufficient_for_blueprint: sufficient,
+    evidence_requirement: { kind: 'not_required', reason: '本章依据招标任务设计专业方法，没有需要外部资料证明的项目事实。' },
     diagnostics: {
       tender_and_response_points: '已理解本分支招标要求、评分点和响应点。',
       technical_approach: '已核对相关技术原理、实施路线和验证方法。',
@@ -706,7 +707,8 @@ function mappingFixture(
               } }))
             if (!taskResult.isError) await invokeSubmissionTool(child, tools.get('update_section_task')!, planToolArgs(section.id, taskResult))
           }
-          await invokeSubmissionTool(child, tools.get('submit_section_structure_assessment')!, structureAssessment())
+          const structureTool = tools.get('submit_section_structure_assessment')
+          if (structureTool !== undefined) await invokeSubmissionTool(child, structureTool, structureAssessment())
         }
         const apply = tools.get('apply_section_outline_edit')
         if (apply !== undefined) for (const [index, operation] of operations.entries()) {
@@ -2282,6 +2284,34 @@ describe('evidence-mapping Agent executor', () => {
     }
     expect(log.statistics.tools.web_search).toMatchObject({ calls: 1, succeeded: 0, failed: 1, failure_reasons: ['failed'] })
     expect(log.statistics.tools.web_fetch).toMatchObject({ calls: 0, succeeded: 0, failed: 0 })
+  })
+
+  it('零参考资料充分性必须说明本章证据需求，不能仅声称已研究', async () => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-research-demand-')))
+    const fixture = mappingFixture(workspace, await writeInputs(workspace))
+    const controller = new AbortController()
+    const execution = executeEvidenceMapping(fixture.agent, workspace, buildBidStageTask('evidence_mapping'), {
+      maxConcurrency: 1, maxRepairAttempts: 0, signal: controller.signal,
+    })
+    void execution.catch(() => {})
+    try {
+      await vi.waitFor(() => { expect(fixture.starts).toHaveLength(1) })
+      const assessment = { ...branchResearchAssessment() } as Record<string, unknown>
+      delete assessment.evidence_requirement
+      expect((await fixture.invokeSubmissionTool(fixture.starts[0]!.request.childId!, 'submit_section_research_assessment', assessment)).isError).toBe(true)
+      const external = { ...branchResearchAssessment(), evidence_requirement: {
+        kind: 'external_required', reason: '本章要求引用访问控制标准的正式条款。',
+      } }
+      expect((await fixture.invokeSubmissionTool(fixture.starts[0]!.request.childId!, 'submit_section_research_assessment', external)).isError).toBe(true)
+      expect((await fixture.invokeSubmissionTool(fixture.starts[0]!.request.childId!, 'submit_section_research_assessment', {
+        ...branchResearchAssessment(), evidence_requirement: { kind: 'local_sufficient', reason: '参考资料支持既有事实。' },
+      })).isError).toBe(true)
+      expect((await fixture.invokeSubmissionTool(fixture.starts[0]!.request.childId!, 'submit_section_research_assessment', branchResearchAssessment())).isError).toBe(false)
+    } finally {
+      controller.abort(new Error('测试结束'))
+      fixture.starts[0]?.complete()
+      await execution.catch(() => {})
+    }
   })
 
   it('Web 认证失败保留结构化根因并停止整批任务', async () => {

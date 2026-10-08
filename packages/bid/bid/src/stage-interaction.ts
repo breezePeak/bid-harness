@@ -692,7 +692,8 @@ const CAPABILITY_TASK_GUIDANCE = [
  */
 export function installStageInteractionTools(
   ctx: Context,
-  execute: (agent: Agent, request: unknown, signal: AbortSignal) => Promise<unknown>,
+  execute: (agent: Agent, request: unknown, signal: AbortSignal,
+    authorization?: ReturnType<typeof resolveBidToolAuthorization> | null) => Promise<unknown>,
   interacting: (session: Session) => boolean,
   workspaceFor: (session: Session) => BidWorkspace,
 ): void {
@@ -709,8 +710,9 @@ export function installStageInteractionTools(
       const recoveryAvailable = bidRunRecoveryEligibility(agent.session).eligible
         || bidWritingPlanRecoveryEligibility(agent.session).eligible
       const takeoverAvailable = bidCapabilityTakeoverRun(agent.session, task) !== undefined
+      const completedCapability = bidCompletedCapabilityRun(agent.session, task)
       const hasGoal = toolCtx.get('goals')?.get(agent) !== undefined
-      const actualScope = `${scope ?? 'none'}:${String(hasGoal)}:${String(recoveryAvailable)}:${String(takeoverAvailable)}`
+      const actualScope = `${scope ?? 'none'}:${String(hasGoal)}:${String(recoveryAvailable)}:${String(takeoverAvailable)}:${completedCapability?.runId ?? ''}`
       const existing = mounted.get(agent)
       if (existing?.scope === actualScope) return
       existing?.dispose()
@@ -917,12 +919,14 @@ export function installStageInteractionTools(
                   writing_request_id: target.requestId, attempt_id: target.attemptId }, exec.signal)
               }
               if (name === 'bid_plan_task') {
+                const authorization = resolveBidToolAuthorization(agent)
                 const request = z.object({ edit: planEditSchema, steps: z.array(z.unknown()) }).strict().parse(args)
                 const state = agent.session.events.reduce(reduceBidTaskState, BID_INITIAL_TASK_STATE)
                 const catalog = modelCatalogs.get(agent)
                 if (catalog === undefined) throw new Error('BID_MODEL_TASK_INSPECT_REQUIRED')
-                const run = bidRecoverableRun(agent.session, state) ?? bidCompletedCapabilityRun(agent.session, state)
-                if (run === undefined || state.status === 'completed' && request.edit !== 'append') throw new Error('BID_CAPABILITY_PLAN_PATCH_NOT_READY')
+                const completed = bidCompletedCapabilityRun(agent.session, state)
+                const run = bidRecoverableRun(agent.session, state) ?? completed
+                if (run === undefined || completed !== undefined && request.edit !== 'append') throw new Error('BID_CAPABILITY_PLAN_PATCH_NOT_READY')
                 const workspace = workspaceFor(agent.session)
                 const path = within(workspace.projectRoot, `runs/${run.work.workId}/task-checkpoint.json`)
                 await assertNoLinkedPath(workspace.root, path)
@@ -932,7 +936,7 @@ export function installStageInteractionTools(
                 if (from_index < 0) throw new Error('BID_CAPABILITY_PLAN_PATCH_NOT_READY')
                 return execute(agent, { action: name, work_id: run.work.workId, from_index,
                   ...request.edit === 'restart_pending' ? { restart_pending: true } : {},
-                  steps: bindBidModelSteps(request.steps, catalog) }, exec.signal)
+                  steps: bindBidModelSteps(request.steps, catalog) }, exec.signal, authorization ?? null)
               }
               if (name === 'bid_run_task') {
                 const catalog = modelCatalogs.get(agent)

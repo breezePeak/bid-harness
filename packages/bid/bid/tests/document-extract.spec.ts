@@ -2,8 +2,10 @@ import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { AlignmentType, Document, LevelFormat, Packer, Paragraph, Table, TableCell, TableRow } from 'docx'
-import { describe, expect, it } from 'vitest'
+import { AlignmentType, Document, ImageRun, LevelFormat, Packer, Paragraph, Table, TableCell, TableRow } from 'docx'
+import JSZip from 'jszip'
+import mammoth from 'mammoth'
+import { describe, expect, it, vi } from 'vitest'
 import { extractDocument, pdfPageText, sectionsFromMarkdown } from '../src/document-extract.ts'
 
 const fixture = (name: string): string => fileURLToPath(new URL(`./fixtures/${name}`, import.meta.url))
@@ -114,6 +116,38 @@ describe('extractDocument', () => {
     expect(markdown).toContain('投标报价<全部通过符合性审查供应商报价平均值×50%')
     expect(markdown).toContain('二、技术、服务部分（60分）')
     expect(markdown).toContain('2.设计方案（45分）')
+  })
+
+  it('提取带图片的真实 DOCX 正文时不读取媒体内容', async ({ onTestFinished }) => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-document-extract-'))
+    const source = join(root, '图片文件.docx')
+    const pixel = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9ZQmcAAAAASUVORK5CYII=', 'base64')
+    const document = new Document({ sections: [{ children: [
+      new Paragraph({ text: '项目实施管理', heading: 'Heading1' }),
+      new Paragraph({ children: [new ImageRun({ data: pixel, type: 'png', transformation: { width: 12, height: 12 } })] }),
+      new Paragraph('本项目采用分阶段交付。'),
+    ] }] })
+    const bytes = await Packer.toBuffer(document)
+    await writeFile(source, bytes)
+    const zip = await JSZip.loadAsync(bytes)
+    const media = zip.file(/^word\/media\/.+\.png$/u)
+    expect(media).toHaveLength(1)
+    // 观察真实 ZIP 解压调用，保留原实现。
+    const zipObjectPrototype = Object.getPrototypeOf(media[0]!) as JSZip.JSZipObject
+    const reads = vi.spyOn(zipObjectPrototype, 'async')
+    const readNames = () => reads.mock.contexts.map(entry => (entry as JSZip.JSZipObject).name)
+    onTestFinished(() => { reads.mockRestore() })
+    const defaultConversion = await mammoth.convertToHtml({ buffer: bytes })
+    expect(defaultConversion.value).toContain('data:image/png;base64,')
+    expect(readNames().some(name => name.startsWith('word/media/'))).toBe(true)
+    reads.mockClear()
+
+    const result = await extractDocument({ sourcePath: source, outputDir: join(root, 'corpus') })
+
+    expect(result).toMatchObject({ parseStatus: 'success', fileType: 'docx' })
+    expect(await readFile(result.documentPath!, 'utf8')).toBe('# 项目实施管理\n\n本项目采用分阶段交付。\n')
+    expect(readNames()).toContain('word/document.xml')
+    expect(readNames().some(name => name.startsWith('word/media/'))).toBe(false)
   })
 
   it('extracts a real Chinese Word 97-2003 DOC without system executables', async () => {

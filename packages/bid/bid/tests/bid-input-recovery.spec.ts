@@ -61,3 +61,11 @@ it('权限、版本、身份和未知故障不能按资源暂态重试', () => {
   }
   expect(retryableBidInputFailure(Object.assign(new Error('写盘暂态'), { code: 'EIO' }))).toBe(true)
 })
+
+it('应用身份必须绑定当前执行次数，已接纳记录必须包含 Run 身份', async () => {
+  const project = await workspace()
+  const record = await readBidInputRecovery(project, binding, 3)
+  await expect(writeBidInputRecovery(project, { ...record, attempts: 1,
+    application: { id: 'b'.repeat(64), attempt: 2 } })).rejects.toThrow('应用标识必须绑定当前持久执行次数')
+  await expect(writeBidInputRecovery(project, { ...record, phase: 'accepted' })).rejects.toThrow('已接纳状态必须保存实际 Run 身份')
+})

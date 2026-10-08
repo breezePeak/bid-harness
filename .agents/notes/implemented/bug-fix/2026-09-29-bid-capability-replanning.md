@@ -14,6 +14,8 @@ Status: implemented
 
 新的用户目标通过[挂起能力任务接管](2026-09-30-bid-suspended-capability-takeover.md)创建独立 Work；计划补丁只继续本段所述的原目标。
 
+已完成能力恢复原阶段后的纠正入口和重复补丁识别由[已完成能力纠正](2026-10-07-bid-completed-capability-correction-entry.md)补充；本记录的自动恢复授权与未完成步骤限制继续适用。
+
 本决策部分替代[主会话能力工具](../feature/2026-09-24-bid-main-capability-tools.md)和[能力步骤与发布](../architecture/2026-09-24-bid-capability-task-work.md)中仅由后续用户消息替换未开始步骤的限制，并补充[独立恢复授权](../architecture/2026-09-29-bid-goal-decoupling.md)。原 Work 身份、输入校验、项目锁和正式发布约束继续有效。
 
 ## Alternatives considered

@@ -226,6 +226,7 @@ describe('bid control-plane public contract', () => {
         readonly section_ids: readonly string[]
         readonly child_session_id: string | null
         readonly latest_issue: string | null
+        readonly research_diagnostics?: Exclude<BidEvidenceMappingProgress['tasks'][number]['research_diagnostics'], undefined>
       }[]
     }>()
   })

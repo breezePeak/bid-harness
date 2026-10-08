@@ -19,8 +19,9 @@ export function bidRecoverableRun(session: Session, task: BidTaskState):
   Extract<BidTaskState, { status: 'suspended' }>['run'] | undefined {
   if (task.status === 'suspended') return task.run
   if (task.status !== 'failed') return
-  const started = session.events.findLast(event => event.type === 'bid.run.started')
   const notice = session.events.findLast(event => event.type === 'bid.run.notice')
+  const started = notice?.type === 'bid.run.notice' ? session.events.findLast(event => event.type === 'bid.run.started'
+    && event.data.run.runId === notice.data.runId) : undefined
   if (started?.type !== 'bid.run.started' || notice?.type !== 'bid.run.notice'
     || started.data.run.work.stage !== task.stage
     || notice.data.noticeId !== `run:${started.data.run.runId}:failed` || notice.data.stage !== task.stage) return
@@ -31,13 +32,19 @@ export function bidRecoverableRun(session: Session, task: BidTaskState):
  * 读取当前完成通知对应的原能力 Run，供原会话追加纠正步骤。
  * @param session 保存该 Work 的公开 Main 会话。
  * @param task 已核对的当前项目状态。
- * @returns 与当前完成通知对应的原 Run；其他状态或任务返回 undefined。
+ * @returns 已实际完成且与当前完成通知对应的原 Run；停止、失败及其他任务返回 undefined。
  */
 export function bidCompletedCapabilityRun(session: Session, task: BidTaskState): BidRunData | undefined {
-  if (task.status !== 'completed') return
-  const started = session.events.findLast(event => event.type === 'bid.run.started')
-  const notice = session.events.findLast(event => event.type === 'bid.run.notice')
+  if (task.status !== 'ready' && task.status !== 'waiting_user' && task.status !== 'completed') return
+  const started = session.events.findLast(event => event.type === 'bid.run.started'
+    && event.data.run.work.kind === 'capability_task')
+  const notice = started?.type === 'bid.run.started' ? session.events.findLast(event => event.type === 'bid.run.notice'
+    && event.data.runId === started.data.run.runId) : undefined
+  const completed = started?.type === 'bid.run.started' ? session.events.findLast(event => event.type === 'bid.run.completed'
+    && event.data.run.runId === started.data.run.runId) : undefined
   if (started?.type !== 'bid.run.started' || notice?.type !== 'bid.run.notice'
+    || completed?.type !== 'bid.run.completed' || completed.data.run.runId !== started.data.run.runId
+    || completed.data.run.work.workId !== started.data.run.work.workId
     || started.data.run.work.kind !== 'capability_task' || started.data.run.work.stage !== task.stage
     || notice.data.kind !== 'completed' || notice.data.runId !== started.data.run.runId
     || notice.data.workId !== started.data.run.work.workId) return
@@ -74,7 +81,7 @@ const BLOCKED_CODE = new RegExp(
 const RETRY_CODE = new RegExp(
   '^(?:EIO|ETIMEDOUT|ECONNRESET|EAI_AGAIN|TRANSPORT|TIMEOUT|SERVER|EMPTY_RESPONSE|RATE_LIMIT|'
   + '(?:EVIDENCE_MAPPING|CHAPTER)_SUBAGENT_INFRASTRUCTURE_ERROR|'
-  + 'EVIDENCE_MAPPING_INFRASTRUCTURE_ERROR|WEB_PROVIDER_RATE_LIMITED|WEB_SEARCH_TIMEOUT|EVIDENCE_MAPPING_WEB_PROVIDER_BACKOFF)$', 'u',
+  + 'EVIDENCE_MAPPING_INFRASTRUCTURE_ERROR|WEB_PROVIDER_RATE_LIMITED|WEB_SEARCH_TIMEOUT|WEB_FETCH_TIMEOUT|TOOL_TIMEOUT|EVIDENCE_MAPPING_WEB_PROVIDER_BACKOFF)$', 'u',
 )
 const PROVIDER_FAILURE = new RegExp(
   '\\b(?:provider unavailable|model service unavailable|quota (?:exceeded|exhausted)|authentication failed|'

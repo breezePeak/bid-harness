@@ -3,7 +3,8 @@ import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { normalizeSessionSnapshot } from '@deepseek-ai/dsh-acp-snapshot'
-import { parseEvidenceMapArtifact, parseOutlineArtifact, parseOutlineQualityReport, parseWebEvidenceSourcesArtifact } from '@deepseek-ai/dsh-bid'
+import { type BidEvidenceMappingProgress, BidWorkspace, readEvidenceMappingProgress, parseEvidenceMapArtifact,
+  parseOutlineArtifact, parseOutlineQualityReport, parseWebEvidenceSourcesArtifact } from '@deepseek-ai/dsh-bid'
 import { LOADER_SMOKE_TEST_TIMEOUT_MS, runLoaderSmoke } from '@deepseek-ai/dsh-loader-smoke'
 import type { SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
 import { expect, it } from 'vitest'
@@ -171,6 +172,12 @@ it('corrects S4 tool arguments in one Child turn through the headless Loader', a
         chunk_refs: [expect.stringMatching(/^W:WEB-[a-f0-9]{16}:C0001$/u)],
       })
       const snapshots = await Promise.all(ledger.sources.map(source => readFile(join(projectRoot, source.snapshot_path), 'utf8')))
+      const researchLog = JSON.parse(await readFile(join(projectRoot, 'analysis/evidence-mapping-log.json'), 'utf8')) as {
+        tasks: Array<{ research_diagnostics?: BidEvidenceMappingProgress['tasks'][number]['research_diagnostics'] }>
+      }
+      expect(researchLog.tasks[0]?.research_diagnostics).toMatchObject({ status: 'display_omitted', searches: 1, fetched: 1, adopted: 2, bound: 2, displayed: 0 })
+      expect((await readEvidenceMappingProgress(new BidWorkspace(cwd)))?.tasks[0]?.research_diagnostics)
+        .toMatchObject({ status: 'bound', bound: 2, displayed: 2 })
       const artifacts = JSON.stringify({
         outline, map, ledger: { ...ledger, sources: ledger.sources.map(source => ({ ...source, fetched_at: '<TIME>' })) }, snapshots,
       }, null, 2) + '\n'

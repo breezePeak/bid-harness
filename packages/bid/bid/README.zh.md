@@ -17,9 +17,9 @@ await extractDocument({
 })
 ```
 
-PDF 提取使用文本位置保留物理行，并输出 `<!-- page: N -->` 注释。无文字 PDF 会写出带 `needs_ocr` 状态的语料；本包不执行 OCR。DOCX 提取会保留 Word 标题、列表、表格和正文中的比较符号（如 `<`、`>`），不伪造页码，也不会把比较符号误判为 HTML 标签。DOC 提取使用纯 JavaScript 的 `word-extractor`，因此 Windows、macOS 和 Linux 都不需要 Word、LibreOffice、`antiword` 或其他系统可执行文件。DOC 文本会保留自然段和制表符分隔的表格单元格，但二进制格式无法通过该 parser 提供可靠的 Markdown 标题层级或页码。
+PDF 提取使用文本位置保留物理行，并输出 `<!-- page: N -->` 注释。无文字 PDF 会写出带 `needs_ocr` 状态的语料；本包不执行 OCR。DOCX 提取保留 Word 标题、列表、表格和正文中的比较符号（如 `<`、`>`），不伪造页码或把比较符号误判为 HTML 标签；语料不读取或编码嵌入图片，接入时原 DOCX 字节完整保留在 `input/`。DOC 提取使用纯 JavaScript 的 `word-extractor`，因此 Windows、macOS 和 Linux 都不需要 Word、LibreOffice、`antiword` 或其他系统可执行文件。DOC 文本保留自然段和制表符分隔的表格单元格，但二进制格式无法通过该 parser 提供可靠的 Markdown 标题层级或页码。
 
-入库会拒绝空文件、不安全文件、不支持格式、超大文件和超数量批次。解析失败会保留原文件，并在 `manifest.json` 中记录稳定的提取错误。复用提取输出目录时，系统通过 `dsh-atomic-write` 原子替换三个完整语料文件。`exportDocx()` 只接受项目目录内 Markdown，并写入项目输出目录。
+入库拒绝空文件、不安全文件、不支持格式、超大文件和超数量批次。解析失败保留原文件，并在 `manifest.json` 记录稳定错误；当前批次没有成功解析的招标文件时，S1 保存失败终态、释放项目锁并允许再次上传。同一内容、同一资料类型重新解析成功后，成功条目替换清单中此前批次的失败条目，原始文件仍保留；本批次的每个文件结果分别保存。复用提取输出目录时，系统通过 `dsh-atomic-write` 原子替换三个完整语料文件。`exportDocx()` 只接受项目目录内 Markdown，并写入项目输出目录。
 
 S4 的映射计划和检查点通过当前 Agent 的文件系统服务提交；任一任务成功后立即将结果和 `completed=true` 写入关键状态队列，恢复调度和进度统计均以该完成标记覆盖执行日志中的瞬时状态。执行日志仅在子会话建立后标记任务运行中；准备子会话和等待重试期间保持待启动状态，旧日志中没有活动子会话身份的运行标记也按待启动投影。执行日志保留真正失败、运行中与未开始任务的区别并使用独立的尽力写入队列和原子替换；恢复只调度失败与未开始任务，首个失败任务通过恢复屏障后立即按配置并发继续。限流任务共用 Provider 冷却截止时间，分别计算重试预算；记录落盘耗时计入冷却，不另加一次等待。短暂的 Windows 文件占用会有限重试，重试耗尽只记录 Host 告警且不阻断后续检查点。
 
@@ -71,6 +71,8 @@ S5 私有工具同样按本轮对象位置选择章节关系、验收条件和�
 
 局部审核中断后，恢复保留已接纳且身份与摘要有效的正文及原 Writer，只继续未完成的 Reviewer；当前目录、计划、正文或材料变化仍使对应候选失效。已发布结果的用户纠正沿用原 Work，入口及凭据规则见[控制面运行时](README.md#control-plane-runtime)。
 
+已完成能力恢复 `ready`、`waiting_user` 或 `completed` 后，新的用户纠正均通过 `bid_plan_task(edit="append")` 追加到原 Work，再由 `bid_recover_task` 执行。同一消息重复提交相同补丁复用原记录，不重复追加、执行或消耗预算；原完成步骤、发布历史和授权范围保留。能力计划摘要显示当前 Run 与当前检查点的状态，旧完成记录不能覆盖追加步骤的待执行或运行状态。局部任务返回 `ready` 不因主 Agent 空闲自动推进整本路线，原生阶段入口仍可明确启动已有写作计划。
+
 主 Agent 对原能力 Work 的恢复指令作为执行上下文传给失败步骤；模型适配器仅在对应失败单元的提示中使用它，不改变不可变任务、输入摘要或已完成步骤。恢复准入前核对原授权会话，其他 Main 的请求不会创建新 Run。每次后台 Run 从当前 Main 最新持久请求 Header 取得 Provider 与模型，其 Child、Writer 和 Reviewer 继承该选择；续写旧 Writer 时仍保留原父子会话身份，下一次请求采用当前执行模型。结构化 `TRANSPORT`、`TIMEOUT`、`SERVER`、`EMPTY_RESPONSE` 和 `RATE_LIMIT` 按暂时通道错误分类，资料映射在有界预算内重建失败 Child；预算耗尽后保留原错误码，原 Work 恢复继续按网络重试处理。`AUTH`、`QUOTA`、`NO_ADAPTER`、`INVALID_REQUEST` 和未分类的 `PI_AI_ERROR` 保留原错误码并阻断自动恢复，不会被限流文本覆盖；主 Agent 读取诊断并向用户说明。Host 重启续行失败保留当前 Run 的错误通知并唤醒主 Agent。
 
 `bid_plan_task` 替换已经开始的 `chapter.write` 时保留原候选文件及哈希，在新步骤候选中恢复并由原执行器重验正文、审核和研究检查点。原写作范围不能缩小，已完成章节由执行器复用；`previous_targets` 只表示前一步结果的章节，迁移原文的目标集合可能少于全部新子章。改用其他能力或删除已开始的写作步骤会被拒绝，须保留写作并使用恢复指令调整未完成部分。原候选身份或文件哈希不符时拒绝恢复和发布。
@@ -91,6 +93,8 @@ S5 私有工具同样按本轮对象位置选择章节关系、验收条件和�
 
 选中非叶章节并允许深化时，首轮研究以该父节点为结构编辑根，覆盖完整子树；新增叶节随后单独研究。固定目录研究的 Initial Mapping 和 Final Check 均拒绝改变 Blueprint 职责或业务覆盖，结构问题直接报告。Final Check 之前持久化当前 Evidence 与目录候选，恢复只复用匹配研究请求、章节范围、目录和语料身份的检查点。用户补充的文字仅作为新研究的待核验输入；当前范围的 gap 必须重新评估，不能自动改为有依据。
 
+研究评估必须说明无需外部资料、本地资料足够或需要外部资料及其理由。需要外部资料时，充分结论必须引用真实读取的 Web 正文并绑定到章节；本地足够也须实际读取参考资料，招标条款不代替技术参考。执行日志按实际工具结果记录检索、候选、抓取、读取、采用、绑定与展示，保留排除理由和具体缺口；阶段及已完成的独立研究均从所属步骤候选读取诊断。
+
 全新项目的文件接入必须等待专用上传操作，因为其 Executor 需要已准入的文件批次。S2 的 Stage Policy 声明 `requiresUserConfirmationAfterValidation`；初次校验通过后记录 `bid.user_confirmation.required`，不记录完成事件。`confirmValidatedStage()` 在正式 Artifact 再次通过 Validator 后才记录用户确认和阶段完成。
 
 `registerBidRuntimeProjection()` 把同一状态归约函数注册为 DSH Session Projection `bid.runtime`。Projection 返回 `{ task: BidTaskState, ... }`，不再投影第二套 runtime、workflow 或最近 Run 状态。`allowedActions`、composer 能力以及 `allowedExtensions`、`maxFiles`、`maxFileBytes`、`maxTotalBytes` 限制均由 Host 生成；Client 不归约 Bid Event，也不根据 Stage、聊天或 Agent 活动推导业务状态和权限。`@deepseek-ai/dsh-bid/control-plane` 是不依赖 Node 文档处理库的 browser-safe 数据契约出口。
@@ -100,6 +104,8 @@ Host 插件注册该 Projection，并全局拒绝已解析 Preset 为 `bid` 的 
 `bid` Agent Preset 为 Bid Session 注册 `/bid-reset-s1` 至 `/bid-reset-s5` 五个无参数重置命令。重置可以选择当前阶段或更早阶段；Host 原子占用项目，无论内存中是否仍保留运行记录，都会取消并等待主 Agent、Subagent 和并发 Worker 静止，再删除所选阶段及其后续阶段拥有的 Artifact。旧操作已经开始结算时，重置等待其完成；否则重置与操作收尾共用一次 Run retirement，排空 child 后才释放父 Execution Agent。S2、S3、S4 提交 `ready` 并结束重置请求后，由持有同一项目操作的后台续行进入正常执行；续行结算前不释放 Execution Agent 或项目锁。S1 与 S5 回到 `waiting_user` 且不创建 Execution Agent；S1 保留已上传原文件、解析语料、`manifest.json` 与 Word 格式配置，清理分析、目录、正文、私有工作目录和导出产物，等待下一批上传。短暂文件事务先自然结算；未来阶段、第二个并发重置和带参数命令会被拒绝。用户发起的取消不会记录 `bid.stage.failed`，命令结果也不进入模型历史。
 
 浏览器将一次 S1 所选原文件按顺序组成同源二进制请求，并只在小型请求头中声明名称、角色、类型和大小。Host 由该请求解析实时 Session，以工作区的规范绝对路径作为项目锁键，准入完整批次，通过 `BidWorkspace` 入库并校验生成的 `manifest.json`、原文件、语料、分块索引和分块文件，随后调用 `drive()`。同一 Workspace 的不同 Session 不能并发修改项目；不同 Workspace 可以并行。请求体不能还原全部已声明文件时，S1 会记录 Workflow 失败且不能推进。`modelStageRepairAttempts` 配置 S2–S5 的内容校验修复轮数；内部错误保留挂起 Run 和恢复诊断，确定的输入、权限及模型基础设施阻断结算为 `failed`。S2、S4 和 S5 分别从逐条分析、任务与章节检查点恢复未完成或失效工作。
+
+原生输入恢复的执行次数只在开始应用动作前持久计数；正常提问、等待答案、答案保存及未开始的取消不消耗执行预算，准备失败使用独立有限次数。答案已保存时重启不重复提问，Run 已接纳时按原 Work 与实际启动事件补结算，不重复启动；真实失败和用户停止跨重启保留。应用记录落盘后、调用前的直接进程崩溃无法证明未执行，保守保留预占次数；正常 Host 取消可撤销尚未调用的预占。
 
 DOCX 模板通过独立同源二进制请求上传，请求头只携带 Session、文件名、长度和配置 revision。`docxTemplateMaxBytes` 默认 300 MiB，浏览器按 `DocxFormatView.templateMaxBytes` 预检，Host 按相同值和声明长度限制请求体；模板解析需要 ZIP 随机访问，因此 Host 只在准入后把原始二进制体缓冲一次，不生成 base64 字符串。Host 解析 docDefaults、Theme、样式继承、段落与 Run 直接格式、页面和编号，再让当前会话模型仅依据模板正文与候选解释格式说明和角色；模型选择候选后只合并该候选，模板说明中的常用中文字号在页面显示原名称和对应磅值。模型解释失败时保留确定性提取结果，并提示用户重新上传以重试解释。模板上传、冲突确认、独立格式建议和导出使用项目级 Word 操作锁，不占用 S1—S5 阶段 operation；同项目各会话均可配置或导出 Word，阶段启动与 Word 操作可并行；会删除章节和输出的阶段重置与 Word 写入互斥。`word-export/config.json` 分别保存 `extracted`、`modelInterpreted`、`conflicts`、`resolved` 和 `userConfirmed`，预览与导出只读取 `resolved`。
 
@@ -111,7 +117,9 @@ S5 将 `execution-plan.json` 和 schema v4 `execution-log.json` 绑定当前 Wri
 
 Writer 使用私有 `submit_chapter` 提交完整候选，工具参数错误在当前回合纠正；每轮语义修复保留 Writer 身份并启动独立 Reviewer，引用和报告按当前候选重新生成。正文标题在审查前按确认目录统一编号；页面读取同一正文，Word 保留相同编号并调整文档标题层级。
 
-S6 按最终 Word 页面逐块审核流程图、表格和图片。同一版 DOCX 在一次导出中只转换一次 PDF；版式调整并重新生成 DOCX 后重新转换，后续审核读取调整后的页面。表格按多个单元格文字片段定位，找不到目标表时明确失败，不按全书比例猜页；正常跨页续表不视为裁切。表格定位规则参与输入摘要，旧定位结论失效；已通过的块按[视觉审核缓存](../../../.agents/notes/implemented/feature/2026-09-21-docx-visual-sensitive-review-cache.md)复用。
+S6 按最终 Word 页面逐块审核流程图、表格和图片。同一版 DOCX 在一次导出中只转换一次 PDF；版式调整并重新生成 DOCX 后重新转换，重新检查全部块的当前页面。缓存通过结论只在块输入、调整参数、页码、总页数及页面图片摘要一致时复用；每块累计最多两次调整，跨块重查不重置预算。最终验收集合绑定同一份 DOCX 字节摘要。表格按多个单元格文字片段定位，找不到目标表时明确失败；正常跨页续表不视为裁切。详见[视觉审核缓存](../../../.agents/notes/implemented/feature/2026-09-21-docx-visual-sensitive-review-cache.md)。
+
+缓存命中仍需渲染当前 PDF 页面，再决定是否省去模型审核。流程图和图片的文字锚点无法提取时，页面定位沿用文档顺序的近似结果；缓存比较的是实际送审页面，不能补足页面定位或视觉模型判断的准确性。
 
 Writer 在缺少真实项目数量、人员、设备或记录值时只保留正式字段和填写规则，不生成示例数据行。Reviewer 不得要求虚构或示例值，并把已填的“示例、待补、XXX、最终填写”等内容视为占位。
 

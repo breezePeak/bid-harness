@@ -142,7 +142,10 @@ async function parsePdf(sourcePath: string): Promise<ParsedDocument> {
 }
 
 async function parseDocx(sourcePath: string): Promise<ParsedDocument> {
-  const result = await mammoth.convertToHtml({ path: sourcePath })
+  // 语料只提取正文，不读取或内嵌 DOCX 图片。
+  const result = await mammoth.convertToHtml({ path: sourcePath }, {
+    convertImage: Object.assign(() => [], { __mammothBrand: 'ImageConverter' as const }),
+  })
   return { markdown: `${htmlToMarkdown(result.value).trim()}\n`, pageCount: null, needsOcr: false, parser: 'mammoth', parserVersion: null }
 }
 

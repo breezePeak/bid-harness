@@ -23,9 +23,11 @@ it('S6 表格视觉审核定位真实页面并记录正常跨页约束', async (
         "升级路径",
         "内容",
       ],
+      "cacheReused": true,
       "decision": {
-        "status": "pass",
+        "status": "passed",
       },
+      "finalOutputMatchesReviews": true,
       "imageCount": 3,
       "kind": "table",
       "loggedRequest": true,

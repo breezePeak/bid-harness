@@ -1060,6 +1060,9 @@ importers:
       '@deepseek-ai/dsh-tool-fs-search':
         specifier: workspace:^
         version: link:../../fs/tool-fs-search
+      '@deepseek-ai/dsh-tool-web':
+        specifier: workspace:^
+        version: link:../../web/tool-web
       '@deepseek-ai/dsh-token-meter':
         specifier: workspace:^
         version: link:../../llm/token-meter
@@ -1072,6 +1075,9 @@ importers:
       '@deepseek-ai/dsh-user-questions':
         specifier: workspace:^
         version: link:../../interaction/user-questions
+      '@deepseek-ai/dsh-web':
+        specifier: workspace:^
+        version: link:../../web/web
       '@types/word-extractor':
         specifier: 1.0.2
         version: 1.0.2

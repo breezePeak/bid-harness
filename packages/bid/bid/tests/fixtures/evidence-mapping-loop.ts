@@ -8,7 +8,7 @@ import { join, relative, resolve } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
 import { Context } from '@deepseek-ai/cordis'
 import LocalFileSystem from '@deepseek-ai/dsh-fs-local'
-import { CallId, CONTEXT_WINDOW_EXCEEDED_CODE, HarnessError, LlmAdapter, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
+import { CallId, CONTEXT_WINDOW_EXCEEDED_CODE, HarnessError, LlmAdapter, WebError, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import { SessionId, type Session } from '@deepseek-ai/dsh-session'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { SearchError } from '@deepseek-ai/dsh-tool-fs-search'
@@ -50,7 +50,7 @@ function reviewPendingMappingItems(options: GenerateOptions): StreamChunk[] {
     for (const block of message.content) {
       if (block.type !== 'tool-result') continue
       for (const content of block.content) {
-        if (content.type !== 'text') continue
+        if (content.type !== 'text' || !content.text.startsWith('{')) continue
         const result = JSON.parse(content.text) as { pending_items?: Array<{ review_ref: string }> }
         if (result.pending_items === undefined) continue
         return toolCall('review-current-items', 'review_items', { items: result.pending_items.map(item => ({
@@ -127,10 +127,13 @@ export function registerIntegrationTools(ctx: Context, root: string, sourceUrls:
   code: string
   statusCode?: number | undefined
   remaining: number
+  tool?: 'web_search' | 'web_fetch'
+  retryAfter?: string
+  production?: true
 }): void {
   const urls = typeof sourceUrls === 'string' ? [sourceUrls] : [...sourceUrls]
   let searchIndex = 0
-  ctx.provide('web', {
+  if (webFailure?.production !== true) ctx.provide('web', {
     diagnose: async () => ({
       search: { selectedProviderId: 'fixture-web-search', providers: [] },
       fetch: { selectedProviderId: 'fixture-web-fetch', providers: [] },
@@ -169,6 +172,21 @@ export function registerIntegrationTools(ctx: Context, root: string, sourceUrls:
       return 'written'
     },
   })))
+  if (webFailure?.production === true) {
+    ctx.effect(() => ctx.web.registerSearchProvider({ id: 'fixture-web-search', available: () => true,
+      search: async () => ({
+        sources: urls.length === 0 ? [] : [{ url: urls[Math.min(searchIndex++, urls.length - 1)]! }], truncated: false,
+      }) }))
+    ctx.effect(() => ctx.web.registerFetchProvider({ id: 'fixture-web-fetch', available: () => true,
+      fetch: async ({ url }) => {
+        if (webFailure.remaining-- > 0) throw new WebError('注入的联网故障', webFailure.code, {
+          ...(webFailure.statusCode === undefined ? {} : { statusCode: webFailure.statusCode }), retryAfter: webFailure.retryAfter ?? '0',
+        })
+        if (!urls.includes(url)) throw new Error('固定场景未提供该外部来源正文。')
+        return { url, statusCode: 200, body: { kind: 'text', content: '官方标准要求访问控制与安全审计。' }, truncated: false }
+      } }))
+    return
+  }
   ctx.effect(() => ctx.tools.register(defineTool({
     name: 'web_search', description: 'Search public technical sources.', parameters: {
       queries: { type: 'array', required: true, items: { type: 'string' } },
@@ -181,9 +199,9 @@ export function registerIntegrationTools(ctx: Context, root: string, sourceUrls:
       render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }],
     },
     execute: async () => {
-      if (webFailure !== undefined && webFailure.remaining-- > 0) {
+      if (webFailure !== undefined && webFailure.tool !== 'web_fetch' && webFailure.remaining-- > 0) {
         throw Object.assign(new HarnessError('注入的联网故障', webFailure.code), {
-          statusCode: webFailure.statusCode, retryAfter: '0',
+          statusCode: webFailure.statusCode, retryAfter: webFailure.retryAfter ?? '0',
         })
       }
       return { sources: urls.length === 0 ? [] : [{ url: urls[Math.min(searchIndex++, urls.length - 1)]! }], truncated: false }
@@ -207,6 +225,11 @@ export function registerIntegrationTools(ctx: Context, root: string, sourceUrls:
       },
     },
     execute: async (args) => {
+      if (webFailure?.tool === 'web_fetch' && webFailure.remaining-- > 0) {
+        throw Object.assign(new HarnessError('注入的联网故障', webFailure.code), {
+          statusCode: webFailure.statusCode, retryAfter: webFailure.retryAfter ?? '0',
+        })
+      }
       if (!urls.includes(args.url)) throw new Error('固定场景未提供该外部来源正文。')
       return { url: args.url, statusCode: 200, body: { kind: 'text' as const, content: '官方标准要求访问控制与安全审计。' }, truncated: false }
     },
@@ -366,9 +389,12 @@ function sectionSubmission(url: string) {
   }
 }
 
-function researchAssessment(sufficient: boolean, affectsBlueprint: boolean) {
+function researchAssessment(sufficient: boolean, affectsBlueprint: boolean, mode?: 'zero' | 'local' | 'external_unbound') {
   return {
     sufficient_for_blueprint: sufficient,
+    evidence_requirement: mode === 'local' ? { kind: 'local_sufficient', reason: '已读取本地实施方法，本章不需要外部技术事实。' }
+      : mode === 'external_unbound' ? { kind: 'external_required', reason: '本章安全方案需要引用公开标准的控制条款。' }
+        : { kind: 'not_required', reason: '授权与审计安排属于依据招标任务提出的专业方案，参考资料只补充背景。' },
     diagnostics: {
       tender_and_response_points: '已理解访问控制与安全审计要求及评分响应点。',
       technical_approach: '已研究身份鉴别、权限控制和安全审计的技术路线。',
@@ -377,7 +403,9 @@ function researchAssessment(sufficient: boolean, affectsBlueprint: boolean) {
     },
     key_findings: [{ finding: '访问控制的授权操作需要通过审计记录验证。',
       explanation: '从身份鉴别、权限授予到操作记录，明确权限执行和追溯验证的方法。',
-      nature: 'professional_design', basis: [{ kind: 'requirement', ref: 'REQ-1' }],
+      nature: 'professional_design', basis: sufficient && mode === 'local' ? [{ kind: 'local_material', ref: 'M1:chunk_0001' }]
+        : sufficient && mode === 'external_unbound' ? [{ kind: 'web_material', ref: expectedWebChunkRef('https://official.example/standard') }]
+          : [{ kind: 'requirement', ref: 'REQ-1' }],
       evidence_boundary: '授权与审计安排是本方案设计，不声称项目已有账号规模或系统能力。' }],
     unresolved_gaps: [{
       topic: '当前项目的既有账号与权限清单未提供',
@@ -402,11 +430,16 @@ export async function runEvidenceMappingLoop(ctx: Context, root: string, repair:
     maxRetries?: number
     signal?: AbortSignal
     reviewOverflow?: boolean
-  }) {
+    tool?: 'web_search' | 'web_fetch'
+    retryAfter?: string
+    resume?: true
+    production?: true
+  }, researchMode?: 'zero' | 'local' | 'external_unbound') {
   const sessionId = SessionId('s3-real-loop')
   const workspace = new BidWorkspace(root)
-  const s2 = await prepareS2(workspace)
-  await workspace.import([{
+  const s2 = fault?.resume === true ? { requirementId: 'REQ-1', scoringId: 'SCORE-1', responsePointId: 'RP-000001' }
+    : await prepareS2(workspace)
+  if (fault?.resume !== true) await workspace.import([{
     name: 'reference-bid.md', role: 'reference_bid', bytes: new TextEncoder().encode([
       '# 安全平台技术标', '## 身份治理', '### 账户生命周期', '### 权限审批', '## 安全运维', '### 访问控制与安全审计',
     ].join('\n\n')),
@@ -418,6 +451,10 @@ export async function runEvidenceMappingLoop(ctx: Context, root: string, repair:
   }])
   const sourceUrl = 'https://official.example/standard'
   const unusedSourceUrl = 'https://official.example/unused'
+  const useWeb = researchMode !== 'zero' && researchMode !== 'local'
+  const submittedMaterials = sectionSubmission(sourceUrl)
+  if (!useWeb || researchMode === 'external_unbound') submittedMaterials.web_materials = []
+  if (researchMode === 'zero') submittedMaterials.local_materials = []
   const workspacePath = relative(root, workspace.projectRoot).replaceAll('\\', '/')
   const quality = JSON.stringify({ scope: 'technical_bid', checked_requirement_ids: [s2.requirementId], checked_scoring_ids: [s2.scoringId], checked_scoring_response_point_ids: [s2.responsePointId], issues: [{ severity: 'advisory', message: '建议以权限表说明授权与追溯关系。' }], blocking_issues: [] })
   const manifest = await workspace.readManifest()
@@ -448,7 +485,9 @@ export async function runEvidenceMappingLoop(ctx: Context, root: string, repair:
   }
   const childScript: ScriptStep[] = [
     ...Array.from({ length: fault?.failures ?? 0 }, (_, index) =>
-      toolCall(`fault-search-${String(index)}`, 'web_search', { queries: ['注入网络故障'] })),
+      fault?.tool === 'web_fetch'
+        ? toolCall(`fault-fetch-${String(index)}`, 'web_fetch', { url: sourceUrl })
+        : toolCall(`fault-search-${String(index)}`, 'web_search', { queries: ['注入网络故障'] })),
     toolCall('read-forbidden-tender', 'read', { file_path: `${workspacePath}/${tender.chunksPath}/chunk_0001.md` }),
     toolCall('read-forbidden-framework', 'read', { file_path: `${workspacePath}/${framework.chunksPath}/chunk_0001.md` }),
     ...(repair ? [
@@ -461,18 +500,18 @@ export async function runEvidenceMappingLoop(ctx: Context, root: string, repair:
     ...(repair ? [
       toolCall('lock-before-research-ready', 'lock_section_outline', { comparison: '尚未提交研究充分性判断。' }),
     ] : []),
-    toolCall('research-not-ready', 'submit_section_research_assessment', researchAssessment(false, true)),
+    toolCall('research-not-ready', 'submit_section_research_assessment', researchAssessment(false, true, researchMode)),
     toolCall('search-research-gap', 'search_sources', { scope_ref: 'ALL', keywords: ['权限', '审计'] }),
-    toolCall('search-source', 'web_search', { queries: ['访问控制安全审计官方标准'] }),
-    toolCall('fetch-source', 'web_fetch', { url: sourceUrl }),
-    toolCall('list-source-chunks', 'list_web_chunks', { source_ref: expectedWebChunkRef(sourceUrl).slice(0, -6) }),
-    toolCall('read-web-chunk', 'read_source', { source_ref: expectedWebChunkRef(sourceUrl) }),
+    ...(useWeb ? [toolCall('search-source', 'web_search', { queries: ['访问控制安全审计官方标准'] }),
+      toolCall('fetch-source', 'web_fetch', { url: sourceUrl }),
+      toolCall('list-source-chunks', 'list_web_chunks', { source_ref: expectedWebChunkRef(sourceUrl).slice(0, -6) }),
+      toolCall('read-web-chunk', 'read_source', { source_ref: expectedWebChunkRef(sourceUrl) })] : []),
     toolCall('refresh-source-positions', 'list_mapping_objects', {}),
-    ...(!repair ? [
+    ...(!repair && useWeb ? [
       toolCall('search-unused', 'web_search', { queries: ['未采用的公开资料'] }),
       toolCall('fetch-unused', 'web_fetch', { url: unusedSourceUrl }),
     ] : []),
-    toolCall('research-ready', 'submit_section_research_assessment', researchAssessment(true, false)),
+    toolCall('research-ready', 'submit_section_research_assessment', researchAssessment(true, false, researchMode)),
     toolCall('update-task', 'update_section_task', blueprint),
     toolCall('prepare-answer-plan', 'update_section_task', answerPlan),
     toolCall('assess-structure', 'submit_section_structure_assessment', structure),
@@ -488,7 +527,7 @@ export async function runEvidenceMappingLoop(ctx: Context, root: string, repair:
       web_materials: [],
     }),
     ...(repair ? [toolCall('submit-before-fetch', 'submit_section_mapping', sectionSubmission(unusedSourceUrl))] : []),
-    toolCall('submit-after-fetch', 'submit_section_mapping', sectionSubmission(sourceUrl)),
+    toolCall('submit-after-fetch', 'submit_section_mapping', submittedMaterials),
     ...(repair ? [
       toolCall('revise-blueprint', 'update_section_task', { ...blueprint, writing_dimensions: ['授权方法与条件', '安全审计'] }),
       toolCall('reject-stale-lock', 'lock_section_outline', { comparison: '必须重新核对新 Blueprint。' }),
@@ -498,13 +537,14 @@ export async function runEvidenceMappingLoop(ctx: Context, root: string, repair:
       toolCall('lock-current-structure', 'lock_section_outline', { comparison: '当前 Blueprint 的目录承载判断有效。' }),
     ] : []),
     toolCall('finish-initial-mapping', 'finish_mapping_task', {}),
+    ...(researchMode === 'external_unbound' ? [finalText('所需外部标准正文尚未绑定到章节材料，保留当前缺口。')] : []),
     ...(repair ? [toolCall('submit-refinement-incomplete', 'structured_output', {
       ...parsedQuality, scope: 'commercial_bid',
     })] : []),
     toolCall('submit-refinement-quality', 'structured_output', parsedQuality),
     toolCall('reject-incomplete-final-check', 'finish_final_check', {}),
     toolCall('list-final-items', 'list_review_items', {}),
-    toolCall('reread-final-web-chunk', 'read_source', { source_ref: expectedWebChunkRef(sourceUrl) }),
+    ...(useWeb ? [toolCall('reread-final-web-chunk', 'read_source', { source_ref: expectedWebChunkRef(sourceUrl) })] : []),
     reviewPendingMappingItems,
     toolCall('finish-final-check', 'finish_final_check', {}),
   ]
@@ -513,28 +553,42 @@ export async function runEvidenceMappingLoop(ctx: Context, root: string, repair:
   adapter.reviewOverflow = fault?.reviewOverflow === true
   ctx.effect(() => ctx.llm.registerAdapter(['mock'], adapter))
   registerIntegrationTools(ctx, root, [sourceUrl, unusedSourceUrl], fault === undefined ? undefined
-    : { code: fault.code, statusCode: fault.statusCode, remaining: fault.failures })
-  const agent = ctx.agentLoop.create(sessionId, { provider: 'mock', model: 'mock' }, { cwd: root, ...(interactive ? { agentPreset: 'bid' } : {}) })
+    : { code: fault.code, statusCode: fault.statusCode, remaining: fault.failures,
+      ...(fault.tool === undefined ? {} : { tool: fault.tool }),
+      ...(fault.retryAfter === undefined ? {} : { retryAfter: fault.retryAfter }),
+      ...(fault.production === undefined ? {} : { production: fault.production }) })
+  const agentOptions = { provider: 'mock', model: 'mock', ...(interactive ? { agentPreset: 'bid' } : {}) }
+  const agent = fault?.resume === true
+    ? (await ctx.agents.resume({ resumeSessionId: sessionId, agentOptions })).agent
+    : interactive
+      ? (await ctx.agentLoop.createAgent(ctx, { sessionId, agentOptions, meta: { cwd: root, agentPreset: 'bid' } })).agent
+      : ctx.agentLoop.create(sessionId, agentOptions, { cwd: root })
   // Loader 装配的 Host 必须完成项目初始化，才能设置本场景的 S4 起点。
   const host = ctx.get('bid') as unknown as { inFlight: ReadonlyMap<unknown, { session: Session; done: Promise<void> }> } | undefined
   await [...host?.inFlight.values() ?? []].find(operation => operation.session === agent.session)?.done
-  agent.session.append('bid.stage.started', { stage: 'file_intake', status: 'running' })
-  agent.session.append('bid.stage.completed', { stage: 'file_intake', status: 'completed', artifacts: [] })
-  agent.session.append('bid.stage.started', { stage: 'tender_analysis', status: 'running' })
-  agent.session.append('bid.stage.completed', { stage: 'tender_analysis', status: 'completed', artifacts: [] })
-  agent.session.append('bid.stage.started', { stage: 'outline_generation', status: 'running' })
-  agent.session.append('bid.stage.completed', { stage: 'outline_generation', status: 'completed', artifacts: [] })
+  if (fault?.resume !== true) {
+    agent.session.append('bid.stage.started', { stage: 'file_intake', status: 'running' })
+    agent.session.append('bid.stage.completed', { stage: 'file_intake', status: 'completed', artifacts: [] })
+    agent.session.append('bid.stage.started', { stage: 'tender_analysis', status: 'running' })
+    agent.session.append('bid.stage.completed', { stage: 'tender_analysis', status: 'completed', artifacts: [] })
+    agent.session.append('bid.stage.started', { stage: 'outline_generation', status: 'running' })
+    agent.session.append('bid.stage.completed', { stage: 'outline_generation', status: 'completed', artifacts: [] })
+  }
   const orchestrator = new BidOrchestrator(
     agent.session,
     { canExecute: stage => stage === 'evidence_mapping', execute: (task, run) => executeEvidenceMapping(agent, workspace, task, {
       maxRepairAttempts: repair ? 1 : 0, maxConcurrency: 2,
       ...(fault?.maxRetries === undefined ? {} : { maxInfrastructureRetryAttempts: fault.maxRetries }),
+      ...(run.resumeOf === undefined ? {} : { resume: true }),
       run: fault?.signal === undefined ? run : { ...run, signal: AbortSignal.any([run.signal, fault.signal]) },
     }) },
     { validate: (stage, artifacts) => validateEvidenceMapping(workspace, stage, artifacts) },
   )
 
-  const outcome = await orchestrator.runCurrentAutomaticStage()
+  const suspended = agent.session.events.findLast(event => event.type === 'bid.run.suspended' || event.type === 'bid.run.started')
+  const outcome = fault?.resume === true && (suspended?.type === 'bid.run.suspended' || suspended?.type === 'bid.run.started')
+    ? await orchestrator.resume(suspended.data.run.runId)
+    : await orchestrator.runCurrentAutomaticStage()
   adapter.interactive = interactive
   return { agent, workspace, sourceUrl, outcome, requests: adapter.requests,
     parentScript, childScript, reviewScript: adapter.reviewScript }

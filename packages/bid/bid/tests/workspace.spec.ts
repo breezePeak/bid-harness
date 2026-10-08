@@ -11,9 +11,13 @@ import { LocalFileSystem } from '@deepseek-ai/dsh-fs-local'
 import * as ToolFsSearch from '@deepseek-ai/dsh-tool-fs-search'
 import * as ToolFs from '@deepseek-ai/dsh-tool-fs'
 import { Document, Packer, Paragraph } from 'docx'
+import mammoth from 'mammoth'
 import * as XLSX from 'xlsx'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { BidWorkspace, DEFAULT_BID_CONFIG, parseBidDocument, safeFileName, within } from '../src/index.ts'
+import { parseDocumentChunkIndex } from '../src/document-chunk.ts'
+import { resolveEvidenceChunk } from '../src/evidence-chunk.ts'
+import { validateFileIntake } from '../src/file-intake-validator.ts'
 import { clearDocxExportArtifacts, invalidateDocxLastExports, readDocxFormat, readDocxTemplateLibrary, saveDocxTemplate, writeDocxFormat } from '../src/docx-format-store.ts'
 import { createTestBidRunContext } from '../src/run-coordinator.ts'
 
@@ -120,6 +124,109 @@ describe('BidWorkspace', () => {
       { originalName: '历史投标书.doc', mediaType: 'application/msword', documentPath: 'corpus/历史投标书.doc/document.md' },
       { originalName: '招标文件.docx', documentPath: 'corpus/招标文件.docx/document.md' },
     ])
+  })
+
+  it('同一 DOCX 重解析成功替换同角色失败记录，保留原件与其他角色', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-bid-'))
+    const bid = new BidWorkspace(root)
+    const bytes = await Packer.toBuffer(new Document({ sections: [{ children: [new Paragraph('项目实施管理')] }] }))
+    const conversion = vi.spyOn(mammoth, 'convertToHtml')
+      .mockRejectedValueOnce(new Error('转换服务暂时不可用'))
+      .mockRejectedValueOnce(new Error('转换服务暂时不可用'))
+    try {
+      const failed = await bid.import([
+        { name: '招标文件.docx', role: 'tender', bytes },
+        { name: '参考文件.docx', role: 'reference', bytes },
+      ], createTestBidRunContext())
+      expect(failed.map(file => file.parseStatus)).toEqual(['failed', 'failed'])
+      const previous = await bid.readManifest()
+      const retired = createTestBidRunContext()
+      retired.commits.retire()
+      await expect(bid.import([{ name: '招标文件.docx', role: 'tender', bytes }], retired))
+        .rejects.toThrow('BID_RUN_RETIRED')
+      await expect(bid.readManifest()).resolves.toEqual(previous)
+
+      const [reparsed] = await bid.import([{ name: '招标文件.docx', role: 'tender', bytes }], createTestBidRunContext())
+      expect(reparsed).toMatchObject({ id: failed[0]!.id, role: 'tender', parseStatus: 'success' })
+      const manifest = await bid.readManifest()
+      expect(manifest.files).toMatchObject([
+        { id: failed[1]!.id, role: 'reference', parseStatus: 'failed' },
+        { id: failed[0]!.id, role: 'tender', parseStatus: 'success', inputPath: 'input/招标文件 (2).docx' },
+      ])
+      expect(manifest.files).toHaveLength(2)
+      for (const file of [...failed, reparsed!]) {
+        await expect(readFile(join(bid.projectRoot, file.inputPath))).resolves.toEqual(bytes)
+      }
+      const chunks = parseDocumentChunkIndex(JSON.parse(await readFile(reparsed!.absoluteChunkIndexPath!, 'utf8')))
+      const material = { source_kind: 'tender' as const, file_id: reparsed!.id, chunk: chunks.chunks[0]!.id }
+      const resolved = await resolveEvidenceChunk(bid, manifest, material)
+      await expect(readFile(resolved.path, 'utf8')).resolves.toContain('项目实施管理')
+
+      conversion.mockRejectedValueOnce(new Error('转换服务再次不可用'))
+      const [retryFailure] = await bid.import([{ name: '招标文件.docx', role: 'tender', bytes }], createTestBidRunContext())
+      expect(retryFailure!.parseStatus).toBe('failed')
+      const withRetryFailure = await bid.readManifest()
+      expect(withRetryFailure.files.filter(file => file.role === 'tender').map(file => file.parseStatus))
+        .toEqual(['success', 'failed'])
+      await expect(resolveEvidenceChunk(bid, withRetryFailure, material)).resolves.toMatchObject({ file: { parseStatus: 'success' } })
+      await expect(readFile(join(bid.projectRoot, retryFailure!.inputPath))).resolves.toEqual(bytes)
+
+      const differentBytes = await Packer.toBuffer(new Document({ sections: [{ children: [new Paragraph('新的招标文件内容')] }] }))
+      const [different] = await bid.import([{ name: '招标文件.docx', role: 'tender', bytes: differentBytes }], createTestBidRunContext())
+      expect(different!.inputPath).toBe('input/招标文件 (4).docx')
+      await expect(readFile(join(bid.projectRoot, failed[0]!.inputPath))).resolves.toEqual(bytes)
+      await expect(readFile(join(bid.projectRoot, different!.inputPath))).resolves.toEqual(differentBytes)
+    } finally {
+      conversion.mockRestore()
+    }
+  })
+
+  it('同批次相同 DOCX 保留失败和成功记录、原件，并优先引用成功语料', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-bid-'))
+    const bid = new BidWorkspace(root)
+    const bytes = await Packer.toBuffer(new Document({ sections: [{ children: [new Paragraph('项目实施管理')] }] }))
+    const conversion = vi.spyOn(mammoth, 'convertToHtml').mockRejectedValueOnce(new Error('转换服务暂时不可用'))
+    try {
+      const files = [
+        { name: '招标文件.docx', bytes },
+        { name: '招标文件.docx', bytes },
+      ]
+      const imported = await bid.import(files, createTestBidRunContext())
+      expect(imported.map(file => file.parseStatus)).toEqual(['failed', 'success'])
+      const manifest = await bid.readManifest()
+      expect(manifest.files).toHaveLength(2)
+      expect(manifest.files[0]).toMatchObject({ id: imported[0]!.id, parseStatus: 'success', inputPath: imported[1]!.inputPath })
+      expect(manifest.files[1]).toMatchObject({ id: imported[0]!.id, parseStatus: 'failed', inputPath: imported[0]!.inputPath })
+      await expect(validateFileIntake(bid, imported, 'file_intake', [{
+        stage: 'file_intake', type: 'manifest', path: 'manifest.json',
+      }], files)).resolves.toEqual({ ok: true })
+      for (const file of imported) await expect(readFile(join(bid.projectRoot, file.inputPath))).resolves.toEqual(bytes)
+      const chunks = parseDocumentChunkIndex(JSON.parse(await readFile(imported[1]!.absoluteChunkIndexPath!, 'utf8')))
+      const resolved = await resolveEvidenceChunk(bid, manifest, {
+        source_kind: 'tender', file_id: imported[1]!.id, chunk: chunks.chunks[0]!.id,
+      })
+      await expect(readFile(resolved.path, 'utf8')).resolves.toContain('项目实施管理')
+    } finally {
+      conversion.mockRestore()
+    }
+  })
+
+  it('同字节 DOCX 失败与文本成功的本批清单保留每个文件并通过 S1 校验', async () => {
+    const bid = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-bid-')))
+    const bytes = new TextEncoder().encode('not a zip archive')
+    const files = [{ name: 'broken.docx', bytes }, { name: 'same.txt', bytes }]
+    const imported = await bid.import(files, createTestBidRunContext())
+    expect(imported.map(file => file.parseStatus)).toEqual(['failed', 'success'])
+    const manifest = await bid.readManifest()
+    expect(manifest.files).toHaveLength(2)
+    expect(manifest.files.map(file => ({ name: file.originalName, status: file.parseStatus }))).toEqual([
+      { name: 'same.txt', status: 'success' }, { name: 'broken.docx', status: 'failed' },
+    ])
+    expect(manifest.files[1]!.parseError).toContain('DOCX_PARSE_FAILED')
+    await expect(validateFileIntake(bid, imported, 'file_intake', [{
+      stage: 'file_intake', type: 'manifest', path: 'manifest.json',
+    }], files)).resolves.toEqual({ ok: true })
+    for (const file of imported) await expect(readFile(join(bid.projectRoot, file.inputPath))).resolves.toEqual(Buffer.from(bytes))
   })
 
   it('makes imported PDF corpus searchable and readable through the DSH tools', async () => {

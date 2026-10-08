@@ -81,6 +81,8 @@ import {
   type WebEvidenceSourcesArtifact,
 } from './web-evidence-source-artifacts.ts'
 import { S4WebResearchPool } from './web-research-pool.ts'
+import { deriveResearchDiagnostics, observeResearchTool, researchDiagnosticsSchema, researchObservationSchema,
+  researchRequirementSchema } from './research-diagnostics.ts'
 import { buildWebEvidenceChunkIndex, webEvidenceChunkIndexPath, webEvidenceChunkSourceId } from './web-evidence-chunks.ts'
 import { outlineReassignmentSchema } from './outline-capability-update.ts'
 import { readChapterLocation } from './chapter-storage.ts'
@@ -108,7 +110,7 @@ const INITIAL_MAPPING_TOOLS = [
   'submit_section_research_assessment', 'submit_section_structure_assessment', 'apply_section_outline_edit', 'lock_section_outline', 'submit_section_mapping',
   'update_section_task', 'add_mapping_suggestion', 'finish_mapping_task',
 ] as const
-const REMAP_MAPPING_TOOLS = ['list_mapping_objects', 'submit_section_mapping', 'update_section_task', 'finish_mapping_task'] as const
+const REMAP_MAPPING_TOOLS = ['list_mapping_objects', 'submit_section_research_assessment', 'submit_section_mapping', 'update_section_task', 'finish_mapping_task'] as const
 const FINAL_CHECK_TOOLS = ['list_mapping_objects', 'replace_section_mapping', 'update_section_task', 'list_review_items', 'review_items', 'finish_final_check'] as const
 const BRANCH_SUMMARY_TOOLS = ['list_mapping_objects', 'submit_branch_summary', 'list_review_items', 'review_items', 'finish_final_check'] as const
 const MAX_TASK_NEW_SECTIONS = 100
@@ -214,8 +216,8 @@ const PERMANENT_WEB_FAILURE_CODES = new Set([
 
 function retryAfterMilliseconds(value: string | undefined): number {
   if (value === undefined) return 0
-  const seconds = Number(value)
-  if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1_000
+  const seconds = /^\d+$/u.test(value.trim()) ? Number(value) : NaN
+  if (Number.isFinite(seconds)) return seconds * 1_000
   const date = Date.parse(value)
   return Number.isNaN(date) ? 0 : Math.max(0, date - Date.now())
 }
@@ -230,10 +232,10 @@ function webInfrastructureFailure(
   const statusCode = info?.statusCode
   const permanent = code !== undefined && PERMANENT_WEB_FAILURE_CODES.has(code)
     || statusCode === 401 || statusCode === 402 || statusCode === 403
-  const transient = code === 'WEB_PROVIDER_RATE_LIMITED'
-    || captured.exec.name === 'web_search' && code === 'WEB_SEARCH_TIMEOUT'
+  const transient = !permanent && (code === 'WEB_PROVIDER_RATE_LIMITED'
+    || code === 'WEB_SEARCH_TIMEOUT' || code === 'WEB_FETCH_TIMEOUT' || code === 'TOOL_TIMEOUT'
     || code === 'WEB_PROVIDER_ERROR' && (statusCode === undefined || statusCode === 429 || statusCode >= 500)
-    || statusCode === 429 || statusCode !== undefined && statusCode >= 500
+    || statusCode === 429 || statusCode !== undefined && statusCode >= 500)
   if (!permanent && !transient) return undefined
   const issueCode = code ?? 'EVIDENCE_MAPPING_WEB_PROVIDER_FAILURE'
   const status = statusCode === undefined ? '' : `（HTTP ${String(statusCode)}）`
@@ -243,6 +245,8 @@ function webInfrastructureFailure(
   }], transient, false, taskId, retryAfterMilliseconds(info?.retryAfter), captured.exec.name as typeof MAPPING_AGENT_TOOLS[number],
   Object.assign(new Error(captured.result.error.message), {
     name: info?.name ?? 'WebProviderError', code: issueCode, retryable: transient,
+    cause: captured.result.error,
+    ...(info?.retryAfter === undefined ? {} : { retryAfter: info.retryAfter }),
     ...(statusCode === undefined ? {} : { statusCode, status: statusCode }),
   }))
 }
@@ -532,6 +536,8 @@ const evidenceMappingExecutionLogSchema = z.object({
     final_child_session_id: z.string().nullable(),
     active_child_session_id: z.string().nullable().optional(),
     research_stats: researchStatsSchema.optional(),
+    research_observations: z.array(researchObservationSchema).optional(),
+    research_diagnostics: researchDiagnosticsSchema.optional(),
     prompt_context_stats: z.object({
       task_id: z.string().min(1),
       scoped_section_count: z.number().int().nonnegative(),
@@ -558,6 +564,13 @@ export function parseEvidenceMappingExecutionLog(raw: unknown): EvidenceMappingE
 }
 
 type PartialSectionMapping = EvidenceMappingPartialResult['section_mappings'][number]
+
+function researchMaterialRefs(mappings: readonly Pick<PartialSectionMapping, 'local_materials' | 'web_materials'>[]): string[] {
+  return uniqueStrings(mappings.flatMap(mapping => [
+    ...mapping.local_materials.map(material => `L:${material.file_id}:${material.chunk}`),
+    ...mapping.web_materials.flatMap(material => material.chunk_refs),
+  ]))
+}
 
 function bindMappingResponsePoints(
   mapping: PartialSectionMapping, catalog: EvidenceMappingInputs['responsePoints'],
@@ -618,6 +631,8 @@ const topicDispositionSchema = z.discriminatedUnion('placement', [
 ])
 const sectionResearchAssessmentFields = {
   sufficient_for_blueprint: z.boolean(),
+  evidence_requirement: researchRequirementSchema,
+  excluded_materials: z.array(z.object({ material_ref: z.string().min(1), reason: z.string().trim().min(1) }).strict()).optional(),
   diagnostics: z.object({
     tender_and_response_points: z.string().trim().min(1),
     technical_approach: z.string().trim().min(1),
@@ -1717,6 +1732,7 @@ async function completeMappingSubmission(
       review_progress: reviewProgress(state, task),
     } }
   }
+  if (task.phase === 'initial') assertResearchReady(state)
   if (taskOwnsOutlineRefinement(task)) {
     assertResearchReady(state)
     assertStructureCurrent(state, task)
@@ -1738,6 +1754,12 @@ async function completeMappingSubmission(
     })) } : {}),
   })
   const issues = await validateCompletedMappingState(workspace, inputs, task, state, result)
+  if (task.phase === 'initial' && expected.length > 0
+    && state.researchAssessment?.evidence_requirement.kind === 'external_required'
+    && result.section_mappings.every(mapping => mapping.web_materials.length === 0)) issues.push({
+    code: 'EVIDENCE_MAPPING_REQUIRED_EVIDENCE_UNBOUND',
+    message: '本章要求外部证据，但已读取的相关正文尚未绑定到章节材料；请采用真实资料或重新评估具体证据缺口。',
+  })
   if (issues.length > 0) {
     state.lastIncompleteIssues = issues
     return { response: task.phase === 'final_check'
@@ -2083,7 +2105,7 @@ function attachMappingSubmissionRuntime(
       return pool.fetch(url, exec)
     },
   })
-  if (taskOwnsOutlineRefinement(task)) register({
+  if (task.phase === 'initial') register({
     name: 'submit_section_research_assessment',
     description: '提交研究充分性与中性 key_findings，不在这里决定目录归位。每项发现区分项目事实与专业方案设计，引用真实招标/评分/资料依据并说明推演边界。研究充分后先完成 Blueprint，再判断结构。Host 保存引用；调用方使用返回的 finding_index。',
     parameters: zodJsonSchema(sectionResearchAssessmentInputSchema), output,
@@ -2101,6 +2123,20 @@ function attachMappingSubmissionRuntime(
         captured(),
         readWebChunkRefs(),
       )
+      const actualReads = buildTaskResearchCandidates(captured(), readWebChunkRefs()).local_material_refs
+      const findingBasis = assessment.key_findings.flatMap(finding => finding.basis)
+      if (assessment.sufficient_for_blueprint && assessment.evidence_requirement.kind === 'external_required'
+        && !findingBasis.some(basis => basis.kind === 'web_material' && readWebChunkRefs().has(basis.ref))) throw new ToolArgsError([
+        'evidence_requirement: 当前声明需要外部证据，但尚未成功抓取并读取相关正文；请调整查询或来源，仍不足时提交具体 unresolved_gaps 与 sufficient_for_blueprint=false。',
+      ])
+      if (assessment.sufficient_for_blueprint && assessment.evidence_requirement.kind === 'local_sufficient'
+        && !findingBasis.some(basis => basis.kind === 'local_material' && actualReads.includes(basis.ref))) throw new ToolArgsError([
+        'evidence_requirement: 本地足够必须以当前任务成功读取的参考资料为依据；招标要求和目录框架不作为参考资料。',
+      ])
+      const reads = new Set([...actualReads, ...readWebChunkRefs()])
+      for (const excluded of assessment.excluded_materials ?? []) if (!reads.has(excluded.material_ref)) throw new ToolArgsError([
+        'excluded_materials: 只能排除当前任务已实际读取的资料位置。',
+      ])
       const retainedFindingRefs = new Set(assessment.key_findings.map(finding => finding.finding_ref))
       const used = new Set(state.outlineOperationBases.flatMap(basis => basis.finding_refs))
       assessment.key_findings.push(...state.researchAssessment?.key_findings
@@ -2108,7 +2144,7 @@ function attachMappingSubmissionRuntime(
       state.researchAssessment = assessment
       state.researchReady = assessment.sufficient_for_blueprint
       invalidateStructureAssessment(state, task)
-      if (!state.researchReady) state.locked = false
+      if (!state.researchReady && taskOwnsOutlineRefinement(task)) state.locked = false
       state.lastIncompleteIssues = assessment.sufficient_for_blueprint ? [] : [{
         code: 'EVIDENCE_MAPPING_RESEARCH_NOT_READY',
         message: '当前研究仍不足以设计 Blueprint；请针对诊断与缺口继续检索、阅读并重新评估。',
@@ -2610,16 +2646,26 @@ export async function readEvidenceMappingLog(workspace: BidWorkspace): Promise<E
 /**
  * 读取当前证据映射执行的任务进度。
  * @param workspace 会话工作区。
+ * @param display 浏览器当前详情契约返回的目录和材料；私有候选不得视为已展示。
  * @returns checkpoint 完成事实与执行日志瞬时状态合并后的计数，尚未执行时返回 null。
  */
-export async function readEvidenceMappingProgress(workspace: BidWorkspace): Promise<BidEvidenceMappingProgress | null> {
+export async function readEvidenceMappingProgress(workspace: BidWorkspace,
+  display?: { outline: OutlineArtifact | null; evidence: EvidenceMapArtifact | null }): Promise<BidEvidenceMappingProgress | null> {
   const log = await readEvidenceMappingLog(workspace)
   if (log === null) return null
   const rawPlan = await readOptionalJson(workspace, PLAN_PATH)
   const rawCheckpoint = await readOptionalJson(workspace, CHECKPOINT_PATH)
+  const rawEvidence = await readOptionalJson(workspace, 'analysis/evidence-map.json')
+  const currentEvidence = rawEvidence === undefined ? null : parseEvidenceMapArtifact(rawEvidence)
+  const checkpoints = rawCheckpoint === undefined ? [] : evidenceMappingCheckpointSchema.parse(rawCheckpoint).tasks
+  let displayed = display
+  if (displayed === undefined) {
+    const rawOutline = await readOptionalJson(workspace, OUTLINE_PATH)
+    displayed = { outline: rawOutline === undefined ? null : parseOutlineArtifact(rawOutline), evidence: currentEvidence }
+  }
   const planByTask = new Map((rawPlan === undefined ? [] : parseEvidenceMappingPlan(rawPlan).tasks)
     .map(task => [task.task_id, task] as const))
-  const checkpointCompleted = new Set((rawCheckpoint === undefined ? [] : evidenceMappingCheckpointSchema.parse(rawCheckpoint).tasks)
+  const checkpointCompleted = new Set(checkpoints
     .filter(task => task.completed).map(task => task.task_id))
   let completed = 0
   let running = 0
@@ -2648,16 +2694,33 @@ export async function readEvidenceMappingProgress(workspace: BidWorkspace): Prom
     : planByTask.get(task.task_id)?.section_ids ?? []))]
   const tasks = log.tasks.map((task) => {
     const latestAttempt = task.attempts.at(-1)
+    const sectionIds = planByTask.get(task.task_id)?.section_ids ?? []
+    let diagnostics = task.research_diagnostics
+    if (diagnostics !== undefined) {
+      const adopted = new Set(diagnostics.adopted_refs)
+      const checkpoint = checkpoints.find(item => item.task_id === task.task_id)
+      const bound = researchMaterialRefs((currentEvidence?.section_mappings ?? checkpoint?.result.section_mappings ?? [])
+        .filter(mapping => sectionIds.includes(mapping.section_id)))
+        .filter(ref => adopted.has(ref))
+      const visible = new Set(displayed.outline?.sections.filter(section => section.writable && sectionIds.includes(section.id))
+        .map(section => section.id) ?? [])
+      const refs = researchMaterialRefs(displayed.evidence?.section_mappings.filter(mapping => visible.has(mapping.section_id)) ?? [])
+        .filter(ref => bound.includes(ref))
+      diagnostics = { ...diagnostics, bound_refs: bound, bound: bound.length, displayed_refs: refs, displayed: refs.length,
+        status: bound.length === 0 ? diagnostics.adopted_refs.length > 0 ? 'saved_unbound' : diagnostics.status
+          : bound.some(ref => !refs.includes(ref)) ? 'display_omitted' : 'bound' }
+    }
     return {
       task_id: task.task_id,
       title: task.title,
       phase: task.phase,
       status: checkpointCompleted.has(task.task_id) ? 'completed' as const
         : task.status === 'running' && task.active_child_session_id == null ? 'pending' as const : task.status,
-      section_ids: planByTask.get(task.task_id)?.section_ids ?? [],
+      section_ids: sectionIds,
       child_session_id: task.active_child_session_id ?? task.final_child_session_id
         ?? latestAttempt?.child_session_id ?? null,
       latest_issue: latestAttempt?.issues[0]?.message ?? null,
+      ...(diagnostics === undefined ? {} : { research_diagnostics: diagnostics }),
     }
   })
   return { total: log.tasks.length, initial: log.tasks.filter(task => task.phase === 'initial').length,
@@ -2892,6 +2955,7 @@ export function renderEvidenceMappingSubagentTask(
     : [...(webSearchEnabled ? MAPPING_AGENT_TOOLS : []), ...SOURCE_TOOLS, ...phaseTools]
   return [
     '当前阶段：evidence_mapping / Mapping Subagent',
+    ...(task.phase === 'initial' ? ['完成研究后必须提交 evidence_requirement：not_required 说明为何无需外部证明；local_sufficient 引用当前已读本地资料；external_required 引用当前已读网页正文。需要证据但没有执行或没有相关结果时不得声明充分，保留具体 unresolved_gaps 并调整查询或来源；已读未采用材料可在 excluded_materials 中选择位置说明原因。'] : []),
     `Mapping Task：${JSON.stringify({ task_id: task.task_id, task_kind: task.task_kind, generation: task.generation,
       phase: task.phase, section_ids: task.section_ids, outline_edit_scope_id: task.outline_edit_scope_id,
       summary_section_ids: task.summary_section_ids, title: task.title, heading_path: task.heading_path })}`,
@@ -4414,6 +4478,11 @@ async function executeEvidenceMappingRun(
         return saved === undefined ? [] : [saved]
       }) }
       await writeMappingState(options.run.commits, checkpointPath, checkpoint)
+      const log = executionLog.tasks.find(item => item.task_id === taskId)
+      if (log !== undefined) log.research_diagnostics = deriveResearchDiagnostics(
+        log.research_observations ?? [], submission.researchAssessment, researchMaterialRefs(result.section_mappings),
+        researchMaterialRefs(result.section_mappings), [],
+      )
     })
     return criticalStateWrites
   }
@@ -4539,6 +4608,10 @@ async function executeEvidenceMappingRun(
     const log = executionLog.tasks.find(item => item.task_id === request?.task.task_id)
     if (request === undefined || log === undefined) return
     const webFailure = webInfrastructureFailure({ exec, result }, request.task.task_id)
+    if ([...MAPPING_AGENT_TOOLS, ...SOURCE_TOOLS].some(name => name === exec.name)) {
+      const observations = log.research_observations ??= []
+      if (!observations.some(item => item.call_id === String(exec.callId))) observations.push(observeResearchTool(exec, result))
+    }
     if (webFailure?.retryable) {
       backoffFailures.set(String(childId), webFailure)
       const provider = providerFor(exec.name as typeof MAPPING_AGENT_TOOLS[number])
@@ -4551,6 +4624,9 @@ async function executeEvidenceMappingRun(
       controller.abort(webFailure)
     }
     const state = request.state
+    log.research_diagnostics = deriveResearchDiagnostics(log.research_observations ?? [], state.researchAssessment,
+      researchMaterialRefs([...state.mappings.values()]),
+      researchMaterialRefs(checkpointTasks.get(request.task.task_id)?.result.section_mappings ?? []), [])
     log.research_stats = {
       research_ready: state.researchReady && state.researchAssessment?.sufficient_for_blueprint === true,
       findings: state.researchAssessment?.key_findings.length ?? 0,
@@ -5080,6 +5156,11 @@ async function executeEvidenceMappingRun(
         log.status = 'failed'
         log.active_child_session_id = null
         if (error instanceof MappingSubagentInfrastructureError) {
+          if (log.attempts.length === attemptBase) log.attempts.push({
+            child_session_id: String(reservedChildId), attempt: attemptBase + 1,
+            stop_reason: 'infrastructure-error', accepted: false, infrastructure_provider: error.provider ?? 'subagent',
+            issues: error.issues.map(({ code, message }) => ({ code, message })), warnings: [],
+          })
           await persistLog()
           reportMappingProgress('章节资料映射遇到基础设施错误')
           throw error
@@ -5582,6 +5663,15 @@ async function executeEvidenceMappingRun(
     })
     await writeJson(join(workspace.projectRoot, QUALITY_PATH), quality, options.run.commits)
     if (options.remap === undefined) await pruneWebEvidenceArtifacts(workspace, evidence, options.run.commits)
+    for (const log of executionLog.tasks) {
+      const task = plan.tasks.find(task => task.task_id === log.task_id)
+      if (task === undefined) continue
+      const saved = checkpointTasks.get(task.task_id)
+      const refs = researchMaterialRefs(evidence.section_mappings.filter(mapping => task.section_ids.includes(mapping.section_id)))
+      log.research_diagnostics = deriveResearchDiagnostics(log.research_observations ?? [], saved?.research_assessment,
+        researchMaterialRefs(saved?.result.section_mappings ?? []), refs, [])
+    }
+    await persistLog()
   } finally {
     liftSubmissionSetup()
     liftObserver()

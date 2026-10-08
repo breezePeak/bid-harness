@@ -1,0 +1,68 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`原阶段 completed：已发布能力沿用原 Work 追加纠正并重新验收 1`] = `
+{
+  "calls": [
+    "bid_project_inspect",
+    "bid_project_inspect",
+    "bid_run_task",
+    "bid_project_inspect",
+    "bid_plan_task",
+    "bid_recover_task",
+  ],
+  "correctionNoticeMatchesRun": true,
+  "outsideCompleted": true,
+  "outsidePreserved": true,
+  "planPatchCount": 1,
+  "priorPublicationPreserved": true,
+  "publicationNotices": 2,
+  "sameWork": true,
+  "seedPreserved": true,
+}
+`;
+
+exports[`原阶段 ready：已发布能力沿用原 Work 追加纠正并重新验收 1`] = `
+{
+  "calls": [
+    "bid_project_inspect",
+    "bid_project_inspect",
+    "bid_run_task",
+    "bid_project_inspect",
+    "bid_plan_task",
+    "bid_recover_task",
+  ],
+  "correctionNoticeMatchesRun": true,
+  "nativeStageRuns": 0,
+  "outsideCompleted": true,
+  "outsidePreserved": true,
+  "planPatchCount": 1,
+  "priorPublicationPreserved": true,
+  "publicationNotices": 2,
+  "sameWork": true,
+  "seedPreserved": true,
+  "stagePreserved": true,
+}
+`;
+
+exports[`原阶段 waiting_user：已发布能力沿用原 Work 追加纠正并重新验收 1`] = `
+{
+  "calls": [
+    "bid_project_inspect",
+    "bid_project_inspect",
+    "bid_run_task",
+    "bid_project_inspect",
+    "bid_plan_task",
+    "bid_recover_task",
+  ],
+  "correctionNoticeMatchesRun": true,
+  "nativeStageRuns": 0,
+  "outsideCompleted": true,
+  "outsidePreserved": true,
+  "planPatchCount": 1,
+  "priorPublicationPreserved": true,
+  "publicationNotices": 2,
+  "sameWork": true,
+  "seedPreserved": true,
+  "stagePreserved": true,
+}
+`;

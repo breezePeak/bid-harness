@@ -226,10 +226,36 @@ class PlanningAdapter extends ChapterAdapter {
       const checklist = inputJson<Array<{ section_id: string; items: Array<{ item_ref: string }> }>>(prompt, 'answer_checklists：')[0]
       if (checklist === undefined) throw new Error('研究任务没有章节回答清单')
       const { section_id, items } = checklist
-      const objects = inputJson<{ sections: Array<{ id: string; position: number }> }>(prompt, '对象位置：')
+      const objects = inputJson<{ sections: Array<{ id: string; position: number }>; sources: Array<{ id: string; position: number }> }>(prompt, '对象位置：')
       const section_position = objects.sections.find(section => section.id === section_id)!.position
-      if (step === 0) yield* mappingModelReply(call('submit_section_mapping', { section_position, local_materials: [], web_materials: [] }), options)
-      else if (step === 1) yield* mappingModelReply(call('update_section_task', { section_position, basis: {
+      const requiresResearch = options.tools.some(tool => tool.name === 'submit_section_research_assessment')
+      const material = objects.sources.find(source => /^M\d+:chunk_/u.test(source.id))
+      if (requiresResearch && material === undefined) throw new Error('研究任务缺少真实本地流程依据')
+      if (requiresResearch && step === 0) {
+        yield* call('read_source', { source_position: material!.position })
+        return
+      }
+      if (requiresResearch && step === 1) {
+        yield* mappingModelReply(call('submit_section_research_assessment', {
+          sufficient_for_blueprint: true,
+          evidence_requirement: { kind: 'local_sufficient', reason: '本地流程依据完整覆盖原章三个阶段，当前任务仅保留并细化已有方法。' },
+          diagnostics: {
+            tender_and_response_points: '本节沿用已授权源章职责与原始需求归属。',
+            technical_approach: '读取了收集、校验和交付阶段的步骤、产物与记录。',
+            evidence_and_inferences: '流程依据用于方案设计，不据此声称企业已有能力。',
+            project_specific_quality_risks: '保留原文、表格和流程图，避免新增指标或企业事实。',
+          },
+          key_findings: [{ finding: '工作流程通过收集、校验与交付记录形成阶段闭环。',
+            explanation: '各阶段保留原章步骤、产物与校验记录，细化章节后仍能追溯交接关系。',
+            nature: 'professional_design', basis: [{ kind: 'local_material', ref: material!.id }],
+            evidence_boundary: '仅描述原章已有方法，不承诺未核实的企业能力、规模或技术指标。' }],
+          unresolved_gaps: [],
+        }), options)
+        return
+      }
+      const mappingStep = requiresResearch ? step - 2 : step
+      if (mappingStep === 0) yield* mappingModelReply(call('submit_section_mapping', { section_position, local_materials: [], web_materials: [] }), options)
+      else if (mappingStep === 1) yield* mappingModelReply(call('update_section_task', { section_position, basis: {
         kind: 'section_responsibility', explanation: '本节只说明本阶段的执行方法，不扩展现实企业事实。', requirement_positions: [],
       }, writing_dimensions: ['保留源章执行步骤、产物和校验记录'], answer_plan: items.map(item => ({ target_refs: [item.item_ref], mode: 'proposal',
         content: '沿用源章已分配的流程方法和记录，按本阶段职责形成结果。',
@@ -277,7 +303,8 @@ class PlanningAdapter extends ChapterAdapter {
         return
       }
       const state = this.recoveryWorkspace === undefined ? null : await readBidProjectState(this.recoveryWorkspace)
-      if (this.publishedCorrection && this.correctionStep < 2 && state?.status === 'completed' && prompt.includes('纠正刚才已发布结果')) {
+      if (this.publishedCorrection && this.correctionStep < 2 && state != null
+        && ['ready', 'waiting_user', 'completed'].includes(state.status) && prompt.includes('纠正刚才已发布结果')) {
         if (this.correctionStep++ === 0) {
           yield* call('bid_project_inspect', { query: { object: 'task' } })
           return
@@ -647,11 +674,13 @@ export async function seedMainTaskPlanningProject(root: string, completeSourceFa
  * @param selectedRoute 是否通过会话模型选择覆盖启动时的路由。
  * @param clarify 是否用第二条章节名称消息澄清第一条拆章要求。
  * @param sixSparse 是否拆为六个叶节并模拟漏块、表题分离及原文共享；部分叶节没有迁移草稿。
+ * @param restoreStatus 独立能力完成后恢复的原阶段状态；三态纠正场景在 Host 初始化结束后设置。
  * @returns 工具序列和正式产物事实。
  */
 export async function runMainTaskPlanningLoop(ctx: Context, root: string,
   fault?: 'after_split' | 'after_migration' | 'writing' | 'reviewing' | 'before_verification' | 'unread_verification' | 'published_correction' | 'migration_restart' | 'repeat_completed' | 'partial_replan' | 'authorization_recheck' | 'assignment_conflict' | 'completed_repair' | 'binding_repair' | 'rules_update',
-  structure: 'split' | 'add' = 'split', selectedRoute = false, clarify: boolean | 'numeric' = false, sixSparse = false) {
+  structure: 'split' | 'add' = 'split', selectedRoute = false, clarify: boolean | 'numeric' = false, sixSparse = false,
+  restoreStatus: 'ready' | 'waiting_user' | 'completed' = 'completed') {
   const workspace = await seedMainTaskPlanningProject(root)
   const outside = await readFile(join(workspace.projectRoot, 'chapters/sections/0002.md'), 'utf8')
   const canonicalBody = await readFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), 'utf8')
@@ -759,6 +788,13 @@ export async function runMainTaskPlanningLoop(ctx: Context, root: string,
     agentOptions: { provider: 'planning-mock', model: 'planning-mock' }, meta: { cwd: root, agentPreset: 'bid' } })
   const agent = handle.agent
   adapter.mainSession = agent.session
+  const host = ctx.bid as unknown as { readonly inFlight: Map<string, { readonly done: Promise<unknown> }> }
+  if (fault === 'published_correction' && restoreStatus !== 'completed') {
+    await Promise.all([...host.inFlight.values()].map(operation => operation.done))
+    const initial = { stage: 'chapter_writing' as const, status: restoreStatus, run: null }
+    await checkpointBidProjectState(workspace, initial)
+    agent.session.append('bid.task.changed', { state: initial })
+  }
   let migrationRestartRequested = false
   if (fault === 'migration_restart') adapter.onRecovery = () => {
     if (migrationRestartRequested) return
@@ -786,14 +822,13 @@ export async function runMainTaskPlanningLoop(ctx: Context, root: string,
     : '只修改本章 S2.3，把三个阶段拆成真实目录子章节，保留原文并完成正文和审核。不要改其他章节。'
   agent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text }] }))
   await agent.whenIdle()
-  const host = ctx.bid as unknown as { readonly inFlight: Map<string, { readonly done: Promise<unknown> }> }
   const settle = async () => {
     const deadline = Date.now() + 60_000
     while (Date.now() < deadline) {
       await Promise.all([...host.inFlight.values()].map(operation => operation.done))
       await agent.whenIdle()
       const current = await readBidProjectState(workspace)
-      if (current?.status === 'completed') return
+      if (current?.status === restoreStatus) return
       const round = agent.session.events.findLast(event => event.type === 'bid.recovery.round')
       if (round?.type === 'bid.recovery.round' && ['blocked', 'waiting_input', 'cancelled'].includes(round.data.state)) return
       await new Promise<void>((resolve) => { setTimeout(resolve, 20) })
@@ -808,7 +843,7 @@ export async function runMainTaskPlanningLoop(ctx: Context, root: string,
     await settle()
   }
   const state = await readBidProjectState(workspace)
-  if (state?.status !== 'completed') throw new Error('真实任务链路未完成：' + JSON.stringify({ state, errors: adapter.errors }))
+  if (state?.status !== restoreStatus) throw new Error('真实任务链路未完成：' + JSON.stringify({ state, errors: adapter.errors }))
   const outline = parseOutlineArtifact(JSON.parse(await readFile(join(workspace.projectRoot, 'outline/confirmed-outline.json'), 'utf8')))
   const children = outline.sections.filter(section => section.parent_id === 'S2.3')
   const locations = await readChapterLocations(workspace)
@@ -884,6 +919,9 @@ export async function runMainTaskPlanningLoop(ctx: Context, root: string,
     publicationNotices: agent.session.events.filter(event => event.type === 'bid.run.notice' && event.data.kind === 'completed').length,
     correctionNoticeMatchesRun: agent.session.events.findLast(event => event.type === 'bid.run.notice')?.data.runId
       === agent.session.events.findLast(event => event.type === 'bid.run.started')?.data.run.runId } : {},
+    ...restoreStatus !== 'completed' ? { stagePreserved: state.stage === 'chapter_writing',
+      nativeStageRuns: agent.session.events.filter(event => event.type === 'bid.run.started'
+        && event.data.run.work.kind === 'stage_execution').length } : {},
     executionParentModelTurns: adapter.inputs.filter(input => input.sessionId !== undefined
       && executionParents.has(input.sessionId)).length,
     workbench: workbench.outline.filter(section => children.some(child => child.id === section.section_id))

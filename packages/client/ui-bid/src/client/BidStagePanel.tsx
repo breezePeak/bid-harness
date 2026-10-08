@@ -56,6 +56,13 @@ type SelectedFile = BidSelectedFile & {
 }
 type SelectedTemplate = Omit<SelectedFile, 'role'> & { role: 'docx_template' }
 
+const RESEARCH_STATUS_LABELS = {
+  not_started: '尚未发起研究', not_required: '无需外部资料', local_sufficient: '本地资料足够',
+  researching: '正在研究', search_empty: '检索无相关结果', search_failed: '检索失败', fetch_failed: '抓取失败',
+  read_excluded: '已读但未采用', saved_unbound: '已保存未绑定', bound: '资料已绑定',
+  display_omitted: '已绑定资料未展示', insufficient: '证据仍有缺口',
+} satisfies Record<NonNullable<BidEvidenceMappingProgress['tasks'][number]['research_diagnostics']>['status'], string>
+
 /** Select manual or automatic confirmation for the current Bid Session. */
 export function BidConfirmationModeControl({ sessionId, useSessions, useStore, actions, t }: BidConfirmationModeControlProps) {
   const isBidSession = useSessions(state => isBidMainSessionSummary(state.byId[sessionId]))
@@ -425,8 +432,8 @@ export function BidStagePanel({
   const progressWorkId = projection?.task.run?.work.workId ?? null
   const progressReaderAvailable = getEvidenceMappingProgress !== undefined
   const mappingProgressObservable = isBidSession
-    && progressStage === 'evidence_mapping'
-    && progressStatus !== 'ready'
+    && (progressStage === 'evidence_mapping' && progressStatus !== 'ready'
+      || capabilityPlan?.steps.some(step => step.capability === 'evidence.research' || step.capability === 'outline.refine') === true)
   const progressInput = useRef({ projection, getEvidenceMappingProgress })
   const [outlineFeedback, setOutlineFeedback] = useState('')
   const [draftSaveState, setDraftSaveState] = useState<'saved' | 'saving' | 'failed' | 'conflict'>('saved')
@@ -1093,6 +1100,27 @@ export function BidStagePanel({
   const mappingPercent = visibleMappingProgress.total > 0
     ? Math.min(100, Math.round((visibleMappingProgress.completed / visibleMappingProgress.total) * 100))
     : 0
+  const researchProcess = mappingProgressObservable && visibleMappingProgress.tasks.length > 0 ? (
+    <details className={css.mappingFailureSections}>
+      <summary>资料研究过程</summary>
+      {visibleMappingProgress.tasks.map((task) => {
+        const diagnostic = task.research_diagnostics
+        return <div key={task.task_id}>
+          <strong>{task.title}</strong>
+          {diagnostic === undefined ? <p>研究过程未记录</p> : <>
+            <p>{RESEARCH_STATUS_LABELS[diagnostic.status]}{diagnostic.requirement === null ? '' : `：${diagnostic.requirement.reason}`}</p>
+            <p>检索 {diagnostic.searches} · 抓取 {diagnostic.fetched} · 读取 {diagnostic.read}
+              {' · '}采用 {diagnostic.adopted} · 绑定 {diagnostic.bound} · 展示 {diagnostic.displayed}</p>
+            {diagnostic.queries.length > 0 && <p>检索词：{diagnostic.queries.join('；')}</p>}
+            {diagnostic.candidate_urls.length > 0 && <p>候选来源：{diagnostic.candidate_urls.join('；')}</p>}
+            {diagnostic.exclusions.length > 0 && <p>未采用原因：{diagnostic.exclusions.map(item => item.reason).join('；')}</p>}
+            {diagnostic.unresolved_gaps.length > 0 && <p>具体缺口：{diagnostic.unresolved_gaps.join('；')}</p>}
+            {diagnostic.failure_reasons.length > 0 && <p>失败原因：{diagnostic.failure_reasons.join('；')}</p>}
+          </>}
+        </div>
+      })}
+    </details>
+  ) : null
   const mappingProgressPending = mappingProgress === null
   const mappingAccessibilityLabel = mappingProgressPending
     ? t('mapping.progress_pending')
@@ -1158,6 +1186,7 @@ export function BidStagePanel({
     {runPlan}
     {capabilityRunPlan}
     {exportPlan}
+    {researchProcess}
     {floatingRevision}
   </>
   const queuedFiles: readonly (SelectedFile | SelectedTemplate)[] = selectedTemplate === null
@@ -1215,6 +1244,8 @@ export function BidStagePanel({
             {t('mapping.failed_sections', { sections: visibleMappingProgress.failed_section_ids.join('、') })}
           </p>
         )}
+
+        {researchProcess}
 
         {rules !== undefined && canUpload && <p className={css.rules}>{rules}</p>}
 

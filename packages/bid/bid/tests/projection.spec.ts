@@ -80,6 +80,10 @@ describe('Bid client projection', () => {
   it('从 task 状态生成 Host 准入动作', () => {
     expect(getBidClientProjection({ stage: 'file_intake', status: 'waiting_user', run: null }).allowedActions)
       .toEqual(['upload_files', 'send_message'])
+    expect(getBidClientProjection({ stage: 'file_intake', status: 'failed', run: null,
+      failure: { message: '资料解析失败。' } }).allowedActions).toEqual(['upload_files', 'send_message'])
+    expect(getBidClientProjection({ stage: 'tender_analysis', status: 'failed', run: null,
+      failure: { message: '招标分析失败。' } }).allowedActions).toEqual(['send_message'])
     expect(getBidClientProjection({ stage: 'evidence_mapping', status: 'waiting_user', run: null }).allowedActions)
       .toEqual(['confirm_outline', 'regenerate_outline', 'send_message'])
     expect(getBidClientProjection({ stage: 'chapter_writing', status: 'running', run: { ...run,

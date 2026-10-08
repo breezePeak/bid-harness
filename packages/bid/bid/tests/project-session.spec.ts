@@ -8,9 +8,15 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import JSZip from 'jszip'
+import mammoth from 'mammoth'
+import { Document, Packer, Paragraph } from 'docx'
 import { Context } from '@deepseek-ai/cordis'
 import AgentRegistry, { emitAgentEvent, type Agent } from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
+import LocalFileSystem from '@deepseek-ai/dsh-fs-local'
+import LocalSubprocessRuntime from '@deepseek-ai/dsh-subprocess-local'
+import * as ToolFs from '@deepseek-ai/dsh-tool-fs'
+import * as ToolFsSearch from '@deepseek-ai/dsh-tool-fs-search'
 import LlmRuntime, { CallId, createUserMessage, LlmAdapter, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import SessionStore, { SessionId, type Session } from '@deepseek-ai/dsh-session'
 import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
@@ -36,7 +42,8 @@ import {
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { prepareBidStageContextTransition } from '../src/stage-context.ts'
 import { inspectBidStage, isBidMainSession } from '../src/stage-interaction.ts'
-import { bidRecoverableRun } from '../src/bid-recovery.ts'
+import { bidCompletedCapabilityRun, bidRecoverableRun } from '../src/bid-recovery.ts'
+import { withBidNativeTaskAuthorization } from '../src/bid-tool-authorization.ts'
 import { parseChapterExecutionLog, parseOrMigrateChapterExecutionLog } from '../src/chapter-writing-plan-artifacts.ts'
 import { chapterContentSha256 } from '../src/chapter-revision.ts'
 import { readBidChapterCommandJournal } from '../src/chapter-command-journal.ts'
@@ -54,7 +61,7 @@ import {
 } from '../src/docx-format-contract.ts'
 import { persistBidWorkRequest, readBidWorkRequest } from '../src/work-descriptor.ts'
 import type { CapabilityTaskDispatcher } from '../src/bid-capability-task.ts'
-import { capabilityTaskRequestSchema, persistCapabilityTaskRequest } from '../src/bid-capability-task.ts'
+import { capabilityPlanPatchRepeated, capabilityTaskCheckpointSchema, capabilityTaskRequestSchema, persistCapabilityTaskRequest } from '../src/bid-capability-task.ts'
 import { executeTestCapabilityTask as executeCapabilityTask } from './fixtures/task-verifier.ts'
 import { bidCapabilityTaskSchema } from '../src/bid-capability-contract.ts'
 import { createTestBidRunContext } from '../src/run-coordinator.ts'
@@ -68,6 +75,9 @@ import * as capabilityInput from '../src/bid-capability-task.ts'
 import { ChapterAdapter } from './fixtures/chapter-writing-adapter.ts'
 import { writeInputs as writeChapterInputs } from './fixtures/chapter-writing-inputs.ts'
 import { executeChapterWriting } from '../src/chapter-writing-executor.ts'
+import { parseDocumentChunkIndex } from '../src/document-chunk.ts'
+import { resolveEvidenceChunk } from '../src/evidence-chunk.ts'
+import { deriveResearchDiagnostics } from '../src/research-diagnostics.ts'
 
 interface HostExecution {
   readonly inFlight: Map<string, unknown>
@@ -1367,6 +1377,139 @@ describe('Workspace 项目与独立 Session', () => {
     expect(await ctx.bid.getCapabilityTaskPlan(agent.session)).toMatchObject({ status: 'awaiting_input', steps: [
       { description: '核对本章资料依据并列出缺口', status: 'awaiting_input', detail: '请提供验收资料' },
     ] })
+  })
+
+  it.each(['ready', 'waiting_user', 'completed'] as const)('独立能力回到 %s 后在同一 Work 追加纠正且重复提交不重复执行', async (status) => {
+    const { ctx, workspace, fresh } = await fixture()
+    await seedCapabilityProject(workspace, 'complete')
+    await checkpointStoredBidProjectState(workspace, { stage: 'chapter_writing', status, run: null })
+    const agent = await fresh(`capability-correction-${status}`)
+    await checkpointStoredBidProjectState(workspace, { stage: 'chapter_writing', status, run: null })
+    agent.session.append('bid.task.changed', { state: { stage: 'chapter_writing', status, run: null } })
+    const first = createUserMessage({ content: [{ type: 'text', text: '核对第一章并保存审核结果。' }], source: { kind: 'user' } })
+    agent.session.append('turn/start', { turn: 1 })
+    agent.session.append('user/message', first, { surfaceOp: 'append' })
+    let executions = 0
+    const correctionStarted = Promise.withResolvers<undefined>()
+    const releaseCorrection = Promise.withResolvers<undefined>()
+    const unregister = ctx.bid.registerCapabilityTaskDispatcher({ verifyTask: executorTestVerifier,
+      allowedWrites: async () => new Set(['chapters/local-review.json']),
+      execute: async (_call, context) => {
+        executions += 1
+        if (executions === 2) {
+          correctionStarted.resolve(undefined)
+          await releaseCorrection.promise
+        }
+        await context.run.commits.writeJson(join(context.working.projectRoot, 'chapters/local-review.json'), { version: executions })
+        return { result: { target_section_ids: ['SEC-1'], changed_artifacts: ['chapters/local-review.json'],
+          change_summary: '第一章审核结果已更新', warnings: [], missing_topics: [], needs_input: false } }
+      }, validate: async () => {},
+    })
+    try {
+      await ctx.bid.runCapabilityTask(agent, { goal: '核对第一章并保存审核结果', scope: { kind: 'sections', section_ids: ['SEC-1'] },
+        steps: [{ description: '核对第一章', scope: { source: 'task' }, call: { capability: 'chapter.review', input: { reason: '核对第一章' } } }],
+      }, { session_id: String(agent.session.id), message_id: String(first.id) }, ['chapters/execution-log.json'])
+      expect(await readBidProjectState(workspace)).toMatchObject({ stage: 'chapter_writing', status })
+      const original = agent.session.events.findLast(event => event.type === 'bid.run.completed')
+      if (original?.type !== 'bid.run.completed') throw new Error('缺少独立能力完成记录')
+      const work = original.data.run.work
+      expect(bidCompletedCapabilityRun(agent.session, runtime(agent.session))).toBeDefined()
+      expect(ctx.tools.get('bid_plan_task', agent), '完成事件后应注册纠正工具').toBeDefined()
+      const unrelatedPath = join(workspace.projectRoot, 'chapters/sections/0004.md')
+      const unrelated = await readFile(unrelatedPath)
+      const correction = createUserMessage({ content: [{ type: 'text', text: '纠正第一章审核结果，只修改原任务范围。' }], source: { kind: 'user' } })
+      agent.session.append('turn/start', { turn: 2 })
+      agent.session.append('user/message', correction, { surfaceOp: 'append' })
+      await ctx.tools.execute({ agent, name: 'bid_project_inspect', arguments: { query: { object: 'task' } },
+        callId: CallId('inspect-completed-correction'), signal: new AbortController().signal })
+      expect(ctx.tools.get('bid_plan_task', agent)).toBeDefined()
+      const patch = { edit: 'append', steps: [{ description: '纠正第一章审核', scope: { source: 'task' },
+        call: { capability: 'chapter.review', input: { reason: '纠正第一章审核结果' } } }] }
+      const invoke = () => withBidNativeTaskAuthorization(agent.session, correction, () => ctx.tools.execute({ agent, name: 'bid_plan_task', arguments: patch,
+        callId: CallId('append-completed-correction'), signal: new AbortController().signal }))
+      const patched = await invoke()
+      expect(patched, JSON.stringify(patched)).toMatchObject({ isError: false, value: { accepted: true, steps: 2 } })
+      const firstPatch = await readFile(join(workspace.projectRoot, 'runs', work.workId, 'task-checkpoint.json'), 'utf8')
+      expect(capabilityPlanPatchRepeated(capabilityTaskCheckpointSchema.parse(JSON.parse(firstPatch)),
+        { session_id: String(agent.session.id), message_id: String(correction.id) }, 2,
+        bidCapabilityTaskSchema.parse({ goal: '纠正第一章审核结果', scope: { kind: 'sections', section_ids: ['SEC-1'] }, steps: patch.steps }).steps)).toBe(true)
+      const repeated = await invoke()
+      expect(repeated, JSON.stringify(repeated)).toMatchObject({ isError: false, value: { accepted: true, steps: 2 } })
+      const checkpointPath = join(workspace.projectRoot, 'runs', work.workId, 'task-checkpoint.json')
+      const checkpoint = JSON.parse(await readFile(checkpointPath, 'utf8')) as { steps: Array<{ status: string }>; plan_patches: object[] }
+      expect(checkpoint.steps.map(step => step.status)).toEqual(['completed', 'pending'])
+      expect(checkpoint.plan_patches).toHaveLength(1)
+      expect(executions).toBe(1)
+      expect(await ctx.bid.getCapabilityTaskPlan(agent.session)).toMatchObject({ status: 'failed', steps: [
+        { status: 'completed' }, { status: 'failed' },
+      ] })
+      const resumed = resumeRun(ctx, agent.session)
+      await correctionStarted.promise
+      expect(await ctx.bid.getCapabilityTaskPlan(agent.session)).toMatchObject({ status: 'running', steps: [
+        { status: 'completed' }, { status: 'running' },
+      ] })
+      releaseCorrection.resolve(undefined)
+      expect(await resumed).toMatchObject({ ok: true, value: { stage: 'chapter_writing', status } })
+      expect(executions).toBe(2)
+      const last = agent.session.events.findLast(event => event.type === 'bid.run.completed')
+      expect(last).toMatchObject({ data: { run: { work: { workId: work.workId } } } })
+      expect(JSON.parse(await readFile(join(workspace.projectRoot, 'chapters/local-review.json'), 'utf8'))).toEqual({ version: 2 })
+      expect(await readFile(unrelatedPath)).toEqual(unrelated)
+      const afterCompletion = await invoke()
+      expect(afterCompletion, JSON.stringify(afterCompletion)).toMatchObject({ isError: false, value: { accepted: true, steps: 2 } })
+      expect(await readBidProjectState(workspace)).toMatchObject({ stage: 'chapter_writing', status })
+      expect(await ctx.bid.getCapabilityTaskPlan(agent.session)).toMatchObject({ status: 'completed' })
+      expect(executions).toBe(2)
+    } finally { releaseCorrection.resolve(undefined); unregister() }
+  }, 30_000)
+
+  it.each(['chapter_writing', 'evidence_mapping'] as const)('独立研究完成后在 %s 从原 Work 候选读取诊断，不显示根目录旧日志', async (stage) => {
+    const { ctx, workspace, fresh } = await fixture()
+    await seedCapabilityProject(workspace, 'complete')
+    await checkpointStoredBidProjectState(workspace, { stage, status: 'waiting_user', run: null })
+    const agent = await fresh('completed-research-progress')
+    const message = createUserMessage({ content: [{ type: 'text', text: '复核第一章资料需求。' }], source: { kind: 'user' } })
+    agent.session.append('turn/start', { turn: 1 })
+    agent.session.append('user/message', message, { surfaceOp: 'append' })
+    const research = deriveResearchDiagnostics([], { sufficient_for_blueprint: true, unresolved_gaps: [],
+      evidence_requirement: { kind: 'not_required', reason: '本章说明项目实施职责，无需外部事实依据。' } })
+    const log = { schema_version: 5, max_concurrency: 1, observed_max_concurrency: 1,
+      tasks: [{ task_id: 'MAP-INIT-SEC-1', phase: 'initial', title: '本次职责研究', status: 'completed',
+        attempts: [], final_child_session_id: null, research_diagnostics: research }] }
+    const unregister = ctx.bid.registerCapabilityTaskDispatcher({ verifyTask: executorTestVerifier,
+      allowedWrites: async () => new Set(['analysis/evidence-mapping-log.json']),
+      execute: async (_call, context) => {
+        await context.run.commits.writeJson(join(context.working.projectRoot, 'analysis/evidence-mapping-log.json'), log)
+        return { result: { target_section_ids: ['SEC-1'], changed_artifacts: ['analysis/evidence-mapping-log.json'],
+          change_summary: '已复核资料需求', warnings: [], missing_topics: [], needs_input: false } }
+      }, validate: async () => {},
+    })
+    try {
+      await ctx.bid.runCapabilityTask(agent, { goal: '复核第一章资料需求', scope: { kind: 'sections', section_ids: ['SEC-1'] },
+        steps: [{ description: '复核资料需求', scope: { source: 'task' }, call: { capability: 'evidence.research',
+          input: { mode: 'supplement', reason: '复核职责说明是否需要外部事实依据', allow_outline_refinement: false } } }],
+      }, { session_id: String(agent.session.id), message_id: String(message.id) }, [])
+      expect(await readBidProjectState(workspace)).toMatchObject({ stage, status: 'waiting_user' })
+      await writeFile(join(workspace.projectRoot, 'analysis/evidence-mapping-log.json'), JSON.stringify({ ...log,
+        tasks: [{ ...log.tasks[0]!, title: '根目录旧资料研究', research_diagnostics: undefined }] }))
+      const current = getBidClientProjection(runtime(agent.session))
+      const progress = await ctx.bid.getEvidenceMappingProgress(agent.session, current)
+      expect(progress).toMatchObject({ completed: 1, tasks: [{ title: '本次职责研究', research_diagnostics: research }] })
+      expect(progress?.tasks.some(task => task.title === '根目录旧资料研究')).toBe(false)
+      if (stage === 'evidence_mapping') {
+        const nativeRequest = { reason: '后续原生资料映射' }
+        const work = await persistBidWorkRequest(workspace, 'stage_execution', stage, nativeRequest, { stage, nativeRequest })
+        const nativeRun: BidRunData = { runId: 'later-native-mapping', epoch: 2, baseProjectRevision: 1,
+          work, startedAt: 10, updatedAt: 20 }
+        agent.session.append('bid.run.started', { run: nativeRun })
+        agent.session.append('bid.run.completed', { run: nativeRun })
+        const restored: BidTaskState = { stage, status: 'waiting_user', run: null }
+        await checkpointStoredBidProjectState(workspace, restored)
+        agent.session.append('bid.task.changed', { state: restored })
+        const nativeProgress = await ctx.bid.getEvidenceMappingProgress(agent.session, getBidClientProjection(runtime(agent.session)))
+        expect(nativeProgress?.tasks[0]?.title).toBe('根目录旧资料研究')
+      }
+    } finally { unregister() }
   })
 
   it('后续真实用户消息通过 bid_plan_task 只调整挂起 Work 未开始的后缀', async () => {
@@ -4501,4 +4644,86 @@ describe('Workspace 项目与独立 Session', () => {
     expect(executedError, JSON.stringify(executed)).not.toContain('BID_CHAPTER_REVISION_CONTEXT_UNAVAILABLE')
   })
 
+})
+describe('S1 文件接入失败', () => {
+  it('同字节 DOCX 重传成功后替换失败身份记录并可供 S4 读取', async () => {
+    const { ctx, fresh, host, workspace, adapter } = await fixture({ realOrchestrator: true, withPersistence: true })
+    await ctx.plugin(LocalSubprocessRuntime)
+    await ctx.plugin(LocalFileSystem, { cwd: workspace.root })
+    await ctx.plugin(ToolFsSearch, { sampleOverCapGlobResults: true })
+    await ctx.plugin(ToolFs)
+    const agent = await fresh('s1-same-bytes-retry')
+    const bytes = await Packer.toBuffer(new Document({ sections: [{ children: [
+      new Paragraph({ text: '智慧审计平台建设项目', heading: 'Heading1' }),
+      new Paragraph('系统必须支持统一身份认证和审计日志。'),
+      new Paragraph('技术评分：总体技术方案完整合理得 10 分。'),
+      new Paragraph('技术方案必须提供数据安全措施。'),
+    ] }] }))
+    const upload = { name: 'tender.docx', role: 'tender' as const, size: bytes.byteLength, data: bytes.toString('base64') }
+    const conversion = vi.spyOn(mammoth, 'convertToHtml').mockRejectedValueOnce(new Error('首次转换暂时失败'))
+    adapter.script.push(answer('首次 DOCX 转换失败，请重新上传。'))
+
+    const first = await ctx.bid.uploadFiles(agent.session, [upload])
+
+    expect(first).toMatchObject({ ok: false, error: { code: 'BID_FILE_INTAKE_FAILED',
+      files: [{ name: 'tender.docx', status: 'failed', error: { code: 'BID_FILE_PARSE_FAILED' } }] } })
+    expect(await readBidProjectState(workspace)).toMatchObject({ stage: 'file_intake', status: 'failed' })
+    const failed = (await workspace.readManifest()).files[0]!
+    expect(failed).toMatchObject({ role: 'tender', parseStatus: 'failed' })
+    expect(await readFile(join(workspace.projectRoot, failed.inputPath))).toEqual(bytes)
+    await vi.waitFor(() => {
+      expect(JSON.stringify(agent.session.deriveMessages())).toContain('首次 DOCX 转换失败，请重新上传。')
+    })
+    await agent.whenIdle()
+    const source = (anchor_text: string) => ({ file_position: 0, chunk_position: 0, anchor_text })
+    adapter.script.push(toolCall('submit_tender_analysis', {
+      project_facts: [{ field: 'project_name', value: '智慧审计平台建设项目', sources: [source('智慧审计平台建设项目')] }],
+      requirements: [{ category: '功能要求', normalized_requirement: '系统必须支持统一身份认证和审计日志。',
+        mandatory: true, sources: [source('系统必须支持统一身份认证和审计日志。')] }],
+      scoring_items: [{ group: '技术评分', title: '总体技术方案', criterion: '总体技术方案完整合理得 10 分。',
+        score: 10, score_range: null, must_answer: true, sources: [source('技术评分：总体技术方案完整合理得 10 分。')] }],
+      compliance_items: [{ type: '强制要求', normalized_rule: '技术方案必须提供数据安全措施。',
+        severity: 'mandatory', sources: [source('技术方案必须提供数据安全措施。')] }],
+    }), answer('已提交完整招标分析，等待用户确认。'))
+
+    const retry = await ctx.bid.uploadFiles(agent.session, [upload])
+
+    expect(retry, JSON.stringify(retry)).toMatchObject({ ok: true, value: { stage: 'tender_analysis', status: 'waiting_user' } })
+    expect(conversion).toHaveBeenCalledTimes(2)
+    expect(host.inFlight.size).toBe(0)
+    const manifest = await workspace.readManifest()
+    const sameIdentity = manifest.files.filter(file => file.id === failed.id && file.role === 'tender')
+    expect(sameIdentity).toHaveLength(1)
+    const successful = sameIdentity[0]!
+    expect(successful).toMatchObject({ sha256: failed.sha256, parseStatus: 'success', parseError: null })
+    expect(successful.inputPath).not.toBe(failed.inputPath)
+    expect(await readFile(join(workspace.projectRoot, failed.inputPath))).toEqual(bytes)
+    expect(await readFile(join(workspace.projectRoot, successful.inputPath))).toEqual(bytes)
+    const index = parseDocumentChunkIndex(JSON.parse(await readFile(join(workspace.projectRoot, successful.chunkIndexPath!), 'utf8')))
+    const resolved = await resolveEvidenceChunk(workspace, manifest, {
+      source_kind: 'tender', file_id: String(successful.id), chunk: index.chunks[0]!.id,
+    })
+    expect(resolved.file).toEqual(successful)
+    expect(await readFile(resolved.path, 'utf8')).toContain('系统必须支持统一身份认证和审计日志。')
+  }, 15_000)
+
+  it('损坏 DOCX 保存失败终态并释放项目锁，允许再次上传', async () => {
+    const { ctx, fresh, host, workspace } = await fixture({ realOrchestrator: true, withPersistence: true })
+    const agent = await fresh('s1-parse-failure')
+    const bytes = new TextEncoder().encode('not a zip archive')
+    const result = await ctx.bid.uploadIncomingFiles(agent.session, [{
+      name: 'broken.docx', role: 'tender', bytes,
+    }])
+    expect(result).toMatchObject({ ok: false, error: { code: 'BID_FILE_INTAKE_FAILED',
+      files: [{ name: 'broken.docx', status: 'failed', error: { code: 'BID_FILE_PARSE_FAILED' } }] } })
+    expect(await readBidProjectState(workspace)).toMatchObject({ stage: 'file_intake', status: 'failed',
+      failure: { code: 'BID_STAGE_VALIDATION_FAILED', issues: [{ code: 'FILE_INTAKE_NO_SUCCESSFUL_TENDER' }] } })
+    expect(host.inFlight.size).toBe(0)
+    const retry = await ctx.bid.uploadIncomingFiles(agent.session, [{ name: 'retry.docx', role: 'tender', bytes }])
+    expect(retry).toMatchObject({ ok: false, error: { code: 'BID_FILE_INTAKE_FAILED',
+      files: [{ name: 'retry.docx', status: 'failed' }] } })
+    expect(agent.session.events.filter(event => event.type === 'bid.run.started')).toHaveLength(2)
+    expect(await readBidProjectState(workspace)).toMatchObject({ stage: 'file_intake', status: 'failed' })
+    expect(host.inFlight.size).toBe(0)
+  }, 15_000)
 })

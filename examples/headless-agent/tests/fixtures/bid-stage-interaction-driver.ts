@@ -14,7 +14,7 @@ let ctx: Context | undefined
 try {
   ctx = await boot('bid-stage-interaction-snapshot', configPath)
   if (['task-rules-update', 'task-numeric-clarification'].includes(process.argv[3] ?? '')) await ctx.plugin(AttachmentLocal, { dshHome: join(process.cwd(), '.dsh') })
-  if (['task-planning', 'task-adding', 'selected-route', 'partial-replan', 'task-clarification', 'six-sparse', 'task-auth-recheck', 'task-assignment-conflict', 'task-completed-repair', 'task-binding-repair', 'task-review-resume', 'task-unread-verification', 'task-published-correction', 'task-migration-restart'].includes(process.argv[3] ?? '')) {
+  if (['task-planning', 'task-adding', 'selected-route', 'partial-replan', 'task-clarification', 'six-sparse', 'task-auth-recheck', 'task-assignment-conflict', 'task-completed-repair', 'task-binding-repair', 'task-review-resume', 'task-unread-verification', 'task-published-correction', 'task-published-correction-ready', 'task-published-correction-waiting-user', 'task-migration-restart'].includes(process.argv[3] ?? '')) {
     await ctx.plugin(AttachmentLocal, { dshHome: join(process.cwd(), '.dsh') })
   }
   const run = process.argv[3] === 'replan' ? runCapabilityReplanLoop
@@ -26,22 +26,25 @@ try {
         : process.argv[3] === 'task-review-resume' ? await runMainTaskPlanningLoop(ctx, process.cwd(), 'reviewing')
           : process.argv[3] === 'task-migration-restart' ? await runMainTaskPlanningLoop(ctx, process.cwd(), 'migration_restart')
             : process.argv[3] === 'task-unread-verification' ? await runMainTaskPlanningLoop(ctx, process.cwd(), 'unread_verification')
-              : process.argv[3] === 'task-published-correction' ? await runMainTaskPlanningLoop(ctx, process.cwd(), 'published_correction')
-                : process.argv[3] === 'task-auth-recheck' || process.argv[3] === 'task-assignment-conflict'
+              : ['task-published-correction-ready', 'task-published-correction-waiting-user'].includes(process.argv[3] ?? '')
+                ? await runMainTaskPlanningLoop(ctx, process.cwd(), 'published_correction', 'split', false, false, false,
+                  process.argv[3] === 'task-published-correction-ready' ? 'ready' : 'waiting_user')
+                : process.argv[3] === 'task-published-correction' ? await runMainTaskPlanningLoop(ctx, process.cwd(), 'published_correction')
+                  : process.argv[3] === 'task-auth-recheck' || process.argv[3] === 'task-assignment-conflict'
       || process.argv[3] === 'task-completed-repair' || process.argv[3] === 'task-binding-repair'
-                  ? await runMainTaskPlanningLoop(ctx, process.cwd(), process.argv[3] === 'task-auth-recheck' ? 'authorization_recheck'
-                    : process.argv[3] === 'task-assignment-conflict' ? 'assignment_conflict'
-                      : process.argv[3] === 'task-binding-repair' ? 'binding_repair' : 'completed_repair')
-                  : process.argv[3] === 'six-sparse' ? await runMainTaskPlanningLoop(ctx, process.cwd(), undefined, 'split', false, false, true)
-                    : process.argv[3] === 'task-clarification'
-                      ? await runMainTaskPlanningLoop(ctx, process.cwd(), undefined, 'split', false, true)
-                      : process.argv[3] === 'partial-replan'
-                        ? await runMainTaskPlanningLoop(ctx, process.cwd(), 'partial_replan', 'split', true)
-                        : process.argv[3] === 'selected-route'
-                          ? await runMainTaskPlanningLoop(ctx, process.cwd(), 'after_migration', 'split', true)
-                          : process.argv[3] === 'task-adding'
-                            ? await runMainTaskPlanningLoop(ctx, process.cwd(), undefined, 'add')
-                            : process.argv[3] === 'failed-supersede' ? await runCapabilitySupersedeLoop(ctx, process.cwd(), true)
-                              : await run(ctx, process.cwd())
+                    ? await runMainTaskPlanningLoop(ctx, process.cwd(), process.argv[3] === 'task-auth-recheck' ? 'authorization_recheck'
+                      : process.argv[3] === 'task-assignment-conflict' ? 'assignment_conflict'
+                        : process.argv[3] === 'task-binding-repair' ? 'binding_repair' : 'completed_repair')
+                    : process.argv[3] === 'six-sparse' ? await runMainTaskPlanningLoop(ctx, process.cwd(), undefined, 'split', false, false, true)
+                      : process.argv[3] === 'task-clarification'
+                        ? await runMainTaskPlanningLoop(ctx, process.cwd(), undefined, 'split', false, true)
+                        : process.argv[3] === 'partial-replan'
+                          ? await runMainTaskPlanningLoop(ctx, process.cwd(), 'partial_replan', 'split', true)
+                          : process.argv[3] === 'selected-route'
+                            ? await runMainTaskPlanningLoop(ctx, process.cwd(), 'after_migration', 'split', true)
+                            : process.argv[3] === 'task-adding'
+                              ? await runMainTaskPlanningLoop(ctx, process.cwd(), undefined, 'add')
+                              : process.argv[3] === 'failed-supersede' ? await runCapabilitySupersedeLoop(ctx, process.cwd(), true)
+                                : await run(ctx, process.cwd())
   process.stdout.write(`${JSON.stringify(result)}\n`)
 } finally { await ctx?.fiber.dispose() }

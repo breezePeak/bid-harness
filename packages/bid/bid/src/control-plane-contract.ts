@@ -2,6 +2,7 @@ import { z } from 'zod'
 import { recordOnlySchemaVersion } from './schema-version.ts'
 import type { DocxTemplateId } from './docx-format-contract.ts'
 import type { FlowchartSpec } from './flowchart.ts'
+import type { BidResearchDiagnostics } from './research-diagnostics-contract.ts'
 
 /** The ordered Bid Harness stages owned by the control plane. */
 export const BID_STAGES = [
@@ -200,6 +201,8 @@ export interface BidEvidenceMappingProgress {
     readonly section_ids: readonly string[]
     readonly child_session_id: string | null
     readonly latest_issue: string | null
+    /** 工具执行、充分性及保存、绑定、展示的可对账事实。 */
+    readonly research_diagnostics?: BidResearchDiagnostics
   }[]
 }
 

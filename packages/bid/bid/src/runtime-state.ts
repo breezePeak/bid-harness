@@ -559,7 +559,7 @@ export function getBidClientProjection(
   if (task.stage === 'docx_export' && task.status !== 'running' && task.status !== 'completed') return { ...base, allowedActions: ['send_message', 'export_docx'], composer: { enabled: true }, ...fileView }
   if (task.status === 'failed') return {
     ...base,
-    allowedActions: ['send_message'],
+    allowedActions: task.stage === 'file_intake' ? ['upload_files', 'send_message'] : ['send_message'],
     composer: { enabled: true },
     ...fileView,
   }

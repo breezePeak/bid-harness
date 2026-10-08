@@ -3,7 +3,12 @@ import { mkdir, mkdtemp, readFile, unlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
-import type { ToolExecutionResult, ToolRunContext } from '@deepseek-ai/dsh-tools'
+import { Context } from '@deepseek-ai/cordis'
+import { CallId, WebError } from '@deepseek-ai/dsh-llm'
+import ToolRuntime, { defineTool, type ToolExecutionResult, type ToolRunContext } from '@deepseek-ai/dsh-tools'
+import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
+import WebRuntime from '@deepseek-ai/dsh-web'
+import * as webTools from '@deepseek-ai/dsh-tool-web'
 import {
   BidWorkspace,
   createTestBidRunContext,
@@ -13,6 +18,63 @@ import {
 } from '@deepseek-ai/dsh-bid'
 
 describe('S4 Web Research Pool', () => {
+  it('生产 Fetch 成功但正文为空时拒绝保存，不伪装为 Provider 暂态错误', async () => {
+    const ctx = new Context()
+    await ctx.plugin(ToolRuntime)
+    await ctx.plugin(SystemPrompt, { persona: 'test' })
+    await ctx.plugin(WebRuntime)
+    await ctx.plugin(webTools)
+    ctx.effect(() => ctx.web.registerFetchProvider({ id: 'empty-fetch', available: () => true,
+      fetch: async ({ url }) => ({ url, statusCode: 200, body: { kind: 'text', content: '   ' }, truncated: false }) }))
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-web-pool-empty-')))
+    const pool = new S4WebResearchPool(workspace, createTestBidRunContext().commits, (url, exec) => ctx.tools.execute({
+      callId: CallId('parent-empty-fetch'), name: 'web_fetch', arguments: { url }, signal: exec.signal,
+    }))
+    try {
+      await expect(pool.fetch('https://example.com/empty', { signal: new AbortController().signal } as ToolRunContext))
+        .rejects.toMatchObject({ code: 'INVALID_ARGS' })
+      expect(pool.snapshots()).toEqual([])
+    } finally { await ctx.fiber.dispose() }
+  })
+  it.each([
+    ['WEB_PROVIDER_RATE_LIMITED', 429, '12'], ['WEB_PROVIDER_ERROR', 503, undefined],
+    ['WEB_FETCH_TIMEOUT', undefined, undefined], ['WEB_PROVIDER_AUTHENTICATION_FAILED', 401, undefined],
+    ['WEB_PROVIDER_QUOTA_EXCEEDED', 429, undefined],
+  ] as const)('生产 Web Tool 与 Pool 双层执行保留 %s 原始字段', async (code, statusCode, retryAfter) => {
+    const ctx = new Context()
+    await ctx.plugin(ToolRuntime)
+    await ctx.plugin(SystemPrompt, { persona: 'test' })
+    await ctx.plugin(WebRuntime)
+    await ctx.plugin(webTools)
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-web-pool-errors-')))
+    const original = new WebError('固定 Provider 原因', code, {
+      ...(statusCode === undefined ? {} : { statusCode }), ...(retryAfter === undefined ? {} : { retryAfter }),
+    })
+    ctx.effect(() => ctx.web.registerFetchProvider({ id: 'fake-fetch', available: () => true, fetch: async () => { throw original } }))
+    const observed: ToolExecutionResult[] = []
+    ctx.on('tools/result', (_exec, result) => { observed.push(result) })
+    let caught: unknown
+    const pool = new S4WebResearchPool(workspace, createTestBidRunContext().commits, (url, exec) => ctx.tools.execute({
+      callId: CallId('parent-fetch'), name: 'web_fetch', arguments: { url }, signal: exec.signal, parent: exec.token,
+    }))
+    ctx.effect(() => ctx.tools.register(defineTool({
+      name: 'pooled_fetch', description: '共享研究来源。', parameters: { url: { type: 'string', required: true } },
+      output: { schema: { type: 'object', additionalProperties: true }, render: () => [] },
+      async execute(args, exec) {
+        try { return await pool.fetch(args.url, exec) } catch (error) { caught = error; throw error }
+      },
+    })))
+    try {
+      const result = await ctx.tools.execute({ callId: CallId('child-fetch'), name: 'pooled_fetch', arguments: { url: 'https://example.com/standard' }, signal: new AbortController().signal })
+      expect(result).toMatchObject({ isError: true, error: { info: {
+        code, ...(statusCode === undefined ? {} : { statusCode }), ...(retryAfter === undefined ? {} : { retryAfter }),
+      } } })
+      expect(observed).toHaveLength(2)
+      expect(caught).toMatchObject({ cause: { message: '固定 Provider 原因', info: { code } } })
+      expect(pool.snapshots()).toEqual([])
+    } finally { await ctx.fiber.dispose() }
+  })
+
   it('同 URL single-flight，并在抓取返回时立即共享可读 Chunk', async () => {
     const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-web-pool-')))
     await mkdir(join(workspace.projectRoot, 'analysis/web-sources'), { recursive: true })

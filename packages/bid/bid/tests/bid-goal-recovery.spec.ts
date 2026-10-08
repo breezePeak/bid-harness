@@ -88,8 +88,8 @@ it.each(['QUOTA', 'AUTH', 'NO_ADAPTER', 'INVALID_REQUEST', 'PI_AI_ERROR'])('模�
     .toMatchObject({ issues, recovery: { kind: 'blocked', reason: '模型通道不可用' } })
 })
 
-it.each(['TRANSPORT', 'TIMEOUT', 'SERVER', 'EMPTY_RESPONSE', 'RATE_LIMIT', 'WEB_SEARCH_TIMEOUT'])
-('模型通道 %s 预算耗尽后按原错误码恢复网络请求', (code) => {
+it.each(['TRANSPORT', 'TIMEOUT', 'SERVER', 'EMPTY_RESPONSE', 'RATE_LIMIT', 'WEB_SEARCH_TIMEOUT', 'WEB_FETCH_TIMEOUT', 'TOOL_TIMEOUT'])
+('请求通道 %s 预算耗尽后按原错误码恢复网络请求', (code) => {
   const mappingWork: BidWorkDescriptor = { ...work, stage: 'evidence_mapping' }
   const issues = [{ code, artifact: 'MAP-INIT-SEC-009', message: '模型响应通道暂时失败' }]
   expect(safeRecoverableBidFailure(mappingWork, new BidStageExecutionError(issues)))

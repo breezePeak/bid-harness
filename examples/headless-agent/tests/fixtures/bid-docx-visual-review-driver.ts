@@ -1,4 +1,5 @@
-/** 真实 Loader 回放固定 Word 页面中的表格定位与视觉模型输入。 */
+/** 真实 Loader 和固定 PDF 页面验证视觉缓存；模型结论与 DOCX 转换为测试替身。 */
+import { createHash } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import { boot } from '@deepseek-ai/dsh-app-boot'
 import LocalAttachmentStore from '@deepseek-ai/dsh-attachment-local'
@@ -6,7 +7,7 @@ import { BidWorkspace, checkpointBidProjectState } from '@deepseek-ai/dsh-bid'
 import { LlmAdapter, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { readDocxFormat } from '../../../../packages/bid/bid/src/docx-format-store.ts'
-import { collectVisualSensitiveBlocks, createDocxVisualReviewer } from '../../../../packages/bid/bid/src/docx-visual-review.ts'
+import { collectVisualSensitiveBlocks, createDocxVisualReviewer, reviewDocxVisualBlocks } from '../../../../packages/bid/bid/src/docx-visual-review.ts'
 import { renderPdfReviewPages } from '../../../../packages/bid/bid/src/pdf-page-render.ts'
 import { seedProjectArtifacts } from '../../../../packages/bid/bid/tests/fixtures/project-session.ts'
 
@@ -49,15 +50,28 @@ try {
   const reviewer = createDocxVisualReviewer(ctx, session)
   const pdf = new Uint8Array(await readFile(new URL('../../../../packages/bid/bid/tests/fixtures/table-page-anchors.pdf', import.meta.url)))
   const pages = await renderPdfReviewPages(pdf, block.anchor, 0, 1, reviewer.imageLimits, new AbortController().signal)
-  const decision = await reviewer.review({ block, pages })
+  const exportBytes = Buffer.from('固定 DOCX 导出字节替身')
+  const render = async () => exportBytes
+  const signal = new AbortController().signal
+  const reviewed = await reviewDocxVisualBlocks(workspace, markdown, view.values, '固定页面模板', reviewer, render, signal, {
+    renderPdf: async () => pdf,
+  })
+  const beforeRepeat = session.events.filter(event => event.type === 'bid.visual-review.request').length
+  const repeated = await reviewDocxVisualBlocks(workspace, markdown, view.values, '固定页面模板', reviewer, render, signal, {
+    renderPdf: async () => pdf,
+  })
   const request = session.events.findLast(event => event.type === 'bid.visual-review.request')
   if (request?.type !== 'bid.visual-review.request') throw new Error('视觉模型输入没有持久事件')
   const text = request.data.messages[0]?.content.find(item => item.type === 'text')
   await ctx.sessions.flush(session)
-  process.stdout.write(`${JSON.stringify({ decision, kind: block.kind, anchor: block.anchor,
+  const documentHash = `sha256:${createHash('sha256').update(repeated.bytes).digest('hex')}`
+  process.stdout.write(`${JSON.stringify({ decision: { status: reviewed.reviews[0]?.status }, kind: block.kind, anchor: block.anchor,
     pages: pages.map(page => page.page), pageCount: pages[0]?.pageCount,
     prompt: text?.type === 'text' ? text.text : null,
     imageCount: request.data.messages.flatMap(message => message.content).filter(item => item.type === 'image').length,
     loggedRequest: true,
+    cacheReused: beforeRepeat === session.events.filter(event => event.type === 'bid.visual-review.request').length,
+    finalOutputMatchesReviews: repeated.outputHash === documentHash && repeated.reviews.length === 1
+      && repeated.reviews.every(review => review.documentHash === documentHash && review.status === 'passed'),
   })}\n`)
 } finally { await ctx.fiber.dispose() }

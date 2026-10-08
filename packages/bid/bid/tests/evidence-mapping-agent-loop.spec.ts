@@ -1,4 +1,4 @@
-import { mkdtemp, readFile } from 'node:fs/promises'
+import { mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
@@ -12,12 +12,97 @@ import SubagentRuntime from '@deepseek-ai/dsh-subagent'
 import * as spawn from '@deepseek-ai/dsh-subagent-spawn-in-process'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
-import { describe, expect, it } from 'vitest'
-import { buildBidStageTask, parseOutlineArtifact, parseWebEvidenceSourcesArtifact, parseEvidenceMapArtifact, webEvidenceContentSha256 } from '@deepseek-ai/dsh-bid'
+import WebRuntime from '@deepseek-ai/dsh-web'
+import * as webTools from '@deepseek-ai/dsh-tool-web'
+import { describe, expect, it, vi } from 'vitest'
+import { buildBidStageTask, readEvidenceMappingProgress, parseOutlineArtifact, parseWebEvidenceSourcesArtifact, parseEvidenceMapArtifact, webEvidenceContentSha256 } from '@deepseek-ai/dsh-bid'
 import IntegrationFileSystem, { runEvidenceMappingLoop } from './fixtures/evidence-mapping-loop.ts'
 import { runFullOutlineRegenerationLoop, runStageInteractionLoop } from './fixtures/stage-interaction-loop.ts'
 
 describe('S4 Web evidence through a real Agent Tool loop', () => {
+  it.each(['zero', 'local', 'external_unbound'] as const)('真实章节研究按证据需求结算 %s 并发布诊断', async (mode) => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-bid-research-demand-'))
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    await ctx.plugin(SessionStore)
+    await ctx.plugin(JsonlSessionPersistence, { root: join(root, '.session-store'), compression: 'none' })
+    await ctx.plugin(SystemPrompt, { persona: 'test' })
+    await ctx.plugin(ToolRuntime)
+    await ctx.plugin(WebRuntime)
+    await ctx.plugin(webTools)
+    await ctx.plugin(IntegrationFileSystem)
+    await ctx.plugin(AgentRegistry)
+    await ctx.plugin(AgentLoop, { agents: [] })
+    await ctx.plugin(SubagentRuntime)
+    await ctx.plugin(spawn, { providerName: 'spawn' })
+    try {
+      const { workspace, outcome } = await runEvidenceMappingLoop(ctx, root, false, false,
+        { code: 'WEB_PROVIDER_RATE_LIMITED', failures: 0, production: true }, mode)
+      if (mode === 'external_unbound') {
+        expect(outcome).toMatchObject({ status: 'failed', failure: { issues: [expect.objectContaining({ code: 'EVIDENCE_MAPPING_REQUIRED_EVIDENCE_UNBOUND' })] } })
+        const progress = await readEvidenceMappingProgress(workspace)
+        expect(progress?.tasks[0]?.research_diagnostics).toMatchObject({ requirement: { kind: 'external_required' }, fetched: 2, read: 3 })
+      } else {
+        expect(outcome, JSON.stringify(outcome)).toMatchObject({ status: 'waiting_user' })
+        const evidence = parseEvidenceMapArtifact(JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/evidence-map.json'), 'utf8')))
+        expect(evidence.section_mappings[0]?.web_materials).toEqual([])
+        expect(evidence.section_mappings[0]?.local_materials).toHaveLength(mode === 'zero' ? 0 : 1)
+        const progress = await readEvidenceMappingProgress(workspace)
+        expect(progress?.tasks[0]?.research_diagnostics).toMatchObject({
+          status: mode === 'zero' ? 'not_required' : 'bound', requirement: { kind: mode === 'zero' ? 'not_required' : 'local_sufficient' },
+          searches: 0, fetched: 0, bound: mode === 'zero' ? 0 : 1, displayed: mode === 'zero' ? 0 : 1,
+        })
+      }
+    } finally { await ctx.fiber.dispose() }
+  }, 20_000)
+  it('生产 Web Tool 和 Pool 在真实会话重启后继承同 Work 抓取预算', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-bid-fetch-restart-'))
+    const createContext = async () => {
+      const ctx = new Context()
+      await ctx.plugin(LlmRuntime)
+      await ctx.plugin(SessionStore)
+      await ctx.plugin(JsonlSessionPersistence, { root: join(root, '.session-store'), compression: 'none' })
+      await ctx.plugin(SystemPrompt, { persona: 'test' })
+      await ctx.plugin(ToolRuntime)
+      await ctx.plugin(WebRuntime)
+      await ctx.plugin(webTools)
+      await ctx.plugin(IntegrationFileSystem)
+      await ctx.plugin(AgentRegistry)
+      await ctx.plugin(AgentLoop, { agents: [] })
+      await ctx.plugin(SubagentRuntime)
+      await ctx.plugin(spawn, { providerName: 'spawn' })
+      return ctx
+    }
+    const first = await createContext()
+    const controller = new AbortController()
+    const firstExecution = runEvidenceMappingLoop(first, root, false, false, { code: 'WEB_PROVIDER_RATE_LIMITED', statusCode: 429,
+      failures: 1, tool: 'web_fetch', maxRetries: 1, retryAfter: '60', signal: controller.signal, production: true })
+    const path = join(root, '.bid-harness/analysis/evidence-mapping-log.json')
+    await vi.waitFor(async () => {
+      const log = JSON.parse(await readFile(path, 'utf8')) as { tasks: Array<{ status: string; attempts: unknown[] }> }
+      expect(log.tasks[0]).toMatchObject({ status: 'pending', attempts: [expect.anything()] })
+    }, { timeout: 10_000 })
+    controller.abort(new Error('测试用户停止并重新挂载'))
+    const initial = await firstExecution
+    expect(initial.outcome.status).toBe('failed')
+    await first.sessions.flush(initial.agent.session)
+    await first.fiber.dispose()
+    const restarted = await createContext()
+    try {
+      const resumed = await runEvidenceMappingLoop(restarted, root, false, false, { code: 'WEB_PROVIDER_RATE_LIMITED', statusCode: 429,
+        failures: 1, tool: 'web_fetch', maxRetries: 5, resume: true, production: true })
+      expect(resumed.outcome).toMatchObject({ status: 'failed', failure: { cause: { code: 'WEB_PROVIDER_RATE_LIMITED', retryable: true } } })
+      const log = JSON.parse(await readFile(path, 'utf8')) as { max_infrastructure_retry_attempts: number
+        tasks: Array<{ attempts: Array<{ infrastructure_provider: string; issues: Array<{ code: string }> }> }> }
+      expect(log.max_infrastructure_retry_attempts).toBe(1)
+      expect(log.tasks[0]?.attempts).toHaveLength(2)
+      expect(log.tasks[0]?.attempts.every(attempt => attempt.infrastructure_provider === 'web_fetch' && attempt.issues[0]?.code === 'WEB_PROVIDER_RATE_LIMITED')).toBe(true)
+      expect(resumed.agent.session.events.filter(event => event.type === 'bid.run.started')).toHaveLength(2)
+      const started = resumed.agent.session.events.filter(event => event.type === 'bid.run.started')
+      expect(started[1]?.data.run.work.workId).toBe(started[0]?.data.run.work.workId)
+      expect(resumed.requests.filter(request => request.messages.some(message => message.content.some(block => block.type === 'text' && block.text.includes('Mapping Task：'))))).toHaveLength(1)
+    } finally { await restarted.fiber.dispose() }
+  }, 30_000)
   it.each(['exhausted', 'server_exhausted', 'user', 'race', 'overflow'] as const)('真实 Agent 取消与网络恢复边界：%s', async (scenario) => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-bid-s4-stop-loop-'))
     const ctx = new Context()
@@ -107,6 +192,47 @@ describe('S4 Web evidence through a real Agent Tool loop', () => {
       expect(log.tasks[0]?.attempts[0]?.issues[0]?.message).toContain('注入的联网故障')
     } finally { await ctx.fiber.dispose() }
   }, 20_000)
+  it.each([
+    ['WEB_PROVIDER_RATE_LIMITED', 429, true], ['WEB_PROVIDER_ERROR', 503, true], ['WEB_FETCH_TIMEOUT', undefined, true],
+    ['WEB_PROVIDER_AUTHENTICATION_FAILED', 401, false], ['WEB_PROVIDER_QUOTA_EXCEEDED', 429, false],
+  ] as const)('父级 raw fetch 和 Child Pool 封装统一恢复 %s', async (code, statusCode, retryable) => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-bid-s4-fetch-loop-'))
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    await ctx.plugin(SessionStore)
+    await ctx.plugin(JsonlSessionPersistence, { root: join(root, '.session-store'), compression: 'none' })
+    await ctx.plugin(SystemPrompt, { persona: 'test' })
+    await ctx.plugin(ToolRuntime)
+    await ctx.plugin(WebRuntime)
+    await ctx.plugin(webTools)
+    await ctx.plugin(IntegrationFileSystem)
+    await ctx.plugin(AgentRegistry)
+    await ctx.plugin(AgentLoop, { agents: [] })
+    await ctx.plugin(SubagentRuntime)
+    await ctx.plugin(spawn, { providerName: 'spawn' })
+    const failures: Array<{ parent: boolean; info: unknown }> = []
+    ctx.on('tools/result', (exec, result) => {
+      if (exec.name === 'web_fetch' && result.isError) failures.push({ parent: exec.agent?.session.header.origin !== 'subagent', info: result.error.info })
+    }, { global: true })
+    try {
+      const { workspace, outcome } = await runEvidenceMappingLoop(ctx, root, false, false, { code, statusCode, failures: 1, tool: 'web_fetch', maxRetries: 1, production: true })
+      expect(failures.filter(failure => (failure.info as { code?: string } | undefined)?.code === code)).toMatchObject([
+        { parent: true, info: { code, retryAfter: '0' } }, { parent: false, info: { code, retryAfter: '0' } },
+      ])
+      const log = JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/evidence-mapping-log.json'), 'utf8')) as {
+        tasks: Array<{ attempts: Array<{ accepted: boolean; infrastructure_provider?: string; issues: Array<{ code: string }> }> }>
+      }
+      if (retryable) {
+        expect(outcome, JSON.stringify(outcome)).toMatchObject({ status: 'waiting_user' })
+        expect(log.tasks[0]?.attempts).toMatchObject([
+          { accepted: false, infrastructure_provider: 'web_fetch', issues: [{ code }] }, { accepted: true },
+        ])
+      } else {
+        expect(outcome).toMatchObject({ status: 'failed', failure: { cause: { code, retryable: false } } })
+        expect(log.tasks[0]?.attempts).toHaveLength(1)
+      }
+    } finally { await ctx.fiber.dispose() }
+  }, 20_000)
   it('整本重生成由无文件工具 Child 选择位置，Host 保留身份并保存 Draft 后等待确认', async () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-bid-full-regeneration-'))
     const ctx = new Context()
@@ -149,7 +275,7 @@ describe('S4 Web evidence through a real Agent Tool loop', () => {
         confirmations: 0, rawWriteBlocked: true, untouchedEvidencePreserved: true, revision: 3, disposed: true,
         titles: ['访问控制与安全审计', '实施准备与资源核查', '实施过程', '验收移交'],
         visibleTools: ['bid_stage_inspect', 'bid_outline_apply_operations', 'bid_outline_regenerate_scope', 'bid_evidence_remap',
-          'bid_project_inspect', 'bid_run_task', 'bid_confirm_writing_plan'],
+          'bid_project_inspect', 'bid_run_task', 'bid_plan_task', 'bid_confirm_writing_plan'],
         concurrent: Array(3).fill('BID_OPERATION_IN_PROGRESS'), failures: 2, incompletePlanRejected: true,
         readOnlyNoWork: true, planOnlyNoWork: true, capabilityUpdates: 1, updatedRequirement: '明确实施边界',
       })
@@ -227,6 +353,18 @@ describe('S4 Web evidence through a real Agent Tool loop', () => {
       expect(attempts.map(attempt => attempt.accepted)).toEqual([true])
       expect(new Set(attempts.map(attempt => attempt.child_session_id)).size).toBe(1)
       expect(log.tasks[1]).toMatchObject({ task_id: 'MAP-FINAL-CHECK', phase: 'final_check', attempts: [{ accepted: true }] })
+      expect((await readEvidenceMappingProgress(workspace, { outline, evidence: map }))?.tasks[0]?.research_diagnostics)
+        .toMatchObject({ status: 'bound', adopted: 2, bound: 2, displayed: 2 })
+      const hidden = await readEvidenceMappingProgress(workspace, { outline: { ...outline, sections: [] }, evidence: map })
+      expect(hidden?.tasks[0]?.research_diagnostics)
+        .toMatchObject({ status: 'display_omitted', bound: 2, displayed: 0 })
+      expect((await readEvidenceMappingProgress(workspace, { outline, evidence: null }))?.tasks[0]?.research_diagnostics)
+        .toMatchObject({ status: 'display_omitted', bound: 2, displayed: 0 })
+      await writeFile(join(workspace.projectRoot, 'analysis/evidence-map.json'), JSON.stringify({ ...map,
+        section_mappings: map.section_mappings.map(mapping => ({ ...mapping, local_materials: [], web_materials: [] })),
+      }), 'utf8')
+      expect((await readEvidenceMappingProgress(workspace, { outline, evidence: map }))?.tasks[0]?.research_diagnostics)
+        .toMatchObject({ status: 'saved_unbound', adopted: 2, bound: 0, displayed: 0 })
     } finally {
       await ctx.fiber.dispose()
     }

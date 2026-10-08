@@ -54,6 +54,20 @@ describe('BidOrchestrator', () => {
     expect(execute.mock.calls[0]![0].stage).toBe('file_intake')
   })
 
+  it.each(['file_intake', 'docx_export'] as const)('程序阶段 %s 校验失败保存可序列化的失败终态', async (stage) => {
+    const current = await session()
+    current.append('bid.task.changed', { state: { stage, status: 'ready', run: null } })
+    const issues = [{ code: 'INVALID_ARTIFACT', message: '阶段产物未通过校验。' }]
+    const orchestrator = new BidOrchestrator(current,
+      { canExecute: () => true, execute: async task => artifacts(task.stage) },
+      { validate: async () => ({ ok: false, issues }) })
+
+    await expect(orchestrator.runCurrentProgramStage()).resolves.toMatchObject({ stage, status: 'failed', run: null,
+      failure: { code: 'BID_STAGE_VALIDATION_FAILED', issues } })
+    const terminal = current.events.findLast(event => event.type === 'bid.task.changed')
+    expect(terminal).toMatchObject({ type: 'bid.task.changed', data: { state: { stage, status: 'failed' } } })
+  })
+
   it('finishes the linear workflow at S5 and leaves S6 for on-demand export', async () => {
     expect(BID_STAGES).toEqual(['file_intake', 'tender_analysis', 'outline_generation', 'evidence_mapping', 'chapter_writing', 'docx_export'])
     expect(BID_STAGES.map(stage => getBidStagePolicy(stage).userGate)).toEqual(['none', 'after_validation', 'after_validation', 'after_validation', 'none', 'none'])
