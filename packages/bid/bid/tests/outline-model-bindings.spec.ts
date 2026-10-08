@@ -1,5 +1,6 @@
+import { applyOutlineCandidateRepair } from '../src/outline-candidate-repair.ts'
 import { describe, expect, it } from 'vitest'
-import type { z } from 'zod'
+import { z } from 'zod'
 import { bindOutlineModelCandidate, bindOutlineModelCandidateRepairs, bindOutlineModelRepairOperations,
   bindOutlineModelStructuralOperations, outlineModelInputView, outlineModelView, outlineModelRepairOperationSchema,
   outlineModelResponsePointRepairOperationSchema, outlineModelStructuralOperationSchema,
@@ -53,6 +54,47 @@ function outline() {
 }
 
 describe('S3 程序绑定身份', () => {
+  it('字段修复只清理被授权的标题字段，不能清理相邻旧标题', () => {
+    const value = outline()
+    value.sections[0]!.title = '一、实施方案'
+    const issues = [{ code: 'OUTLINE_CANDIDATE_FIELD_INVALID', message: '名称缺失', section_index: 1,
+      section_id: value.sections[1]!.id, field: 'title' }]
+    const operations = bindOutlineModelCandidateRepairs([{ section_index: 1, field: 'title', value: '1.1 新名称' }], value.sections, inputs)
+    const result = applyOutlineCandidateRepair(value, operations, issues, inputs)
+    expect(result).toMatchObject({ sections: [expect.objectContaining({ title: '一、实施方案' }),
+      expect.objectContaining({ title: '新名称' }), expect.objectContaining({ title: '进度安排' })] })
+    expect(value.sections[1]?.title).toBe('实施方案')
+    expect(() => applyOutlineCandidateRepair(value, [{ section_index: 1, field: 'title', value: '第一章' }], issues, inputs)).toThrow()
+  })
+
+  it('只读语义投影清理旧标题，原始目录及框架来源保持不变', () => {
+    const legacy = outline()
+    legacy.sections[1]!.title = '第一章 一、实施方案'
+    const before = JSON.stringify(legacy)
+    const view = z.object({ sections: z.array(z.object({ title: z.string() })) }).parse(outlineModelView(legacy, inputs))
+    expect(view.sections[1]?.title).toBe('实施方案')
+    expect(JSON.stringify(legacy)).toBe(before)
+  })
+  it('新候选与编辑拒绝净化后为空的标题，历史正式 Schema 仍可读', () => {
+    const value = modelCandidate()
+    value.sections[0]!.title = '第一章'
+    expect(() => bindOutlineModelCandidate(value, inputs)).toThrow()
+    expect(() => bindOutlineModelRepairOperations([{ type: 'update_section', section_position: 0, title: '一、' }], outline(), inputs)).toThrow()
+  })
+
+  it('新候选清理章节旧号，重生成仍绑定原身份与引用', () => {
+    const baseline = outline()
+    const value = modelCandidate()
+    value.sections[0]!.title = '一、实施方案'
+    value.sections[0]!.children[0]!.title = '2.1 1.1 项目背景'
+    const bound = bindOutlineModelCandidate(value, inputs)
+    expect(bound.sections.map(section => section.title)).toEqual(['实施方案', '项目背景', '进度安排'])
+    value.sections[0]!.children[0] = { ...value.sections[0]!.children[0]!, source_position: 1 }
+    const regenerated = bindOutlineModelCandidate(value, inputs, baseline)
+    expect(regenerated.sections[1]).toMatchObject({ id: baseline.sections[1]!.id,
+      title: '项目背景', requirement_ids: baseline.sections[1]!.requirement_ids })
+  })
+
   it('Host 按树派生可写状态，清空父节作答与 RP，并拒绝缺少叶节语义', () => {
     const candidate = modelCandidate()
     candidate.sections[0] = { ...candidate.sections[0]!, must_answer: ['父节错误作答'], response_point_positions: [0] }

@@ -4,6 +4,7 @@
  * this module never stores an ambient current workspace or emits file bytes to
  * a model request.
  */
+import { normalizeOutlineSectionTitle } from './outline-title.ts'
 
 import { Buffer } from 'node:buffer'
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
@@ -7133,7 +7134,7 @@ export class BidHostRuntime extends TypertRemoteService {
         section_id: section.id,
         parent_id: section.parent_id,
         order: section.order,
-        title: section.title,
+        title: normalizeOutlineSectionTitle(section.title) || section.title,
         ...(section.summary === undefined ? {} : { summary: section.summary }),
         writable: section.writable,
         writing_status: writingStatus,
@@ -7352,7 +7353,7 @@ export class BidHostRuntime extends TypertRemoteService {
     const section = outline.sections.find(item => item.id === sectionId)
     if (section === undefined) throw new Error('BID_REVIEW_SECTION_UNKNOWN')
     const chain = reviewHeadingPath(outline, section.id)
-    if (!section.writable) return { section_id: section.id, title: section.title, number: chain.numbers.join('.'), heading_path: chain.titles, writable: false, markdown: section.summary ?? null, flowcharts: [], content_sha256: null, requirement_ids: [], scoring_response_point_ids: [], evidence_status: 'not_applicable', review: { status: 'not_started', issues: [] } }
+    if (!section.writable) return { section_id: section.id, title: normalizeOutlineSectionTitle(section.title) || section.title, number: chain.numbers.join('.'), heading_path: chain.titles, writable: false, markdown: section.summary ?? null, flowcharts: [], content_sha256: null, requirement_ids: [], scoring_response_point_ids: [], evidence_status: 'not_applicable', review: { status: 'not_started', issues: [] } }
     const index = buildChapterWorklist(outline).findIndex(item => item.id === section.id)
     if (index < 0) throw new Error('BID_REVIEW_SECTION_UNKNOWN')
     const assigned = await readChapterLocation(workspace, section.id)
@@ -7406,7 +7407,7 @@ export class BidHostRuntime extends TypertRemoteService {
         ]
       }
     } catch { evidenceStatus = 'missing' }
-    return { section_id: section.id, title: section.title, number: chain.numbers.join('.'), heading_path: chain.titles, writable: true, markdown, flowcharts, content_sha256: markdown === null ? null : chapterContentSha256(markdown), requirement_ids: section.requirement_ids, scoring_response_point_ids: section.scoring_response_point_ids ?? [], evidence_status: evidenceStatus, materials, review }
+    return { section_id: section.id, title: normalizeOutlineSectionTitle(section.title) || section.title, number: chain.numbers.join('.'), heading_path: chain.titles, writable: true, markdown, flowcharts, content_sha256: markdown === null ? null : chapterContentSha256(markdown), requirement_ids: section.requirement_ids, scoring_response_point_ids: section.scoring_response_point_ids ?? [], evidence_status: evidenceStatus, materials, review }
   }
 
   /** Admit the S5 workbench while writing is running or after its last result. */
@@ -8151,7 +8152,7 @@ function reviewHeadingPath(outline: OutlineArtifact, sectionId: string): { title
   const numbers: number[] = []
   let current = sections.get(sectionId)
   while (current !== undefined) {
-    titles.unshift(current.title)
+    titles.unshift(normalizeOutlineSectionTitle(current.title) || current.title)
     numbers.unshift(current.order)
     current = current.parent_id === null ? undefined : sections.get(current.parent_id)
   }

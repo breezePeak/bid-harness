@@ -1,3 +1,4 @@
+import { normalizeOutlineSectionTitle } from './outline-title.ts'
 import { createHash } from 'node:crypto'
 import { mkdir, readFile, rm } from 'node:fs/promises'
 import { join, relative } from 'node:path'
@@ -155,7 +156,8 @@ export async function generateScopedOutlineOperations(
       renderOutlineRevisionFeedback(feedback),
       renderBidRecoveryContext(recovery),
       `当前目录：${JSON.stringify(draft.outline.sections.map((section, position) => ({ position,
-        title: section.title, purpose: section.purpose, summary: section.summary, writable: section.writable,
+        title: normalizeOutlineSectionTitle(section.title) || section.title,
+        purpose: section.purpose, summary: section.summary, writable: section.writable,
         must_answer: section.must_answer, writing_notes: section.writing_notes, sibling_position: section.order - 1,
         parent_position: section.parent_id === null ? null : draft.outline.sections.findIndex(parent => parent.id === section.parent_id) })))}`,
       `只允许修改以下章节位置及其子树：${JSON.stringify(sectionIds.map(id => draft.outline.sections.findIndex(section => section.id === id)))}。保留选中根的父节点和位置；不得修改范围外节点。拆分叶子使用 split_section，合并同级叶子使用 merge_sections。`,
@@ -216,7 +218,7 @@ export async function generateScopedOutlineBusinessBindings(
     if (position < 0) throw new Error('BID_OUTLINE_BINDING_OBJECT_UNKNOWN')
     return position
   })
-  const sectionView = (section: OutlineArtifact['sections'][number]) => ({ title: section.title,
+  const sectionView = (section: OutlineArtifact['sections'][number]) => ({ title: normalizeOutlineSectionTitle(section.title) || section.title,
     purpose: section.purpose, must_answer: section.must_answer,
     requirement_positions: positions(facts.requirements, section.requirement_ids),
     scoring_positions: positions(facts.scoring, section.scoring_ids),
@@ -363,6 +365,7 @@ function renderInitialOutlineTask(agent: Agent, task: BidStageTask, input: Outli
     '根据当前 Project、Requirements、Scoring、Compliance 和稳定评分响应点设计技术标详细写作 Blueprint。每个响应点位置至少由一个合适的可写叶子覆盖，只选择 response_point_positions，正式身份和快照由程序绑定。',
     '评分响应点是章节要回答的要求，不等于目录标题；按技术方案的自然结构组织层级，不要机械地把每个响应点或评分项第一条提升成标题。仅当响应点本身构成独立方案主题时才用作标题。',
     '技术标目录只组织投标人需要展开的技术方案、实施措施和交付成果；只需材料核验的 Compliance 放入 global_compliance_positions。程序按子节点生成 writable 并清空结构节点的 must_answer 和响应点；叶节点必须有具体 must_answer。不得返回 writable。',
+    'title 只填写章节名称，不包含章号或层级编号；章节顺序、编号、ID 由程序生成。',
     '返回 document_title、global_compliance_positions、sections；sections 只放根章节，子章节嵌套在所属父章节的 children 数组中，叶章节返回 children: []。所有深度的子章节都遵守与根章节完全相同的节点字段和必填规则；Host 会完整递归校验后才接受目录。按语义直接组织这棵树，不计算或返回 parent_position。只选择业务位置和框架标题位置；父引用、节点编号、同级顺序、树层级、版本、scope 和所有业务身份由程序填写。',
     '不要生成“封面”“目录”或“技术偏离表”；Host 会确定性补入固定第一章，返回内容只负责第二章以后的动态技术正文目录。',
     ...task.constraints.map(constraint => `约束：${constraint}`),

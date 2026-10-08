@@ -1,4 +1,5 @@
 /** S3 模型只选择本次输入表的位置；持久身份、派生快照及新增节点编号由程序绑定。 */
+import { normalizeOutlineSectionTitle } from './outline-title.ts'
 import { z } from 'zod'
 import { outlineAssociationRepairOperationSchema, outlineRepairOperationSchema } from './outline-generation-repair.ts'
 import { outlineCandidateRepairSchema } from './outline-candidate-repair.ts'
@@ -180,7 +181,7 @@ export function outlineModelView(outline: OutlineArtifact, inputs: OutlineModelB
     sections: outline.sections.map((section, position) => {
       const { id: _id, parent_id, level: _level, order, requirement_ids, scoring_ids, compliance_ids,
         scoring_response_point_ids, scoring_response_points: _snapshots, framework_refs, ...semantic } = section
-      return { position, ...semantic,
+      return { position, ...semantic, title: normalizeOutlineSectionTitle(section.title) || section.title,
         sibling_position: order - 1,
         parent_position: parent_id === null ? null : currentPositions(outline.sections, [parent_id], 'parent_position', position)[0],
         requirement_positions: currentPositions(inputs.requirements.requirements, requirement_ids, 'requirement_positions', position),
@@ -239,7 +240,7 @@ export function bindOutlineModelCandidate(value: unknown, inputs: OutlineModelBi
       const writable = children.length === 0
       return { id: identities[index]?.id, parent_id: parent === null ? null : identities[parent]?.id, level, order,
         ...Object.fromEntries(Object.entries(section).map(([field, value]) => [reverse[field] ?? field,
-          bindValue(field, value, inputs, identities)])), writable,
+          field === 'title' ? normalizeOutlineSectionTitle(z.string().parse(value)) : bindValue(field, value, inputs, identities)])), writable,
         ...(!writable ? { must_answer: [], scoring_response_point_ids: [] } : {}) }
     }),
   })

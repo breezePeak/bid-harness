@@ -1,3 +1,4 @@
+import { normalizeOutlineSectionTitle } from '@deepseek-ai/dsh-bid/control-plane'
 /** 目录业务字段差异与现有移动操作的展示落点。 */
 import { applyOutlineEdits, type OutlineArtifact, type OutlineEditOperation, type OutlineSection, type OutlineReviewContext } from '@deepseek-ai/dsh-bid/control-plane'
 
@@ -51,7 +52,8 @@ export function compareOutlines(
       }
       return changed
     }
-    const title = a !== undefined && b !== undefined && a.title !== b.title
+    const title = a !== undefined && b !== undefined
+      && (normalizeOutlineSectionTitle(a.title) || a.title) !== (normalizeOutlineSectionTitle(b.title) || b.title)
     const writing = changedFields(writingFields, false)
     const linkedFields = changedFields(linkFields, true)
     const mapping = evidence?.section_mappings.find(item => item.section_id === id)
@@ -117,7 +119,7 @@ export function outlineDropOperation(outline: OutlineArtifact, sourceId: string,
   for (const section of moved.sections) {
     if (section.writable === parents.has(section.id)) return null
     if (section.writable && section.must_answer.length === 0) return null
-    const key = `${section.parent_id}\u0000${section.title.normalize('NFKC').toLocaleLowerCase().replace(/[^\p{L}\p{N}]/gu, '')}`
+    const key = `${section.parent_id}\u0000${(normalizeOutlineSectionTitle(section.title) || section.title).normalize('NFKC').toLocaleLowerCase().replace(/[^\p{L}\p{N}]/gu, '')}`
     if (titles.has(key)) return null
     titles.add(key)
   }

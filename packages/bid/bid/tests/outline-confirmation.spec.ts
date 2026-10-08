@@ -22,6 +22,17 @@ const outline: OutlineArtifact = {
 }
 
 describe('outline confirmation artifacts', () => {
+  it('只清理明确提交的标题，不修改未触及章节及其引用', () => {
+    const source = { ...outline, sections: [{ ...outline.sections[0]!, title: '一、交付方案' }] }
+    const edited = applyOutlineEdits(source, [{ type: 'add_section', parent_id: null, order: 2,
+      writable: true, title: '第二章 2.1 新增章节', purpose: '补充', must_answer: ['补充内容'] }])
+    expect(edited.sections.map(section => section.title)).toEqual(['一、交付方案', '新增章节'])
+    const updated = applyOutlineEdits(edited, [{ type: 'update_section', section_id: 'SEC-002', title: '（一）新增名称' }])
+    expect(updated.sections[1]?.title).toBe('新增名称')
+    expect(updated.sections[0]).toEqual(source.sections[0])
+    expect(source.sections[0]?.title).toBe('一、交付方案')
+  })
+
   it('只更新写作注记，不改目录身份、覆盖及原对象', () => {
     const notes = ['流程图仅归本叶节，保持原文及条件化边界。']
     const edited = applyOutlineEdits(outline, parseOutlineEditOperations([

@@ -1,4 +1,5 @@
 /** 固定 A4 的快速近似与基于所选原始模板的 LibreOffice 真实分页。 */
+import { normalizeOutlineSectionTitle } from './outline-title.ts'
 import { createHash } from 'node:crypto'
 import { readFile, stat } from 'node:fs/promises'
 import { fromMarkdown } from 'mdast-util-from-markdown'
@@ -406,7 +407,7 @@ export async function estimateChapterWritingPages(
       parent_id: section.parent_id,
       number: position.number,
       depth: position.depth,
-      title: section.title,
+      title: normalizeOutlineSectionTitle(section.title) || section.title,
       writable: section.writable,
       markdown,
     }

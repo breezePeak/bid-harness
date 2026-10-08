@@ -1,3 +1,4 @@
+import { normalizeOutlineSectionTitle } from './outline-title.ts'
 import { createHash, randomUUID } from 'node:crypto'
 import { lstat, mkdir, readFile, rm, unlink } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -151,7 +152,7 @@ export function buildEvidenceMappingPlan(outline: OutlineArtifact): EvidenceMapp
       phase: 'initial',
       section_ids: [section.id],
       outline_edit_scope_id: section.id,
-      title: section.title,
+      title: normalizeOutlineSectionTitle(section.title) || section.title,
       heading_path: sectionEvidenceContext(outline, section).heading_path,
     })),
   }
@@ -886,7 +887,9 @@ function mappingTaskOutlineSections(outline: OutlineArtifact, task: EvidenceMapp
 }> {
   const editable = taskEditableSectionIds(outline, task)
   return outline.sections.filter(section => editable.has(section.id))
-    .map(section => ({ section_id: section.id, parent_id: section.parent_id, title: section.title, writable: section.writable }))
+    .map(section => ({ section_id: section.id, parent_id: section.parent_id,
+      title: normalizeOutlineSectionTitle(section.title) || section.title,
+      writable: section.writable }))
 }
 
 function toolIssues(issues: readonly StageValidationIssue[]): Array<{
@@ -1038,7 +1041,8 @@ function structureFingerprint(state: MappingSubmissionState, task: EvidenceMappi
     research: state.researchAssessment,
     research_ready: state.researchReady,
     sections: state.stagedOutline.sections.filter(section => ids.has(section.id)).map(section => ({
-      id: section.id, parent_id: section.parent_id, title: section.title, order: section.order,
+      id: section.id, parent_id: section.parent_id, title: normalizeOutlineSectionTitle(section.title) || section.title,
+      order: section.order,
       purpose: section.purpose, must_answer: section.must_answer, writable: section.writable,
       blueprint: section.writable ? sectionTaskSemanticState(currentSectionMapping(state, task, section.id)) : undefined,
     })),
@@ -1463,7 +1467,7 @@ function sectionTaskReviewContext(
   const sectionContext = sectionEvidenceContext(state.stagedOutline, section)
   const complianceIds = new Set(sectionContext.compliance_ids)
   return {
-    title: section.title,
+    title: normalizeOutlineSectionTitle(section.title) || section.title,
     parent_id: section.parent_id,
     heading_path: sectionContext.heading_path,
     project: subagentTaskContext(state.reviewInputs.project),
@@ -2063,7 +2067,9 @@ function attachMappingSubmissionRuntime(
   }
   const objectView = () => ({
     sections: state.stagedOutline.sections.map(section => ({
-      position: currentSectionObjects().indexOf(section.id), id: section.id, title: section.title,
+      position: currentSectionObjects().indexOf(section.id), id: section.id,
+      title: normalizeOutlineSectionTitle(section.title) || section.title,
+
     })),
     ...mappingBusinessObjectView(task, inputs),
     references: currentReferenceObjects().map(item => ({ ...item, allowed_uses: referencePositions().uses(item.position) })),
@@ -2403,13 +2409,14 @@ function attachMappingSubmissionRuntime(
         state.locked = true
         state.lastIncompleteIssues = []
         return Promise.resolve({ locked: true, mapping_sections: mappingTaskSections(state.stagedOutline, task).map(section => ({
-          section_id: section.id, title: section.title, parent_id: section.parent_id,
+          section_id: section.id, title: normalizeOutlineSectionTitle(section.title) || section.title, parent_id: section.parent_id,
           purpose: section.purpose, must_answer: section.must_answer,
           requirement_ids: section.requirement_ids, scoring_ids: section.scoring_ids,
           scoring_response_point_ids: section.scoring_response_point_ids ?? [],
         })), queued_leaf_sections: mappingTaskWritingSections(state.stagedOutline, task)
           .filter(section => !task.section_ids.includes(section.id))
-          .map(section => ({ section_id: section.id, title: section.title, parent_id: section.parent_id })) })
+          .map(section => ({ section_id: section.id, title: normalizeOutlineSectionTitle(section.title) || section.title,
+            parent_id: section.parent_id })) })
       },
     })
     register({
@@ -2932,7 +2939,8 @@ export async function buildEvidenceMappingAcceptanceReport(
       research_findings_count: researchFindings.length,
       research_findings: researchFindings,
       final_blueprints: finalSections.map(section => ({
-        section_id: section.id, title: section.title, purpose: section.purpose, must_answer: section.must_answer,
+        section_id: section.id, title: normalizeOutlineSectionTitle(section.title) || section.title,
+        purpose: section.purpose, must_answer: section.must_answer,
         writing_notes: section.writing_notes,
         writing_dimensions: evidenceBySection.get(section.id)?.writing_dimensions ?? [],
         missing_topics: evidenceBySection.get(section.id)?.missing_topics ?? [],
@@ -2947,7 +2955,9 @@ export async function buildEvidenceMappingAcceptanceReport(
       review_overturned_initial_judgment: repairChangedStructure,
       repair_changed_structure: repairChangedStructure,
       tools: aggregateTools(taskIds),
-      final_corresponding_sections: finalSections.map(section => ({ section_id: section.id, title: section.title })),
+      final_corresponding_sections: finalSections.map(section => ({
+        section_id: section.id, title: normalizeOutlineSectionTitle(section.title) || section.title,
+      })),
     }
   })
   const statistics = log.statistics
@@ -3073,7 +3083,7 @@ export function renderEvidenceMappingSubagentTask(
     `allow_outline_refinement：${JSON.stringify(allowOutlineRefinement)}`,
     ...(!allowOutlineRefinement ? ['当前为固定目录研究：不得修改已确认章节的 title、结构、purpose、must_answer、writing_brief 或业务覆盖；Final Check 中发现职责问题须报告阻断，不得借任务修正改变 Blueprint。'] : []),
     `current_section_scope：${JSON.stringify(currentSectionScope)}`,
-    `对象位置：${JSON.stringify({ sections: inputs.outline.sections.map((section, position) => ({ position, id: section.id, title: section.title })), ...mappingBusinessObjectView(task, inputs),
+    `对象位置：${JSON.stringify({ sections: inputs.outline.sections.map((section, position) => ({ position, id: section.id, title: normalizeOutlineSectionTitle(section.title) || section.title })), ...mappingBusinessObjectView(task, inputs),
       references: references.map(item => ({ ...item, allowed_uses: referencePositions.uses(item.position) })),
       reference_choices: { ...referencePositions.choices(), local: [], web: [] },
       sources: navigation,
@@ -3639,7 +3649,7 @@ function dynamicLeafMappingTasks(
         ]),
         ...(item.task.recovery_request === undefined ? {} : { recovery_request: item.task.recovery_request }),
         coverage_candidates: coverageCandidates,
-        title: section.title,
+        title: normalizeOutlineSectionTitle(section.title) || section.title,
         heading_path: sectionEvidenceContext(after, section).heading_path,
       })
     }
@@ -4334,7 +4344,8 @@ async function executeEvidenceMappingRun(
           if (section === undefined) throw new Error(`BID_SECTION_SCOPE_INVALID: ${id}`)
           return { task_id: `MAP-INIT-${id}`, task_kind: 'outline_repair' as const,
             generation: 0, phase: 'initial' as const, section_ids: [], outline_edit_scope_id: id,
-            title: section.title, heading_path: sectionEvidenceContext(inputs.outline, section).heading_path }
+            title: normalizeOutlineSectionTitle(section.title) || section.title,
+            heading_path: sectionEvidenceContext(inputs.outline, section).heading_path }
         })]
       : plan.tasks.map(({ outline_edit_scope_id: _scope, research_candidate_task_ids: _candidateTasks, ...item }) => ({
         ...item,

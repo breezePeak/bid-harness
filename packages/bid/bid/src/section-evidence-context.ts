@@ -1,4 +1,5 @@
 /** S4 与 S5 共用的章节遍历、检索上下文及证据集合校验。 */
+import { normalizeOutlineSectionTitle } from './outline-title.ts'
 import { BidStageExecutionError, type StageValidationIssue } from './control-plane-contract.ts'
 import type { EvidenceMapArtifact } from './evidence-mapping-artifacts.ts'
 import { TECHNICAL_DEVIATION_SECTION_ID, type OutlineArtifact, type OutlineSection } from './outline-generation-artifacts.ts'
@@ -60,7 +61,7 @@ export function sectionEvidenceContext(outline: OutlineArtifact, section: Outlin
   while (true) {
     if (seen.has(current.id)) throw new Error('evidence-mapping-outline-cycle')
     seen.add(current.id)
-    headingPath.unshift(current.title)
+    headingPath.unshift(normalizeOutlineSectionTitle(current.title) || current.title)
     if (current.parent_id === null) break
     current = byId.get(current.parent_id)
     if (current === undefined) throw new Error('evidence-mapping-outline-parent-missing')
@@ -114,7 +115,7 @@ export function changedWritableSectionIds(before: OutlineArtifact, after: Outlin
     }
     const semantics = (section: OutlineSection) => ({
       id: section.id,
-      title: section.title,
+      title: normalizeOutlineSectionTitle(section.title) || section.title,
       purpose: section.purpose,
       must_answer: section.must_answer.map((text, position) => answerTargetKey({ kind: 'must_answer', position, text })),
       requirement_ids: [...section.requirement_ids].sort(),

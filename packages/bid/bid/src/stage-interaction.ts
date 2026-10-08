@@ -1,4 +1,5 @@
 /** Main Agent 全阶段对话工具、可回放提示与当前阶段资料读取。 */
+import { normalizeOutlineSectionTitle } from './outline-title.ts'
 import { readFile, stat } from 'node:fs/promises'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
@@ -382,7 +383,7 @@ async function inspectBidStageValue(
         return {
           section_id: section.id,
           number: positions.get(section.id)?.number,
-          title: section.title,
+          title: normalizeOutlineSectionTitle(section.title) || section.title,
           status: entry?.status ?? 'pending',
           writer_attempts: entry?.attempts.filter(item => item.role === 'writer').length ?? 0,
           reviewer_attempts: entry?.attempts.filter(item => item.role === 'reviewer').length ?? 0,
@@ -452,7 +453,7 @@ async function inspectBidStageValue(
       outline: outline.sections.slice(0, MAX_INSPECT_SECTIONS).map(section => ({
         id: section.id,
         parent_id: section.parent_id,
-        title: section.title,
+        title: normalizeOutlineSectionTitle(section.title) || section.title,
         writable: section.writable,
       })),
       ...(view === 'task_contract_context' ? { writing_plan: writing_plan ?? null } : {}),

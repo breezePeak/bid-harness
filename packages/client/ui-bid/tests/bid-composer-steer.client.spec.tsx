@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { useSyncExternalStore } from 'react'
-import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, expect, it, vi } from 'vitest'
 import type { BidReviewChapterView } from '@deepseek-ai/dsh-bid/control-plane'
 import type { ComposerSubmitForward, ComposerSubmitHandler } from '@deepseek-ai/dsh-client-ui-conversation/client'
@@ -57,6 +57,7 @@ it('章节引用提交原样透传 steer 和 signal，发送成功后才清除�
   const view = composer()
   view.drop()
   await screen.findByText('章节 · 1 实施方案')
+  await waitFor(() => { expect(screen.getByRole('button', { name: '移除章节引用' }).hasAttribute('disabled')).toBe(false) })
   const signal = new AbortController().signal
   await act(async () => {
     await expect(view.submit('请继续这一节', [], signal, 'steer')).resolves.toEqual({ kind: 'success' })
@@ -70,6 +71,7 @@ it('章节引用默认保留 queue，未带引用交还普通发送', async () =
   expect(view.submit('普通要求', [], undefined, 'steer')).toBeUndefined()
   view.drop()
   await screen.findByText('章节 · 1 实施方案')
+  await waitFor(() => { expect(screen.getByRole('button', { name: '移除章节引用' }).hasAttribute('disabled')).toBe(false) })
   await act(async () => {
     await expect(view.submit('排队修改', [], undefined, 'queue', 'submission-2')).resolves.toEqual({ kind: 'success' })
   })
@@ -80,6 +82,7 @@ it('章节引用发送失败不清除引用且不重复发送', async () => {
   const view = composer()
   view.drop()
   await screen.findByText('章节 · 1 实施方案')
+  await waitFor(() => { expect(screen.getByRole('button', { name: '移除章节引用' }).hasAttribute('disabled')).toBe(false) })
   view.forward.mockRejectedValueOnce(new Error('发送失败'))
   await act(async () => {
     await expect(view.submit('失败后保留', [], undefined, 'steer')).rejects.toThrow('发送失败')
@@ -92,6 +95,7 @@ it('章节引用可随图片发送并保留图片顺序，包括仅图片消息'
   const view = composer()
   view.drop()
   await screen.findByText('章节 · 1 实施方案')
+  await waitFor(() => { expect(screen.getByRole('button', { name: '移除章节引用' }).hasAttribute('disabled')).toBe(false) })
   const images = ['image-1', 'image-2'] as never
   await act(async () => {
     await expect(view.submit('', images, undefined, 'steer', 'submission-image')).resolves.toEqual({ kind: 'success' })
@@ -104,6 +108,7 @@ it('forward 返回失败时保留引用且不重复发送', async () => {
   const view = composer()
   view.drop()
   await screen.findByText('章节 · 1 实施方案')
+  await waitFor(() => { expect(screen.getByRole('button', { name: '移除章节引用' }).hasAttribute('disabled')).toBe(false) })
   view.forward.mockResolvedValueOnce({ kind: 'error', text: '发送失败' })
   await act(async () => {
     await expect(view.submit('失败后保留', ['image-1'] as never, undefined)).resolves.toEqual({

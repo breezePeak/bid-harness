@@ -1,3 +1,4 @@
+import { resolveHeadingNumbering } from '../src/docx-numbering.ts'
 import { createHash } from 'node:crypto'
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -137,6 +138,34 @@ async function exportFixture() {
 }
 
 describe('Bid DOCX export', () => {
+  it.each(['目录', '正文', '两处'])('历史%s旧号导出仅生成一套编号且正式文件不变', async (where) => {
+    const { workspace, outline } = await exportFixture()
+    try {
+      if (where !== '正文') outline.sections.forEach((section) => { section.title = `一、${section.title}` })
+      const path = join(workspace.projectRoot, 'outline/confirmed-outline.json')
+      const original = JSON.stringify(outline)
+      await writeFile(path, original)
+      await writeFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), where === '目录' ? '# 资源配置\n\n资源配置正文。' : '# 9.1 资源配置\n\n# 1.1.1 资源配置\n\n资源配置正文。')
+      const snapshot = await collectDocxExportSnapshot(workspace)
+      expect(snapshot.markdown).toContain('# 1 实施方案')
+      expect(snapshot.markdown).toContain('### 1.1.1 资源配置\n\n资源配置正文。')
+      expect(snapshot.markdown).not.toContain('一、')
+      expect(snapshot.markdown).not.toContain('9.1')
+      await executeDocxExport(workspace)
+      const bytes = await readFile(join(workspace.outputRoot, 'bid.docx'))
+      const { value: html } = await mammoth.convertToHtml({ buffer: bytes })
+      expect(html).toContain('<h3><strong>资源配置</strong></h3>')
+      expect(html).not.toContain('一、')
+      expect(html).not.toContain('9.1')
+      const zip = await JSZip.loadAsync(bytes)
+      const levels = resolveHeadingNumbering((await readDocxFormat(workspace)).state.resolved)
+      const numbering = await zip.file('word/numbering.xml')!.async('string')
+      expect(numbering).toContain(`<w:numFmt w:val="${levels[0]!.format}"`)
+      expect(numbering).toContain('<w:pStyle w:val="Heading1"')
+      expect(await readFile(path, 'utf8')).toBe(original)
+    } finally { await rm(workspace.projectRoot, { recursive: true, force: true }) }
+  })
+
   it('程序图键保持全书唯一，位置选择生成的跨章引用使用目标图编号', async () => {
     const { workspace } = await exportFixture()
     const semantic = [{ title: '程序流程', nodes: [{ type: 'start', text: '开始' }], edges: [] }]

@@ -80,6 +80,7 @@ export type {
   BidBinaryUploadFile,
 } from './control-plane-contract.ts'
 export { BID_DOCUMENT_ROLES, isBidDocumentRole } from './control-plane-contract.ts'
+export { normalizeOutlineSectionTitle } from './outline-title.ts'
 export { applyOutlineEdits, buildOutlineView } from './outline-confirmation-browser.ts'
 export type { OutlineEditOperation, OutlineViewSection } from './outline-confirmation-browser.ts'
 export type { OutlineArtifact, OutlineSection } from './outline-generation-artifacts.ts'

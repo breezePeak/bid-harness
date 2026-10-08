@@ -1,3 +1,4 @@
+import { normalizeOutlineSectionTitle } from '@deepseek-ai/dsh-bid/control-plane'
 import { useMemo, useState, useRef, useEffect } from 'react'
 import type { ReactNode } from 'react'
 import {
@@ -192,7 +193,7 @@ export function OutlineConfirmationReview({
     for (const { section, number } of view) {
       const change = diff?.get(section.id)
       const matches = (!onlyChanges || change?.added || change?.deleted || change?.modified || change?.moved)
-        && (query.length === 0 || section.title.toLowerCase().includes(query)
+        && (query.length === 0 || (normalizeOutlineSectionTitle(section.title) || section.title).toLowerCase().includes(query)
           || number.includes(query) || section.purpose.toLowerCase().includes(query))
       if (!matches && section.id !== navigation?.id) continue
       included.add(section.id)
@@ -222,7 +223,7 @@ export function OutlineConfirmationReview({
     const parts: string[] = []
     let section = source?.sections.find(item => item.id === id)
     while (section !== undefined) {
-      parts.unshift(section.title)
+      parts.unshift((normalizeOutlineSectionTitle(section.title) || section.title))
       const parent = section.parent_id
       section = source?.sections.find(item => item.id === parent)
     }
@@ -379,7 +380,7 @@ export function OutlineConfirmationReview({
                 aria-current={selectedId === section.id ? 'true' : undefined} style={{ paddingLeft: (depth - 1) * 20 }}>
                   <div className={css.rowMain}>
                     {hasChildren ? <button type="button" className={css.collapseToggle}
-                      aria-label={`${baselineCollapsed.has(section.id) ? '展开' : '折叠'} ${section.title}`}
+                      aria-label={`${baselineCollapsed.has(section.id) ? '展开' : '折叠'} ${(normalizeOutlineSectionTitle(section.title) || section.title)}`}
                       onClick={(event) => {
                         event.stopPropagation()
                         setBaselineCollapsed((previous) => {
@@ -393,7 +394,7 @@ export function OutlineConfirmationReview({
                     </button> : <span className={css.collapsePlaceholder} />}
                     <span className={css.dragPlaceholder} />
                     <span className={css.sectionNumber}>{number}</span>
-                    <button className={css.baselineTitle} title={section.title} type="button">{section.title}</button>
+                    <button className={css.baselineTitle} title={(normalizeOutlineSectionTitle(section.title) || section.title)} type="button">{(normalizeOutlineSectionTitle(section.title) || section.title)}</button>
                     {badges(section.id)}
                   </div>
                 </div>
@@ -412,7 +413,7 @@ export function OutlineConfirmationReview({
                 aria-current={selectedId === section.id ? 'true' : undefined} style={{ paddingLeft: (depth - 1) * 20 }}>
                   <div className={css.rowMain}>
                     {hasChildren ? <button type="button" className={css.collapseToggle}
-                      aria-label={`${baselineCollapsed.has(section.id) ? '展开' : '折叠'} ${section.title}`}
+                      aria-label={`${baselineCollapsed.has(section.id) ? '展开' : '折叠'} ${(normalizeOutlineSectionTitle(section.title) || section.title)}`}
                       onClick={(event) => {
                         event.stopPropagation()
                         toggleBranch(section.id)
@@ -421,7 +422,7 @@ export function OutlineConfirmationReview({
                     </button> : <span className={css.collapsePlaceholder} />}
                     <span className={css.dragPlaceholder} />
                     <span className={css.sectionNumber}>{number}</span>
-                    <button className={css.baselineTitle} title={section.title} type="button">{section.title}</button>
+                    <button className={css.baselineTitle} title={(normalizeOutlineSectionTitle(section.title) || section.title)} type="button">{(normalizeOutlineSectionTitle(section.title) || section.title)}</button>
                     {badges(section.id)}
                   </div>
                 </div>
@@ -501,7 +502,7 @@ export function OutlineConfirmationReview({
                         <button
                           type="button"
                           className={css.collapseToggle}
-                          aria-label={isBranchCollapsed ? `展开 ${section.title}` : `折叠 ${section.title}`}
+                          aria-label={isBranchCollapsed ? `展开 ${(normalizeOutlineSectionTitle(section.title) || section.title)}` : `折叠 ${(normalizeOutlineSectionTitle(section.title) || section.title)}`}
                           onClick={(event) => { event.stopPropagation(); toggleBranch(section.id) }}
                         >
                           {isBranchCollapsed ? <IconChevronRightOutline14 /> : <IconChevronDownOutline14 />}
@@ -510,7 +511,7 @@ export function OutlineConfirmationReview({
                         <span className={css.collapsePlaceholder} />
                       )}
 
-                      {!readOnly && <button type="button" aria-label={`拖动 ${section.title}`} className={css.dragHandle}
+                      {!readOnly && <button type="button" aria-label={`拖动 ${(normalizeOutlineSectionTitle(section.title) || section.title)}`} className={css.dragHandle}
                         onClick={() => { setSelectedId(section.id) }}
                       >⠿</button>}
                       <span className={css.sectionNumber} aria-label={`${section.id} 章节编号`}>
@@ -525,29 +526,31 @@ export function OutlineConfirmationReview({
                             else titleInputs.current.delete(section.id)
                           }}
                           aria-label={`${section.id} 标题`}
-                          title={section.title}
+                          title={(normalizeOutlineSectionTitle(section.title) || section.title)}
                           readOnly={readOnly || editingId !== section.id}
-                          value={editingId === section.id ? editingTitle : section.title}
+                          value={editingId === section.id ? editingTitle : (normalizeOutlineSectionTitle(section.title) || section.title)}
                           onChange={(event) => { setEditingTitle(event.target.value) }}
                           onBlur={() => {
                             if (editingId !== section.id) return
-                            if (editingTitle !== section.title) onUpdateSection(section.id, { title: editingTitle })
+                            if (editingTitle !== (normalizeOutlineSectionTitle(section.title) || section.title)) {
+                              onUpdateSection(section.id, { title: editingTitle })
+                            }
                             setEditingId(null)
                           }}
                         />
                       </div>
                       {badges(section.id)}
                       {!readOnly && <span className={css.rowActions}>
-                        <button type="button" className={css.rowIcon} aria-label={`编辑 ${section.title}`}
+                        <button type="button" className={css.rowIcon} aria-label={`编辑 ${(normalizeOutlineSectionTitle(section.title) || section.title)}`}
                           onClick={() => {
                             setEditingId(section.id)
-                            setEditingTitle(section.title)
+                            setEditingTitle((normalizeOutlineSectionTitle(section.title) || section.title))
                             titleInputs.current.get(section.id)?.focus()
                             titleInputs.current.get(section.id)?.select()
                           }}>
                           <IconEditOutline16 />
                         </button>
-                        <button type="button" className={css.rowIcon} aria-label={`删除 ${section.title}`}
+                        <button type="button" className={css.rowIcon} aria-label={`删除 ${(normalizeOutlineSectionTitle(section.title) || section.title)}`}
                           onClick={() => { onStructureOperation({ type: 'delete_section', section_id: section.id }) }}>
                           <IconTrashOutline16 />
                         </button>
@@ -578,14 +581,17 @@ export function OutlineConfirmationReview({
             const index = siblings.findIndex(candidate => candidate.id === section.id)
 
             return <div key={section.id}>
-              <h4>{section.title}</h4>
+              <h4>{(normalizeOutlineSectionTitle(section.title) || section.title)}</h4>
               {diff !== null && <section className={css.chapterChanges} aria-label="本章变化">
                 <h4>本章变化</h4>
                 {currentSelected === undefined && <p>S4 中无对应章节 · 已删除，以下为 S3 原内容</p>}
                 {original === undefined && <p>S3 中无对应章节</p>}
                 {badges(section.id)}
                 {!change?.modified && !change?.moved && !change?.added && !change?.deleted && <p>本章内容未变化</p>}
-                {original !== undefined && diff.get(section.id)?.title && titleChange(original.title, section.title)}
+                {original !== undefined && diff.get(section.id)?.title && titleChange(
+                  normalizeOutlineSectionTitle(original.title) || original.title,
+                  normalizeOutlineSectionTitle(section.title) || section.title,
+                )}
                 {diff.get(section.id)?.moved && <p>{path(baseline, section.id)} → {path(outline, section.id)}</p>}
                 {diff.get(section.id)?.details.map(detail => <div key={detail.label}><h5>{detail.label}</h5>
                   {detail.before.map((value, index) => <p key={`before-${index}`}>− <del>{value}</del></p>)}

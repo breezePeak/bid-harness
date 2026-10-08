@@ -1,3 +1,4 @@
+import { normalizeOutlineSectionTitle } from './outline-title.ts'
 import { z } from 'zod'
 import { applyOutlineEdits, buildOutlineView, type OutlineEditOperation, type OutlineViewSection } from './outline-confirmation-browser.ts'
 import type { OutlineArtifact } from './outline-generation-artifacts.ts'
@@ -9,16 +10,18 @@ export { applyOutlineEdits, buildOutlineView }
 export type { OutlineEditOperation, OutlineViewSection }
 
 const text = z.string().min(1)
+const sectionTitle = z.string().transform(normalizeOutlineSectionTitle).pipe(text)
+  .describe('title 只填写章节名称，不包含章号或层级编号；章节顺序、编号、ID 由程序生成。')
 /** 程序与浏览器使用的结构化目录编辑参数；模型位置协议由绑定器转换。 */
 export const outlineEditOperationSchema = z.discriminatedUnion('type', [
-  z.object({ type: z.literal('update_section'), section_id: text, title: text.optional(), purpose: text.optional(), summary: text.optional(), must_answer: z.array(text).optional(), writing_notes: z.array(text).optional() }).strict().refine(value => value.title !== undefined || value.purpose !== undefined || value.summary !== undefined || value.must_answer !== undefined || value.writing_notes !== undefined),
-  z.object({ type: z.literal('add_section'), parent_id: z.string().min(1).nullable(), order: z.number().int().positive(), writable: z.boolean(), title: text, purpose: text, summary: text.optional(), must_answer: z.array(text).optional() }).strict().superRefine((value, context) => {
+  z.object({ type: z.literal('update_section'), section_id: text, title: sectionTitle.optional(), purpose: text.optional(), summary: text.optional(), must_answer: z.array(text).optional(), writing_notes: z.array(text).optional() }).strict().refine(value => value.title !== undefined || value.purpose !== undefined || value.summary !== undefined || value.must_answer !== undefined || value.writing_notes !== undefined),
+  z.object({ type: z.literal('add_section'), parent_id: z.string().min(1).nullable(), order: z.number().int().positive(), writable: z.boolean(), title: sectionTitle, purpose: text, summary: text.optional(), must_answer: z.array(text).optional() }).strict().superRefine((value, context) => {
     if (value.writable && (value.must_answer?.length ?? 0) === 0) context.addIssue({ code: 'custom', message: 'a writable section requires must_answer' })
     if (!value.writable && (value.must_answer?.length ?? 0) !== 0) context.addIssue({ code: 'custom', message: 'a structural section cannot have must_answer' })
   }),
   z.object({ type: z.literal('delete_section'), section_id: text }).strict(),
-  z.object({ type: z.literal('split_section'), section_id: text, children: z.array(z.object({ title: text, purpose: text, must_answer: z.array(text).min(1) }).strict()).min(2) }).strict(),
-  z.object({ type: z.literal('merge_sections'), section_ids: z.array(text).min(2), title: text, purpose: text }).strict(),
+  z.object({ type: z.literal('split_section'), section_id: text, children: z.array(z.object({ title: sectionTitle, purpose: text, must_answer: z.array(text).min(1) }).strict()).min(2) }).strict(),
+  z.object({ type: z.literal('merge_sections'), section_ids: z.array(text).min(2), title: sectionTitle, purpose: text }).strict(),
   z.object({ type: z.literal('move_section'), section_id: text, parent_id: z.string().min(1).nullable(), order: z.number().int().positive() }).strict(),
 ])
 

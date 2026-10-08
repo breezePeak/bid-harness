@@ -1,3 +1,4 @@
+import { normalizeOutlineSectionTitle } from '@deepseek-ai/dsh-bid/control-plane'
 import { fromMarkdown } from 'mdast-util-from-markdown'
 import { gfmFromMarkdown } from 'mdast-util-gfm'
 import { gfm } from 'micromark-extension-gfm'
@@ -17,9 +18,21 @@ export interface RevisionDiffRow {
 
 function markdownBlocks(source: string): string[] {
   const tree = fromMarkdown(source, { extensions: [gfm()], mdastExtensions: [gfmFromMarkdown()] })
-  const children = tree.children[0]?.type === 'heading' && tree.children[0].depth === 1
-    ? tree.children.slice(1)
-    : tree.children
+  const first = tree.children[0]
+  let start = first?.type === 'heading' && first.depth === 1 ? 1 : 0
+  if (start > 0 && first?.type === 'heading') {
+    const label = (node: typeof first): string => {
+      const begin = node.children[0]?.position?.start.offset ?? 0
+      const end = node.children.at(-1)?.position?.end.offset ?? begin
+      const title = source.slice(begin, end)
+      return normalizeOutlineSectionTitle(title) || title
+    }
+    for (const node of tree.children.slice(1)) {
+      if (node.type !== 'heading' || label(node) !== label(first)) break
+      start++
+    }
+  }
+  const children = tree.children.slice(start)
   return children.flatMap((node) => {
     const start = node.position?.start.offset
     const end = node.position?.end.offset

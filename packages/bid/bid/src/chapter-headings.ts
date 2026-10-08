@@ -1,4 +1,5 @@
 /** 确认目录拥有章节标题；叶节正文不能另外创建目录层级。 */
+import { normalizeOutlineSectionTitle } from './outline-title.ts'
 import { fromMarkdown } from 'mdast-util-from-markdown'
 import type { Heading, Nodes } from 'mdast'
 
@@ -8,11 +9,12 @@ function headingText(markdown: string, node: Heading): string {
   return first === undefined || last === undefined ? '' : markdown.slice(first, last)
 }
 
-function isChapterTitle(markdown: string, node: Nodes, title: string, sectionId: string): boolean {
+function isChapterTitle(markdown: string, node: Nodes, title: string, sectionId: string, number?: string): boolean {
   if (node.type !== 'heading') return false
-  const text = headingText(markdown, node)
-  const label = text.replace(/^(?:\d+(?:\.\d+)*(?:[.、．]\s*|\s+)|[一二三四五六七八九十百]+[、．.]\s*)/u, '')
-  return label === title || label === sectionId
+  const heading = headingText(markdown, node)
+  const text = number !== undefined && heading.startsWith(`${number} `) ? heading.slice(number.length + 1) : heading
+  const label = normalizeOutlineSectionTitle(text) || text
+  return label === (normalizeOutlineSectionTitle(title) || title) || label === sectionId
 }
 
 /**
@@ -44,11 +46,12 @@ export function validateChapterHeadings(markdown: string, title: string, section
  * @returns 以当前章节标题开头的正文，重复调用保持结果不变。
  */
 export function normalizeChapterHeadings(markdown: string, title: string, sectionId: string, number: string): string {
-  const first = fromMarkdown(markdown).children[0]
-  if (first !== undefined && isChapterTitle(markdown, first, title, sectionId)) {
+  let removedEnd = 0
+  for (const first of fromMarkdown(markdown).children) {
+    if (!isChapterTitle(markdown, first, title, sectionId, number)) break
     const end = first.position?.end.offset
     if (end === undefined) throw new Error('Markdown 标题缺少源码位置。')
-    markdown = markdown.slice(end)
+    removedEnd = end
   }
-  return `# ${number} ${title}\n\n${markdown.trim()}`.trim()
+  return `# ${number} ${normalizeOutlineSectionTitle(title) || title}\n\n${markdown.slice(removedEnd).trim()}`.trim()
 }

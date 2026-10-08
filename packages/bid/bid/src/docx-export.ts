@@ -1,4 +1,5 @@
 /** 按确认目录导出已保存正文；导出不依赖执行记录、审核结果或章节 Manifest。 */
+import { normalizeOutlineSectionTitle } from './outline-title.ts'
 import { readFile } from 'node:fs/promises'
 import { posix, sep } from 'node:path'
 import { readDocxXml } from './docx-template.ts'
@@ -214,7 +215,7 @@ export async function collectDocxExportSnapshot(
   for (const { section, number, depth } of buildOutlineView(outline.sections)) {
     signal?.throwIfAborted()
     const headingDepth = Math.min(6, depth)
-    parts.push(`${'#'.repeat(headingDepth)} ${number} ${section.title}`)
+    parts.push(`${'#'.repeat(headingDepth)} ${number} ${normalizeOutlineSectionTitle(section.title) || section.title}`)
     if (!section.writable && section.summary !== undefined) {
       const summaryIssues = validateFlowchartAnchors(section.summary, [])
       if (summaryIssues.length > 0) throw new Error(`目录概述不能提交绘图数据：${summaryIssues.join('；')}`)

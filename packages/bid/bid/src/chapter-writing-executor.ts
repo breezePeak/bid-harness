@@ -1,3 +1,4 @@
+import { normalizeOutlineSectionTitle } from './outline-title.ts'
 import { createHash } from 'node:crypto'
 import { lstat, mkdir, readFile } from 'node:fs/promises'
 import { join, relative, resolve } from 'node:path'
@@ -358,7 +359,7 @@ export function chapterEvidenceInputFingerprint(
     .sort((a, b) => webMaterialIdentity(a).localeCompare(webMaterialIdentity(b)))
   const section = context.section
   return createHash('sha256').update(JSON.stringify({
-    section: { id: section.id, title: section.title, purpose: section.purpose,
+    section: { id: section.id, title: normalizeOutlineSectionTitle(section.title) || section.title, purpose: section.purpose,
       heading_path: context.headingPath, must_answer: section.must_answer,
       writing_notes: section.writing_notes, suggested_tables: section.suggested_tables,
       suggested_figures: section.suggested_figures, framework_refs: section.framework_refs,
@@ -524,7 +525,7 @@ export function renderChapterExecutionPlanTask(
     '从现有项目资料即可独立写作的节点，不应按目录顺序串成依赖链。项目工作的先后顺序不自动构成正文写作依赖。需要引用另一章最终正文位置，或使用另一章首次确定的接口、成果结构等方案决策时，应保留相应依赖。不要为凑满并发而删除真实依赖。',
     `Confirmed Outline SHA-256：${outlineHash}`,
     `Confirmed Outline：${JSON.stringify(outline)}`,
-    `可写章节位置：${JSON.stringify(buildWritableSectionWorklist(outline).map((section, position) => ({ position, title: section.title, purpose: section.purpose })))}`,
+    `可写章节位置：${JSON.stringify(buildWritableSectionWorklist(outline).map((section, position) => ({ position, title: normalizeOutlineSectionTitle(section.title) || section.title, purpose: section.purpose })))}`,
     `Project：${JSON.stringify(modelContext(inputs.project))}`,
     `Requirements：${JSON.stringify(modelContext(inputs.requirements))}`,
     `Scoring：${JSON.stringify(modelContext(inputs.scoring))}`,
@@ -1784,7 +1785,7 @@ export async function executeDocumentReview(
     const location = locations.get(section.id)
     if (location === undefined) throw new Error(`BID_DOCUMENT_REVIEW_CHAPTER_MISSING: ${section.id}`)
     const markdown = await readFile(join(workspace.projectRoot, location.contentPath), 'utf8')
-    return { section_id: section.id, title: section.title, markdown,
+    return { section_id: section.id, title: normalizeOutlineSectionTitle(section.title) || section.title, markdown,
       candidate_sha256: chapterCandidateSha256(markdown) }
   }))
   await writeGlobalComplianceReview(agent, workspace, outline, outlineHash, compliance, chapters,
@@ -1846,7 +1847,7 @@ async function reviewWritingPlanCompletion(
       return {
         section_id: section.id,
         number: positions.get(section.id) ?? '',
-        title: section.title,
+        title: normalizeOutlineSectionTitle(section.title) || section.title,
         pages: estimate?.sections.get(section.id)?.pages ?? null,
         content_sha256: chapterContentSha256(markdown),
         summary: compact.length <= 2_000 ? compact : `${compact.slice(0, 1_500)} … ${compact.slice(-500)}`,
@@ -3635,7 +3636,7 @@ async function runChapterWriting(
       if (chapter !== undefined) {
         chaptersForGlobalReview.push({
           section_id: section.id,
-          title: section.title,
+          title: normalizeOutlineSectionTitle(section.title) || section.title,
           markdown: chapter.candidate.markdown,
           candidate_sha256: chapterCandidateSha256(chapter.candidate.markdown),
         })
@@ -3643,7 +3644,7 @@ async function runChapterWriting(
         const md = await readFile(join(workspace.projectRoot, storageLocation(section.id).contentPath), 'utf8')
         chaptersForGlobalReview.push({
           section_id: section.id,
-          title: section.title,
+          title: normalizeOutlineSectionTitle(section.title) || section.title,
           markdown: md,
           candidate_sha256: chapterCandidateSha256(md),
         })

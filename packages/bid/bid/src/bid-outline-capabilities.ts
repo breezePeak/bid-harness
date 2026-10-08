@@ -1,4 +1,5 @@
 /** 目录与原文迁移能力使用同一候选协调器和精确文件准入。 */
+import { normalizeOutlineSectionTitle } from './outline-title.ts'
 import { readFile } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 import { z } from 'zod'
@@ -117,7 +118,7 @@ async function generateChapterAssignments(
     '目标章节的 outline_position 是 Main 当前完整目录对象表中的位置；position 是本分配会话的局部位置。步骤指令提及目录位置时用 outline_position 对应到章节标题，提交 target_positions 时只使用 position。',
     `当前可写目标章节：${JSON.stringify(targets.map((section, position) => ({ position,
       outline_position: outline.sections.findIndex(item => item.id === section.id),
-      title: section.title, purpose: section.purpose, must_answer: section.must_answer })))} `,
+      title: normalizeOutlineSectionTitle(section.title) || section.title, purpose: section.purpose, must_answer: section.must_answer })))} `,
     `必须分配到相同目标的关联块位置：${JSON.stringify(linkedPositions)}`,
     '每个源块必须恰好有一个决定。move 指向一个目标；正式原文只能 move 到一个目标，其相同副本必须具有相同归属，Host 按正式源文件份数保留，合并候选新增副本。不得用 share 复制正式原文；其他章节的交接说明须另行编写。候选新增内容确需共享时显式用 share；只有用户明确允许删减时才可用 delete。',
     'assignments 以每个源块的 position 为键，逐块完整分配，包括标题、表题及表格。不能合并、遗漏或重复块位置；只选择目标列表中的 position，块身份和原文字节由程序绑定。',

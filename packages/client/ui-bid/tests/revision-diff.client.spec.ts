@@ -6,6 +6,14 @@ const shape = (before: string, after: string) => buildRevisionDiffRows(before, a
   .map(({ kind, after: next, before: prior }) => ({ kind, after: next, before: prior }))
 
 describe('revision markdown block diff', () => {
+  it('历史重复同章根标题不进入对比，正文及其他标题保留', () => {
+    const before = '# 1.1 实施方案\n\n# 第二章 2.1 实施方案\n\nAAA\n\n## 其他主题'
+    expect(shape(before, '# 2.1 实施方案\n\nAAA\n\n## 其他主题')).toEqual([
+      { kind: 'equal', after: 'AAA', before: 'AAA' },
+      { kind: 'equal', after: '## 其他主题', before: '## 其他主题' },
+    ])
+  })
+
   it('keeps equal blocks aligned and omits the duplicated chapter H1', () => {
     expect(shape(body('AAA', 'BBB'), body('AAA', 'BBB'))).toEqual([
       { kind: 'equal', after: 'AAA', before: 'AAA' },

@@ -25,6 +25,8 @@ S1 和 S6 共用项目 Word 模板库：`word-export/templates.json` 保存模�
 
 S5 的预览、快速页数、Writer 候选、父节点汇总和验收使用同一份 `resolved`；快速算法固定使用纵向 A4。LibreOffice 真实分页与正式导出都把正文填入所选原始 DOCX，系统默认选择读取 `assets/templates/default-technical-bid.docx`，上传模板读取 `word-export/templates/{hash}.docx`。真实分页缓存由正文、图片、原始模板内容摘要、模板身份、模板格式版本、生效值和 Renderer 版本共同标识，环境不支持或转换失败时明确回退为快速估算。S3 确认边界固定补入第一章“技术偏离表”，拒绝“目录”章节；第二章以后保持用户确认的动态目录。两类模板都以其封面、页眉页脚、分节、固定文字、表格、合并关系及图片为最终骨架。默认封面项目名称来自 `analysis/project.json`，投标人来自 `bidderName` 配置，项目编号没有稳定来源时保持为空，日期按导出日生成；这些内容不进入 Writer。正文锚点优先使用内容控件、书签或占位段落，未提供锚点时插入末节属性之前。表格按表头语义、`tblGrid`、`gridSpan` 和 `vMerge` 定位可编辑列；默认模板的技术偏离表按 `dsh-technical-deviation-table` 填充并自适应数据行数，固定第一章不会再次插入 `dsh-body`。所有正文、表格、图片和流程图完成后，Windows Microsoft Word finalizer 刷新字段、目录和页码；没有 Word 时保留真实 TOC 字段与 `updateFields=true`，并返回 `DOCX_TOC_UPDATE_DEFERRED`，不生成模型目录或估算页码。所有导出按完整确认目录收录已保存正文和父节点概述；图片路径相对于项目产物目录，外部资源不自动下载。
 
+输出章节的 `title` 只保存名称，模型绑定、新增、拆分、合并及显式标题编辑清理明确的章节前缀；目录树派生导航编号，Word 使用模板原生编号。历史目录在展示、模型语义投影、正文根标题和导出组合时净化名称，不重写正式文件、hash 或确认关系；未触及章节、业务数字和来源标题路径保持原文。连续同章根标题仅在正文开头合并，叶节额外目录标题仍拒绝。
+
 S6 只对流程图、表格和图片执行最终页面视觉审核；标题、正文、编号和普通列表不创建审核请求。`word-export/visual-review-cache.json` 以稳定块 ID 和联合 `inputHash` 保存 PASS、`outputHash` 与白名单调整，联合摘要包含当前块内容、原始模板摘要、页面尺寸和页边距、块样式、Renderer 版本及 Review 版本。命中相同 PASS 时直接应用历史调整并跳过模型；未命中时把完成模板合成、原生流程图嵌入和 Word 字段刷新后的 DOCX 经现有 LibreOffice 链路转换为 PDF，只把目标页及相邻页交给当前会话视觉模型。模型只能缩放流程图或图片、缩小表格字体；每次调整后重新生成并复核，最多两轮调整。
 
 ## Control plane types

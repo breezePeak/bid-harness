@@ -82,6 +82,25 @@ const testOutline: OutlineArtifact = {
 }
 
 describe('OutlineConfirmationReview', () => {
+  it('历史旧号标题净显示，打开编辑未改动不保存，搜索保持全树编号', () => {
+    const legacy = { ...testOutline, sections: testOutline.sections.map((section, index) => ({
+      ...section, title: `${['一、', '1.1 ', '二、'][index]}${section.title}`,
+    })) }
+    const before = JSON.stringify(legacy)
+    const onUpdate = vi.fn()
+    render(<OutlineConfirmationReview outline={legacy} stage="outline_generation" revision={1}
+      onUpdateSection={onUpdate} onStructureOperation={vi.fn()} onIndentSection={vi.fn()}
+      onOutdentSection={vi.fn()} t={t as never} />)
+    expect(screen.getByLabelText<HTMLInputElement>('SEC-002 标题').value).toBe('系统微服务架构设计')
+    fireEvent.click(screen.getByRole('button', { name: '编辑 系统微服务架构设计' }))
+    fireEvent.blur(screen.getByLabelText('SEC-002 标题'))
+    expect(onUpdate).not.toHaveBeenCalled()
+    fireEvent.change(screen.getByPlaceholderText('搜索章节标题或编号...'), { target: { value: '微服务' } })
+    expect(screen.getByLabelText('技术标目录').textContent).toContain('1.1')
+    expect(screen.queryByLabelText('SEC-003 标题')).toBeNull()
+    expect(JSON.stringify(legacy)).toBe(before)
+  })
+
   it('shows a compact outline with actions and metadata in the selected details', () => {
     const onUpdate = vi.fn()
     const onStructure = vi.fn()

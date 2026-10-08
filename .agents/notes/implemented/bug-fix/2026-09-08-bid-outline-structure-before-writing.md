@@ -20,6 +20,8 @@ S5 Writer 与 Reviewer 都接收确认目录及当前祖先路径，按父子关
 
 该规则部分替代[同一 Writer 与编号](../architecture/2026-09-07-s5-continuable-writer.md)中的节内编号机制，并补充[增量映射工具](../simplification/2026-09-07-s4-incremental-mapping-tools.md)的目录锁定条件和[章节研究任务](../feature/2026-09-03-bid-section-research-blueprint.md)的结构依据。这些记录的会话修复、增量提交、证据来源和确认时机仍有独立价值，保留并互链。
 
+输出标题名称与章号的写入、只读兼容及正文组合规则见[名称与编号分离](2026-10-08-bid-outline-title-numbering.md)。
+
 ## Alternatives considered
 
 **要求每个 Section 必须增加节点或达到固定层数。** 简单章节本来就可能可独立写作，节点计数不能证明内容归属正确；结构对照结论保留不拆分的理由。

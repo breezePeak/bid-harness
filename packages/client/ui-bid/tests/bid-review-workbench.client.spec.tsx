@@ -49,6 +49,18 @@ function props(patch: Partial<BidReviewWorkbenchProps> = {}): BidReviewWorkbench
 }
 
 describe('BidReviewWorkbench', () => {
+  it('历史旧号名称与连续同章根标题净显示，段落 offset 仍指向原文', async () => {
+    const source = '# 1.1 实施方案\n\n## 第二章 1.1 实施方案\n\n正文完整保留。'
+    render(<BidReviewWorkbench {...props({
+      getWorkbench: async () => ({ ...workbench, outline: workbench.outline.map(section => ({ ...section, title: `一、${section.title}` })) }),
+      getChapter: async () => ({ ...chapter, title: '1.1 实施方案', markdown: source }),
+    })} />)
+    const paragraph = await screen.findByText('正文完整保留。')
+    expect(screen.getByRole('heading', { level: 1, name: '实施方案' })).toBeTruthy()
+    expect(screen.queryByRole('heading', { name: '第二章 1.1 实施方案' })).toBeNull()
+    expect(paragraph.outerHTML).toContain(String(source.indexOf('正文完整保留。')))
+  })
+
   it('renders historical comparison as shared rows with after on the left', async () => {
     let compare: ((target: { issueId: string; sectionId: string }) => void) | undefined
     render(<BidReviewWorkbench {...props({

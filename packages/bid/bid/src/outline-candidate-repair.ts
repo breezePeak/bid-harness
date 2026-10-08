@@ -1,4 +1,5 @@
 /** S3 未通过 Schema 的候选修复；只允许修改被定位的顶层或章节字段。 */
+import { normalizeOutlineSectionTitle } from './outline-title.ts'
 import { z } from 'zod'
 import type { StageValidationIssue } from './control-plane-contract.ts'
 import { outlineCandidateSchema, type OutlineArtifact } from './outline-generation-artifacts.ts'
@@ -93,7 +94,7 @@ export function applyOutlineCandidateRepair(value: unknown, operations: unknown,
       Reflect.deleteProperty(target, operation.field)
     } else {
       if (schema === undefined) throw new Error('不能添加目录 Schema 以外的字段。')
-      const parsed: unknown = schema.parse(operation.value)
+      const parsed: unknown = schema.parse(operation.field === 'title' ? normalizeOutlineSectionTitle(z.string().parse(operation.value)) : operation.value)
       const known: Record<string, readonly string[]> = {
         requirement_ids: inputs.requirements.requirements.map(item => item.id),
         scoring_ids: inputs.scoring.scoring_items.map(item => item.id),

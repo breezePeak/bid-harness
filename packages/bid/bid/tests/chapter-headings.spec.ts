@@ -2,6 +2,21 @@ import { describe, expect, it } from 'vitest'
 import { normalizeChapterHeadings, validateChapterHeadings } from '../src/chapter-headings.ts'
 
 describe('按确认目录生成正文编号', () => {
+  it.each(['第一章', '2025 年度成果'])('历史名称 %s 回退原文，当前四位树编号仍可重复规范化', (title) => {
+    const result = normalizeChapterHeadings('正文。', title, 'S021', '1000')
+    expect(result).toBe(`# 1000 ${title}\n\n正文。`)
+    expect(normalizeChapterHeadings(result, title, 'S021', '1000')).toBe(result)
+  })
+
+  it('合并开头连续的同章旧号标题，保留正文与非法子标题校验', () => {
+    const body = '正文。\n\n```md\n# 1.1 原文\n```\n\n| 编号 | 参数 |\n| --- | --- |\n| 1 | 1.5米 |'
+    const result = normalizeChapterHeadings(`# 1.1 项目背景\n\n# 2.1 1.1 项目背景\n\n${body}`, '1.1 项目背景', 'S021', '2.1')
+    expect(result).toBe(`# 2.1 项目背景\n\n${body}`)
+    expect(normalizeChapterHeadings(result, '1.1 项目背景', 'S021', '2.1')).toBe(result)
+    expect(validateChapterHeadings('# 2.1 1.1 项目背景\n\n正文。', '1.1 项目背景', 'S021')).toEqual([])
+    expect(validateChapterHeadings('# 2.1 项目背景\n\n## 其他标题', '1.1 项目背景', 'S021')).toHaveLength(1)
+  })
+
   it('仅补齐确认根标题，旧正文标题保留原文且不再产生子编号', () => {
     const input = '## 项目背景\n\n### 1. 监管任务\n\n#### 1.1 业务范围\n\n### 4、实施要求\n\n正文。'
     const result = normalizeChapterHeadings(input, '项目背景', 'S021', '2.1')

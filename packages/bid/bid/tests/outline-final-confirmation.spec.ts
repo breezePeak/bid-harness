@@ -117,6 +117,34 @@ beforeEach(() => {
 })
 
 describe('S4 Draft 最终确认', () => {
+  it('旧号 Draft 只读不写盘，合法标题编辑清理目标并保留 CAS 与未触及章节', async () => {
+    const f = await fixture()
+    try {
+      f.outline.sections[0]!.title = '一、方案1'
+      f.outline.sections[1]!.title = '二、方案2'
+      const original = JSON.stringify(f.outline)
+      await writeFile(join(f.workspace.projectRoot, 'outline/outline.json'), original)
+      const initial = await f.host.getOutlineDraft(f.session)
+      expect(initial.outline.sections[0]?.title).toBe('一、方案1')
+      expect(await f.read('outline/outline.json')).toBe(original)
+      const edited = await f.host.applyOutlineDraftOperations(f.session, { ...identity(initial), operations: [
+        { type: 'update_section', section_id: 'SEC-1', title: '第二章 2.1 更新方案' },
+      ] })
+      expect(edited).toMatchObject({ ok: true, value: { revision: initial.revision + 1 } })
+      const current = await f.host.getOutlineDraft(f.session)
+      expect(current.outline.sections[0]).toEqual({ ...initial.outline.sections[0], title: '更新方案' })
+      expect(current.outline.sections[1]).toEqual(initial.outline.sections[1])
+      expect(current.draft_outline_sha256).not.toBe(initial.draft_outline_sha256)
+      await expect(f.host.applyOutlineDraftOperations(f.session, { ...identity(initial), operations: [
+        { type: 'update_section', section_id: 'SEC-1', title: '旧并发编辑' },
+      ] })).resolves.toMatchObject({ ok: false, error: { code: 'BID_OUTLINE_DRAFT_CONFLICT' } })
+      await expect(f.host.applyOutlineDraftOperations(f.session, { ...identity(current), operations: [
+        { type: 'update_section', section_id: 'SEC-1', title: '一、' },
+      ] })).resolves.toMatchObject({ ok: false, error: { code: 'BID_INVALID_USER_OUTLINE' } })
+      expect(await f.read('outline/outline.json')).toBe(original)
+    } finally { await f.ctx.fiber.dispose() }
+  })
+
   it('已授权目录重生成的内部错误保存失败状态和修复信息', async () => {
     const f = await fixture()
     try {

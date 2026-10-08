@@ -21,7 +21,7 @@ export const outlineSectionSchema = z.object({
   parent_id: z.string().min(1).nullable(),
   order: z.number().int().positive(),
   level: z.number().int().positive(),
-  title: z.string().min(1),
+  title: z.string().min(1).describe('title 只填写章节名称，不包含章号或层级编号；章节顺序、编号、ID 由程序生成。'),
   purpose: z.string().min(1),
   /** 可直接用于标书正文的父节点总述，依据最终子章节任务与已确认信息；S4 发布前生成并复核。 */
   summary: z.string().trim().min(1).optional(),

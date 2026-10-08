@@ -1,3 +1,5 @@
+import { fromMarkdown } from 'mdast-util-from-markdown'
+import { normalizeOutlineSectionTitle } from '@deepseek-ai/dsh-bid/control-plane'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type {
   BidAddRevisionIssueRequest,
@@ -560,7 +562,7 @@ export function BidReviewWorkbench({
           </div>
           <div className={css.outline} role="navigation" aria-label="章节目录">
             {rows.map(({ section, number, depth, hasChildren }) => {
-              const title = `${number} ${section.title}`
+              const title = `${number} ${(normalizeOutlineSectionTitle(section.title) || section.title)}`
               const isSelected = chapter?.section_id === section.section_id
               const isCollapsed = collapsed.has(section.section_id)
               const dotInfo = getChapterDotInfo(section)
@@ -586,7 +588,7 @@ export function BidReviewWorkbench({
                         target: {
                           kind: 'chapter',
                           sectionId: freshChapter.section_id,
-                          title: freshChapter.title,
+                          title: (normalizeOutlineSectionTitle(freshChapter.title) || freshChapter.title),
                           number: freshChapter.number,
                           baseContentSha256: freshChapter.content_sha256,
                         },
@@ -656,7 +658,7 @@ export function BidReviewWorkbench({
               <header className={css.compareToolbar}>
                 <div>
                   <h1 className={css.compareTitle}>本次修改对比</h1>
-                  <p className={css.breadcrumbs}>章节：{readerMode.kind === 'compare' ? readerMode.comparison.section_title : chapter?.title ?? readerMode.sectionId}</p>
+                  <p className={css.breadcrumbs}>章节：{readerMode.kind === 'compare' ? (normalizeOutlineSectionTitle(readerMode.comparison.section_title) || readerMode.comparison.section_title) : chapter === null ? readerMode.sectionId : (normalizeOutlineSectionTitle(chapter.title) || chapter.title)}</p>
                 </div>
                 <Button
                   variant="ghost"
@@ -732,7 +734,7 @@ export function BidReviewWorkbench({
                       target: {
                         kind: 'chapter',
                         sectionId: chapter.section_id,
-                        title: chapter.title,
+                        title: (normalizeOutlineSectionTitle(chapter.title) || chapter.title),
                         number: chapter.number,
                         baseContentSha256: chapter.content_sha256,
                       },
@@ -740,7 +742,7 @@ export function BidReviewWorkbench({
                   }}
                 >
                   {chapter.number && <span className={css.chapterNumber}>{chapter.number}</span>}
-                  <h1 className={css.articleTitle}>{chapter.title}</h1>
+                  <h1 className={css.articleTitle}>{(normalizeOutlineSectionTitle(chapter.title) || chapter.title)}</h1>
                 </div>
               </header>
               <div className={css.articleBody} ref={articleBody}
@@ -944,7 +946,7 @@ export function BidReviewWorkbench({
             <div className={css.reviewReference}>
               <span className={css.reviewReferenceLabel}>
                 {reviewModal.kind === 'chapter'
-                  ? `${reviewModal.number} ${reviewModal.title} · 整个章节`
+                  ? `${reviewModal.number} ${(normalizeOutlineSectionTitle(reviewModal.title) || reviewModal.title)} · 整个章节`
                   : reviewModal.reference.label}
               </span>
               {reviewModal.kind === 'paragraphs' && (
@@ -976,7 +978,19 @@ export function BidReviewWorkbench({
 
 function AnchoredFlowcharts({ chapter }: { chapter: BidReviewChapterView }): JSX.Element {
   const source = chapter.markdown ?? ''
-  const heading = source.match(/^# [^\n]*(?:\n|$)\s*/u)?.[0] ?? ''
+  let headingEnd = 0
+  for (const node of fromMarkdown(source).children) {
+    if (node.type !== 'heading') break
+    const first = node.children[0]?.position?.start.offset
+    const last = node.children.at(-1)?.position?.end.offset
+    const headingText = first === undefined || last === undefined ? '' : source.slice(first, last)
+    const text = headingText.startsWith(`${chapter.number} `)
+      ? headingText.slice(chapter.number.length + 1) : headingText
+    const label = normalizeOutlineSectionTitle(text) || text
+    if (label !== (normalizeOutlineSectionTitle(chapter.title) || chapter.title) && label !== chapter.section_id) break
+    headingEnd = node.position?.end.offset ?? headingEnd
+  }
+  const heading = source.slice(0, headingEnd)
   const markdown = source.slice(heading.length)
   const flowcharts = chapter.flowcharts ?? []
   const byKey = new Map(flowcharts.map(flowchart => [flowchart.key ?? flowchart.id, flowchart]))

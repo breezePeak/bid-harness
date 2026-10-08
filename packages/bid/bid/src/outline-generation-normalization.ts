@@ -1,10 +1,11 @@
 /** S3 候选的确定性字段生成，不决定章节归属。 */
+import { normalizeOutlineSectionTitle } from './outline-title.ts'
 import { z } from 'zod'
 import { catalogMatchesScoring, type ScoringResponsePointCatalog } from './scoring-response-point-artifacts.ts'
 import type { TenderScoringArtifact } from './tender-analysis-artifacts.ts'
 import { outlineCandidateSchema, parseOutlineArtifact, TECHNICAL_DEVIATION_SECTION_ID, type OutlineArtifact, type OutlineSection } from './outline-generation-artifacts.ts'
 
-const deviationTitle = (value: string): boolean => value.normalize('NFKC').replace(/\s+/gu, '') === '技术偏离表'
+const deviationTitle = (value: string): boolean => normalizeOutlineSectionTitle(value).normalize('NFKC').replace(/\s+/gu, '') === '技术偏离表'
 
 /**
  * 保留现有章节身份，并确保技术偏离表使用固定位置。
@@ -12,7 +13,7 @@ const deviationTitle = (value: string): boolean => value.normalize('NFKC').repla
  * @param sections 当前目录章节。
  */
 export function ensureTechnicalDeviationSection(sections: OutlineSection[]): OutlineSection[] {
-  if (sections.some(section => section.title.normalize('NFKC').replace(/\s+/gu, '') === '目录')) {
+  if (sections.some(section => normalizeOutlineSectionTitle(section.title).normalize('NFKC').replace(/\s+/gu, '') === '目录')) {
     throw new Error('S3 不得创建目录章节；目录由 Word 导出程序生成。')
   }
   const matches = sections.filter(section => section.id === TECHNICAL_DEVIATION_SECTION_ID || deviationTitle(section.title))

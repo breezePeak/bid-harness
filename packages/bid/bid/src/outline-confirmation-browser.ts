@@ -1,3 +1,4 @@
+import { normalizeOutlineSectionTitle } from './outline-title.ts'
 import type { OutlineArtifact, OutlineSection } from './outline-generation-artifacts.ts'
 
 /** User-requested outline change shared by the browser editor and Host validator. */
@@ -111,7 +112,7 @@ export function applyOutlineEdits(
     if (operation.type === 'update_section') {
       const section = byId.get(operation.section_id)
       if (section === undefined) throw new Error(`unknown outline section ${operation.section_id}`)
-      if (operation.title !== undefined) section.title = operation.title
+      if (operation.title !== undefined) section.title = normalizeOutlineSectionTitle(operation.title)
       if (operation.purpose !== undefined) section.purpose = operation.purpose
       if (operation.summary !== undefined) section.summary = operation.summary
       if (operation.must_answer !== undefined) section.must_answer = [...operation.must_answer]
@@ -123,7 +124,7 @@ export function applyOutlineEdits(
       if (operation.parent_id !== null && parent === undefined) throw new Error(`unknown outline parent ${operation.parent_id}`)
       const section: OutlineSection = {
         id, parent_id: operation.parent_id, order: operation.order, level: parent === undefined ? 1 : parent.level + 1,
-        title: operation.title, purpose: operation.purpose, writable: operation.writable,
+        title: normalizeOutlineSectionTitle(operation.title), purpose: operation.purpose, writable: operation.writable,
         ...(operation.summary === undefined ? {} : { summary: operation.summary }),
         must_answer: operation.writable ? [...(operation.must_answer ?? [])] : [],
         requirement_ids: [], scoring_ids: [], compliance_ids: [], suggested_tables: [], suggested_figures: [], writing_notes: [],
@@ -150,7 +151,8 @@ export function applyOutlineEdits(
         const id = allocateSectionId?.() ?? `SEC-${String(++nextId).padStart(3, '0')}`
         if (byId.has(id)) throw new Error(`duplicate outline section ${id}`)
         const child: OutlineSection = {
-          ...section, ...input, must_answer: [...input.must_answer], id, parent_id: section.id, order: index + 1, level: section.level + 1,
+          ...section, ...input, title: normalizeOutlineSectionTitle(input.title), must_answer: [...input.must_answer],
+          id, parent_id: section.id, order: index + 1, level: section.level + 1,
           requirement_ids: [], scoring_ids: [], compliance_ids: [],
           scoring_response_point_ids: [], scoring_response_points: [],
         }
@@ -169,7 +171,7 @@ export function applyOutlineEdits(
       })
       const target = selected[0]
       if (target === undefined || selected.length < 2 || new Set(operation.section_ids).size !== selected.length || selected.some(item => item.parent_id !== target.parent_id)) throw new Error('merge requires distinct sibling leaves')
-      target.title = operation.title
+      target.title = normalizeOutlineSectionTitle(operation.title)
       target.purpose = operation.purpose
       for (const key of ['must_answer', 'requirement_ids', 'scoring_ids', 'compliance_ids', 'scoring_response_point_ids', 'suggested_tables', 'suggested_figures', 'writing_notes'] as const) {
         target[key] = [...new Set(selected.flatMap(item => item[key] ?? []))]
