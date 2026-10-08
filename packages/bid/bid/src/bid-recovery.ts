@@ -70,6 +70,19 @@ export function bidCapabilityTakeoverRun(session: Session, task: BidTaskState): 
   return started.data.run
 }
 
+/**
+ * 选择可由新的直接用户授权补修的失败 S4 阶段；不重置原 Work 的恢复预算。
+ * @param session 保存原 Run 及失败通知的公开会话。
+ * @param task 当前项目状态。
+ * @returns 与当前结构失败对应的阶段 Run；其他失败和用户停止不授予接管。
+ */
+export function bidEvidenceMappingTakeoverRun(session: Session, task: BidTaskState): BidRunData | undefined {
+  if (task.status !== 'failed' || task.stage !== 'evidence_mapping'
+    || !task.failure.issues?.some(issue => issue.code === 'OUTLINE_REFINEMENT_STRUCTURE_UNRESOLVED')) return
+  const run = bidRecoverableRun(session, task)
+  return run?.work.kind === 'stage_execution' ? run : undefined
+}
+
 const STAGES = new Set(['tender_analysis', 'outline_generation', 'evidence_mapping', 'chapter_writing'])
 const BLOCKED_CODE = new RegExp(
   'INPUT_(?:INVALID|CHANGED|MISMATCH|MISSING|CORRUPT)|FILE_(?:MISSING|CORRUPT)|REVISION_(?:CONFLICT|MISMATCH)|RUN_RETIRED|EACCES|EPERM|'

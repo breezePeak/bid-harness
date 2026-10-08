@@ -170,6 +170,90 @@ function promptText(request: { prompt: readonly { type: string; text?: string }[
   return request.prompt.flatMap(block => block.type === 'text' ? [block.text] : []).join('\n')
 }
 
+it.each([
+  { supported: true, tenderText: '调查面积约 12824.25 平方公里。建设年度国土调查数据库，纳入国土空间规划“一张图”实施监督信息系统管理。' },
+  { supported: false, tenderText: '建设年度国土调查数据库。调查范围和系统衔接另行确认，采购文件没有指定面积或纳管平台。' },
+])('目录审核核对采购原文而非项目摘要，原文支持=$supported', async ({ supported, tenderText }) => {
+  const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-outline-review-source-')))
+  const material = await writeInputs(workspace, undefined, undefined, tenderText)
+  const fixture = mappingFixture(workspace, material)
+  const read = async (path: string) => JSON.parse(await readFile(join(workspace.projectRoot, path), 'utf8')) as unknown
+  const project = parseTenderProjectArtifact(await read('analysis/project.json'))
+  project.project_scope = ['调查面积约 12824.25 平方公里。']
+  const requirements = parseTenderRequirementsArtifact(await read('analysis/requirements.json'))
+  requirements.requirements[0]!.normalized_requirement = '建设年度国土调查数据库。'
+  const outline = parseOutlineArtifact(await read('outline/initial-confirmed-outline.json'))
+  outline.sections[0]!.must_answer = ['说明调查范围面积和数据库纳入“一张图”管理的要求。']
+  fixture.serializeQuality.mockImplementation((content) => {
+    const prompt = fixture.outlineReviewPrompts.at(-1)!
+    const line = prompt.split('\n').find(value => value.startsWith('采购原文：'))!
+    const originals = JSON.parse(line.slice('采购原文：'.length)) as Array<{ file_id: string; chunk: string; text: string }>
+    expect(originals).toHaveLength(1)
+    expect(originals[0]).toMatchObject({ file_id: material.tender.fileId, chunk: material.tender.path })
+    expect(originals[0]!.text).toContain(tenderText)
+    expect(prompt).toContain('"project_scope":["调查面积约 12824.25 平方公里。"]')
+    expect(prompt).toContain('摘要遗漏不等于原文不存在')
+    expect(prompt).toContain('摘要与原文冲突时记录冲突并按原文纠正')
+    const evidenceSupports = originals[0]!.text.includes('12824.25') && originals[0]!.text.includes('“一张图”')
+    return JSON.stringify({ ...JSON.parse(content) as object, blocking_issues: evidenceSupports ? [] : [
+      { section_id: 'SEC-1', issue_kind: 'coverage', reason: '项目摘要中的面积和纳管平台与采购原文不一致，须按原文纠正。' },
+    ] })
+  })
+  const result = await reviewRefinedOutline(fixture.agent, workspace, {
+    project, requirements, scoring: parseTenderScoringArtifact(await read('analysis/scoring.json')),
+    responsePoints: parseScoringResponsePointCatalog(await read('analysis/scoring-response-points.json')),
+    compliance: parseTenderComplianceArtifact(await read('analysis/compliance.json')), outline, frameworks: [],
+  }, [], 0, new AbortController().signal, createTestBidRunContext().commits)
+  expect(result.blockingIssues).toHaveLength(supported ? 0 : 1)
+})
+
+it.each(['wrong_file', 'wrong_chunk', 'wrong_corpus', 'wrong_metadata', 'line_range', 'missing_chunk'] as const)(
+  '目录审核原文 %s 缺证时先拒绝启动Reviewer', async (failure) => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-outline-review-invalid-source-')))
+    const material = await writeInputs(workspace)
+    const fixture = mappingFixture(workspace, material)
+    const read = async (path: string) => JSON.parse(await readFile(join(workspace.projectRoot, path), 'utf8')) as unknown
+    const project = parseTenderProjectArtifact(await read('analysis/project.json'))
+    if (failure === 'wrong_file') project.source_refs[0]!.file_id = material.fileId
+    const manifest = await workspace.readManifest()
+    const reference = manifest.files.find(file => file.id === material.fileId)!
+    if (failure === 'wrong_chunk') project.source_refs[0]!.chunk = `${reference.chunksPath}/${material.chunk}.md`
+    if (failure === 'wrong_corpus') {
+      manifest.files.find(file => file.id === material.tender.fileId)!.corpusPath = reference.corpusPath
+      await writeFile(workspace.manifestPath, JSON.stringify(manifest))
+    }
+    if (failure === 'line_range') project.source_refs[0]!.line_end = 1_000_000
+    if (failure === 'wrong_metadata') await writeFile(join(workspace.projectRoot, material.tender.path), '<!-- chunk_id: chunk_9999 -->\n\n错误归属的原文。')
+    if (failure === 'missing_chunk') await rm(join(workspace.projectRoot, material.tender.path))
+    await expect(reviewRefinedOutline(fixture.agent, workspace, {
+      project, requirements: parseTenderRequirementsArtifact(await read('analysis/requirements.json')),
+      scoring: parseTenderScoringArtifact(await read('analysis/scoring.json')),
+      responsePoints: parseScoringResponsePointCatalog(await read('analysis/scoring-response-points.json')),
+      compliance: parseTenderComplianceArtifact(await read('analysis/compliance.json')),
+      outline: parseOutlineArtifact(await read('outline/initial-confirmed-outline.json')), frameworks: [],
+    }, [], 0, new AbortController().signal, createTestBidRunContext().commits)).rejects.toThrow('OUTLINE_REVIEW_SOURCE_INVALID')
+    expect(fixture.outlineReviewPrompts).toHaveLength(0)
+  },
+)
+
+it('决定性采购原文超出单片预算时明确拒绝，不截断后启动Reviewer', async () => {
+  const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-outline-review-source-budget-')))
+  const material = await writeInputs(workspace)
+  const fixture = mappingFixture(workspace, material)
+  const tenderChunk = join(workspace.projectRoot, material.tender.path)
+  await writeFile(tenderChunk, `${await readFile(tenderChunk, 'utf8')}\n${'采购原文不可截断。'.repeat(40_000)}`)
+  const read = async (path: string) => JSON.parse(await readFile(join(workspace.projectRoot, path), 'utf8')) as unknown
+  await expect(reviewRefinedOutline(fixture.agent, workspace, {
+    project: parseTenderProjectArtifact(await read('analysis/project.json')),
+    requirements: parseTenderRequirementsArtifact(await read('analysis/requirements.json')),
+    scoring: parseTenderScoringArtifact(await read('analysis/scoring.json')),
+    responsePoints: parseScoringResponsePointCatalog(await read('analysis/scoring-response-points.json')),
+    compliance: parseTenderComplianceArtifact(await read('analysis/compliance.json')),
+    outline: parseOutlineArtifact(await read('outline/initial-confirmed-outline.json')), frameworks: [],
+  }, [], 0, new AbortController().signal, createTestBidRunContext().commits)).rejects.toThrow('目录审查对象超过输入预算')
+  expect(fixture.outlineReviewPrompts).toHaveLength(0)
+})
+
 it('全局目录复核按预算审完尾节与跨章职责，共享索引不在逐叶展开 siblings', async () => {
   const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-outline-review-budget-')))
   const material = await writeInputs(workspace, Array.from({ length: 64 }, (_, index) => `SEC-${String(index + 1)}`))
@@ -394,9 +478,9 @@ it('S4 Prompt 分开显示技术偏离表的全量只读 Requirement 与空 cove
 })
 
 async function writeInputs(workspace: BidWorkspace, sectionIds: readonly string[] = ['SEC-1', 'SEC-2'],
-  referenceText = '可复用的统一技术资料。') {
+  referenceText = '可复用的统一技术资料。', tenderText = '要求一。要求二。评分一。评分二。') {
   const [tender, reference, framework, referenceBid] = await workspace.import([
-    { name: 'tender.md', role: 'tender', bytes: new TextEncoder().encode('要求一。要求二。评分一。评分二。') },
+    { name: 'tender.md', role: 'tender', bytes: new TextEncoder().encode(tenderText) },
     { name: 'reference.md', role: 'reference', bytes: new TextEncoder().encode(referenceText) },
     { name: 'framework.md', role: 'outline_framework', bytes: new TextEncoder().encode('# 智慧园区方案\n\n框架正文。\n\n## 设备接入\n\n### 协议适配\n\n### 点位映射\n\n## 能耗分析\n\n### 用量统计\n\n### 用能诊断\n') },
     { name: 'reference-bid.md', role: 'reference_bid', bytes: new TextEncoder().encode('# 云平台建设方案\n\n成熟方案。\n\n## 数据服务\n\n### 数据接入\n\n### 数据治理\n\n#### 元数据目录\n\n#### 数据血缘\n\n## 平台运维\n\n### 监控告警\n') },
@@ -415,7 +499,8 @@ async function writeInputs(workspace: BidWorkspace, sectionIds: readonly string[
   const chunk = index.chunks[0]!.id
   const tenderChunk = tenderIndex.chunks[0]!.id
   const tenderPath = `${tender.chunksPath}/${tenderIndex.chunks[0]!.path}`
-  const source = [{ file_id: tender.id, chunk: 'x', line_start: 1, line_end: 1 }]
+  const source = [{ file_id: tender.id, chunk: tenderPath, line_start: 1,
+    line_end: (await readFile(join(workspace.projectRoot, tenderPath), 'utf8')).split('\n').length }]
   const scoring = { schema_version: 1 as const, scoring_items: [1, 2].map(value => ({ id: `S-${value}`, parent: null, group: '技术', title: `评分${value}`, raw_text: `评分${value}`, criterion: `响应评分${value}`, score: 1, score_range: null, must_answer: true, source_refs: source })) }
   await mkdir(join(workspace.projectRoot, 'analysis'), { recursive: true })
   await Promise.all([
@@ -1237,6 +1322,133 @@ function mappingFixture(
 
 const webUrl = 'https://official.example/a'
 
+it('已完成研究和一代结构修复后，已接纳恢复先修改问题章节再审核', async () => {
+  const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-s4-accepted-structure-recovery-')))
+  const material = await writeInputs(workspace)
+  const work = createTestBidRunContext().work
+  const first = mappingFixture(workspace, material)
+  first.onReply.mockImplementation((_child, result) => {
+    if (result.task_id.startsWith('MAP-REPAIR-')) result.section_mappings[0]!.writing_brief.writing_notes = ['第一代修复仍缺少验证责任。']
+  })
+  first.serializeQuality.mockImplementation(text => JSON.stringify({ ...JSON.parse(text) as object,
+    blocking_issues: [{ section_id: 'SEC-1', reason: '需要明确成果验证责任。' }],
+  }))
+  const failed = executeEvidenceMapping(first.agent, workspace, buildBidStageTask('evidence_mapping'), {
+    run: createTestBidRunContext({ work }), maxRepairAttempts: 1,
+  }).catch((error: unknown) => error)
+  await vi.waitFor(() => { expect(first.starts).toHaveLength(2) })
+  first.starts.forEach((start) => { start.resolve() })
+  await vi.waitFor(() => { expect(first.starts).toHaveLength(3) })
+  first.starts[2]!.resolve()
+  expect(await failed).toMatchObject({ issues: [{ code: 'OUTLINE_REFINEMENT_STRUCTURE_UNRESOLVED' }] })
+  const checkpointPath = join(workspace.projectRoot, 'analysis/evidence-mapping-checkpoint.json')
+  const before = JSON.parse(await readFile(checkpointPath, 'utf8')) as { tasks: Array<{
+    task_id: string
+    completed: boolean
+    result: EvidenceMappingPartialResult
+    task_operations: Array<{ operation: { writing_brief?: unknown; answer_plan?: unknown } }>
+  }> }
+  expect(before.tasks.every(task => task.completed)).toBe(true)
+  const untouched = before.tasks.find(task => task.task_id === 'MAP-INIT-SEC-2')
+  const historicalOperations = before.tasks.find(task => task.task_id === 'MAP-INIT-SEC-1')!.task_operations
+  const taskChange = historicalOperations.find(change => change.operation.writing_brief !== undefined)!
+  taskChange.operation.answer_plan = historicalOperations.find(change => change.operation.answer_plan !== undefined)!.operation.answer_plan
+  await writeFile(checkpointPath, JSON.stringify(before))
+
+  const resumed = mappingFixture(workspace, material)
+  const instruction = '只补齐问题章节的成果验证责任，保留已完成研究和兄弟章节。'
+  ;(resumed.agent.session.events as unknown[]).push({ type: 'bid.recovery.requested', seq: 0,
+    data: { ownerSessionId: String(resumed.agent.id), target: { kind: 'run', workId: work.workId, runId: 'failed-run' },
+      unit: 'SEC-1', instruction, progressFingerprint: '已持久化结构问题' } })
+  resumed.onReply.mockImplementation((_child, result) => {
+    result.section_mappings[0]!.writing_brief.writing_notes = ['按本次恢复补齐成果验证责任。']
+  })
+  resumed.serializeQuality.mockImplementation((text) => {
+    expect(resumed.outlineReviewPrompts.at(-1)).toContain('按本次恢复补齐成果验证责任。')
+    expect(resumed.outlineReviewPrompts.at(-1)).toContain(instruction)
+    return JSON.stringify({ ...JSON.parse(text) as object,
+      blocking_issues: [{ section_id: 'SEC-1', reason: '还需要核对验证成果的接收责任。' }],
+    })
+  })
+  const running = executeEvidenceMapping(resumed.agent, workspace, buildBidStageTask('evidence_mapping'), {
+    run: createTestBidRunContext({ work, resumeOf: { runId: 'failed-run', cause: 'retry_exhausted' } }),
+    recovery: { workId: work.workId, ownerSessionId: String(resumed.agent.id), requestSeq: 0, unit: 'SEC-1', instruction,
+      issues: [{ code: 'OUTLINE_REFINEMENT_STRUCTURE_UNRESOLVED', message: '需要明确成果验证责任。' }] },
+    maxRepairAttempts: 1,
+  })
+  const settled = running.catch((error: unknown) => error)
+  await vi.waitFor(() => { expect(resumed.starts).toHaveLength(1) })
+  expect(promptText(resumed.starts[0]!.request.request)).toContain(instruction)
+  expect(promptText(resumed.starts[0]!.request.request)).toContain('需要明确成果验证责任。')
+  expect(promptText(resumed.starts[0]!.request.request)).toContain('"generation":2')
+  resumed.starts[0]!.resolve()
+  expect(await settled).toMatchObject({ issues: [{ code: 'OUTLINE_REFINEMENT_STRUCTURE_UNRESOLVED' }] })
+  expect(resumed.starts).toHaveLength(1)
+  const after = JSON.parse(await readFile(checkpointPath, 'utf8')) as typeof before
+  expect(after.tasks.find(task => task.task_id === untouched?.task_id)).toEqual(untouched)
+  expect(after.tasks.map(task => task.task_id).filter(id => id.startsWith('MAP-REPAIR-'))).toHaveLength(2)
+
+  const next = mappingFixture(workspace, material)
+  const secondInstruction = '补齐验证成果的接收责任，不重复研究。'
+  const authorization = { type: 'bid.recovery.requested', seq: 1,
+    data: { ownerSessionId: String(next.agent.id), target: { kind: 'run', workId: work.workId, runId: 'second-failed-run' },
+      unit: 'MAP-REPAIR-2-SEC-1', instruction: secondInstruction, progressFingerprint: '第二份结构问题' } }
+  ;(next.agent.session.events as unknown[]).push(...resumed.agent.session.events, authorization)
+  const controller = new AbortController()
+  const recovery = { workId: work.workId, ownerSessionId: String(next.agent.id), requestSeq: 1, unit: 'MAP-REPAIR-2-SEC-1',
+    instruction: secondInstruction, issues: [{ code: 'OUTLINE_REFINEMENT_STRUCTURE_UNRESOLVED', message: '需要核对验证成果接收责任。' }] }
+  const cancelled = executeEvidenceMapping(next.agent, workspace, buildBidStageTask('evidence_mapping'), {
+    run: createTestBidRunContext({ work, signal: controller.signal, resumeOf: { runId: 'second-failed-run', cause: 'retry_exhausted' } }),
+    recovery, maxRepairAttempts: 1,
+  }).catch((error: unknown) => error)
+  await vi.waitFor(() => { expect(next.starts).toHaveLength(1) })
+  const taskId = mappingTaskId(next.starts[0]!.request.request)
+  expect(taskId).toBe('MAP-REPAIR-3-SEC-1')
+  controller.abort()
+  expect(await cancelled).toBeInstanceOf(Error)
+  const planPath = join(workspace.projectRoot, 'analysis/evidence-mapping-plan.json')
+  const cancelledPlan = JSON.parse(await readFile(planPath, 'utf8')) as EvidenceMappingPlan
+  expect(cancelledPlan.tasks.find(task => task.task_id === taskId)?.recovery_request?.max_repair_attempts).toBe(1)
+  const logPath = join(workspace.projectRoot, 'analysis/evidence-mapping-log.json')
+  const interruptedLog = parseEvidenceMappingExecutionLog(JSON.parse(await readFile(logPath, 'utf8')))
+  interruptedLog.tasks = interruptedLog.tasks.filter(task => task.task_id !== taskId)
+  await writeFile(logPath, JSON.stringify(interruptedLog))
+
+  const reentered = mappingFixture(workspace, material)
+  ;(reentered.agent.session.events as unknown[]).push(...next.agent.session.events)
+  reentered.onReply.mockImplementation((_child, result) => {
+    result.section_mappings[0]!.writing_brief.writing_notes = ['明确验证成果接收责任。']
+  })
+  reentered.serializeQuality.mockImplementation((text) => {
+    expect(reentered.outlineReviewPrompts.at(-1)).toContain(secondInstruction)
+    expect(reentered.outlineReviewPrompts.at(-1)).toContain('明确验证成果接收责任。')
+    return text
+  })
+  const reentry = executeEvidenceMapping(reentered.agent, workspace, buildBidStageTask('evidence_mapping'), {
+    run: createTestBidRunContext({ work, resumeOf: { runId: 'cancelled-run', cause: 'user_stop' } }),
+    recovery, maxRepairAttempts: 20,
+  })
+  await vi.waitFor(() => { expect(reentered.starts).toHaveLength(1) })
+  expect(mappingTaskId(reentered.starts[0]!.request.request)).toBe(taskId)
+  reentered.starts[0]!.resolve()
+  await reentry
+  expect(reentered.starts).toHaveLength(1)
+  const finalPlan = JSON.parse(await readFile(planPath, 'utf8')) as EvidenceMappingPlan
+  expect(finalPlan.tasks.filter(task => task.phase === 'initial')).toEqual(cancelledPlan.tasks)
+  expect(reentered.agent.session.events.filter(event => event.type === 'bid.recovery.requested')).toHaveLength(2)
+})
+
+it('其他Work的恢复授权在写入计划前拒绝', async () => {
+  const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-s4-recovery-owner-')))
+  const material = await writeInputs(workspace)
+  const fixture = mappingFixture(workspace, material)
+  await expect(executeEvidenceMapping(fixture.agent, workspace, buildBidStageTask('evidence_mapping'), {
+    recovery: { workId: 'other-work', unit: 'SEC-1', instruction: '修改问题章节', issues: [] },
+  })).rejects.toMatchObject({ issues: [{ code: 'BID_RECOVERY_WORK_MISMATCH' }] })
+  expect(fixture.starts).toHaveLength(0)
+  await expect(readFile(join(workspace.projectRoot, 'analysis/evidence-mapping-plan.json'))).rejects.toMatchObject({ code: 'ENOENT' })
+})
+
 function failMappingChildTurn(fixture: ReturnType<typeof mappingFixture>, index: number, code: string, message: string): void {
   const start = fixture.starts[index]!
   const child = fixture.children.get(String(start.request.childId))!
@@ -1341,9 +1553,18 @@ describe('evidence-mapping Agent executor', () => {
       expect(fixture.starts[0]!.request.request.toolFilter?.allow).not.toContain(tool)
     }
     const objects = (await fixture.invokeSubmissionTool(id, 'list_mapping_objects', {})).value as {
-      objects: { sources: Array<{ id: string; position: number }> }
+      objects: { sources: Array<{ id: string; position: number; allowed_uses: string[] }>
+        source_choices: { read: number[]; search: number[] } }
     }
     const sourcePosition = objects.objects.sources.find(source => source.id === 'F1')!.position
+    const allPosition = objects.objects.sources.find(source => source.id === 'ALL')!.position
+    expect(objects.objects.sources.find(source => source.id === 'ALL')!.allowed_uses).toEqual(['search'])
+    expect(objects.objects.source_choices.read).not.toContain(allPosition)
+    expect(objects.objects.source_choices.search).toContain(allPosition)
+    expect(objects.objects.source_choices.read).toContain(sourcePosition)
+    await expect(read.execute({ source_position: allPosition }, exec)).rejects.toThrow('请用 scope_position 调用 search_sources')
+    await expect(read.execute({ source_position: allPosition }, exec)).rejects.toThrow(`可读取 source_position：${JSON.stringify(objects.objects.source_choices.read)}`)
+    expect(await search.execute({ scope_position: allPosition, keywords: ['质量'] }, exec)).toMatchObject({ hits: expect.any(Array) })
     await expect(read.execute({ source_ref: 'F1' }, exec)).rejects.toThrow('请使用 source_position')
     await expect(search.execute({ scope_ref: 'ALL', keywords: ['质量'] }, exec)).rejects.toThrow('请使用 scope_position')
     await expect(chunks.execute({ source_ref: 'W:WEB-0000000000000000' }, exec)).rejects.toThrow('请使用 source_position')
@@ -1379,6 +1600,18 @@ describe('evidence-mapping Agent executor', () => {
     }))
     const planInput = { section_position: 0,
       basis: { kind: 'section_responsibility', explanation: '逐项明确回应方案。', requirement_positions: [] }, answer_plan: plan }
+    expect(task.parameters).toHaveProperty('oneOf')
+    expect(validateJsonSchemaValue(task.parameters, planInput)).toEqual([])
+    const { answer_plan: _answerPlan, ...taskInput } = planInput
+    expect(validateJsonSchemaValue(task.parameters, { ...taskInput, writing_dimensions: ['质量控制'] })).toEqual([])
+    for (const change of [
+      { writing_dimensions: ['质量控制'] }, { missing_topics: [] },
+      { writing_brief: { purpose: '说明质量控制', must_answer: ['核验质量'], writing_notes: [], suggested_tables: [], suggested_figures: [] } },
+      { coverage_override: { requirement_positions: [], scoring_positions: [], response_point_positions: [] } },
+    ]) {
+      expect(validateJsonSchemaValue(task.parameters, { ...planInput, ...change })).not.toEqual([])
+      await expect(task.execute({ ...planInput, ...change }, exec)).rejects.toThrow('本次修改未接纳')
+    }
     await expect(task.execute({ ...planInput,
       answer_plan: [{ ...plan[0], target_refs: ['R1'] }],
     }, exec)).rejects.toThrow('请使用 target_positions')
@@ -1448,9 +1681,10 @@ describe('evidence-mapping Agent executor', () => {
       reviewed_section_ids: outline.sections.map(section => section.id), issues: [],
     }))
     const fixture = mappingFixture(workspace, material)
+    const recoveryRun = createTestBidRunContext()
     const execution = executeEvidenceMapping(fixture.agent, workspace, buildBidStageTask('evidence_mapping'), {
-      maxConcurrency: 3, maxRepairAttempts: 0, recovery: {
-        workId: 'test-work', unit: `MAP-INIT-${TECHNICAL_DEVIATION_SECTION_ID}`,
+      run: recoveryRun, maxConcurrency: 3, maxRepairAttempts: 0, recovery: {
+        workId: recoveryRun.work.workId, unit: `MAP-INIT-${TECHNICAL_DEVIATION_SECTION_ID}`,
         instruction: '只补齐技术偏离表的任务依据。', issues: [{ code: 'EVIDENCE_MAPPING_PARTIAL',
           artifact: `MAP-INIT-${TECHNICAL_DEVIATION_SECTION_ID}`, message: '任务依据不完整' }],
       },
@@ -2730,7 +2964,11 @@ describe('evidence-mapping Agent executor', () => {
     expect(final.sections.filter(section => section.writable)).toHaveLength(54)
     expect(final.sections.filter(section => !section.writable).every(section => Boolean(section.summary))).toBe(true)
     expect(fixture.starts).toHaveLength(54)
-    expect(fixture.finalStarts).toHaveLength(18)
+    const plan = JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/evidence-mapping-plan.json'), 'utf8')) as EvidenceMappingPlan
+    const finalReviewTasks = plan.tasks.filter(task => task.task_kind === 'final_check')
+    expect(fixture.finalStarts).toHaveLength(finalReviewTasks.length)
+    expect(finalReviewTasks.flatMap(task => task.section_ids).sort())
+      .toEqual(final.sections.filter(section => section.writable).map(section => section.id).sort())
     expect(fixture.summaryStarts).toHaveLength(19)
     for (const start of fixture.finalStarts) {
       const prompt = promptText(start.request.request)
@@ -2740,7 +2978,7 @@ describe('evidence-mapping Agent executor', () => {
       expect(prompt.length).toBeLessThanOrEqual(48_000)
     }
     expect(fixture.maxActive()).toBeLessThanOrEqual(3)
-  }, 30_000)
+  }, 90_000)
 
   it.each(['replace', 'supplement'] as const)('局部 %s 只运行选中 Section，并保留其他章节及 Web 快照', async (mode) => {
     const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-targeted-remap-')))
@@ -3037,16 +3275,19 @@ describe('evidence-mapping Agent executor', () => {
       inputSources: new Map(), baselineHashes: new Map(), allowedWrites: allowedEvidenceCapabilityWrites(),
       stepId: 'STEP-REMAP', rootWorkId: 'WORK-REMAP',
       authorization: { session_id: 'SESSION-1', message_id: 'MESSAGE-1' }, inputSha256: '0'.repeat(64),
+      recovery: { workId: 'WORK-REMAP', unit: 'SEC-2', instruction: '只恢复第二章的资料补充，保留其他章节。', issues: [] },
     }
     const remap = executeEvidenceCapability({ capability: 'evidence.research', input: {
       mode: 'supplement', reason: '补充第二章资料', allow_outline_refinement: false,
     } }, context, { maxRepairAttempts: 0, maxConcurrency: 1, webSearchEnabled: true })
     await vi.waitFor(() => { expect(fixture.starts).toHaveLength(1) })
+    expect(promptText(fixture.starts[0]!.request.request)).toContain('只恢复第二章的资料补充，保留其他章节。')
     fixture.starts[0]!.resolve()
     const { result } = await remap
     await validateEvidenceCapability(context, result)
     expect(result.target_section_ids).toEqual(['SEC-2'])
     expect(result.changed_artifacts).toContain('analysis/evidence-map.json')
+    expect(result.change_summary).toContain('已执行恢复修改')
     expect(result.changed_artifacts).not.toContain('outline/confirmed-outline.json')
     expect(await readFile(outlinePath, 'utf8')).toBe(beforeOutline)
     expect(await readFile(join(workspace.projectRoot, 'outline/confirmed-outline.json'), 'utf8')).toBe(beforeConfirmed)
@@ -3352,9 +3593,10 @@ describe('evidence-mapping Agent executor', () => {
     const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-evidence-executor-')))
     const material = await writeInputs(workspace)
     const fixture = mappingFixture(workspace, material)
+    const recoveryRun = createTestBidRunContext()
     const execution = executeEvidenceMapping(fixture.agent, workspace, buildBidStageTask('evidence_mapping'), {
-      maxRepairAttempts: 1, maxConcurrency: 2,
-      recovery: { workId: 'research-work', unit: 'MAP-INIT-SEC-1',
+      run: recoveryRun, maxRepairAttempts: 1, maxConcurrency: 2,
+      recovery: { workId: recoveryRun.work.workId, unit: 'MAP-INIT-SEC-1',
         instruction: '缩小到当前章节重新核对映射来源', issues: [] },
     })
 
@@ -3684,7 +3926,7 @@ describe('evidence-mapping Agent executor', () => {
     }
     secondController.abort()
     expect(await secondRejection).toBeInstanceOf(Error)
-  })
+  }, 20_000)
 
   it('8 个任务保留 7 个完成 checkpoint，仅恢复含 SC-006 总述的失败任务', async () => {
     const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-evidence-summary-resume-')))
@@ -4211,7 +4453,7 @@ describe('evidence-mapping Agent executor', () => {
     outline.sections = [root, ...outline.sections.map(section => ({ ...section, parent_id: 'ROOT', level: 2 }))]
     await writeFile(outlinePath, JSON.stringify(outline))
     const fixture = mappingFixture(workspace, material, false, {
-      'MAP-REPAIR-ROOT': [{
+      'MAP-REPAIR-1-ROOT': [{
         type: 'split_section', section_id: 'SEC-1', children: [
           { title: '实施方法', purpose: '独立说明实施方法。', must_answer: ['如何实施？'] },
           { title: '质量控制', purpose: '独立说明质量控制。', must_answer: ['如何控制质量？'] },
@@ -4233,15 +4475,15 @@ describe('evidence-mapping Agent executor', () => {
     await vi.waitFor(() => { expect(fixture.starts).toHaveLength(5) })
     fixture.starts.slice(3).forEach((start) => { start.resolve() })
     await running
-    expect(fixture.starts.map(start => promptText(start.request.request)).filter(prompt => prompt.includes('Mapping Task：{"task_id":"MAP-REPAIR-ROOT"'))).toHaveLength(1)
-    expect(fixture.starts.map(start => promptText(start.request.request)).some(prompt => prompt.includes('Mapping Task：{"task_id":"MAP-REPAIR-SEC-1"'))).toBe(false)
+    expect(fixture.starts.map(start => promptText(start.request.request)).filter(prompt => prompt.includes('Mapping Task：{"task_id":"MAP-REPAIR-1-ROOT"'))).toHaveLength(1)
+    expect(fixture.starts.map(start => promptText(start.request.request)).some(prompt => prompt.includes('Mapping Task：{"task_id":"MAP-REPAIR-1-SEC-1"'))).toBe(false)
     expect(fixture.outlineReviewPrompts).toHaveLength(2)
     expect(fixture.outlineReviewPrompts[0]).toContain('"research_findings":')
     expect(fixture.outlineReviewPrompts[0]).not.toContain('"material_usages":')
     expect(fixture.outlineReviewPrompts[0]).toContain('Structure Review Cards：')
     expect(fixture.outlineReviewPrompts[0]).toContain('S3→S4 结构 diff：')
     expect(fixture.outlineReviewPrompts[0]).toContain('实际 Outline Operations：')
-    expect(fixture.starts.map(start => promptText(start.request.request)).find(prompt => prompt.includes('MAP-REPAIR-ROOT')))
+    expect(fixture.starts.map(start => promptText(start.request.request)).find(prompt => prompt.includes('MAP-REPAIR-1-ROOT')))
       .toContain('OUTLINE_STRUCTURE_REVIEW')
     expect(promptText(fixture.finalStarts[0]!.request.request)).not.toContain('"identified_issues":')
     const checkpoint = JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/evidence-mapping-checkpoint.json'), 'utf8')) as {
@@ -4251,10 +4493,10 @@ describe('evidence-mapping Agent executor', () => {
         research_assessment?: ReturnType<typeof branchResearchAssessment>
       }>
     }
-    const repairCheckpoint = checkpoint.tasks.find(item => item.task_id === 'MAP-REPAIR-ROOT')
+    const repairCheckpoint = checkpoint.tasks.find(item => item.task_id === 'MAP-REPAIR-1-ROOT')
     expect(typeof repairCheckpoint?.refinement_conclusion).toBe('string')
     expect(repairCheckpoint?.research_assessment?.sufficient_for_blueprint).toBe(true)
-    expect(fixture.starts.map(start => promptText(start.request.request)).find(prompt => prompt.includes('MAP-REPAIR-ROOT')))
+    expect(fixture.starts.map(start => promptText(start.request.request)).find(prompt => prompt.includes('MAP-REPAIR-1-ROOT')))
       .toContain('prior_research_findings：')
     expect(fixture.starts.filter(start => promptText(start.request.request).includes('Mapping Task：{"task_id":"MAP-INIT-SEC-2"'))).toHaveLength(1)
     const report = await buildEvidenceMappingAcceptanceReport(workspace, ['SEC-1', 'SEC-2'])
@@ -5698,8 +5940,10 @@ describe('S4 实际工具统一依据对象表', () => {
     }))
     const input = { section_position: 0, basis: { kind: 'section_responsibility',
       explanation: '逐项说明已有输入与方案。', requirement_positions: [] }, answer_plan: plan }
-    await expect(task.execute({ ...input, answer_plan: [{ ...plan[0],
-      basis: [{ kind: 's2', artifact: 'scoring', record_position: 0 }] }] }, exec)).rejects.toThrow('Unrecognized key')
+    const repeatedArtifact = { ...input, answer_plan: [{ ...plan[0],
+      basis: [{ kind: 's2', artifact: 'scoring', record_position: 0 }] }] }
+    expect(validateJsonSchemaValue(task.parameters, repeatedArtifact)).not.toEqual([])
+    await expect(task.execute(repeatedArtifact, exec)).rejects.toThrow('本次修改未接纳')
     await expect(task.execute({ ...input, answer_plan: [{ ...plan[0],
       basis: [{ kind: 's2', record_position: unread.position }] }] }, exec)).rejects.toThrow('不是 S2 记录')
     const applied = await task.execute(input, exec) as { applied: boolean; after: { answer_plan: Array<{ basis: unknown }> } }

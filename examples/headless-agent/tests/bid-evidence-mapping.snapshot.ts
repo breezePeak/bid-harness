@@ -57,12 +57,20 @@ it('corrects S4 tool arguments in one Child turn through the headless Loader', a
           objects: {
             targets: Array<{ position: number; kind: string; text: string }>
             references: Array<{ position: number; kind: string; allowed_uses: string[] }>
+            sources: Array<{ position: number; id: string; allowed_uses: string[] }>
+            source_choices: { read: number[]; search: number[] }
             reference_choices: { research: number[]; s2: number[]; local: number[]; web: number[] }
             answer_checklists: Array<{ section_position: number; reference_choices: { s2: number[]; local: number[]; web: number[] } }>
           }
         }
       }
       const available = taskResult('refresh-source-positions').objects
+      const all = available.sources.find(item => item.id === 'ALL')!
+      expect(all.allowed_uses).toEqual(['search'])
+      expect(available.source_choices.search).toContain(all.position)
+      expect(available.source_choices.read).not.toContain(all.position)
+      expect(childLog).toContain('read-search-only-scope')
+      expect(childLog).toContain('所选位置仅用于全部资料搜索，没有可读正文。')
       const project = available.references.find(item => item.kind === 'project')!
       expect(project.allowed_uses).toEqual(['s2'])
       expect(available.reference_choices.s2).toContain(project.position)

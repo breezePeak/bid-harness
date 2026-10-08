@@ -114,6 +114,9 @@ export function createMappingSourceTools(
     parameters: zodJsonSchema(readSchema), output,
     async execute(raw: unknown): Promise<unknown> {
       const { source_ref: ref } = await readSchema.parseAsync(raw)
+      if (ref === 'ALL') throw new ToolArgsError([
+        `ALL 仅是搜索范围，没有可读正文。请调用 search_sources；可读取来源：${JSON.stringify([...sources.keys()])}。`,
+      ])
       const page = pages.get(ref)
       if (page !== undefined) return page.kind === 'text' ? readText(page.source, page.offset) : readHits(page.hits, page.offset)
       const source = sources.get(ref)

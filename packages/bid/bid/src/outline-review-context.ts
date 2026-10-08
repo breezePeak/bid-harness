@@ -21,6 +21,18 @@ export interface OutlineReviewContext {
   coverage: unknown
   differences: unknown
   operations: unknown
+  sources?: readonly OutlineReviewSource[]
+  projectSourceKeys?: readonly string[]
+}
+
+/** Host 校验并按采购文件身份去重的完整审核原文。 */
+export interface OutlineReviewSource {
+  key: string
+  file_id: string
+  name: string
+  chunk: string
+  text: string
+  line_count: number
 }
 
 /** 详细卡片判断与共享索引关系判断采用不同的接纳范围。 */
@@ -59,11 +71,15 @@ function renderOutlineReviewRequest(
   kind: OutlineReviewRequest['kind'],
 ): OutlineReviewRequest {
   const cardPositions = index.filter(item => cards.some(card => card.section_id === item.id)).map(item => item.position)
+  const sourceKeys = new Set([...(input.projectSourceKeys ?? []), ...(kind === 'complete' ? [...cards, ...index] : cards.length === 0 ? index : cards)
+    .flatMap(item => item.source_keys as string[] | undefined ?? [])])
+  const sources = (input.sources ?? []).filter(source => sourceKeys.has(source.key))
   const prompt = [input.instructions,
     ...(kind === 'cross_sections' ? [] : [input.detailInstructions ?? '']),
     ...(kind === 'cross_sections' ? ['本轮复核共享职责索引的所有章节关系，特别核对不同分片之间的职责冲突、重复、断裂和覆盖关系。详细叶子审查由独立请求完成。'] : []),
     `本片详细卡片位置：${JSON.stringify(cardPositions)}；只有这些位置允许 issue_kind=detail。其他可见位置仅审查职责关系、覆盖和用户目标。`,
     `Structure Review Cards：${JSON.stringify(cards)}`,
+    ...(input.sources === undefined ? [] : [`采购原文：${JSON.stringify(sources)}`]),
     `全书覆盖依据：${JSON.stringify(input.coverage)}`,
     `全书职责索引：${JSON.stringify(index)}`,
     `S3→S4 结构 diff：${JSON.stringify(input.differences)}`,

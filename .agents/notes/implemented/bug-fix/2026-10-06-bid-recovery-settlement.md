@@ -18,6 +18,8 @@ Main 判断业务原因、选择具体修复方案；Host 绑定原 Work、恢�
 
 S4 内部退避取消必须保留原网络故障，并与真实用户取消区分；用户取消优先约束竞态。执行日志保存首次基础设施预算及每次失败的模型或 Web 通道，检查点恢复据此还原已消耗次数；重启、换 Provider 或提高配置均不扩大原预算。目录全局审查使用共享职责索引和按完整输入估算的 token 预算，详细章节与跨片职责关系均有覆盖映射。上下文超限改变分片策略，不在相同输入上消耗格式修复次数；无法容纳的单个对象明确失败。
 
+S4 已完成结构修复后的新恢复以会话及接纳事件序号关联下一代定向任务，重入复用同一任务组；审核从已保存采购来源装载原文，详见[定向修复与采购原文审核](2026-10-08-s4-authorized-repair-and-procurement-review.md)。
+
 本决定部分替代[主流程与 Goal 独立](../architecture/2026-09-29-bid-goal-decoupling.md)中仅通知后由模型自主续行的机制、[持续恢复](2026-09-28-bid-host-recovery-continuation.md)中的无 Bid 预算取舍，以及[原生恢复决策](2026-09-15-bid-native-recovery-questions.md)中收到答案即抑制后续应用的机制。三份记录保留独立 Goal、原授权、候选保护、原生提问与历史事件的设计依据，继续保持活跃。
 
 required 页数检查的执行异常与实际不足分别适用失败恢复和完成门禁，部分替代[页数结果校验](2026-09-10-bid-s5-live-chat-page-result-validation.md)与[建议性审查风险](2026-09-12-bid-s5-advisory-review-risk.md)中的完成规则；`preferred` 与只读审查的设计依据继续有效。[S2–S5 Goal 恢复](../feature/2026-09-23-bid-s2-s5-goal-recovery.md)及[校验失败交 Main 修复](2026-09-26-bid-validation-main-agent-recovery.md)保留其授权、范围和修复工具约束，续行调度与预算由本决定补充。

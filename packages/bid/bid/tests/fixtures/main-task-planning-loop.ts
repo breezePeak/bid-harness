@@ -254,12 +254,14 @@ class PlanningAdapter extends ChapterAdapter {
         return
       }
       const mappingStep = requiresResearch ? step - 2 : step
+      const basis = { kind: 'section_responsibility', explanation: '本节只说明本阶段的执行方法，不扩展现实企业事实。', requirement_positions: [] }
       if (mappingStep === 0) yield* mappingModelReply(call('submit_section_mapping', { section_position, local_materials: [], web_materials: [] }), options)
-      else if (mappingStep === 1) yield* mappingModelReply(call('update_section_task', { section_position, basis: {
-        kind: 'section_responsibility', explanation: '本节只说明本阶段的执行方法，不扩展现实企业事实。', requirement_positions: [],
-      }, writing_dimensions: ['保留源章执行步骤、产物和校验记录'], answer_plan: items.map(item => ({ target_refs: [item.item_ref], mode: 'proposal',
-        content: '沿用源章已分配的流程方法和记录，按本阶段职责形成结果。',
-        basis: [{ kind: 'section_responsibility' }], boundary: '方法是本方案设计，不宣称企业已有能力或新事实。' })) }), options)
+      else if (mappingStep === 1) yield* mappingModelReply(call('update_section_task', { section_position, basis,
+        writing_dimensions: ['保留源章执行步骤、产物和校验记录'] }), options)
+      else if (mappingStep === 2) yield* mappingModelReply(call('update_section_task', { section_position, basis,
+        answer_plan: items.map(item => ({ target_refs: [item.item_ref], mode: 'proposal',
+          content: '沿用源章已分配的流程方法和记录，按本阶段职责形成结果。',
+          basis: [{ kind: 'section_responsibility' }], boundary: '方法是本方案设计，不宣称企业已有能力或新事实。' })) }), options)
       else yield* call('finish_mapping_task', {})
       return
     }

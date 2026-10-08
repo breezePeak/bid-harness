@@ -13,6 +13,23 @@ function context(count: number): OutlineReviewContext {
 }
 
 describe('目录审查上下文', () => {
+  it('详细分片只装载本片关联与项目原文，同一Chunk去重且按完整内容计入预算', () => {
+    const input = context(4)
+    input.sources = Array.from({ length: 5 }, (_, position) => ({ key: `C${String(position)}`, file_id: '采购文件',
+      name: '采购文件.md', chunk: `chunk_${String(position)}`, text: `原文${String(position)}。`.repeat(100), line_count: 1 }))
+    input.projectSourceKeys = ['C0', 'C0']
+    input.cards.forEach((card, position) => { card.source_keys = [`C${String(position + 1)}`, `C${String(position + 1)}`] })
+    input.index.forEach((item, position) => { item.source_keys = [`C${String(position + 1)}`] })
+    const requests = buildOutlineReviewRequests(input, 1_000)
+    for (const request of requests) {
+      const line = request.prompt.split('\n').find(value => value.startsWith('采购原文：'))!
+      const sources = JSON.parse(line.slice('采购原文：'.length)) as Array<{ key: string; text: string }>
+      const positions = request.kind === 'sections' ? request.cardPositions : request.sectionPositions
+      expect(sources.map(source => source.key)).toEqual(['C0', ...positions.map(position => `C${String(position + 1)}`)])
+      expect(sources.every(source => source.text === input.sources!.find(item => item.key === source.key)!.text)).toBe(true)
+      expect(request.estimatedInputTokens).toBeLessThanOrEqual(1_000)
+    }
+  })
   it('同级索引共享后小目录请求大小随节点数线性增长', () => {
     const small = buildOutlineReviewRequests(context(8), 12_000)[0]!
     const large = buildOutlineReviewRequests(context(16), 12_000)[0]!

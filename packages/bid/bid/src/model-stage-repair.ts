@@ -24,6 +24,12 @@ export interface ModelStageExecutionOptions {
   /** Host-accepted guidance for the exact failed work, never an Artifact field. */
   recovery?: {
     readonly workId: string
+    /** 能力步骤的派生 Work 对应的原任务授权；普通阶段与 workId 相同。 */
+    readonly authorizationWorkId?: string
+    /** 保存恢复授权的主会话。 */
+    readonly ownerSessionId?: string
+    /** 已接纳 bid.recovery.requested 事件的序号；续跑复用同一授权。 */
+    readonly requestSeq?: number
     readonly unit: string
     readonly instruction: string
     readonly issues: readonly StageValidationIssue[]

@@ -44,7 +44,8 @@ import {
   type TenderAnalysisConfirmationView,
   type TenderAnalysisEditOperation,
 } from './tender-analysis-confirmation.ts'
-import { DEFAULT_EVIDENCE_MAPPING_MAX_CONCURRENCY, executeEvidenceMapping, executeEvidenceMappingFinalCheck, pruneWebEvidenceArtifacts, readEvidenceMappingProgress } from './evidence-mapping-executor.ts'
+import { DEFAULT_EVIDENCE_MAPPING_MAX_CONCURRENCY, executeEvidenceMapping, executeEvidenceMappingFinalCheck, pruneWebEvidenceArtifacts, readEvidenceMappingLog, readEvidenceMappingProgress } from './evidence-mapping-executor.ts'
+import { loadOutlineReviewSources } from './outline-review-sources.ts'
 import { changedWritableSectionIds, reconcileSectionEvidence } from './section-evidence-context.ts'
 import { validateEvidenceMapping } from './evidence-mapping-validator.ts'
 import { executeOutlineGeneration, generateScopedOutlineOperations, generateScopedOutlineBusinessBindings } from './outline-generation-executor.ts'
@@ -166,19 +167,19 @@ import { DEFAULT_MODEL_STAGE_REPAIR_ATTEMPTS, type ModelStageExecutionOptions, t
 import { BidOrchestrator, BidOrchestratorError } from './orchestrator.ts'
 import { registerBidDocxExportProjection, registerBidRuntimeProjection, registerBidWritingEntryProjection } from './projection.ts'
 import { reduceDocxExportOperation, type DocxExportOperation } from './docx-export-operation.ts'
-import { BID_INITIAL_TASK_STATE, buildBidStageTask, getBidClientProjection, getBidStagePolicy, reduceBidTaskState, suspendForHostRestart } from './runtime-state.ts'
+import { BID_INITIAL_TASK_STATE, bidTaskStateSchema, buildBidStageTask, getBidClientProjection, getBidStagePolicy, reduceBidTaskState, suspendForHostRestart } from './runtime-state.ts'
 import { BidRunCoordinator, type BidCommitScope, type BidRunContext } from './run-coordinator.ts'
 import { sanitizeBidErrorText } from './safe-error.ts'
 import { bidProjectTaskState, checkpointBidProjectState, commitBidProjectMutation, readBidProjectState, type BidProjectState } from './project-state.ts'
 import { publishBidBatch, reconcileBidPublications, type BidPublicationLease } from './publication-batch.ts'
-import { bidInputFingerprint, bidResetWorkPaths, persistBidWorkRequest, readBidWorkRequest } from './work-descriptor.ts'
+import { bidInputFingerprint, bidResetWorkPaths, bidWorkDescriptorSchema, persistBidWorkRequest, readBidWorkRequest } from './work-descriptor.ts'
 import { prepareBidWorkingTree, publishBidWorkingPaths, readExistingBidWorkingTree } from './working-tree.ts'
 import { assertNoLinkedPath, within, atomicBytes } from './workspace-path.ts'
 import { BID_STAGES, BidStageExecutionError, isBidDocumentRole } from './control-plane-contract.ts'
 import { BID_BINARY_UPLOAD_PATH, BID_UPLOAD_FILES_HEADER, BID_UPLOAD_SESSION_HEADER } from './control-plane-contract.ts'
 import { appendBidSchemaWarning, createBidSchemaWarning } from './bid-events.ts'
 import type {} from '@deepseek-ai/dsh-goal-round-driver'
-import { bidCapabilityTakeoverRun, bidCompletedCapabilityRun, bidRecoverableRun, bidRecoveryInstructionRepeated, bidRunRecoveryEligibility, bidWritingPlanRecoveryEligibility, isBidWritingPlanRecoverableFailure, safeRecoverableBidFailure } from './bid-recovery.ts'
+import { bidCapabilityTakeoverRun, bidCompletedCapabilityRun, bidEvidenceMappingTakeoverRun, bidRecoverableRun, bidRecoveryFingerprint, bidRecoveryInstructionRepeated, bidRunRecoveryEligibility, bidWritingPlanRecoveryEligibility, isBidWritingPlanRecoverableFailure, safeRecoverableBidFailure } from './bid-recovery.ts'
 import { BidRecoveryDriver, type BidRecoveryNotice } from './bid-recovery-driver.ts'
 import { resolveBidToolAuthorization, withBidNativeTaskAuthorization } from './bid-tool-authorization.ts'
 import type { BidSessionEventMap } from './bid-events.ts'
@@ -1312,6 +1313,82 @@ const EVIDENCE_REMAP_PUBLICATION_PATHS = [
   'outline/refined-outline.candidate.json',
   'outline/draft.json',
 ] as const
+
+const evidenceMappingTakeoverSchema = zod.object({
+  stage: zod.literal('evidence_mapping'),
+  kind: zod.literal('evidence_mapping_takeover'),
+  source_work: bidWorkDescriptorSchema,
+  task: bidCapabilityTaskSchema,
+  authorization: zod.object({ session_id: zod.string().min(1), message_id: zod.string().min(1) }).strict(),
+  failed_state: bidTaskStateSchema.refine(state => state.status === 'failed' && state.stage === 'evidence_mapping'),
+  instruction: zod.string().trim().min(1),
+}).strict()
+
+/** 已接受的单步结构研究计划只开放原失败子树，完整阶段仍由标准 S4 执行器核验。 */
+function evidenceMappingTakeoverInstruction(task: BidCapabilityTask, message: string): string {
+  const step = task.steps[0]
+  if (task.scope.kind !== 'project' || task.steps.length !== 1 || step?.scope.source !== 'task'
+    || task.issue_ids !== undefined || !(step.call.capability === 'outline.refine'
+      || step.call.capability === 'evidence.research' && step.call.input.mode === 'supplement'
+        && step.call.input.allow_outline_refinement)) throw new Error('BID_S4_SUPERSEDE_SINGLE_STRUCTURE_PLAN_REQUIRED')
+  const feedback = step.call.capability === 'outline.refine' ? step.call.input.feedback : step.call.input.reason
+  return ['新的直接用户授权：' + message, '已接纳任务目标：' + task.goal,
+    '已接纳结构研究步骤：' + feedback].join('\n')
+}
+
+async function prepareEvidenceMappingTakeover(
+  canonical: BidWorkspace, previous: BidRunData, task: BidCapabilityTask,
+  authorization: CapabilityTaskRequest['authorization'], failedState: BidTaskState, instruction: string,
+): Promise<BidWorkDescriptor> {
+  await readHostWork(canonical, previous.work)
+  const existing = await readExistingBidWorkingTree(canonical, previous.work)
+  const source = existing === null ? canonical : new BidWorkspace(canonical.root, {
+    ...canonical.config, projectDirectory: relative(canonical.root, existing.projectRoot),
+  })
+  const [log, progress, candidate, project, requirements, scoring, compliance] = await Promise.all([
+    readEvidenceMappingLog(source), readEvidenceMappingProgress(source),
+    readStageJson(source, 'outline/refined-outline.candidate.json').then(parseOutlineArtifact),
+    readStageJson(source, 'analysis/project.json').then(parseTenderProjectArtifact),
+    readStageJson(source, 'analysis/requirements.json').then(parseTenderRequirementsArtifact),
+    readStageJson(source, 'analysis/scoring.json').then(parseTenderScoringArtifact),
+    readStageJson(source, 'analysis/compliance.json').then(parseTenderComplianceArtifact),
+    readStageJson(source, 'analysis/evidence-mapping-checkpoint.json'),
+    readStageJson(source, 'analysis/evidence-map.candidate.json').then(parseEvidenceMapArtifact),
+  ])
+  const blocking = log?.outline_reviews?.at(-1)?.blocking_issues ?? []
+  if (progress === null || blocking.length === 0
+    || blocking.some(issue => !candidate.sections.some(section => section.id === issue.section_id))) {
+    throw new Error('BID_S4_SUPERSEDE_FAILED_CANDIDATE_REQUIRED')
+  }
+  await loadOutlineReviewSources(source, [...project.source_refs,
+    ...requirements.requirements.flatMap(item => item.source_refs), ...scoring.scoring_items.flatMap(item => item.source_refs),
+    ...compliance.compliance_items.flatMap(item => item.source_refs)])
+  const original = existing ?? await prepareBidWorkingTree(canonical, previous.work)
+  const work = await persistHostWork(canonical, 'stage_execution', 'evidence_mapping', evidenceMappingTakeoverSchema.parse({
+    stage: 'evidence_mapping', kind: 'evidence_mapping_takeover', source_work: previous.work,
+    task, authorization, failed_state: failedState, instruction,
+  }))
+  await prepareBidWorkingTree(canonical, work, { source: original })
+  return work
+}
+
+async function executeEvidenceMappingTakeoverCandidate(
+  agent: Agent, canonical: BidWorkspace, run: BidRunContext, config: Config,
+  recovery: ModelStageExecutionOptions['recovery'],
+): Promise<StageArtifact[]> {
+  const candidate = await prepareWorkingWorkspace(canonical, run)
+  const artifacts = await executeEvidenceMapping(agent, candidate.workspace, buildBidStageTask('evidence_mapping'), {
+    run: candidate.run, maxRepairAttempts: config.modelStageRepairAttempts,
+    maxConcurrency: config.evidenceMappingMaxConcurrency, webSearchEnabled: config.webSearchEnabled,
+    resumeCandidate: true, preserveAcceptedCandidate: true, ...(recovery === undefined ? {} : { recovery }),
+  })
+  const validation = await validateEvidenceMapping(candidate.workspace, 'evidence_mapping', artifacts)
+  if (!validation.ok) throw new BidStageExecutionError(validation.issues)
+  await publishBidWorkingPaths(run, canonical, candidate.workspace, [
+    ...EVIDENCE_REMAP_PUBLICATION_PATHS, 'outline/outline.json', 'outline/quality-report.json',
+  ])
+  return artifacts
+}
 
 async function executeOutlineInteractionCandidate(
   agent: Agent,
@@ -3826,11 +3903,19 @@ export class BidHostRuntime extends TypertRemoteService {
       this.cancelRunDecisions(session)
       const resumed = session.events.findLast(event => event.type === 'bid.project.resumed')
       if (resumed?.type !== 'bid.project.resumed') throw new Error('BID_RUN_RESUME_REVISION_MISSING')
-      const accepted = Promise.withResolvers<{ accepted: true; execution_status: 'started'; completed: false; run_id: string }>()
+      const accepted = Promise.withResolvers<{
+        accepted: true
+        execution_status: 'started'
+        completed: false
+        run_id: string
+        recovery_status: 'accepted'
+        actual_modification: false
+      }>()
       this.recoveryAcceptances.set(recoveryKey, accepted.promise)
       const task = this.ctx.agents.withoutInitiator(() => this.resumeCurrentRun(
         session, request.run_id, resumed.data.revision,
-        (run) => { accepted.resolve({ accepted: true, execution_status: 'started', completed: false, run_id: run.runId }) },
+        (run) => { accepted.resolve({ accepted: true, execution_status: 'started', completed: false, run_id: run.runId,
+          recovery_status: 'accepted', actual_modification: false }) },
         { instruction: request.instruction },
       ))
       this.recoveryTasks.add(task)
@@ -3861,7 +3946,7 @@ export class BidHostRuntime extends TypertRemoteService {
       }
       return {
         ...await inspectBidStage(workspace, session, request.reference, request.view),
-        ...(request.view === 'recovery' ? { continuation: session.events.findLast(event => event.type === 'bid.recovery.round')?.data } : {}),
+        ...(request.view === 'recovery' ? { continuation: session.events.findLast(event => event.type === 'bid.recovery.round')?.data ?? null } : {}),
         scheduling_paused: active?.stageControl.paused() ?? false,
       }
     }
@@ -4328,6 +4413,18 @@ export class BidHostRuntime extends TypertRemoteService {
             undefined,
             createDocxVisualReviewer(this.ctx, operation.session, run.signal),
           )
+          if (task.stage === 'evidence_mapping' && run.work.kind === 'stage_execution') {
+            const payload = await readHostWork(workspace, run.work)
+            if (payload !== null && typeof payload === 'object' && 'kind' in payload
+              && payload.kind === 'evidence_mapping_takeover') {
+              const request = evidenceMappingTakeoverSchema.parse(payload)
+              if (request.authorization.session_id !== String(operation.session.id)) {
+                throw new Error('BID_RESUME_OWNER_SESSION_REQUIRED')
+              }
+              if (operation.recovery?.workId !== run.work.workId) throw new Error('BID_RECOVERY_AUTHORIZATION_MISSING')
+              return executeEvidenceMappingTakeoverCandidate(agent, workspace, run, this.config, operation.recovery)
+            }
+          }
           if (defaultBidCapabilityForStage(task.stage) === 'chapter.write') {
             await operation.writingControl.bind(workspace, run.work.workId, run.commits)
           }
@@ -5478,6 +5575,21 @@ export class BidHostRuntime extends TypertRemoteService {
         message: '能力任务已在当前 Work 命令日志登记；当前 Run 收敛后按顺序执行。' }
     }
     if (active !== undefined) await active.done
+    if (supersede !== undefined && bidEvidenceMappingTakeoverRun(session, bidSessionTaskState(session)) !== undefined) {
+      const admitted = Promise.withResolvers<BidRunContext>()
+      const completed = this.runEvidenceMappingTakeover(agent, task, authorization, supersede,
+        (run) => { admitted.resolve(run) }).then(state => ({
+        accepted: true, queued: false, execution_status: state.status, completed: false, state,
+      }))
+      const outcome = await Promise.race([completed, admitted.promise.then(run => ({
+        accepted: true, queued: false, execution_status: 'started', completed: false,
+        work_id: run.work.workId, state: bidSessionTaskState(session),
+      }))])
+      void completed.catch((error: unknown) => {
+        this.ctx.logger.warn(`S4 新授权补修结算失败：${sanitizeBidErrorText(String(error))}`)
+      })
+      return outcome
+    }
     const executionTask = exportStep === null ? task : { ...task, steps: task.steps.slice(0, -1) }
     if (supersede !== undefined && executionTask.steps.length === 0) {
       throw new Error('BID_CAPABILITY_SUPERSEDE_REQUIRES_WORK')
@@ -5517,6 +5629,77 @@ export class BidHostRuntime extends TypertRemoteService {
     return { accepted: true, queued: false,
       execution_status: 'completed', completed: true, goal_met: true, state,
       export_path: exported?.ok ? exported.value.path : null }
+  }
+
+  /** 新的直接用户任务接管结构失败候选；旧 Work 身份、检查点与预算独立保留。 */
+  private async runEvidenceMappingTakeover(
+    agent: Agent, task: BidCapabilityTask, authorization: CapabilityTaskRequest['authorization'],
+    supersede: CapabilitySupersede, onAdmitted: (run: BidRunContext) => void,
+  ): Promise<BidTaskState> {
+    const session = agent.session
+    if (this.ctx.agents.get(session.id) !== agent) throw new Error('BID_CAPABILITY_DISPATCHER_UNAVAILABLE')
+    const operation = this.beginOperation(session)
+    let admitted = false
+    try {
+      const current = await this.prepareOperation(operation)
+      const previous = bidEvidenceMappingTakeoverRun(session, current)
+      if (previous === undefined || current.status !== 'failed') throw new Error('BID_S4_SUPERSEDE_NOT_ALLOWED')
+      if (previous.runId !== supersede.run_id || operation.projectRevision !== supersede.expected_project_revision) {
+        throw new Error('BID_CAPABILITY_SUPERSEDE_STALE')
+      }
+      const authorized = resolveBidToolAuthorization(agent)
+      const message = session.events.findLast(event => event.type === 'user/message'
+        && String(event.data.id) === authorization.message_id)
+      const failure = session.events.findLast(event => event.type === 'bid.run.notice'
+        && event.data.noticeId === `run:${previous.runId}:failed`)
+      if (authorized?.session_id !== String(session.id) || authorized.message_id !== authorization.message_id
+        || message?.type !== 'user/message' || message.data.source.kind !== 'user'
+        || failure === undefined || message.seq <= failure.seq) throw new Error('BID_CAPABILITY_USER_MESSAGE_REQUIRED')
+      const text = message.data.content.flatMap(block => block.type === 'text' ? [block.text] : []).join('\n').trim()
+      if (text === '') throw new Error('BID_CAPABILITY_USER_MESSAGE_REQUIRED')
+      const selected = bidCapabilityTaskSchema.parse(task)
+      const instruction = evidenceMappingTakeoverInstruction(selected, text)
+      const work = await prepareEvidenceMappingTakeover(operation.workspace, previous, selected, authorization, current, instruction)
+      const execution = await this.executionAgent(operation, 'evidence_mapping')
+      let run: BidRunContext
+      try { run = await operation.runs.start(work) } catch (error) {
+        if (bidSessionTaskState(session).status !== current.status) {
+          session.append('bid.task.changed', { state: current })
+          await this.ctx.sessions.flush(session)
+        }
+        throw error
+      }
+      admitted = true
+      const unit = current.failure.recovery?.unit ?? 'outline/quality-report.json'
+      const execute = async (): Promise<void> => {
+        const acceptedRecovery = session.append('bid.recovery.requested', {
+          ownerSessionId: String(session.id), target: { kind: 'run', workId: work.workId, runId: run.runId },
+          unit, instruction, progressFingerprint: bidRecoveryFingerprint(work, current.failure, previous.progress),
+        })
+        operation.recovery = { workId: work.workId, ownerSessionId: String(session.id), requestSeq: acceptedRecovery.seq,
+          unit, instruction, issues: current.failure.issues ?? [] }
+        this.cancelRunDecisions(session)
+        session.append('bid.run.notice', { noticeId: `run:${previous.runId}:superseded`, supersedesTurn: null,
+          runId: previous.runId, stage: 'evidence_mapping', kind: 'stopped', severity: 'info',
+          message: '已按新的直接用户授权接纳独立目录补修任务；原失败候选、检查点和恢复预算已保留。' })
+        await this.ctx.sessions.flush(session)
+        onAdmitted(run)
+        await run.activities.track(() => executeEvidenceMappingTakeoverCandidate(
+          execution, operation.workspace, run, this.config, operation.recovery,
+        ))
+        await operation.runs.complete(run, () => {
+          session.append('bid.user_confirmation.required', { stage: 'evidence_mapping', status: 'waiting_user' })
+        })
+      }
+      try { await execute() } catch (error: unknown) {
+        if (operation.runs.current === run) {
+          const failure = safeRecoverableBidFailure(work, error)
+          await operation.runs.suspend(run.signal.aborted ? 'user_stop'
+            : failure.recovery?.kind === 'repair' ? 'retry_exhausted' : 'executor_error', failure)
+        }
+      }
+      return bidSessionTaskState(session)
+    } finally { await this.finishOperation(session, operation, admitted) }
   }
 
   /** 已发布内容只续稳定身份的导出尾效果；正式结算与通知均在独立导出之后。 */
@@ -5916,6 +6099,11 @@ export class BidHostRuntime extends TypertRemoteService {
           && capabilityTaskRequestSchema.parse(payload).authorization.session_id !== String(session.id)) {
           throw new BidOrchestratorError('BID_RESUME_OWNER_SESSION_REQUIRED', '请回到原授权会话继续此任务；当前会话不能恢复原 Work。')
         }
+        if (suspended.work.kind === 'stage_execution' && payload !== null && typeof payload === 'object'
+          && 'kind' in payload && payload.kind === 'evidence_mapping_takeover'
+          && evidenceMappingTakeoverSchema.parse(payload).authorization.session_id !== String(session.id)) {
+          throw new BidOrchestratorError('BID_RESUME_OWNER_SESSION_REQUIRED', '请回到原授权会话继续目录补修；当前会话不能恢复原 Work。')
+        }
       }
       if (recovery !== undefined) {
         const main = this.ctx.agents.get(session.id)
@@ -5953,7 +6141,7 @@ export class BidHostRuntime extends TypertRemoteService {
         if (bidRecoveryInstructionRepeated(session, eligibility.target, eligibility.fingerprint, recovery.instruction)) {
           throw new BidOrchestratorError('BID_RECOVERY_DUPLICATE_INSTRUCTION', '同一问题不能重复提交相同修复指令。')
         }
-        session.append('bid.recovery.requested', {
+        const acceptedRecovery = session.append('bid.recovery.requested', {
           ownerSessionId: String(session.id),
           target: { kind: 'run', workId: suspended.work.workId, runId: suspendedRunId },
           unit: suspended.error.recovery.unit,
@@ -5963,9 +6151,28 @@ export class BidHostRuntime extends TypertRemoteService {
         await this.ctx.sessions.flush(session)
         operation.recovery = {
           workId: suspended.work.workId,
+          ownerSessionId: String(session.id),
+          requestSeq: acceptedRecovery.seq,
           unit: suspended.error.recovery.unit,
           instruction: recovery.instruction,
           issues: suspended.error.issues ?? [],
+        }
+      } else {
+        const acceptedRecovery = session.events.findLast(event => event.type === 'bid.recovery.requested'
+          && event.data.target.kind === 'run' && event.data.target.workId === suspended.work.workId)
+        if (acceptedRecovery?.type === 'bid.recovery.requested') {
+          const original = session.events.findLast(event => event.type === 'bid.task.changed'
+            && event.seq < acceptedRecovery.seq
+            && (event.data.state.status === 'failed' && event.data.state.stage === suspended.work.stage
+              || event.data.state.status === 'suspended' && event.data.state.run.work.workId === suspended.work.workId))
+          const issues = original?.type === 'bid.task.changed' && original.data.state.status === 'failed'
+            ? original.data.state.failure.issues : original?.type === 'bid.task.changed' && original.data.state.status === 'suspended'
+              ? original.data.state.run.error?.issues : undefined
+          operation.recovery = {
+            workId: suspended.work.workId, ownerSessionId: String(session.id), requestSeq: acceptedRecovery.seq,
+            unit: acceptedRecovery.data.unit, instruction: acceptedRecovery.data.instruction,
+            issues: issues ?? suspended.error?.issues ?? [],
+          }
         }
       }
       const agent = await this.executionAgent(operation, task.stage)

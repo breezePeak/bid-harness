@@ -95,13 +95,15 @@ const assessmentSchema: JsonSchemaNode = { type: 'object', additionalProperties:
         reasoning_supported: { type: 'boolean' }, reason: { type: 'string' } } },
   } }
 
-async function prepare(workspace: BidWorkspace, scenario: typeof cases[number]) {
+async function prepare(workspace: BidWorkspace, scenario: typeof cases[number], procurementText?: string) {
   const requirementTexts = [
     `背景与需求章节说明${scenario.scope}的业务范围、目标和成果需求；实施细节由实施方案章节承担。`,
     `实施方案章节说明${scenario.scope}的作业方法、质量控制和成果交接。`,
   ]
   const [tender] = await workspace.import([
-    { name: 'tender.md', role: 'tender', bytes: new TextEncoder().encode(`# ${scenario.name}\n\n${requirementTexts.join('\n\n')}`) },
+    { name: 'tender.md', role: 'tender', bytes: new TextEncoder().encode([
+      `# ${scenario.name}`, ...requirementTexts, ...procurementText === undefined ? [] : [procurementText],
+    ].join('\n\n')) },
     { name: 'technical-reference.md', role: 'reference_bid', bytes: new TextEncoder().encode(`# 旧项目实施方案\n\n业务范围涉及${scenario.scope}。\n\n## 实施流程\n\n${scenario.procedure}`) },
     { name: 'other-business.md', role: 'reference_bid', bytes: new TextEncoder().encode(`# 其他业务项目\n\n${scenario.unrelated}`) },
   ])
@@ -366,5 +368,51 @@ describe.skipIf(!process.env.DEEPSEEK_API_KEY && !process.env.DSH_BID_EVAL_PROVI
         vi.unstubAllEnvs()
       }
     })
+
+  it.each([{
+    id: 'supported', name: '摘要遗漏但原文支持的面积与纳管任务', supported: true,
+    procurement: '本项目调查工作范围为玉林市，调查面积约 12824.25 平方公里。建设市级年度国土调查数据库，纳入本项目国土空间规划“一张图”实施监督信息系统进行管理。具体接口字段、账号权限和实施参数未提供。',
+    claim: '本项目调查面积约 12824.25 平方公里，调查数据库纳入本项目国土空间规划“一张图”实施监督信息系统管理。',
+  }, {
+    id: 'unsupported', name: '摘要声称但原文不支持的面积与纳管任务', supported: false,
+    procurement: '本项目按采购人移交的图斑清单开展线索核查，形成经审核的调查数据库。采购范围未规定固定调查面积或与其他系统集成的纳管任务。',
+    claim: '本项目调查面积确定为 99999 平方公里，必须纳入区域综合平台管理。',
+  }])('采购原文复核：$name', { timeout: 180_000, retry: 0 }, async (scenario) => {
+    const root = await mkdtemp(join(tmpdir(), `dsh-s4-source-review-${scenario.id}-`))
+    vi.stubEnv('DSH_HOME', root)
+    const ctx = new Context()
+    try {
+      await configureRuntime(ctx, root)
+      const workspace = new BidWorkspace(root)
+      const outline = await prepare(workspace, cases[0], scenario.procurement)
+      const artifact = async (path: string): Promise<unknown> => JSON.parse(await readFile(join(workspace.projectRoot, path), 'utf8'))
+      const project = parseTenderProjectArtifact(await artifact('analysis/project.json'))
+      if (!scenario.supported) project.project_scope.push(scenario.claim)
+      const implementation = outline.sections.find(section => section.id === 'IMPLEMENTATION')!
+      implementation.must_answer.push(scenario.claim)
+      implementation.writing_notes.push('保留采购原文明确的范围与任务；未确认的接口、账号权限、字段和实施参数只写待核实边界。')
+      const inputs: Parameters<typeof reviewRefinedOutline>[2] = {
+        outline, frameworks: [], project,
+        requirements: parseTenderRequirementsArtifact(await artifact('analysis/requirements.json')),
+        scoring: parseTenderScoringArtifact(await artifact('analysis/scoring.json')),
+        responsePoints: parseScoringResponsePointCatalog(await artifact('analysis/scoring-response-points.json')),
+        compliance: parseTenderComplianceArtifact(await artifact('analysis/compliance.json')),
+      }
+      const agent = ctx.agentLoop.create(SessionId(`source-review-${scenario.id}`),
+        { provider, model: process.env.DSH_BID_EVAL_MODEL ?? 'deepseek-v4-flash' }, { cwd: root })
+      const run = createTestBidRunContext({ signal: AbortSignal.timeout(150_000) })
+      const review = await reviewRefinedOutline(agent, workspace, inputs, [], 0, run.signal, run.commits)
+      const path = join(root, 'procurement-source-review.json')
+      await writeFile(path, `${JSON.stringify({ scenario, project, outline, review }, null, 2)}\n`)
+      console.info('采购原文真实模型复核记录：' + path)
+      if (scenario.supported) expect(review.blockingIssues).toEqual([])
+      else expect(review.blockingIssues).toContainEqual(expect.objectContaining({
+        code: 'OUTLINE_STRUCTURE_REVIEW', section_id: 'IMPLEMENTATION',
+      }))
+    } finally {
+      await ctx.fiber.dispose()
+      vi.unstubAllEnvs()
+    }
+  })
 
 })

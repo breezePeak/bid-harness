@@ -112,6 +112,8 @@ const evidenceMappingTaskSchema = z.object({
   }).strict().optional(),
   summary_section_ids: z.array(z.string().min(1)).optional(),
   review_issues: z.array(z.string().min(1)).optional(),
+  recovery_request: z.object({ owner_session_id: z.string().min(1), request_seq: z.number().int().nonnegative(),
+    max_repair_attempts: z.number().int().nonnegative() }).strict().optional(),
   heading_path: z.array(z.string().min(1)).min(1),
 }).strict().superRefine((task, context) => {
   const final = task.task_kind === 'final_check' || task.task_kind === 'branch_summary'

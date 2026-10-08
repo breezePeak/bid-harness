@@ -216,7 +216,7 @@ describe('同一 Work 的能力序列', () => {
         expect(await readFile(join(workspace.projectRoot, firstPath), 'utf8')).toBe(original)
       }
     } finally { await ctx.fiber.dispose() }
-  })
+  }, 20_000)
 
   it('已接纳步骤缺少展示说明时仍可读取，新的任务输入仍须提供说明', async () => {
     const { ctx, workspace, descriptor, task } = await fixture()

@@ -63,6 +63,11 @@ export async function executeEvidenceCapability(
   call: EvidenceCall, context: BidCapabilityExecutionContext, settings: EvidenceCapabilitySettings,
 ): Promise<{ readonly result: BidCapabilityResult }> {
   const workspace = context.working
+  if (context.recovery !== undefined && context.recovery.workId !== context.rootWorkId) {
+    throw new Error('BID_RECOVERY_WORK_MISMATCH')
+  }
+  const recovery = context.recovery === undefined ? undefined : { ...context.recovery,
+    workId: context.run.work.workId, authorizationWorkId: context.rootWorkId }
   const outline = parseOutlineArtifact(await readCapabilityJson(workspace, 'outline/outline.json'))
   const selected = context.sectionIds === null
     ? new Set(outline.sections.map(section => section.id))
@@ -101,7 +106,7 @@ export async function executeEvidenceCapability(
   try {
     await executeSectionResearch(context.agent, workspace, research, {
       ...settings, run: context.run,
-      ...(context.recovery === undefined ? {} : { recovery: context.recovery }),
+      ...(recovery === undefined ? {} : { recovery }),
       ...(context.resumeCandidate === undefined ? {} : { resumeCandidate: context.resumeCandidate }),
     })
   } catch (error) {
@@ -112,7 +117,7 @@ export async function executeEvidenceCapability(
     warnings.push('联网资料工具不可用；本轮只研究已授权本地资料，未证实的来源保留为资料缺口。')
     await executeSectionResearch(context.agent, workspace, research, {
       ...settings, webSearchEnabled: false, run: context.run,
-      ...(context.recovery === undefined ? {} : { recovery: context.recovery }),
+      ...(recovery === undefined ? {} : { recovery }),
       ...(context.resumeCandidate === undefined ? {} : { resumeCandidate: context.resumeCandidate }),
     })
   }
@@ -163,7 +168,11 @@ export async function executeEvidenceCapability(
       ? [item.required_input ?? item.content] : []) ?? []].map(topic => `${row.section_id}: ${topic}`))
   return { result: {
     target_section_ids: actualTargets, changed_artifacts: changed,
-    change_summary: `已${call.input.mode === 'supplement' ? '补充' : '替换'} ${String(actualTargets.length)} 个章节的资料映射`,
+    change_summary: context.recovery === undefined
+      ? `已${call.input.mode === 'supplement' ? '补充' : '替换'} ${String(actualTargets.length)} 个章节的资料映射`
+      : changed.some(path => ['outline/outline.json', 'analysis/evidence-map.json', 'analysis/web-evidence-sources.json'].includes(path))
+        ? `已执行恢复修改，实际改变 ${String(changed.length)} 个文件并完成复核。`
+        : '未修改资料或目录，本次仅完成复核。',
     warnings, missing_topics: missing, needs_input: false,
   } }
 }

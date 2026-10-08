@@ -6,9 +6,10 @@ import { nestedModelSections } from './outline-model-tree.ts'
 import { lstat, mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { join, relative, resolve } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
+import { createHash } from 'node:crypto'
 import { Context } from '@deepseek-ai/cordis'
 import LocalFileSystem from '@deepseek-ai/dsh-fs-local'
-import { CallId, CONTEXT_WINDOW_EXCEEDED_CODE, HarnessError, LlmAdapter, WebError, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
+import { CallId, CONTEXT_WINDOW_EXCEEDED_CODE, HarnessError, LlmAdapter, WebError, createUserMessage, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import { SessionId, type Session } from '@deepseek-ai/dsh-session'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { SearchError } from '@deepseek-ai/dsh-tool-fs-search'
@@ -22,7 +23,9 @@ import {
   parseTenderScoringArtifact, parseTenderScoringSelection,
   webEvidenceContentSha256, webEvidenceSourceId, createTestBidRunContext,
   parseEvidenceMapArtifact, parseChapterMetadata,
+  checkpointBidProjectState, readBidProjectState,
 } from '@deepseek-ai/dsh-bid'
+import { persistBidWorkRequest } from '../../src/work-descriptor.ts'
 
 function toolCall(callId: string, name: string, args: object): StreamChunk[] {
   const id = CallId(callId)
@@ -65,6 +68,7 @@ function reviewPendingMappingItems(options: GenerateOptions): StreamChunk[] {
 class ScriptedAdapter extends LlmAdapter {
   interactive = false
   reviewOverflow = false
+  structureRecovery = false
   readonly requests: GenerateOptions[] = []
   readonly reviewScript: ScriptStep[] = []
   constructor(
@@ -84,6 +88,16 @@ class ScriptedAdapter extends LlmAdapter {
     if (this.reviewOverflow && options.system?.includes('技术标目录轻量复核 Subagent')) {
       this.reviewOverflow = false
       yield { type: 'finish', reason: { kind: 'error', failure: { code: CONTEXT_WINDOW_EXCEEDED_CODE, message: '注入的 provider context overflow' } } }
+      return
+    }
+    if (this.structureRecovery && options.system?.includes('技术标目录轻量复核 Subagent')) {
+      const prompt = options.messages.flatMap(message => message.content)
+        .flatMap(block => block.type === 'text' ? [block.text] : []).join('\n')
+      const repaired = prompt.includes('由授权岗位核验权限生效，审计岗位对照操作记录完成追溯并保存核验结果。')
+      yield* mappingModelReply(toolCall(repaired ? 'review-actual-repair' : 'review-unresolved-structure', 'structured_output', {
+        issues: [], blocking_issues: repaired ? [] : [{ section_id: 'SEC-SECURITY',
+          reason: '当前职责尚未明确授权核验与审计追溯的执行责任。' }],
+      }), options)
       return
     }
     const verification = options.messages.flatMap(message => message.content)
@@ -332,7 +346,9 @@ async function prepareS2(workspace: BidWorkspace): Promise<{
   if (tender === undefined || reference === undefined || reference.chunkIndexPath === null || reference.chunksPath === null) throw new Error('S4 integration corpus missing')
   const chunkIndex = JSON.parse(await readFile(join(workspace.projectRoot, reference.chunkIndexPath), 'utf8')) as { chunks: Array<{ path: string }> }
   const chunk = `${reference.chunksPath}/${chunkIndex.chunks[0]!.path}`
-  const sourceRef = { file_id: tender.id, chunk, line_start: 1, line_end: 1 }
+  if (tender.chunkIndexPath === null || tender.chunksPath === null) throw new Error('S4 integration tender corpus missing')
+  const tenderIndex = JSON.parse(await readFile(join(workspace.projectRoot, tender.chunkIndexPath), 'utf8')) as { chunks: Array<{ path: string }> }
+  const sourceRef = { file_id: tender.id, chunk: `${tender.chunksPath}/${tenderIndex.chunks[0]!.path}`, line_start: 1, line_end: 1 }
   await mkdir(join(workspace.projectRoot, 'analysis'), { recursive: true })
   await writeFile(join(workspace.projectRoot, 'analysis/project.json'), JSON.stringify({ schema_version: 1, project_name: '访问控制项目', tender_name: null, purchaser: null, owner: null, project_background: ['安全建设'], project_objectives: ['访问控制'], project_scope: ['技术方案'], technical_scope: ['安全'], delivery_scope: ['方案'], implementation_constraints: [], key_technical_points: ['访问控制'], source_refs: [sourceRef], analyzed_tender_files: [tender.id] }))
   await writeFile(join(workspace.projectRoot, 'analysis/requirements.json'), JSON.stringify({ schema_version: 1, requirements: [{ id: 'REQ-1', category: '技术', raw_text: '访问控制', normalized_requirement: '提供访问控制方案', mandatory: true, source_refs: [sourceRef] }] }))
@@ -420,6 +436,7 @@ function researchAssessment(sufficient: boolean, affectsBlueprint: boolean, mode
  * @param ctx - 真实 Agent、工具、持久化和 Subagent 服务。
  * @param root - 本用例的隔离工作区。
  * @param repair - 搜索错误后调整查询，跨 Child 轮次抓取 URL，并修复目录 Schema。
+ * @param structureRecovery - 保留首代修复失败及后续补修脚本，供真实 Main 恢复或新授权使用。
  * @returns 阶段结果、Host、工作区及模型实际请求。
  */
 export async function runEvidenceMappingLoop(ctx: Context, root: string, repair: boolean, interactive = false,
@@ -434,7 +451,7 @@ export async function runEvidenceMappingLoop(ctx: Context, root: string, repair:
     retryAfter?: string
     resume?: true
     production?: true
-  }, researchMode?: 'zero' | 'local' | 'external_unbound') {
+  }, researchMode?: 'zero' | 'local' | 'external_unbound', structureRecovery = false) {
   const sessionId = SessionId('s3-real-loop')
   const workspace = new BidWorkspace(root)
   const s2 = fault?.resume === true ? { requirementId: 'REQ-1', scoringId: 'SCORE-1', responsePointId: 'RP-000001' }
@@ -493,6 +510,7 @@ export async function runEvidenceMappingLoop(ctx: Context, root: string, repair:
     ...(repair ? [
       toolCall('search-unknown-scope', 'search_sources', { scope_ref: 'F999', keywords: ['实施'] }),
       toolCall('read-forged-path', 'read_source', { source_ref: 'F1', file_path: corpus.chunks[0]!.path }),
+      toolCall('read-search-only-scope', 'read_source', { source_ref: 'ALL' }),
     ] : []),
     toolCall('read-heading', 'read_source', { source_ref: 'F2:H1:full' }),
     toolCall('search-local', 'search_sources', { scope_ref: 'F1', keywords: ['实施流程'] }),
@@ -583,8 +601,28 @@ export async function runEvidenceMappingLoop(ctx: Context, root: string, repair:
     reviewPendingMappingItems,
     toolCall('finish-final-check', 'finish_final_check', {}),
   ]
+  if (structureRecovery) {
+    const reviewIndex = childScript.findIndex(step => Array.isArray(step) && step.some(chunk =>
+      chunk.type === 'block-end' && chunk.block.type === 'tool-call' && chunk.block.id === 'submit-refinement-quality'))
+    const repairTask = (generation: number): ScriptStep[] => [
+      toolCall(`repair-${generation}-read`, 'read_source', { source_ref: 'M1:chunk_0001' }),
+      toolCall(`repair-${generation}-research`, 'submit_section_research_assessment', researchAssessment(true, false, researchMode)),
+      toolCall(`repair-${generation}-task`, 'update_section_task', { ...blueprint, writing_brief: {
+        ...blueprint.writing_brief, writing_notes: [generation === 1
+          ? '核验授权申请与审批记录，保留待明确的审计追溯责任。'
+          : '由授权岗位核验权限生效，审计岗位对照操作记录完成追溯并保存核验结果。'],
+      } }),
+      toolCall(`repair-${generation}-plan`, 'update_section_task', answerPlan),
+      toolCall(`repair-${generation}-structure`, 'submit_section_structure_assessment', structure),
+      toolCall(`repair-${generation}-lock`, 'lock_section_outline', { comparison: '沿用已研究的访问控制资料，按本次问题明确核验与追溯责任。' }),
+      toolCall(`repair-${generation}-mapping`, 'submit_section_mapping', submittedMaterials),
+      toolCall(`repair-${generation}-finish`, 'finish_mapping_task', {}),
+    ]
+    childScript.splice(reviewIndex, 1, ...repairTask(1), ...repairTask(2))
+  }
   const parentScript: ScriptStep[] = []
   const adapter = new ScriptedAdapter(sessionId, parentScript, childScript)
+  adapter.structureRecovery = structureRecovery
   adapter.reviewOverflow = fault?.reviewOverflow === true
   ctx.effect(() => ctx.llm.registerAdapter(['mock'], adapter))
   registerIntegrationTools(ctx, root, [sourceUrl, unusedSourceUrl], fault === undefined ? undefined
@@ -612,12 +650,20 @@ export async function runEvidenceMappingLoop(ctx: Context, root: string, repair:
   const orchestrator = new BidOrchestrator(
     agent.session,
     { canExecute: stage => stage === 'evidence_mapping', execute: (task, run) => executeEvidenceMapping(agent, workspace, task, {
-      maxRepairAttempts: repair ? 1 : 0, maxConcurrency: 2,
+      maxRepairAttempts: repair || structureRecovery ? 1 : 0, maxConcurrency: 2,
       ...(fault?.maxRetries === undefined ? {} : { maxInfrastructureRetryAttempts: fault.maxRetries }),
       ...(run.resumeOf === undefined ? {} : { resume: true }),
       run: fault?.signal === undefined ? run : { ...run, signal: AbortSignal.any([run.signal, fault.signal]) },
     }) },
     { validate: (stage, artifacts) => validateEvidenceMapping(workspace, stage, artifacts) },
+    undefined, undefined, undefined,
+    structureRecovery ? async (stage) => {
+      const payload = { stage }
+      const inputs = await Promise.all(buildBidStageTask(stage).inputs.map(async path => ({ path,
+        sha256: createHash('sha256').update(await readFile(join(workspace.projectRoot, path))).digest('hex'),
+      })))
+      return persistBidWorkRequest(workspace, 'stage_execution', stage, payload, { stage, inputs, payload }, `snapshot-${sessionId}-structure`)
+    } : undefined,
   )
 
   const suspended = agent.session.events.findLast(event => event.type === 'bid.run.suspended' || event.type === 'bid.run.started')
@@ -627,6 +673,48 @@ export async function runEvidenceMappingLoop(ctx: Context, root: string, repair:
   adapter.interactive = interactive
   return { agent, workspace, sourceUrl, outcome, requests: adapter.requests,
     parentScript, childScript, reviewScript: adapter.reviewScript }
+}
+
+/**
+ * 在完整研究及首代结构修复失败后，通过正式 Main 恢复工具定向补修原 Work。
+ * @param ctx 包含 Bid Host 的真实 Loader 装配。
+ * @param root 临时项目目录。
+ * @returns 原失败结果、恢复后状态及真实请求；恢复未完成时抛错。
+ */
+export async function runEvidenceMappingStructureRecoveryLoop(ctx: Context, root: string) {
+  const result = await runEvidenceMappingLoop(ctx, root, false, true, undefined, 'local', true)
+  if (result.outcome.status !== 'failed') throw new Error('结构恢复夹具未产生首代修复后的失败：' + JSON.stringify(result.outcome))
+  const failedLog = JSON.parse(await readFile(join(result.workspace.projectRoot, 'analysis/evidence-mapping-log.json'), 'utf8')) as {
+    tasks: Array<{ task_id: string; status: string }>
+    failure?: unknown
+  }
+  if (!failedLog.tasks.some(task => task.task_id.startsWith('MAP-REPAIR-') && task.status === 'completed')) {
+    throw new Error('首代结构修复未完成：' + JSON.stringify(failedLog))
+  }
+  const saved = await checkpointBidProjectState(result.workspace, result.outcome)
+  result.agent.session.append('bid.project.resumed', { state: result.outcome, revision: saved.revision })
+  await result.agent.whenIdle()
+  const instruction = '保留已研究资料，明确授权岗位核验与审计岗位追溯责任，只补修失败章节后重新复核。'
+  result.parentScript.push(toolCall('inspect-structure-recovery', 'bid_stage_inspect', { view: 'recovery' }),
+    toolCall('accept-structure-recovery', 'bid_recover_task', { target: 'run', instruction }), finalText('已接纳定向补修，等待实际修改及复核结果。'))
+  const done = Promise.withResolvers<undefined>()
+  const off = ctx.on('session/event', (session, event) => {
+    if (session === result.agent.session && event.type === 'bid.user_confirmation.required' && event.data.stage === 'evidence_mapping') done.resolve(undefined)
+    if (session === result.agent.session && event.type === 'bid.run.failed') done.reject(new Error('S4 定向补修失败：' + JSON.stringify(event.data)))
+  }, { global: true })
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    result.agent.followup(createUserMessage({ content: [{ type: 'text', text: instruction }], source: { kind: 'user' } }))
+    await Promise.race([done.promise, new Promise<never>((_, reject) => {
+      timer = setTimeout(() => { reject(new Error('S4 定向补修未完成：' + JSON.stringify(result.agent.session.events
+        .filter(event => event.type === 'tool/result' || event.type === 'bid.run.failed').slice(-5)))) }, 45_000)
+    })])
+    const operations = (ctx.bid as unknown as { inFlight: Map<string, { done: Promise<void> }> }).inFlight
+    await Promise.all([...operations.values()].map(operation => operation.done))
+    await result.agent.whenIdle()
+    await ctx.sessions.flush(result.agent.session)
+  } finally { clearTimeout(timer); off() }
+  return { ...result, instruction, outcome: await readBidProjectState(result.workspace), firstOutcome: result.outcome }
 }
 
 /**

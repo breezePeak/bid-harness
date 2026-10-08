@@ -40,7 +40,8 @@ import { revisionBatchTaskInputSchema } from './chapter-revision-batch.ts'
 import { buildWritableSectionWorklist } from './section-evidence-context.ts'
 import { assertNoLinkedPath, within } from './workspace-path.ts'
 import type { BidRunData } from './control-plane-contract.ts'
-import { bidCapabilityTakeoverRun, bidCompletedCapabilityRun, bidRecoverableRun, bidRunRecoveryEligibility, bidWritingPlanRecoveryEligibility } from './bid-recovery.ts'
+import { bidCapabilityTakeoverRun, bidCompletedCapabilityRun, bidEvidenceMappingTakeoverRun,
+  bidRecoverableRun, bidRunRecoveryEligibility, bidWritingPlanRecoveryEligibility } from './bid-recovery.ts'
 import { resolveBidToolAuthorization } from './bid-tool-authorization.ts'
 import { bidModelTaskJsonSchema, bindBidModelTask, bindBidModelSteps, bindBidModelProjectQuery,
   bindBidModelWritingPlan, bindBidModelReference, collectBidModelTaskCatalog,
@@ -709,7 +710,8 @@ export function installStageInteractionTools(
       const scope = stage === undefined ? undefined : `${stage}:${suspended === undefined ? task.status : `suspended:${suspended.runId}`}`
       const recoveryAvailable = bidRunRecoveryEligibility(agent.session).eligible
         || bidWritingPlanRecoveryEligibility(agent.session).eligible
-      const takeoverAvailable = bidCapabilityTakeoverRun(agent.session, task) !== undefined
+      const takeoverAvailable = (bidCapabilityTakeoverRun(agent.session, task)
+        ?? bidEvidenceMappingTakeoverRun(agent.session, task)) !== undefined
       const completedCapability = bidCompletedCapabilityRun(agent.session, task)
       const hasGoal = toolCtx.get('goals')?.get(agent) !== undefined
       const actualScope = `${scope ?? 'none'}:${String(hasGoal)}:${String(recoveryAvailable)}:${String(takeoverAvailable)}:${completedCapability?.runId ?? ''}`
@@ -945,7 +947,8 @@ export function installStageInteractionTools(
                 let supersede: z.infer<typeof supersedeSchema> | undefined
                 if (request.supersede === true) {
                   const state = await readBidProjectState(workspaceFor(agent.session))
-                  const run = state === undefined ? undefined : bidCapabilityTakeoverRun(agent.session, state)
+                  const run = state === undefined ? undefined
+                    : bidCapabilityTakeoverRun(agent.session, state) ?? bidEvidenceMappingTakeoverRun(agent.session, state)
                   if (run === undefined || state === undefined) throw new Error('BID_CAPABILITY_SUPERSEDE_NOT_ALLOWED')
                   supersede = { run_id: run.runId, expected_project_revision: state.revision }
                 }

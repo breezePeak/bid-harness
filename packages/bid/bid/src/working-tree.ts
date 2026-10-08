@@ -39,17 +39,19 @@ async function copyRegularTree(workspaceRoot: string, source: string, target: st
  * Prepare or reopen the durable private project used by one exact work item.
  * @param workspace - Canonical workspace used as the initial snapshot.
  * @param descriptor - Work identity bound to the private project.
- * @param options - Reset a candidate whose previous attempt did not publish a receipt.
+ * @param options 重置未发布候选，或从 Host 已核对的其他候选复制新 Work 的初始项目。
  * @returns Private workspace paths for execution and resume.
  */
 export async function prepareBidWorkingTree(
   workspace: WorkspacePaths,
   descriptor: BidWorkDescriptor,
-  options: { readonly reset?: boolean } = {},
+  options: { readonly reset?: boolean; readonly source?: WorkspacePaths } = {},
 ): Promise<WorkspacePaths> {
   const root = bidWorkRoot(workspace, descriptor)
   const markerPath = within(root, 'work-identity.json')
   const projectRoot = resolve(root, relativeProjectRoot(workspace))
+  const source = options.source ?? workspace
+  within(workspace.root, relative(workspace.root, source.projectRoot))
   await assertNoLinkedPath(workspace.root, root)
   try {
     const saved = JSON.parse(await readFile(markerPath, 'utf8')) as unknown
@@ -65,12 +67,12 @@ export async function prepareBidWorkingTree(
   await rm(root, { recursive: true, force: true })
   await mkdir(projectRoot, { recursive: true, mode: 0o700 })
   let entries: string[] = []
-  try { entries = await readdir(workspace.projectRoot) } catch (error) {
+  try { entries = await readdir(source.projectRoot) } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
   }
   for (const entry of entries) {
     if (EXCLUDED_PROJECT_ENTRIES.has(entry)) continue
-    await copyRegularTree(workspace.root, resolve(workspace.projectRoot, entry), resolve(projectRoot, entry))
+    await copyRegularTree(workspace.root, resolve(source.projectRoot, entry), resolve(projectRoot, entry))
   }
   await writeFileAtomic(markerPath, `${JSON.stringify(descriptor, null, 2)}\n`, { mode: 0o600, dirMode: 0o700 })
   return { root, projectRoot }

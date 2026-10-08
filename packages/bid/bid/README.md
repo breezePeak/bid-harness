@@ -151,17 +151,27 @@ S4 与 S5 共用 `buildWritableSectionWorklist`。Host 为 S3 每个可写叶子
 
 同代 S4 任务及检查点按实际子树检测重叠；相同、祖先或后代范围按计划顺序合并，后续任务使用最新目录，独立分支仍并行。输入有效的已完成研究继续复用，合并时仍拒绝过期子树。
 
+全局结构复核失败后的恢复按最后持久化问题创建下一代受影响子树修复，已完成研究保留为基线；历史修复完成不能阻止新授权执行修改。任务计划绑定接纳恢复的主会话及事件序号，相同授权的取消、重启和续跑复用任务组，不重复递增代次或清零原 Work 预算。修改 Child 与 Reviewer 收到相同修复目标、问题及实际变化摘要。接纳回执仅表示已接纳，执行回执从文件内容差异区分实际修改与仅复核。
+
+原 S4 阶段的恢复预算耗尽后，新的直接用户消息可以通过 `bid_run_task(supersede=true)` 接纳独立补修 Work，保留原失败候选、检查点和预算，从最后结构问题继续局部修复。任务须为项目范围的单步 `outline.refine`，或允许目录深化的补充式 `evidence.research`；含后续写作等其他步骤的计划须另行处理，不能在接管时丢弃。
+
 S4 启动 Child 前复检 reference/reference_bid Corpus，损坏文件以 `EVIDENCE_MAPPING_CORPUS_INVALID` 报告身份与原因。程序根据标准化 Markdown 的实际标题位置、层级及现有分块行号定位正文，同名标题按出现位置区分，直接正文与包含子节的完整范围分别提供引用。`structure.json` 展示完整目录；无法确定对应的节点标记“定位未确定”，不推断缺失。跨标题分块显示全部实际覆盖范围。原始框架标题仅作结构输入，不进入事实 Evidence。
 
 初始研究、重映射及 Final Check 共用 `read_source` 和 `search_sources`。Bid preset 必须同时注册 `web_search` 和 `web_fetch`，Host 在创建 Section 任务前检查这两个 schema；缺少时整次 S4 失败且不创建章节子任务。模型选择程序提供的目录、全文件、材料或搜索范围引用；可直接读取，也可扩大字面搜索范围。长结果返回后续引用，由模型决定是否继续。来源标题、位置与整块覆盖范围保持原样。通用本地 grep/read 不向 S4 开放，不能绕过引用读取；联网搜索、抓取及已授权快照仍可使用。
 
+来源对象的 `allowed_uses` 和 `source_choices.read/search` 分别列出可读取及可搜索位置；`ALL` 仅表示全部本地资料搜索，没有正文。误读该位置时回执给出搜索动作及合法读取位置，不自动读取全部文件。
+
 `submit_section_mapping`、`replace_section_mapping` 只处理材料。模型从当前对象表选择 `material_position` 或 Web `chunk_positions`，提交 usage 及 summary；程序回填真实身份，真实工具入口拒绝未知位置、身份抄写、来源覆盖及任务字段。summary 必须说明支持本章哪项任务、可用内容和展开限度，进入正式 Evidence；跨章复用分别保存用途。`update_section_task` 独立调整 Writing Brief、writing_dimensions、职责内 missing_topics 或明确的 coverage_override，并记录业务依据及前后差异。业务覆盖从全局 `objects.requirements`、`objects.scoring`、`objects.response_points` 选择位置，当前章节的允许集合仍使用这三张表的位置；研究及 S2 依据从 `objects.references` 选择，不能互换。提示、工具说明和拒绝诊断均使用模型接受的位置字段。找到相关资料本身不构成扩展任务的理由。
+
+`update_section_task` 的模型 Schema 接受互斥的任务更新和完整 `answer_plan` 提交。任务更新不含计划，计划提交只含 `section_position`、`basis` 与完整计划；程序在身份绑定前按同源 Schema 拒绝混交且不改状态。更新成功返回完整目标位置、可用依据及下一步，后续计划直接选择这些位置。历史 checkpoint 内部操作保留原正式 Schema，读取不受模型入口收窄影响。
 
 Section Child 通过 `submit_section_research_assessment` 只记录研究充分性、中性 findings、真实依据和专业方案推演边界。Research Ready 后先用 `update_section_task` 提交完整 Writing Brief、writing_dimensions、missing_topics 及当前覆盖，再用 `submit_section_structure_assessment` 判断 KEEP/REFINE、目录导航和隐藏标题压力，并逐项决定主题归位。Host 将判断绑定当前 Blueprint fingerprint；任务、研究或目录语义变化会使判断 stale，重新判断前不能锁定。同一方法的普通步骤允许留章内，连续流程或没有独立评分点不能单独证明 KEEP。
 
 目录操作保留现有 Section 子树作用域。模型提供操作、finding_indices 和业务理由，Host 分配稳定 Section ID 并保存 finding→实际节点绑定；连续编辑不要求因新 ID 重交 Research Assessment。新叶节的候选 Requirement、Scoring 和 Response Point 可用于研究引用校验，正式章节关联仍由 `update_section_task` 的 coverage_override 决定。编辑完成后依据最新 Blueprint 重新判断，再用 `lock_section_outline` 锁定。全书 `reviewRefinedOutline()` 读取精简 Structure Review Cards，独立检查叶子过粗、过度拆分、同级职责和隐藏标题压力。阻断问题由程序填写 `OUTLINE_STRUCTURE_REVIEW` 类别，只重开受影响子树的 `MAP-REPAIR-*`；Repair 接收中性 findings、当前 Blueprint 和具体问题，不继承旧 KEEP/归位理由。Final Check 继续复核任务、资料用途、缺口与父总述，不获得结构编辑权限。
 
 无参数 `finish_final_check` 根据当前版本记录计算漏项、过期及阻断，不接受模型自报已审清单，baseline 也不算已审。首轮与修复轮次先用 `list_review_items` 取得当前 `objects.reviews`，再通过 `review_items.review_position` 选择复核对象；程序绑定正式复核引用。当 finish 发现 pending review 时返回 `review_pending`、待审位置、当前对象表和结构化诊断。可修问题必须通过 `review_items` 的 `correct` 实际修改 S4 产物；旧引用失效后生成新 fingerprint，重新读取对象表并 `keep`，不能继承旧结论。不可在当前边界修复的 `block` 直接终止当前 Final Check，不进入无意义的普通重试。全部收口后合并、去重、整体验证并发布正式产物；失败沿用有限修复及回滚。检查点保存研究发现、带 fingerprint/stale 的结构判断、失效次数、目录操作及 Host 绑定、任务与资料版本和完成状态；结构字段、任务身份及输入关系必须严格校验，旧 S4 数据必须重置。正式 Outline 与 S5 输入不变。日志的 statistics 和各任务 research_stats 记录叶子数、研究充分性、搜索次数与命中、Web 成败及原因、findings、KEEP/REFINE、stale、结构操作、全书复核问题和 Repair 结果，不保存完整 Prompt；日志只接受当前工具名 `web_search` 与 `web_fetch`。
+
+S4 全局目录审核同时接收 S2 项目事实、覆盖记录的规范化文本与原文引用，以及 Host 从这些引用装载的完整采购 Chunk。Host 核对文件角色、上传文件的 Corpus 归属、索引、真实路径及行范围，按当前卡片或跨章索引实际关联的 Chunk 去重分片，并在完整请求中计入预算；缺失、错挂或单对象超限时明确拒绝审核，不截断决定性原文。项目摘要和规范化文本用于导航，采购原文决定事实与任务；摘要遗漏须补充依据，绑定错误须修正关联，摘要与原文冲突须按原文纠正，缺证不能直接推导为要求删除。
 
 开发验收可运行 `pnpm run bid:s4-replay -- --workspace <S1-S3 Workspace> --output <隔离输出目录> [--sections SEC-A,SEC-B]`。入口复制源 Workspace 的 `.bid-harness`，仅在副本中清除旧 S4 及后续产物，再通过真实 Agent、Child 可见的 `web_search`/`web_fetch` 和当前 S4 执行器重跑并写出 `s4-acceptance-report.json`；Section 参数只筛选逐节记录，不改变全书执行，也不内置项目 ID。报告复用执行日志和检查点，列出 S3/S4 叶节差异、研究判断、stale、结构操作、复核/Repair 及本地与 Web 工具成败，不设置拆分数量门槛。
 
