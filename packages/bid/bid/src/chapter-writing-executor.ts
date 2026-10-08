@@ -84,7 +84,8 @@ import {
 import { resolveSemanticRevisionPath } from './chapter-revision-lineage.ts'
 import { resolveEvidenceChunk } from './evidence-chunk.ts'
 import { buildWritableSectionWorklist, sectionEvidenceContext, sectionVisibleRequirements, validateSectionEvidenceCoverage } from './section-evidence-context.ts'
-import { buildSectionAnswerChecklist, validateSectionAnswerPlan, type SectionAnswerPlan } from './section-answer-plan.ts'
+import { type SectionAnswerPlan } from './section-answer-plan.ts'
+import { validateMappingAnswerPlan } from './section-answer-readiness.ts'
 import { executeSectionResearch } from './evidence-mapping-executor.ts'
 import { parseEvidenceMappingPlan } from './evidence-mapping-artifacts.ts'
 import {
@@ -2102,25 +2103,15 @@ async function runChapterWriting(
       const responsePointsForSection = responsePointCatalog.points.filter(item =>
         (section.scoring_response_point_ids ?? []).includes(item.id))
       const complianceForSection = compliance.compliance_items.filter(item => section.compliance_ids.includes(item.id))
-      const checklist = buildSectionAnswerChecklist({ section, requirements: requirementsForSection,
-        responsePoints: responsePointsForSection, compliance: complianceForSection })
       const local = mapping.local_materials.filter(item => manifest.files.some(file => file.id === item.file_id
         && file.parseStatus === 'success'))
       const web = mapping.web_materials.filter(item => webSources.sources.some(source => source.source_id === item.source_id
         && source.snapshot_path === item.snapshot_path))
-      const sourceKeys = new Set([
-        's2:project:', `section:${section.id}`,
-        ...requirementsForSection.map(item => `s2:requirement:${item.id}`),
-        ...scoring.scoring_items.filter(item => section.scoring_ids.includes(item.id)).map(item => `s2:scoring:${item.id}`),
-        ...responsePointsForSection.map(item => `s2:response_point:${item.id}`),
-        ...complianceForSection.map(item => `s2:compliance:${item.id}`),
-        ...local.map(item => `local:${item.file_id}:${item.chunk}`),
-        ...mapping.answer_plan?.flatMap(item => item.basis.flatMap(basis => basis.kind === 'web'
-          && web.some(material => material.source_id === basis.source_id
-            && basis.chunk_refs.every(ref => material.chunk_refs.includes(ref)))
-          ? [`web:${basis.source_id}:${basis.chunk_refs.join(',')}`] : [])) ?? [],
-      ])
-      return validateSectionAnswerPlan(mapping.answer_plan, checklist, sourceKeys).length > 0
+      return validateMappingAnswerPlan(section, { ...mapping, local_materials: local, web_materials: web }, {
+        requirements: requirementsForSection,
+        scoring: scoring.scoring_items.filter(item => section.scoring_ids.includes(item.id)),
+        responsePoints: responsePointsForSection, compliance: complianceForSection,
+      }).length > 0
         || options.inputAnswer !== undefined && mapping.answer_plan?.some(item => item.mode === 'gap') === true
     })
     if (stale.length > 0) {

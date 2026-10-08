@@ -9,6 +9,8 @@ import { missingOutlineResponsePoints, validateOutlineSharedStructure } from '..
 import { outlineArtifactSha256 } from '../src/outline-confirmation-artifacts.ts'
 import { buildWritableSectionWorklist, sectionVisibleRequirements } from '../src/section-evidence-context.ts'
 import type { Agent } from '@deepseek-ai/dsh-agent'
+import { assertObjectJsonSchema, validateJsonSchemaValue, type ObjectJsonSchema } from '@deepseek-ai/dsh-tools'
+import { generateScopedOutlineOperations } from '../src/outline-generation-executor.ts'
 import {
   BidWorkspace,
   buildBidStageTask,
@@ -275,6 +277,7 @@ async function modelPositions(value: unknown, workspace: BidWorkspace, request: 
       })]
       if (name === 'order') return ['sibling_position', Number(child) - 1]
       if (name === 'framework_refs' && Array.isArray(child)) return [name, child.map((ref: ModelObject) => {
+        if ('framework_position' in ref || 'heading_position' in ref) return ref
         const framework = business.frameworks?.find(item => (item.headings as ModelObject[]).some(heading =>
           JSON.stringify(heading.heading_path) === JSON.stringify(ref.heading_path)))
         const heading = (framework?.headings as ModelObject[] | undefined)?.find(item =>
@@ -580,6 +583,112 @@ describe('S3 候选错误分流', () => {
 })
 
 describe('S3 需求、合规、框架与结构局部修复', () => {
+  it('缺失关联修复 Child 只根据投影诊断和当前可选位置补交，原章节与合法关联保留', async () => {
+    const workspace = await fixture()
+    const [framework] = await workspace.import([{ name: 'framework.md', role: 'outline_framework',
+      bytes: new TextEncoder().encode('# 组织实施\n') }])
+    const outline = structuredClone(reviewedOutline)
+    outline.sections[1] = { ...outline.sections[1]!, requirement_ids: ['removed-requirement'], origin: 'mixed',
+      framework_refs: [{ file_id: String(framework!.id), heading_path: ['被移除的标题'] }] }
+    await publishOutline(workspace, outline)
+    const { agent, subagentStart } = modelAgent(workspace, async (prompt, submitReview) => {
+      if (!prompt.includes('局部关联与结构修复')) {
+        await submitReview()
+        return
+      }
+      const line = prompt.split('\n').find(line => line.startsWith('当前目录（包含 purpose、must_answer 和已有关联）：'))!
+      const view = JSON.parse(line.slice(line.indexOf('{'))) as {
+        sections: Array<{ position: number; title: string; requirement_positions: Array<number | null> }>
+        unresolved_references: Array<{ section_position: number; field: string; reference_position: number }>
+      }
+      const section = view.sections.find(section => section.title === '项目组织与职责')!
+      expect(section.requirement_positions).toEqual([null])
+      expect(view.unresolved_references).toEqual(expect.arrayContaining([
+        expect.objectContaining({ section_position: section.position, field: 'requirement_positions', reference_position: 0 }),
+        expect.objectContaining({ section_position: section.position, field: 'framework_refs', reference_position: 0 }),
+      ]))
+      expect(JSON.stringify(view)).not.toContain('-1')
+      const choices = JSON.parse(prompt.split('\n').find(line => line.startsWith('{"requirements":'))!) as {
+        requirements: Array<{ position: number; normalized_requirement: string }>
+        frameworks: Array<{ framework_position: number; headings: Array<{ heading_position: number; title: string }> }>
+      }
+      return { operations: [{ type: 'update_section', section_position: section.position,
+        requirement_positions: [choices.requirements.find(item => item.normalized_requirement === '建立项目组织。')!.position],
+        framework_refs: [{ framework_position: choices.frameworks[0]!.framework_position,
+          heading_position: choices.frameworks[0]!.headings.find(heading => heading.title === '组织实施')!.heading_position }],
+      }] }
+    })
+    await executeOutlineGeneration(agent, workspace, buildBidStageTask('outline_generation'))
+    expect(subagentStart.mock.calls.map(([, request]) => request.label)).toEqual(['目录局部修复', '目录质量复核'])
+    const repaired = JSON.parse(await readFile(join(workspace.projectRoot, 'outline/outline.json'), 'utf8')) as OutlineArtifact
+    expect(repaired.sections.find(section => section.id === outline.sections[1]!.id)).toEqual({ ...outline.sections[1],
+      requirement_ids: ['REQ-ORG'], framework_refs: [{ file_id: String(framework!.id), heading_path: ['组织实施'] }] })
+    expect(repaired.sections.find(section => section.id === outline.sections[2]!.id)).toEqual(outline.sections[2])
+  })
+
+  it.each(['关联修复', '响应点修复'] as const)('%s 实际 Child Schema 公开新增必答项和关联更新条件', async (mode) => {
+    const workspace = await fixture()
+    const initial = structuredClone(reviewedOutline)
+    if (mode === '关联修复') initial.sections[1]!.requirement_ids = []
+    else await catalogWithMissing(workspace)
+    await publishOutline(workspace, initial)
+    const { agent, subagentStart } = modelAgent(workspace, async (prompt, submitReview) => {
+      if (!prompt.includes('局部响应点修复') && !prompt.includes('局部关联与结构修复')) {
+        await submitReview()
+        return
+      }
+      const line = prompt.split('\n').find(line => line.startsWith('当前目录（包含 purpose、must_answer 和已有关联）：'))!
+      const current = JSON.parse(line.slice(line.indexOf('{'))) as { sections: Array<{ position: number; title: string }> }
+      const business = JSON.parse(prompt.split('\n').find(line => line.startsWith('{"requirements":'))!) as {
+        requirements: Array<{ position: number; normalized_requirement: string }>
+        response_points: Array<{ position: number; text: string }>
+      }
+      return { operations: [{ type: 'add_section',
+        parent_position: current.sections.find(section => section.title === '项目实施方案')!.position,
+        sibling_position: 2, title: '实施补充要求', purpose: '说明实施补充要求',
+        must_answer: ['说明组织责任与延期预警处置'],
+        ...(mode === '关联修复' ? { requirement_positions: [business.requirements.find(item => item.normalized_requirement === '建立项目组织。')!.position] }
+          : { response_point_positions: [business.response_points.find(item => item.text === '说明延期风险识别、预警与纠偏安排')!.position] }),
+      }] }
+    })
+    await executeOutlineGeneration(agent, workspace, buildBidStageTask('outline_generation'))
+    const request = subagentStart.mock.calls.find(([, request]) => request.label === '目录局部修复')![1]
+    const schema = request.outputSchema as ObjectJsonSchema
+    assertObjectJsonSchema(schema)
+    const addition = { type: 'add_section', parent_position: 0, sibling_position: 2,
+      title: '实施补充要求', purpose: '说明实施补充要求' }
+    expect(validateJsonSchemaValue(schema, { operations: [addition] })).not.toEqual([])
+    expect(validateJsonSchemaValue(schema, { operations: [{ ...addition, must_answer: ['说明组织责任'] }] })).toEqual([])
+    expect(JSON.stringify(schema)).toContain('新增可写章节的具体写作要求，必填且至少一项。')
+    const update = { type: 'update_section', section_position: 1, response_point_positions: [0] }
+    expect(validateJsonSchemaValue(schema, { operations: [update] })).not.toEqual([])
+    expect(validateJsonSchemaValue(schema, { operations: [{ ...update, must_answer: ['说明组织责任'] }] })).toEqual([])
+    expect(JSON.parse(await readFile(join(workspace.projectRoot, 'outline/outline.json'), 'utf8'))).toMatchObject({
+      sections: expect.arrayContaining([expect.objectContaining({ title: addition.title,
+        writable: true, must_answer: ['说明组织责任与延期预警处置'] })]) as unknown,
+    })
+  })
+
+  it.each([undefined, [], ['说明质量核验']] as const)('局部重生成的实际模型入口拒绝缺失或空必答项，接纳有效新增（%j）', async (must_answer) => {
+    const outline = withTechnicalDeviation(reviewedOutline)
+    const operations = [{ type: 'add_section', parent_position: 1, sibling_position: 2,
+      title: '质量核验', purpose: '说明质量核验', ...(must_answer === undefined ? {} : { must_answer }) }]
+    const start = vi.fn(async (_provider: string, request: Record<string, unknown>) => {
+      expect(subagentPrompt(request)).toContain('"must_answer"]')
+      expect(subagentPrompt(request)).toContain('新增可写章节的具体写作要求，必填且至少一项。')
+      return { result: Promise.resolve({ stopReason: 'completed', output: [{ type: 'text', text: JSON.stringify(operations) }] }),
+        dispose: vi.fn() }
+    })
+    const agent = { ctx: { get: () => ({ getProvider: () => ({ inheritsParentContext: false }), start }) } } as unknown as Agent
+    const draft = { schema_version: 1 as const, scope: 'technical_bid' as const, revision: 1,
+      source_outline_sha256: outlineArtifactSha256(outline), draft_outline_sha256: outlineArtifactSha256(outline), outline }
+    const result = generateScopedOutlineOperations(agent, draft, ['SEC-IMPLEMENTATION'], '补充质量核验', new AbortController().signal)
+    if (must_answer === undefined || must_answer.length === 0) await expect(result).rejects.toThrow()
+    else await expect(result).resolves.toEqual([{ type: 'add_section', parent_id: 'SEC-IMPLEMENTATION', order: 3,
+      writable: true, title: '质量核验', purpose: '说明质量核验', must_answer }])
+    expect(start).toHaveBeenCalledTimes(1)
+  })
+
   it('按 parent_id 派生目录层级，未知父节点仍由结构校验拒绝', async () => {
     const workspace = await fixture()
     const catalog = parseScoringResponsePointCatalog(JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/scoring-response-points.json'), 'utf8')))

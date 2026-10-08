@@ -23,7 +23,7 @@ export function mappingModelQuality(value: unknown, prompt: string): unknown {
     }) : report.issues, blocking_issues: Array.isArray(report.blocking_issues) ? report.blocking_issues.map((issue: unknown) => {
       if (issue === null || typeof issue !== 'object' || !('section_id' in issue)) return issue
       const { section_id, ...rest } = issue
-      return { ...rest, section_position: sections.find(item => item.id === section_id)?.position ?? 999_999 }
+      return { issue_kind: 'relationship', ...rest, section_position: sections.find(item => item.id === section_id)?.position ?? 999_999 }
     }) : report.blocking_issues }
 }
 const fields: Record<string, [string, string]> = {

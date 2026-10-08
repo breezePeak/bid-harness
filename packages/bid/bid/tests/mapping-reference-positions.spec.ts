@@ -42,6 +42,21 @@ describe('S4 统一依据引用位置', () => {
     expect(() => positions.bind({ kind: 's2', record_position: 4 })).toThrow('不是 S2 记录')
   })
 
+  it('公开用途和纠正位置来自同一接纳规则，未读材料不能作为研究依据', () => {
+    const scoped = createMappingReferencePositions(references, ['requirement', 'scoring', 'local_material'], {
+      research: new Set(['REQ-007', 'SC-001']),
+      s2: new Set(['REQ-007', 'COM-001', 's2:project:']),
+    })
+    expect(scoped.choices()).toEqual({ research: [0, 1], s2: [0, 2, 3] })
+    expect(scoped.uses(2)).toEqual(['s2'])
+    expect(scoped.uses(3)).toEqual(['s2'])
+    expect(scoped.uses(4)).toEqual([])
+    for (const position of scoped.choices().research) expect(() => scoped.bind({ reference_position: position })).not.toThrow()
+    for (const position of scoped.choices().s2) expect(() => scoped.bind({ kind: 's2', record_position: position })).not.toThrow()
+    expect(() => scoped.bind({ reference_position: 4 })).toThrow('可选位置：[0,1]')
+    expect(() => scoped.bind({ kind: 's2', record_position: 1 })).toThrow('可选位置：[0,2,3]')
+  })
+
   it('S2 模型 Schema 只要求 kind=s2 和统一表位置', () => {
     const schema = positions.schema(zodJsonSchema(sectionAnswerPlanInputSchema))
     expect(JSON.stringify(schema)).not.toContain('"artifact"')

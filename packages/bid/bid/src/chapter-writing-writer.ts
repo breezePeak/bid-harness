@@ -417,7 +417,7 @@ export async function bindChapterWriterInput(
  * @param candidate 上次完整候选。
  * @param refs 本章稳定资料位置表。
  * @param preservedFlowcharts 程序保留的只读原图，不交回模型重写。
- * @returns 修复提示中不含内部身份或 Blueprint 索引的候选。
+ * @returns 修复提示中不含内部身份或 Blueprint 索引的候选；不可定位的本地资料保留语义与不可用原因，须重选合法位置后提交。
  */
 export function projectChapterWriterCandidate(candidate: AcceptedChapterCandidate, refs: ChapterWriterReferences,
   preservedFlowcharts: readonly FlowchartSpec[] = []): unknown {
@@ -427,13 +427,16 @@ export function projectChapterWriterCandidate(candidate: AcceptedChapterCandidat
       refs.dependencyFlowcharts.map(value => value.chart)),
     metadata: {
       local_materials_used: candidate.metadata.local_materials_used.map((material) => {
-        const mapped = [...refs.materials].find(([, value]) => value.file_id === material.file_id && value.chunk === material.chunk)
         const semantics = { usage: material.usage, summary: material.summary }
-        const filePosition = [...refs.files.values()].findIndex(value => value.file_id === material.file_id)
-        const fileRef = [...refs.files.keys()][filePosition]
-        return mapped !== undefined ? { material_position: [...refs.materials.keys()].indexOf(mapped[0]), ...semantics }
-          : { file_position: filePosition, chunk_position: fileRef === undefined ? -1
-            : refs.chunks.get(fileRef)?.findIndex(chunk => chunk.id === material.chunk) ?? -1, ...semantics }
+        const files = [...refs.files]
+        const file_position = files.findIndex(([, file]) => file.file_id === material.file_id && file.role === material.source_kind)
+        const file = files[file_position]
+        if (file === undefined) return { source_unavailable: '原本地来源不在当前允许的文件表中；保留资料语义并重选有效来源。', ...semantics }
+        const chunk_position = refs.chunks.get(file[0])?.findIndex(chunk => chunk.id === material.chunk) ?? -1
+        if (chunk_position < 0) return { source_unavailable: '原本地 Chunk 不在当前文件的资料块表中；保留资料语义并重选有效片段。', ...semantics }
+        const material_position = [...refs.materials.values()].findIndex(value => value.source_kind === material.source_kind
+          && value.file_id === material.file_id && value.chunk === material.chunk)
+        return material_position >= 0 ? { material_position, ...semantics } : { file_position, chunk_position, ...semantics }
       }),
       web_materials_used: candidate.metadata.web_materials_used.map((material) => {
         const web_position = [...refs.webMaterials.keys()].indexOf(webMaterialIdentity(material))

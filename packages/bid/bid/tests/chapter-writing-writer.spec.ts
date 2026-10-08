@@ -100,6 +100,49 @@ describe('S5 Writer 短引用与语义输入', () => {
     }
   })
 
+  it('本地资料投影经重排及恢复后保留来源、片段和语义', async () => {
+    const { workspace, manifest, context, refs } = await fixture()
+    const candidate = await bindChapterWriterInput(workspace, manifest, context, refs, {
+      markdown: `# ${context.section.title}\n\n具体正文。`, metadata: { local_materials_used: [
+        { material_position: 0, usage: 'reference', summary: '企业事实。' },
+        { file_position: 1, chunk_position: 0, usage: 'adapt', summary: '历史方案仅用于技术方法。' },
+      ] },
+    }, [])
+    const { additional_web_materials: _additional, ...metadata } = candidate.metadata
+    const accepted = { ...candidate, metadata }
+    const restored = createChapterWriterReferences({ ...context, availableLocalCorpus: [...context.availableLocalCorpus].reverse() })
+    await loadChapterWriterChunkReferences(workspace, restored)
+    for (const table of [refs, restored, { ...restored, materials: new Map() }]) {
+      const projected = projectChapterWriterCandidate(accepted, table)
+      expect(JSON.stringify(projected)).not.toContain(':-1')
+      const rebound = await bindChapterWriterInput(workspace, manifest, context, table, projected, [])
+      expect(rebound.metadata.local_materials_used).toEqual(metadata.local_materials_used)
+    }
+  })
+
+  it.each(['file', 'chunk', 'role'] as const)('本地 %s 缺失时修复投影保留原语义、公开来源不可用且不产生负数位置', async (missing) => {
+    const { workspace, manifest, context, refs, bind } = await fixture()
+    const candidate = await bind({ local_materials_used: [{ material_position: 0, usage: 'reference', summary: '原企业事实须继续核验。' }] })
+    const { additional_web_materials: _additional, ...metadata } = candidate.metadata
+    const table = { ...refs, files: new Map(refs.files), chunks: new Map(refs.chunks) }
+    if (missing === 'file') table.files.delete('F1')
+    else if (missing === 'chunk') table.chunks.set('F1', [])
+    else table.files.set('F1', { ...table.files.get('F1')!, role: 'reference_bid' })
+    const projected = projectChapterWriterCandidate({ ...candidate, metadata }, table) as {
+      metadata: { local_materials_used: Record<string, unknown>[] }
+    }
+    expect(projected.metadata.local_materials_used).toEqual([{
+      // oxlint-disable-next-line typescript/no-unsafe-assignment -- Vitest 非对称匹配器返回 any。
+      source_unavailable: expect.stringContaining(missing === 'chunk' ? 'Chunk' : '来源'),
+      usage: 'reference', summary: '原企业事实须继续核验。',
+    }])
+    expect(JSON.stringify(projected)).not.toContain(':-1')
+    await expect(bindChapterWriterInput(workspace, manifest, context, table, projected, [])).rejects.toBeInstanceOf(ToolArgsError)
+    const rebound = await bindChapterWriterInput(workspace, manifest, context, refs,
+      projectChapterWriterCandidate({ ...candidate, metadata }, refs), [])
+    expect(rebound.metadata.local_materials_used).toEqual(metadata.local_materials_used)
+  })
+
   it('须保留的迁移原图由程序复用，模型不能提交原图身份重写它', async () => {
     const { workspace, manifest, context, refs } = await fixture()
     const source = normalizeFlowchartInputs('old-section', [{ key: 'process', title: '原流程', direction: 'TB',

@@ -2,13 +2,14 @@ import { describe, expect, it } from 'vitest'
 import type { z } from 'zod'
 import { bindOutlineModelCandidate, bindOutlineModelCandidateRepairs, bindOutlineModelRepairOperations,
   bindOutlineModelStructuralOperations, outlineModelInputView, outlineModelView, outlineModelRepairOperationSchema,
-  outlineModelResponsePointRepairOperationSchema,
+  outlineModelResponsePointRepairOperationSchema, outlineModelStructuralOperationSchema,
   type OutlineModelBindingInputs } from '../src/outline-model-bindings.ts'
 import { outlineModelCandidateSchema } from '../src/outline-generation-artifacts.ts'
 import { bindScoringResponsePointModelCandidate, createScoringResponsePointCatalog,
   scoringResponsePointModelCandidateSchema } from '../src/scoring-response-point-artifacts.ts'
 import { normalizeOutlineCandidate } from '../src/outline-generation-normalization.ts'
-import { applyOutlineRepair, applyOutlineModelRepair } from '../src/outline-generation-repair.ts'
+import { applyOutlineRepair, applyOutlineModelRepair, outlineRepairOperationSchema,
+  outlineAssociationRepairOperationSchema } from '../src/outline-generation-repair.ts'
 import { parseTenderRequirementsArtifact, parseTenderScoringArtifact, parseTenderComplianceArtifact } from '../src/tender-analysis-artifacts.ts'
 import { zodJsonSchema } from '../src/zod-json-schema.ts'
 
@@ -191,6 +192,126 @@ describe('S3 程序绑定身份', () => {
       scoring_ids: ['scoring-original-b'], scoring_response_point_ids: ['RP-000002'] })
   })
 
+  it.each([
+    ['关联修复', outlineModelRepairOperationSchema, (value: unknown) => bindOutlineModelRepairOperations(value, outline(), inputs)],
+    ['响应点修复', outlineModelResponsePointRepairOperationSchema, (value: unknown) => bindOutlineModelRepairOperations(value, outline(), inputs, true)],
+    ['局部重生成', outlineModelStructuralOperationSchema, (value: unknown) => bindOutlineModelStructuralOperations(value, outline())],
+  ] as const)('%s 新增入口和绑定器共同要求非空 must_answer', (_name, schema, bind) => {
+    const addition = { type: 'add_section', parent_position: 0, sibling_position: 2,
+      title: '质量保障', purpose: '说明质量核验' }
+    for (const invalid of [addition, { ...addition, must_answer: [] }]) {
+      expect(schema.safeParse(invalid).success).toBe(false)
+      expect(() => bind([invalid])).toThrow()
+    }
+    const accepted = { ...addition, must_answer: ['说明核验措施'] }
+    expect(schema.safeParse(accepted).success).toBe(true)
+    const result = applyOutlineModelRepair(outline(), bind([accepted]), catalog, scoring)
+    expect(result.sections.at(-1)).toMatchObject({ writable: true, must_answer: accepted.must_answer })
+    const wire = zodJsonSchema(schema) as { anyOf: Array<{ properties?: { type?: { const?: string } }; required?: string[] }> }
+    expect(wire.anyOf.find(branch => branch.properties?.type?.const === 'add_section')?.required).toContain('must_answer')
+  })
+
+  it.each([outlineModelRepairOperationSchema, outlineModelResponsePointRepairOperationSchema])(
+    '修改响应点关联时，模型解析及绑定均要求同一操作提交 must_answer', (schema) => {
+      const update = { type: 'update_section', section_position: 1, response_point_positions: [0] }
+      expect(schema.safeParse(update).success).toBe(false)
+      expect(() => bindOutlineModelRepairOperations([update], outline(), inputs)).toThrow()
+      expect(schema.safeParse({ ...update, must_answer: ['说明组织职责'] }).success).toBe(true)
+      expect(schema.safeParse({ type: 'update_section', section_position: 1, title: '组织职责' }).success).toBe(true)
+      expect(applyOutlineModelRepair(outline(), bindOutlineModelRepairOperations([
+        { ...update, must_answer: ['说明组织职责'] },
+      ], outline(), inputs), catalog, scoring).sections[1]).toMatchObject({ scoring_response_point_ids: ['RP-000001'] })
+    },
+  )
+
+  it.each([outlineRepairOperationSchema, outlineAssociationRepairOperationSchema])(
+    '正式响应点编辑解析器在变更前拒绝遗漏 must_answer 的关联更新', (schema) => {
+      const update = { type: 'update_section', section_id: 'SEC-002', title: '组织职责', scoring_response_point_ids: ['RP-000001'] }
+      expect(schema.safeParse(update).success).toBe(false)
+      expect(schema.safeParse({ ...update, must_answer: ['说明组织职责'] }).success).toBe(true)
+    },
+  )
+
+  it('目录关联投影后再次绑定保留章节、业务对象和框架标题', () => {
+    const original = outline()
+    original.sections[1]!.framework_refs = [{ file_id: 'framework-original', heading_path: ['实施方案'] }]
+    const view = outlineModelView(original, inputs) as { sections: Array<{
+      position: number
+      must_answer: string[]
+      requirement_positions: number[]
+      scoring_positions: number[]
+      compliance_positions: number[]
+      response_point_positions: number[]
+      framework_refs: Array<{ framework_position: number; heading_position: number }>
+    }> }
+    const section = view.sections[1]!
+    const { position: section_position, ...fields } = section
+    const result = applyOutlineModelRepair(original, bindOutlineModelRepairOperations([
+      { type: 'update_section', section_position, must_answer: fields.must_answer,
+        requirement_positions: fields.requirement_positions, scoring_positions: fields.scoring_positions,
+        compliance_positions: fields.compliance_positions, response_point_positions: fields.response_point_positions,
+        framework_refs: fields.framework_refs },
+    ], original, inputs), catalog, scoring)
+    expect(result).toEqual(original)
+  })
+
+  it('缺失关联与框架保留空位和字段诊断，模型用当前合法选项修复后仍绑定原章节', () => {
+    const original = outline()
+    original.global_compliance_ids = ['missing-global-compliance']
+    original.sections[1] = { ...original.sections[1]!, parent_id: 'missing-parent',
+      requirement_ids: ['missing-requirement'], scoring_ids: ['missing-scoring'], compliance_ids: ['missing-compliance'],
+      scoring_response_point_ids: ['RP-999999'], framework_refs: [
+        { file_id: 'missing-framework', heading_path: ['失效框架'] },
+        { file_id: 'framework-original', heading_path: ['失效标题'] },
+      ] }
+    const before = structuredClone(original)
+    const view = outlineModelView(original, inputs) as {
+      global_compliance_positions: Array<number | null>
+      sections: Array<{
+        position: number
+        parent_position: number | null
+        requirement_positions: Array<number | null>
+        scoring_positions: Array<number | null>
+        compliance_positions: Array<number | null>
+        response_point_positions: Array<number | null>
+        framework_refs: Array<{ framework_position: number | null; heading_position: number | null }>
+      }>
+      unresolved_references: Array<{ section_position: number | null; field: string; reference_position: number; message: string }>
+    }
+    expect(view.sections[1]).toMatchObject({ parent_position: null, requirement_positions: [null],
+      scoring_positions: [null], compliance_positions: [null], response_point_positions: [null], framework_refs: [
+        { framework_position: null, heading_position: null }, { framework_position: 0, heading_position: null },
+      ] })
+    expect(view.global_compliance_positions).toEqual([null])
+    expect(view.unresolved_references.map(item => item.field)).toEqual(['global_compliance_positions',
+      'parent_position', 'requirement_positions', 'scoring_positions', 'compliance_positions', 'response_point_positions',
+      'framework_refs', 'framework_refs'])
+    expect(JSON.stringify(view)).not.toContain('-1')
+    expect(original).toEqual(before)
+    const options = outlineModelInputView(inputs) as {
+      requirements: Array<{ position: number }>
+      scoring: Array<{ position: number }>
+      compliance: Array<{ position: number }>
+      response_points: Array<{ position: number }>
+      frameworks: Array<{ framework_position: number; headings: Array<{ heading_position: number }> }>
+    }
+    const section_position = view.sections[1]!.position
+    const result = applyOutlineModelRepair(original, bindOutlineModelRepairOperations([
+      { type: 'repair_structure', section_index: section_position, parent_position: view.sections[0]!.position },
+      { type: 'update_global_compliance', global_compliance_positions: [options.compliance[0]!.position] },
+      { type: 'update_section', section_position, must_answer: ['说明组织职责'],
+        requirement_positions: [options.requirements[0]!.position], scoring_positions: [options.scoring[0]!.position],
+        compliance_positions: [options.compliance[0]!.position], response_point_positions: [options.response_points[0]!.position],
+        framework_refs: [{ framework_position: options.frameworks[0]!.framework_position,
+          heading_position: options.frameworks[0]!.headings[0]!.heading_position }] },
+    ], original, inputs), catalog, scoring)
+    expect(result.sections[1]).toMatchObject({ id: before.sections[1]!.id, parent_id: before.sections[0]!.id,
+      requirement_ids: [requirements.requirements[0]!.id], scoring_ids: [scoring.scoring_items[0]!.id],
+      compliance_ids: [compliance.compliance_items[0]!.id], scoring_response_point_ids: [catalog.points[0]!.id],
+      framework_refs: [{ file_id: inputs.frameworks[0]!.file_id, heading_path: inputs.frameworks[0]!.headings[0]!.heading_path }] })
+    expect(outlineModelView(result, inputs)).not.toHaveProperty('unresolved_references')
+  })
+
   it('复核或普通修复都拒绝模型原始身份；越界位置不产生正式操作', () => {
     expect(() => bindOutlineModelRepairOperations([{ type: 'update_section', section_id: 'SEC-002', title: '组织安排' }], outline(), inputs)).toThrow()
     expect(() => bindOutlineModelRepairOperations([{ type: 'update_section', section_position: 99, title: '组织安排' }], outline(), inputs)).toThrow('BID_OUTLINE_MODEL_POSITION_INVALID')
@@ -207,7 +328,7 @@ describe('S3 程序绑定身份', () => {
       { title: '组织职责', purpose: '说明组织职责', must_answer: ['明确组织岗位职责'], response_point_positions: [0] },
       { title: '进度控制', purpose: '说明进度控制', must_answer: ['明确进度控制措施'], response_point_positions: [1] },
     ] },
-  ] satisfies z.infer<typeof outlineModelResponsePointRepairOperationSchema>[])('响应点修复 $type 的模型输出能经正式操作器应用，并拒绝范围外关联', (operation) => {
+  ] as const)('响应点修复 $type 的模型输出能经正式操作器应用，并拒绝范围外关联', (operation) => {
     const original = outline()
     const accepted = outlineModelResponsePointRepairOperationSchema.parse(operation)
     const bound = bindOutlineModelRepairOperations([accepted], original, inputs, true)

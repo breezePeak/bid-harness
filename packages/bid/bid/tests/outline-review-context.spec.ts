@@ -1,6 +1,7 @@
 /** 固定共享职责输入的增长、逐对跨片覆盖及单节点超限拒绝。 */
 import { describe, expect, it } from 'vitest'
-import { buildOutlineReviewRequests, OutlineReviewContextTooLargeError, type OutlineReviewContext } from '../src/outline-review-context.ts'
+import { bindOutlineReviewIssue, buildOutlineReviewRequest, buildOutlineReviewRequests,
+  OutlineReviewContextTooLargeError, type OutlineReviewContext } from '../src/outline-review-context.ts'
 
 function context(count: number): OutlineReviewContext {
   return { instructions: '逐项核对职责及跨章关系。', coverage: { requirements: [], scoring: [], response_points: [], compliance: [] },
@@ -35,5 +36,43 @@ describe('目录审查上下文', () => {
     input.cards[0]!.research = '巨大节点'.repeat(10_000)
     expect(() => buildOutlineReviewRequests(input, 800)).toThrow(OutlineReviewContextTooLargeError)
     expect(input.cards[0]!.research).toBe('巨大节点'.repeat(10_000))
+  })
+  it('单章意见整理只校验既定范围的完整预算，无关索引的半预算不能阻断', () => {
+    const input: OutlineReviewContext = { instructions: '', coverage: [], differences: [], operations: [],
+      cards: [{ section_id: 'A', detail: 'x'.repeat(1_200) }, { section_id: 'B', detail: 'x'.repeat(1_600) }],
+      index: [{ position: 0, id: 'A', purpose: 'x'.repeat(100) }, { position: 1, id: 'B', purpose: 'x'.repeat(1_700) }],
+    }
+    const original = buildOutlineReviewRequests(input, 1_000)
+    const owner = original.find(request => request.cardPositions.includes(0))!
+    expect(owner.sectionPositions).toEqual([0])
+    const consolidation = { ...input, cards: [input.cards[0]!], operations: { opinions: ['y'.repeat(700)] } }
+    expect(() => buildOutlineReviewRequests(consolidation, 1_000)).toThrow(OutlineReviewContextTooLargeError)
+    const focused = { ...consolidation, index: input.index.filter(item => owner.sectionPositions.includes(item.position)) }
+    const request = buildOutlineReviewRequest(focused, 1_000)
+    expect(request).toMatchObject({ kind: 'complete', sectionPositions: [0], cardPositions: [0] })
+    expect(request.estimatedInputTokens).toBeLessThanOrEqual(1_000)
+    expect(request.prompt).toContain(JSON.stringify(focused.operations))
+    expect(buildOutlineReviewRequest(focused, request.estimatedInputTokens)).toEqual(request)
+    expect(() => buildOutlineReviewRequest(focused, request.estimatedInputTokens - 1)).toThrow(OutlineReviewContextTooLargeError)
+  })
+  it('全书索引可见时详细分片仍只拥有实际卡片，跨片不接纳粒度意见', () => {
+    const input = context(4)
+    input.detailInstructions = '核对 Hidden Heading Pressure。'
+    input.index.forEach((item) => { item.purpose = '章节职责。' })
+    input.cards.forEach((item) => { item.research = '详细研究。'.repeat(400) })
+    const requests = buildOutlineReviewRequests(input, 1_000)
+    const detail = requests.find(request => request.kind === 'sections')!
+    const cross = requests.find(request => request.kind === 'cross_sections')!
+    expect(detail.cardPositions.length).toBeLessThan(detail.sectionPositions.length)
+    const foreign = detail.sectionPositions.find(position => !detail.cardPositions.includes(position))!
+    expect(() => bindOutlineReviewIssue({ section_position: foreign, issue_kind: 'detail', reason: '应拆分。' }, detail, input.index))
+      .toThrow('没有该章详细卡片')
+    expect(() => bindOutlineReviewIssue({ section_position: detail.cardPositions[0]!, issue_kind: 'detail', reason: '缺少独立任务。' }, detail, input.index))
+      .not.toThrow()
+    expect(cross.prompt).not.toContain('核对 Hidden Heading Pressure。')
+    expect(() => bindOutlineReviewIssue({ section_position: 0, issue_kind: 'detail', reason: '应合并。' }, cross, input.index))
+      .toThrow('没有该章详细卡片')
+    expect(bindOutlineReviewIssue({ section_position: 0, issue_kind: 'relationship', reason: '职责冲突。' }, cross, input.index))
+      .toEqual({ section_id: 'S0', reason: '职责冲突。' })
   })
 })

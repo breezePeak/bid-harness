@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'vitest'
-import { bindSectionAnswerPlan, buildSectionAnswerChecklist, validateSectionAnswerPlan } from '../src/section-answer-plan.ts'
+import { bindSectionAnswerPlan, buildSectionAnswerChecklist, reconcileSectionAnswerPlan, validateSectionAnswerPlan } from '../src/section-answer-plan.ts'
 
 describe('section answer plan', () => {
+  const tasks = (must_answer: string[]) => buildSectionAnswerChecklist({
+    section: { must_answer }, requirements: [], responsePoints: [], compliance: [],
+  })
   const checklist = buildSectionAnswerChecklist({
     section: { must_answer: ['说明实施方法'] },
     requirements: [{ id: 'REQ-1', normalized_requirement: '说明验收参数' }],
@@ -43,5 +46,33 @@ describe('section answer plan', () => {
     expect(validateSectionAnswerPlan(prior, changed, new Set(['section:SEC-1']))).toContain(
       'answer_plan.0.targets: 目标不属于当前章节任务。',
     )
+  })
+
+  it('唯一必答项重排时保留语义回应，增删只移除失效目标', () => {
+    const before = tasks(['实施方法', '验收方法'])
+    const plan = bindSectionAnswerPlan(before.map(item => ({ target_refs: [item.item_ref], mode: 'proposal',
+      content: item.text, basis: [{ kind: 'section_responsibility' }], boundary: '不证明未经确认的事实。' })),
+    before, { s2Keys: new Set(), local: new Map(), webChunkRefs: new Set(), sectionId: 'SEC-1' })
+    expect(reconcileSectionAnswerPlan(plan, before, before)).toEqual(plan)
+    const reordered = tasks(['验收方法', '实施方法'])
+    const rebound = reconcileSectionAnswerPlan(plan, before, reordered)!
+    expect(rebound.map(item => item.targets)).toEqual([
+      [{ kind: 'must_answer', position: 1, text: '实施方法' }],
+      [{ kind: 'must_answer', position: 0, text: '验收方法' }],
+    ])
+    expect(validateSectionAnswerPlan(rebound, reordered, new Set(['section:SEC-1']))).toEqual([])
+    const changed = tasks(['实施方法', '质量方法'])
+    expect(reconcileSectionAnswerPlan(plan, before, changed)).toEqual([plan[0]])
+    const incomplete = reconcileSectionAnswerPlan(plan, before, changed)!
+    expect(validateSectionAnswerPlan(incomplete, changed, new Set(['section:SEC-1']))).toEqual(['answer_plan: 未回应 R2。'])
+  })
+
+  it('重复必答原文被移动时不猜测计划对应的项', () => {
+    const before = tasks(['同名回应', '同名回应', '验收方法'])
+    const plan = bindSectionAnswerPlan(before.map(item => ({ target_refs: [item.item_ref], mode: 'proposal',
+      content: item.text, basis: [{ kind: 'section_responsibility' }], boundary: '不证明未经确认的事实。' })),
+    before, { s2Keys: new Set(), local: new Map(), webChunkRefs: new Set(), sectionId: 'SEC-1' })
+    expect(reconcileSectionAnswerPlan(plan, before, tasks(['验收方法', '同名回应', '同名回应']))!.map(item => item.targets))
+      .toEqual([[{ kind: 'must_answer', position: 1, text: '同名回应' }], [{ kind: 'must_answer', position: 0, text: '验收方法' }]])
   })
 })

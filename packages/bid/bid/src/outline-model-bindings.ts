@@ -25,9 +25,22 @@ function semanticFields<Shape extends z.ZodRawShape>(shape: Shape): Omit<Shape, 
   ) as Omit<Shape, typeof programFields[number]>
 }
 
-const modelUpdate = z.object({ ...semanticFields(update.shape), section_position: position, ...references }).strict()
+const writableAnswers = add.shape.must_answer.unwrap().min(1)
+  .describe('新增可写章节的具体写作要求，必填且至少一项。')
+function modelUpdateSchema<Shape extends z.ZodRawShape, Fields extends z.ZodRawShape>(shape: Shape, fields: Fields) {
+  const { response_point_positions: _responsePoints, ...otherReferences } = fields
+  const semantic = { ...semanticFields(shape), section_position: position, ...otherReferences }
+  return z.union([
+    z.object(semantic).strict(),
+    z.object({ ...semantic, response_point_positions: positions,
+      must_answer: update.shape.must_answer.unwrap()
+        .describe('修改响应点关联时必须同时提交本章节完整的 must_answer。') }).strict(),
+  ])
+}
+
+const modelUpdate = modelUpdateSchema(update.shape, references)
 const modelAdd = z.object({ ...semanticFields(add.shape), parent_position: position.nullable(),
-  sibling_position: position, ...references }).strict()
+  sibling_position: position, ...references, must_answer: writableAnswers }).strict()
 const modelSplit = z.object({ ...semanticFields(split.shape), section_position: position,
   children: z.array(z.object({ ...semanticFields(split.shape.children.element.shape), ...references }).strict()).min(2) }).strict()
 
@@ -47,9 +60,9 @@ const [responseUpdate, responseAdd, responseSplit] = outlineRepairOperationSchem
 const responseReferences = { response_point_positions: positions.optional() }
 /** 响应点修复只开放正式操作支持的语义字段和响应点位置。 */
 export const outlineModelResponsePointRepairOperationSchema = z.union([
-  z.object({ ...semanticFields(responseUpdate.shape), section_position: position, ...responseReferences }).strict(),
+  modelUpdateSchema(responseUpdate.shape, responseReferences),
   z.object({ ...semanticFields(responseAdd.shape), parent_position: position.nullable(),
-    sibling_position: position, ...responseReferences }).strict(),
+    sibling_position: position, ...responseReferences, must_answer: writableAnswers }).strict(),
   z.object({ ...semanticFields(responseSplit.shape), section_position: position,
     children: z.array(z.object({ ...semanticFields(responseSplit.shape.children.element.shape),
       response_point_positions: positions }).strict()).min(2) }).strict(),
@@ -59,7 +72,8 @@ const [editUpdate, editAdd, editDelete, editSplit, editMerge, editMove] = outlin
 /** 局部重生成只允许结构与正文指导位置操作，不授予业务关联修改权限。 */
 export const outlineModelStructuralOperationSchema = z.union([
   z.object({ ...semanticFields(editUpdate.shape), section_position: position }).strict(),
-  z.object({ ...semanticFields(editAdd.shape), parent_position: position.nullable(), sibling_position: position }).strict(),
+  z.object({ ...semanticFields(editAdd.shape), parent_position: position.nullable(), sibling_position: position,
+    must_answer: writableAnswers }).strict(),
   z.object({ ...semanticFields(editDelete.shape), section_position: position }).strict(),
   z.object({ ...semanticFields(editSplit.shape), section_position: position, children: editSplit.shape.children }).strict(),
   z.object({ ...semanticFields(editMerge.shape), section_positions: positions.min(2) }).strict(),
@@ -148,32 +162,44 @@ export function outlineModelInputView(inputs: OutlineModelBindingInputs): unknow
  * 以当前目录数组位置投影节点与关联；位置仅在本次请求内有效。
  * @param outline 本次请求的精确目录版本。
  * @param inputs 本次固定业务输入。
- * @returns 无持久身份的目录视图。
+ * @returns 无持久身份的目录视图；不可解析的关联保留 null 占位与字段诊断，供模型按当前输入表重新选择。
  */
 export function outlineModelView(outline: OutlineArtifact, inputs: OutlineModelBindingInputs): unknown {
-  const currentPositions = (items: readonly { id: string }[], ids: readonly string[]): number[] =>
-    ids.map(id => items.findIndex(item => item.id === id))
+  const unresolved: Array<{ section_position: number | null; field: string; reference_position: number; message: string }> = []
+  const currentPositions = (items: readonly { id: string }[], ids: readonly string[],
+    field: string, section_position: number | null = null): Array<number | null> => ids.map((id, reference_position) => {
+    const position = items.findIndex(item => item.id === id)
+    if (position >= 0) return position
+    unresolved.push({ section_position, field, reference_position,
+      message: '原候选关联的对象不在本次输入表中；保留候选内容，根据当前合法选项重新选择该关联。' })
+    return null
+  })
   return {
     document_title: outline.document_title,
-    global_compliance_positions: currentPositions(inputs.compliance.compliance_items, outline.global_compliance_ids),
+    global_compliance_positions: currentPositions(inputs.compliance.compliance_items, outline.global_compliance_ids, 'global_compliance_positions'),
     sections: outline.sections.map((section, position) => {
       const { id: _id, parent_id, level: _level, order, requirement_ids, scoring_ids, compliance_ids,
         scoring_response_point_ids, scoring_response_points: _snapshots, framework_refs, ...semantic } = section
       return { position, ...semantic,
         sibling_position: order - 1,
-        parent_position: parent_id === null ? null : currentPositions(outline.sections, [parent_id])[0],
-        requirement_positions: currentPositions(inputs.requirements.requirements, requirement_ids),
-        scoring_positions: currentPositions(inputs.scoring.scoring_items, scoring_ids),
-        compliance_positions: currentPositions(inputs.compliance.compliance_items, compliance_ids),
-        response_point_positions: currentPositions(inputs.catalog.points, scoring_response_point_ids ?? []),
-        framework_refs: (framework_refs ?? []).map((ref) => {
+        parent_position: parent_id === null ? null : currentPositions(outline.sections, [parent_id], 'parent_position', position)[0],
+        requirement_positions: currentPositions(inputs.requirements.requirements, requirement_ids, 'requirement_positions', position),
+        scoring_positions: currentPositions(inputs.scoring.scoring_items, scoring_ids, 'scoring_positions', position),
+        compliance_positions: currentPositions(inputs.compliance.compliance_items, compliance_ids, 'compliance_positions', position),
+        response_point_positions: currentPositions(inputs.catalog.points, scoring_response_point_ids ?? [], 'response_point_positions', position),
+        framework_refs: (framework_refs ?? []).map((ref, reference_position) => {
           const framework_position = inputs.frameworks.findIndex(item => item.file_id === ref.file_id)
           const heading_position = inputs.frameworks[framework_position]?.headings.findIndex(
             item => JSON.stringify(item.heading_path) === JSON.stringify(ref.heading_path)) ?? -1
-          return { framework_position, heading_position }
+          if (framework_position < 0 || heading_position < 0) unresolved.push({ section_position: position,
+            field: 'framework_refs', reference_position,
+            message: `原框架标题 ${ref.heading_path.join(' / ')} 不在本次输入表中；保留候选内容，根据当前框架标题重新选择关联。` })
+          return { framework_position: framework_position < 0 ? null : framework_position,
+            heading_position: heading_position < 0 ? null : heading_position }
         }),
       }
     }),
+    ...(unresolved.length === 0 ? {} : { unresolved_references: unresolved }),
   }
 }
 

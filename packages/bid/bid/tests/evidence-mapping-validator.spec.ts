@@ -7,6 +7,7 @@ import {
   parseEvidenceMapArtifact,
   parseEvidenceMappingPartialResult,
   parseOutlineArtifact,
+  parseOutlineQualityReport,
   parseTenderScoringArtifact,
   scoringArtifactSha256,
   validateEvidenceMapping,
@@ -152,6 +153,28 @@ describe('evidence-map current schema', () => {
 })
 
 describe('evidence-mapping validator', () => {
+  it('历史缺计划仍可读，当前候选必须覆盖当前任务，已有计划按同一规则验证', async () => {
+    const { workspace } = await fixture()
+    const outline = parseOutlineArtifact(JSON.parse(await readFile(join(workspace.projectRoot, 'outline/outline.json'), 'utf8')))
+    const quality = parseOutlineQualityReport(JSON.parse(await readFile(join(workspace.projectRoot, 'outline/quality-report.json'), 'utf8')))
+    const evidence = evidenceMap()
+    await writeMap(workspace, evidence)
+    await expect(validateEvidenceMapping(workspace, 'evidence_mapping', artifacts)).resolves.toEqual({ ok: true })
+    const missing = await validateEvidenceMapping(workspace, 'evidence_mapping', artifacts, { outline, quality, evidence })
+    expect(missing.ok).toBe(false)
+    if (!missing.ok) expect(missing.issues.some(issue => issue.code === 'EVIDENCE_MAPPING_ANSWER_PLAN_INVALID')).toBe(true)
+    evidence.section_mappings[0]!.answer_plan = [{
+      targets: [{ kind: 'must_answer', position: 0, text: outline.sections[0]!.must_answer[0]! },
+        { kind: 'requirement', id: 'R-1' }, { kind: 'response_point', id: 'RP-000001' }],
+      mode: 'proposal', content: '设计总体技术架构。',
+      basis: [{ kind: 'section_responsibility', section_id: 'SEC-1' }], boundary: '方案建议，具体参数待确认。',
+    }]
+    await expect(validateEvidenceMapping(workspace, 'evidence_mapping', artifacts, { outline, quality, evidence })).resolves.toEqual({ ok: true })
+    outline.sections[0]!.must_answer = ['变更后的任务。']
+    const stale = await validateEvidenceMapping(workspace, 'evidence_mapping', artifacts, { outline, quality, evidence })
+    expect(stale.ok).toBe(false)
+    if (!stale.ok) expect(stale.issues.some(issue => issue.code === 'EVIDENCE_MAPPING_ANSWER_PLAN_INVALID')).toBe(true)
+  })
   it('S3 允许未研究的摘要，S4 要求分支摘要和叶子写作维度', async () => {
     const { workspace } = await fixture()
     const path = join(workspace.projectRoot, 'outline/outline.json')

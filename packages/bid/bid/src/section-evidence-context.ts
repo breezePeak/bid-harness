@@ -4,6 +4,7 @@ import type { EvidenceMapArtifact } from './evidence-mapping-artifacts.ts'
 import { TECHNICAL_DEVIATION_SECTION_ID, type OutlineArtifact, type OutlineSection } from './outline-generation-artifacts.ts'
 import { validateOutlineSharedStructure } from './outline-shared-validator.ts'
 import type { TenderRequirementsArtifact } from './tender-analysis-artifacts.ts'
+import { answerTargetKey } from './section-answer-plan.ts'
 
 interface SectionEvidenceContext {
   readonly heading_path: string[]
@@ -98,7 +99,7 @@ export function sectionVisibleRequirements(
  * 找出写作任务或祖先语义发生变化的叶子；分支成员变化也复核该分支的剩余叶子。
  * @param before - 最近完成章节研究的目录。
  * @param after - 结构校验通过的当前草稿。
- * @returns 按当前目录顺序排列的待复核章节 ID；排序及资料展示顺序不影响结果。
+ * @returns 按当前目录顺序排列的待复核章节 ID；章节排序及资料展示顺序不影响结果，必答项顺序参与任务比较。
  */
 export function changedWritableSectionIds(before: OutlineArtifact, after: OutlineArtifact): string[] {
   const contexts = (outline: OutlineArtifact): Map<string, string> => {
@@ -115,7 +116,7 @@ export function changedWritableSectionIds(before: OutlineArtifact, after: Outlin
       id: section.id,
       title: section.title,
       purpose: section.purpose,
-      must_answer: [...section.must_answer].sort(),
+      must_answer: section.must_answer.map((text, position) => answerTargetKey({ kind: 'must_answer', position, text })),
       requirement_ids: [...section.requirement_ids].sort(),
       scoring_ids: [...section.scoring_ids].sort(),
       scoring_response_point_ids: [...section.scoring_response_point_ids ?? []].sort(),

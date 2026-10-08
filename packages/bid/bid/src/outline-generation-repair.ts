@@ -19,16 +19,21 @@ const references = z.object({
   origin: outlineSectionSchema.shape.origin.optional(),
   scoring_response_point_ids: ids.optional(),
 }).strict()
+const responsePointUpdate = update.safeExtend({ scoring_response_point_ids: ids.optional() })
+  .refine(operation => operation.scoring_response_point_ids === undefined || operation.must_answer !== undefined,
+    { message: '修改响应点关联时必须同时提交具体 must_answer。' })
 /** S3 专用候选操作；新增节点的编号仍由现有编辑器分配。 */
 export const outlineRepairOperationSchema = z.union([
-  update.safeExtend({ scoring_response_point_ids: ids.optional() }),
+  responsePointUpdate,
   add.safeExtend({ scoring_response_point_ids: ids.optional() }),
   split.extend({ children: z.array(split.shape.children.element.extend({ scoring_response_point_ids: ids })).min(2) }),
 ])
 
 /** S3 业务引用与结构修复；普通浏览器编辑 Schema 不包含这些权限。 */
 export const outlineAssociationRepairOperationSchema = z.union([
-  z.object({ ...update.shape, ...references.shape }).strict().refine(operation => Object.keys(operation).length > 2),
+  z.object({ ...responsePointUpdate.shape, ...references.shape }).strict().refine(operation => Object.keys(operation).length > 2)
+    .refine(operation => operation.scoring_response_point_ids === undefined || operation.must_answer !== undefined,
+      { message: '修改响应点关联时必须同时提交具体 must_answer。' }),
   add.safeExtend(references.shape),
   split.extend({ children: z.array(split.shape.children.element.extend(references.shape)).min(2) }),
   remove, merge, move,
@@ -116,7 +121,6 @@ function applyRepair(outline: OutlineArtifact, value: unknown, catalog: ScoringR
       if (section === undefined) throw new Error('目录编辑未返回指定章节。')
       if (selected.scoring_response_point_ids !== undefined) {
         if (!section.writable && selected.scoring_response_point_ids.length > 0) throw new Error('结构章节 ' + section.id + ' 不能承担响应点。')
-        if (operation.type === 'update_section' && operation.must_answer === undefined) throw new Error('修改 ' + section.id + ' 的响应点关联时必须同时提交具体 must_answer。')
       }
       applyReferences(section, selected)
     } else {

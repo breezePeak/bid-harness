@@ -202,6 +202,143 @@ it('全局目录复核按预算审完尾节与跨章职责，共享索引不在�
   expect(cards.map(card => card.section_id).sort()).toEqual(outline.sections.map(section => section.id).sort())
 })
 
+it('目录复核把同章相反与重复意见交语义环节整理，并保留独立问题', async () => {
+  const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-outline-opinions-')))
+  const material = await writeInputs(workspace)
+  const read = async (path: string) => JSON.parse(await readFile(join(workspace.projectRoot, path), 'utf8')) as unknown
+  const outline = parseOutlineArtifact(await read('outline/initial-confirmed-outline.json'))
+  const fixture = mappingFixture(workspace, material)
+  fixture.serializeQuality.mockImplementationOnce(content => JSON.stringify({ ...JSON.parse(content) as object,
+    blocking_issues: [
+      { section_id: 'SEC-1', issue_kind: 'detail', reason: '应拆分两个独立方法。' },
+      { section_id: 'SEC-1', issue_kind: 'detail', reason: '相同成果应合并表达。' },
+      { section_id: 'SEC-1', issue_kind: 'detail', reason: '两个方法需要各自说明。' },
+      { section_id: 'SEC-1', issue_kind: 'coverage', reason: '遗漏验收依据。' },
+    ],
+  })).mockImplementationOnce(content => JSON.stringify({ ...JSON.parse(content) as object,
+    blocking_issues: [
+      { section_id: 'SEC-1', issue_kind: 'detail', reason: '两个方法保持独立论证，共同成果统一交接。' },
+      { section_id: 'SEC-1', issue_kind: 'coverage', reason: '补充验收依据。' },
+    ],
+  }))
+  const result = await reviewRefinedOutline(fixture.agent, workspace, {
+    project: parseTenderProjectArtifact(await read('analysis/project.json')),
+    requirements: parseTenderRequirementsArtifact(await read('analysis/requirements.json')),
+    scoring: parseTenderScoringArtifact(await read('analysis/scoring.json')),
+    responsePoints: parseScoringResponsePointCatalog(await read('analysis/scoring-response-points.json')),
+    compliance: parseTenderComplianceArtifact(await read('analysis/compliance.json')), outline, frameworks: [],
+  }, [], 0, new AbortController().signal, createTestBidRunContext().commits)
+  expect(fixture.outlineReviewPrompts).toHaveLength(2)
+  expect(fixture.outlineReviewPrompts[1]).toContain('相同成果应合并表达。')
+  expect(fixture.outlineReviewPrompts[1]).toContain('独立问题分别保留')
+  expect(fixture.outlineReviewPrompts[1]).toContain('"id":"SEC-2"')
+  expect(result.blockingIssues.map(issue => issue.reason)).toEqual([
+    '两个方法保持独立论证，共同成果统一交接。', '补充验收依据。',
+  ])
+  fixture.serializeQuality.mockImplementationOnce(content => JSON.stringify({ ...JSON.parse(content) as object,
+    blocking_issues: [
+      { section_id: 'SEC-1', issue_kind: 'detail', reason: '需要独立论证。'.repeat(10_000) },
+      { section_id: 'SEC-1', issue_kind: 'coverage', reason: '需要补充验收依据。' },
+    ],
+  }))
+  await expect(reviewRefinedOutline(fixture.agent, workspace, {
+    project: parseTenderProjectArtifact(await read('analysis/project.json')),
+    requirements: parseTenderRequirementsArtifact(await read('analysis/requirements.json')),
+    scoring: parseTenderScoringArtifact(await read('analysis/scoring.json')),
+    responsePoints: parseScoringResponsePointCatalog(await read('analysis/scoring-response-points.json')),
+    compliance: parseTenderComplianceArtifact(await read('analysis/compliance.json')), outline, frameworks: [],
+  }, [], 0, new AbortController().signal, createTestBidRunContext().commits)).rejects.toThrow('目录审查对象超过输入预算')
+  expect(fixture.outlineReviewPrompts).toHaveLength(3)
+})
+
+it('单章粒度意见整理保留详细卡片且不被无关章节索引阻断', async () => {
+  const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-outline-local-opinions-')))
+  const material = await writeInputs(workspace, Array.from({ length: 64 }, (_, index) => `SEC-${String(index + 1)}`))
+  const read = async (path: string) => JSON.parse(await readFile(join(workspace.projectRoot, path), 'utf8')) as unknown
+  const outline = parseOutlineArtifact(await read('outline/initial-confirmed-outline.json'))
+  for (const section of outline.sections) section.purpose += '方法和成果责任。'.repeat(80)
+  const fixture = mappingFixture(workspace, material)
+  fixture.serializeQuality.mockImplementation((content) => {
+    const prompt = fixture.outlineReviewPrompts.at(-1)!
+    if (prompt.includes('只整理 section_position=')) return content
+    const cards = JSON.parse(prompt.split('\n').find(line => line.startsWith('Structure Review Cards：'))!
+      .slice('Structure Review Cards：'.length)) as Array<{ section_id: string }>
+    return JSON.stringify({ ...JSON.parse(content) as object, blocking_issues: cards.some(card => card.section_id === 'SEC-1') ? [
+      { section_id: 'SEC-1', issue_kind: 'detail', reason: '应拆分两个独立方法。' },
+      { section_id: 'SEC-1', issue_kind: 'detail', reason: '相同成果应合并表达。' },
+    ] : [] })
+  })
+  const result = await reviewRefinedOutline(fixture.agent, workspace, {
+    project: parseTenderProjectArtifact(await read('analysis/project.json')),
+    requirements: parseTenderRequirementsArtifact(await read('analysis/requirements.json')),
+    scoring: parseTenderScoringArtifact(await read('analysis/scoring.json')),
+    responsePoints: parseScoringResponsePointCatalog(await read('analysis/scoring-response-points.json')),
+    compliance: parseTenderComplianceArtifact(await read('analysis/compliance.json')), outline, frameworks: [],
+  }, [], 0, new AbortController().signal, createTestBidRunContext().commits)
+  const consolidation = fixture.outlineReviewPrompts.filter(prompt => prompt.includes('只整理 section_position='))
+  expect(consolidation).toHaveLength(1)
+  expect(consolidation[0]).toContain('"section_id":"SEC-1"')
+  const indexLine = consolidation[0]!.split('\n').find(line => line.startsWith('全书职责索引：'))!
+  expect(JSON.parse(indexLine.slice('全书职责索引：'.length))).toEqual([expect.objectContaining({ id: 'SEC-1' })])
+  expect(fixture.outlineReviewPrompts.every(prompt => estimateMessage(createUserMessage({
+    content: [{ type: 'text', text: prompt }], source: { kind: 'user' },
+  })) <= 12_000)).toBe(true)
+  expect(result.blockingIssues).toEqual([])
+})
+
+it('初审输入不变时整理超限仍可缩减，无法缩减的请求不重复调用模型', async () => {
+  const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-outline-opinion-overflow-')))
+  const material = await writeInputs(workspace)
+  const read = async (path: string) => JSON.parse(await readFile(join(workspace.projectRoot, path), 'utf8')) as unknown
+  const outline = parseOutlineArtifact(await read('outline/initial-confirmed-outline.json'))
+  outline.sections[1]!.purpose = 'x'.repeat(4_000)
+  const inputs = {
+    project: parseTenderProjectArtifact(await read('analysis/project.json')),
+    requirements: parseTenderRequirementsArtifact(await read('analysis/requirements.json')),
+    scoring: parseTenderScoringArtifact(await read('analysis/scoring.json')),
+    responsePoints: parseScoringResponsePointCatalog(await read('analysis/scoring-response-points.json')),
+    compliance: parseTenderComplianceArtifact(await read('analysis/compliance.json')), outline, frameworks: [],
+  }
+  const fixture = mappingFixture(workspace, material)
+  let reason = '独立方法需要论证。'.repeat(1_000)
+  fixture.serializeQuality.mockImplementation((content) => {
+    if (fixture.outlineReviewPrompts.at(-1)!.includes('只整理 section_position=')) return content
+    return JSON.stringify({ ...JSON.parse(content) as object, blocking_issues: [
+      { section_id: 'SEC-1', issue_kind: 'detail', reason },
+      { section_id: 'SEC-1', issue_kind: 'detail', reason: `合并重复成果。${reason}` },
+    ] })
+  })
+  const start = fixture.subagents.start.getMockImplementation()!
+  const consolidationPrompts: string[] = []
+  fixture.subagents.start.mockImplementation(async (provider, request) => {
+    const prompt = request.prompt.map(item => item.text).join('\n')
+    if (prompt.includes('只整理 section_position=')) {
+      consolidationPrompts.push(prompt)
+      if (consolidationPrompts.length === 1) throw Object.assign(new Error('provider context overflow'), {
+        code: CONTEXT_WINDOW_EXCEEDED_CODE,
+      })
+    }
+    return start(provider, request)
+  })
+  await expect(reviewRefinedOutline(fixture.agent, workspace, inputs, [], 0, new AbortController().signal,
+    createTestBidRunContext().commits)).resolves.toMatchObject({ blockingIssues: [] })
+  expect(fixture.outlineReviewPrompts[0]).toBe(fixture.outlineReviewPrompts[1])
+  expect(consolidationPrompts).toHaveLength(2)
+  expect(consolidationPrompts[1]).not.toBe(consolidationPrompts[0])
+  expect(consolidationPrompts[1]).not.toContain('"id":"SEC-2"')
+  const tokens = consolidationPrompts.map(prompt => estimateMessage(createUserMessage({
+    content: [{ type: 'text', text: prompt }], source: { kind: 'user' },
+  })))
+  expect(tokens[0]).toBeGreaterThan(6_000)
+  expect(tokens[1]).toBeLessThanOrEqual(6_000)
+  reason = '独立方法需要论证。'
+  outline.sections[1]!.purpose = '职责说明。'
+  consolidationPrompts.length = 0
+  await expect(reviewRefinedOutline(fixture.agent, workspace, inputs, [], 0, new AbortController().signal,
+    createTestBidRunContext().commits)).rejects.toThrow('目录意见整理无法继续缩减')
+  expect(consolidationPrompts).toHaveLength(1)
+})
+
 function mappingTaskId(request: { prompt: readonly { type: string; text?: string }[] }): string {
   const line = promptText(request).split('\n').find(value => value.startsWith('Mapping Task：'))
   if (line === undefined) throw new Error('missing Mapping Task prompt line')
@@ -2249,14 +2386,14 @@ describe('evidence-mapping Agent executor', () => {
       }
     }
     expect(log.statistics).toMatchObject({
-      initial_leaf_count: 2, leaf_count: 3, refine_count: 1, sections_added: 2, sections_split: 1, structure_stale_count: 5,
+      initial_leaf_count: 2, leaf_count: 3, refine_count: 1, sections_added: 2, sections_split: 1, structure_stale_count: 3,
     })
     const report = await buildEvidenceMappingAcceptanceReport(workspace, ['SEC-1'])
     expect(report).toMatchObject({
       schema_version: 1,
       selection: { requested_section_ids: ['SEC-1'], reported_section_ids: ['SEC-1'] },
       summary: {
-        initial_leaf_count: 2, final_leaf_count: 3, refine_count: 1, structure_stale_count: 5,
+        initial_leaf_count: 2, final_leaf_count: 3, refine_count: 1, structure_stale_count: 3,
         operations: { added: 2, split: 1, moved: 0, deleted: 0 },
       },
       sections: [{
@@ -4202,7 +4339,12 @@ describe('evidence-mapping Agent executor', () => {
       objects: {
         reviews: Array<{ id: string; position: number }>
         targets: Array<{ id: string; position: number }>
-        answer_checklists: Array<{ section_position: number; items: Array<{ item_ref: string; text: string }> }>
+        answer_checklists: Array<{
+          section_position: number
+          items: Array<{ item_ref: string; text: string }>
+          reference_choices: { s2: number[] }
+        }>
+        references: Array<{ id: string; kind: string; position: number }>
       }
     }
     const item = value.pending_items.find(candidate => candidate.kind === 'task')!
@@ -4226,6 +4368,12 @@ describe('evidence-mapping Agent executor', () => {
     const taskTool = fixture.submissionTool(childId, 'update_section_task')
     const taskInput = { section_position: 0, basis: { kind: 'section_responsibility',
       explanation: '逐项明确章节回应。', requirement_positions: [] } }
+    const foreignS2 = value.objects.references.find(reference => reference.id === 'R-2')!.position
+    expect(value.objects.answer_checklists.find(section => section.section_position === 0)!.reference_choices.s2)
+      .not.toContain(foreignS2)
+    await expect(taskTool.execute({ ...taskInput, answer_plan: plan.map(item => ({ ...item,
+      basis: [{ kind: 's2', record_position: foreignS2 }],
+    })) }, exec)).rejects.toThrow('本章可选位置：')
     await expect(taskTool.execute({ ...taskInput, answer_plan: plan.slice(1) }, exec)).rejects
       .toThrow(`answer_plan.target_positions: 尚未回应 objects.targets 中的位置 ${plan[0]!.target_positions[0]}`)
     await fixture.reviewAll(childId)
@@ -5398,6 +5546,73 @@ describe('S4 实际工具统一依据对象表', () => {
     expect(ledger.sources.find(source => source.source_id === sourceId)?.requested_url).toBe(urls[0])
   })
 
+  it('同 Child 的任务修改先更新目标，旧位置失效且等价或说明重交保留回应', async () => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-s4-target-transactions-')))
+    const fixture = mappingFixture(workspace, await writeInputs(workspace))
+    const execution = executeEvidenceMapping(fixture.agent, workspace, buildBidStageTask('evidence_mapping'))
+    await vi.waitFor(() => { expect(fixture.starts).toHaveLength(2) })
+    const childId = fixture.starts[0]!.request.childId!
+    await fixture.invokeSubmissionTool(childId, 'submit_section_research_assessment', branchResearchAssessment())
+    const basis = { kind: 'section_responsibility', explanation: '按本章职责完善回应。', requirement_ids: [] }
+    const brief = (must_answer: string[], purpose = '说明当前实施方法。') => ({
+      must_answer, purpose, writing_notes: ['明确方法与成果'], suggested_tables: [], suggested_figures: [],
+    })
+    type View = {
+      answer_checklist: Array<{ item_ref: string; text: string; kind: string }>
+      after: { answer_plan: unknown[]; writing_brief: { must_answer: string[] } }
+      objects: { targets: Array<{ id: string; position: number; text: string }> }
+    }
+    const update = async (fields: Record<string, unknown>): Promise<View> => {
+      const result = await fixture.invokeSubmissionTool(childId, 'update_section_task', { section_id: 'SEC-1', basis, ...fields })
+      if (result.isError) throw new Error(result.error.message)
+      return result.value as View
+    }
+    const plan = (value: View) => value.answer_checklist.map(item => ({
+      target_positions: [value.objects.targets.find(target => target.id === item.item_ref)!.position],
+      mode: 'proposal', content: `拟落实${item.text}。`, basis: [{ kind: 'section_responsibility' }], boundary: '不承诺未经确认的事实。',
+    }))
+    const original = await update({ writing_dimensions: ['响应方案'], missing_topics: [] })
+    const originalPlan = plan(original)
+    const prepared = await update({ answer_plan: originalPlan })
+    const first = original.objects.targets.find(target => target.id === original.answer_checklist[0]!.item_ref)!
+    const rejected = await fixture.invokeSubmissionTool(childId, 'update_section_task', {
+      section_id: 'SEC-1', basis, writing_brief: brief(['新增质量方法', '响应主题1']), answer_plan: originalPlan,
+    })
+    expect(rejected).toMatchObject({ isError: true, error: { message: expect.stringContaining('本次修改未接纳') } })
+    expect(rejected.isError && rejected.error.message).not.toContain('位置 -1')
+    const unchanged = await update({ writing_brief: brief(['响应主题1']) })
+    expect(unchanged.after.answer_plan).toEqual(prepared.after.answer_plan)
+    expect(unchanged.objects.targets).toEqual(original.objects.targets)
+    expect((await update({ writing_brief: brief(['响应主题1'], '说明当前实施方法及成果责任。') })).after.answer_plan)
+      .toEqual(prepared.after.answer_plan)
+    const inserted = await update({ writing_brief: brief(['新增质量方法', '响应主题1']) })
+    expect(inserted.objects.targets.some(target => target.position === first.position)).toBe(false)
+    for (const item of original.answer_checklist.filter(item => item.kind !== 'must_answer')) {
+      expect(inserted.objects.targets.find(target => target.id === item.item_ref)?.position)
+        .toBe(original.objects.targets.find(target => target.id === item.item_ref)!.position)
+    }
+    fixture.reactivateSubmissionTools(childId)
+    const stale = await fixture.invokeSubmissionTool(childId, 'update_section_task', {
+      section_id: 'SEC-1', basis, answer_plan: [{ ...originalPlan[0], target_positions: [first.position] }],
+    })
+    expect(stale).toMatchObject({ isError: true, error: { message: expect.stringContaining('所选检查项已过期') } })
+    const addedPlan = await update({ answer_plan: plan(inserted) })
+    const reordered = await update({ writing_brief: brief(['响应主题1', '新增质量方法']) })
+    expect(reordered.after.answer_plan).toEqual(addedPlan.after.answer_plan.map((item) => {
+      const value = item as { targets: Array<{ kind: string; position?: number; text?: string }> }
+      return { ...value, targets: value.targets.map(target => target.kind !== 'must_answer' ? target
+        : { ...target, position: target.text === '响应主题1' ? 0 : 1 }) }
+    }))
+    const removed = await update({ writing_brief: brief(['响应主题1']),
+      coverage_override: { requirement_ids: [], scoring_ids: [], scoring_response_point_ids: [] } })
+    expect(removed.after.answer_plan).toHaveLength(1)
+    expect(removed.after.answer_plan).toEqual([expect.objectContaining({
+      targets: [{ kind: 'must_answer', position: 0, text: '响应主题1' }],
+    })])
+    fixture.starts.forEach((start) => { start.resolve() })
+    await execution
+  })
+
   it('研究及 S2 计划只选择 references，Host 派生类别并拒绝模型重复标签和未读材料', async () => {
     const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-s4-reference-binding-')))
     const material = await writeInputs(workspace)
@@ -5465,7 +5680,7 @@ describe('S4 实际工具统一依据对象表', () => {
     await expect(research.execute(assessment, exec)).rejects.toThrow('实际身份由程序绑定')
     const unread = objects.objects.references.find(item => item.id.includes(':chunk_'))!
     await expect(research.execute({ ...wire, key_findings: [{ ...findings[0],
-      basis: [{ reference_position: unread.position }] }] }, exec)).rejects.toThrow('不是当前运行中已验证的 local_material')
+      basis: [{ reference_position: unread.position }] }] }, exec)).rejects.toThrow('不适用于研究依据或尚未读取；可选位置：')
     const result = await fixture.invokeSubmissionTool(id, 'update_section_task', {
       section_id: 'SEC-1', basis: { kind: 'section_responsibility', explanation: '按当前任务组织方案。', requirement_ids: [] },
       writing_dimensions: ['技术响应'], missing_topics: [],

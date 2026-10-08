@@ -514,6 +514,41 @@ export async function runEvidenceMappingLoop(ctx: Context, root: string, repair:
     toolCall('research-ready', 'submit_section_research_assessment', researchAssessment(true, false, researchMode)),
     toolCall('update-task', 'update_section_task', blueprint),
     toolCall('prepare-answer-plan', 'update_section_task', answerPlan),
+    ...(repair ? [
+      toolCall('repeat-equivalent-task', 'update_section_task', blueprint),
+      toolCall('reject-target-change-with-plan', 'update_section_task', {
+        ...blueprint, writing_brief: { ...blueprint.writing_brief, must_answer: ['说明成果核验步骤。', ...blueprint.writing_brief.must_answer] },
+        answer_plan: answerPlan.answer_plan,
+      }),
+      toolCall('list-after-rejected-target-change', 'list_mapping_objects', {}),
+      toolCall('insert-answer-target', 'update_section_task', {
+        ...blueprint, writing_brief: { ...blueprint.writing_brief, must_answer: ['说明成果核验步骤。', ...blueprint.writing_brief.must_answer] },
+      }),
+      toolCall('reject-expired-target-position', 'update_section_task', {
+        section_id: blueprint.section_id, basis: blueprint.basis,
+        answer_plan: [{ ...answerPlan.answer_plan[0]!, target_refs: undefined, target_positions: [0] }],
+      }),
+      (options: GenerateOptions) => {
+        for (const message of [...options.messages].reverse()) for (const block of [...message.content].reverse()) {
+          if (block.type !== 'tool-result') continue
+          for (const content of block.content) {
+            if (content.type !== 'text' || !content.text.startsWith('{')) continue
+            const result = JSON.parse(content.text) as { objects?: { targets: Array<{ position: number }> } }
+            if (result.objects === undefined) continue
+            return toolCall('prepare-current-answer-targets', 'update_section_task', {
+              section_id: blueprint.section_id, basis: blueprint.basis,
+              answer_plan: result.objects.targets.map(target => ({ ...answerPlan.answer_plan[0]!,
+                target_refs: undefined, target_positions: [target.position] })),
+            })
+          }
+        }
+        throw new Error('任务修改后缺少当前目标位置表')
+      },
+      toolCall('reorder-answer-targets', 'update_section_task', {
+        ...blueprint, writing_brief: { ...blueprint.writing_brief, must_answer: [...blueprint.writing_brief.must_answer, '说明成果核验步骤。'] },
+      }),
+      toolCall('restore-answer-targets', 'update_section_task', blueprint),
+    ] : []),
     toolCall('assess-structure', 'submit_section_structure_assessment', structure),
     ...(repair ? [
       toolCall('lock-without-comparison', 'lock_section_outline', {}),
@@ -840,12 +875,19 @@ export async function runOutlineGenerationLoop(ctx: Context, root: string,
         response_point_positions: pointIds.map((_id, index) => index),
       }],
     ]
-    for (const [attempt, operations] of attempts.entries()) repairScript.push(
-      toolCall(`repair-outline-${attempt + 1}`, 'structured_output', { operations }),
-    )
+    for (const [attempt, operations] of attempts.entries()) {
+      if (attempt === 1) repairScript.push(toolCall('reject-outline-add-missing-answer', 'structured_output', {
+        operations: [{ type: 'add_section', parent_position: 1, sibling_position: 1,
+          title: '安全审计与追溯措施', purpose: '完整响应各项安全技术措施。' }],
+      }))
+      repairScript.push(toolCall(`repair-outline-${attempt + 1}`, 'structured_output', { operations }))
+    }
   }
   if (scenario === 'missing-response-point') {
     candidate.sections[0]!.response_point_positions = pointIds.slice(0, -1).map((_id, index) => index)
+    repairScript.push(toolCall('reject-outline-update-missing-answer', 'structured_output', { operations: [
+      { type: 'update_section', section_position: 1, response_point_positions: pointIds.map((_id, index) => index) },
+    ] }))
     repairScript.push(toolCall('repair-outline-response-point', 'structured_output', { operations: [
       { type: 'update_section', section_position: 1, response_point_positions: pointIds.map((_id, index) => index),
         must_answer: section.must_answer, writing_notes: ['明确审计留存期限与追溯责任。'] },

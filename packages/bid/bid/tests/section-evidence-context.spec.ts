@@ -95,6 +95,15 @@ it('祖先 purpose 或绑定变化触发后代复核，绑定数组排序不触�
   expect(changedWritableSectionIds(before, value)).toEqual(['A', 'B'])
 })
 
+it('必答项重排参与任务身份比较，并只复核该章节', () => {
+  const value = outline()
+  const leaf = value.sections.find(section => section.id === 'A')!
+  leaf.must_answer = ['实施方法', '验收方法']
+  const before = structuredClone(value)
+  leaf.must_answer.reverse()
+  expect(changedWritableSectionIds(before, value)).toEqual(['A'])
+})
+
 it('删除叶子复核同分支剩余叶子，保留无关分支', () => {
   const value: OutlineArtifact = { ...outline(), sections: [
     { ...section('ROOT', null, 1), writable: false, must_answer: [] },

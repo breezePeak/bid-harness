@@ -28,6 +28,14 @@ it('S3 叶节响应点缺项通过专用修复协议补齐并等待确认', asyn
       expect(repairLog).toContain('局部响应点修复')
       expect(repairLog).toContain('业务关联只提交 response_point_positions')
       expect(repairLog).not.toContain('按问题选择 requirement_positions')
+      const rejected = repairLog.trimEnd().split('\n').map(line => JSON.parse(line) as {
+        type: string
+        data: { message?: { content: Array<{ toolCallId?: string; isError?: boolean }> } }
+      }).find(record => record.type === 'tool/result' && record.data.message?.content.some(
+        block => block.toolCallId === 'reject-outline-update-missing-answer'))
+      expect(rejected?.data.message?.content).toEqual(expect.arrayContaining([
+        expect.objectContaining({ toolCallId: 'reject-outline-update-missing-answer', isError: true }),
+      ]))
       const header = JSON.parse(repairLog.split('\n')[0]!) as SessionHeader
       const transcript = normalizeSessionSnapshot(repairLog, {
         sessionIds: [header.parentSession!, header.id], cwd, cwdAliases: [cwd.replaceAll('\\', '/')],
@@ -273,9 +281,14 @@ it('S3 父章局部修复失败后恢复原 Work，由新叶节承接响应点�
       const childRecords = logs.filter(content => (JSON.parse(content.split('\n')[0]!) as SessionHeader)
         .parentSession === 's3-outline-recovery').flatMap(log => log.trimEnd().split('\n').map(line => JSON.parse(line) as {
         type: string
-        data: { name?: string; arguments?: string }
+        data: { name?: string; arguments?: string; message?: { content: Array<{ toolCallId?: string; isError?: boolean }> } }
       }))
       expect(childRecords.filter(record => record.type === 'tool/call').every(record => record.data.name === 'structured_output')).toBe(true)
+      const rejectedAddition = childRecords.find(record => record.type === 'tool/result'
+        && record.data.message?.content.some(block => block.toolCallId === 'reject-outline-add-missing-answer'))
+      expect(rejectedAddition?.data.message?.content).toEqual(expect.arrayContaining([
+        expect.objectContaining({ toolCallId: 'reject-outline-add-missing-answer', isError: true }),
+      ]))
       for (const call of childRecords.filter(record => record.type === 'tool/call')) {
         expect(call.data.arguments).not.toMatch(/"(?:writable|order|section_id|parent_id|scoring_ids)"\s*:/u)
       }

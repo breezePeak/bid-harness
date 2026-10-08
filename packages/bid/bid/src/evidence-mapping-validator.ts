@@ -2,6 +2,8 @@ import { lstat, readFile } from 'node:fs/promises'
 import { ZodError } from 'zod'
 import { resolveEvidenceChunk } from './evidence-chunk.ts'
 import { validateSectionEvidenceCoverage } from './section-evidence-context.ts'
+import { sectionVisibleRequirements } from './section-evidence-context.ts'
+import { validateMappingAnswerPlan } from './section-answer-readiness.ts'
 import type { BidManifest, BidWorkspace } from './index.ts'
 import type { BidStage, StageArtifact, StageValidationIssue, StageValidationResult } from './control-plane-contract.ts'
 import { parseEvidenceMapArtifact, type EvidenceMapArtifact, type LocalEvidenceMaterial, type WebEvidenceMaterial } from './evidence-mapping-artifacts.ts'
@@ -192,6 +194,15 @@ export async function validateEvidenceMapping(
         || section.scoring_response_point_ids === undefined
         || ![...section.writing_notes, ...mappings.get(section.id)?.writing_dimensions ?? []].some(note => note.trim().length > 0)) {
         reject(issues, 'EVIDENCE_MAPPING_WRITING_BRIEF_INCOMPLETE', `章节 ${section.id} 需要明确写作目标、必答问题和展开维度或写作要求。`, OUTLINE_PATH)
+      }
+      const mapping = mappings.get(section.id)
+      if (mapping !== undefined && (candidate !== undefined || mapping.answer_plan !== undefined)) {
+        for (const problem of validateMappingAnswerPlan(section, mapping, {
+          requirements: sectionVisibleRequirements(section, requirements),
+          scoring: scoring.scoring_items.filter(item => section.scoring_ids.includes(item.id)),
+          responsePoints: catalog.points.filter(item => section.scoring_response_point_ids?.includes(item.id)),
+          compliance: compliance.compliance_items.filter(item => section.compliance_ids.includes(item.id)),
+        })) reject(issues, 'EVIDENCE_MAPPING_ANSWER_PLAN_INVALID', `${section.id}：${problem}`, MAP_PATH, 'answer_plan')
       }
     }
     for (const mapping of map.section_mappings) {

@@ -44,6 +44,48 @@ it('corrects S4 tool arguments in one Child turn through the headless Loader', a
       expect(childLog).toContain('search_sources')
       expect(childLog).toContain('read_source')
       expect(childLog).toContain('update_section_task')
+      const taskResult = (callId: string) => {
+        const event = events.find(event => event.type === 'tool/result' && event.data.message.source.callId === callId)
+        if (event?.type !== 'tool/result') throw new Error('缺少章节任务回执：' + callId)
+        const content = event.data.message.content.flatMap(block => block.type === 'tool-result' ? block.content : [])
+          .find(block => block.type === 'text')
+        if (content?.type !== 'text') throw new Error('缺少章节任务结果正文：' + callId)
+        return JSON.parse(content.text) as {
+          before: { answer_plan?: unknown[] }
+          after: { answer_plan?: unknown[] }
+          answer_plan_reference_choices: { s2: number[]; local: number[]; web: number[] }
+          objects: {
+            targets: Array<{ position: number; kind: string; text: string }>
+            references: Array<{ position: number; kind: string; allowed_uses: string[] }>
+            reference_choices: { research: number[]; s2: number[]; local: number[]; web: number[] }
+            answer_checklists: Array<{ section_position: number; reference_choices: { s2: number[]; local: number[]; web: number[] } }>
+          }
+        }
+      }
+      const available = taskResult('refresh-source-positions').objects
+      const project = available.references.find(item => item.kind === 'project')!
+      expect(project.allowed_uses).toEqual(['s2'])
+      expect(available.reference_choices.s2).toContain(project.position)
+      expect(available.reference_choices.research).not.toContain(project.position)
+      for (const position of available.reference_choices.research) {
+        expect(available.references.find(item => item.position === position)?.allowed_uses).toContain('research')
+      }
+      const equivalent = taskResult('repeat-equivalent-task')
+      expect(equivalent.after.answer_plan).toEqual(equivalent.before.answer_plan)
+      expect(equivalent.after.answer_plan).toHaveLength(3)
+      expect(equivalent.answer_plan_reference_choices).toEqual(equivalent.objects.answer_checklists
+        .find(item => item.section_position === 0)?.reference_choices)
+      for (const callId of ['reject-target-change-with-plan', 'reject-expired-target-position']) {
+        expect(events.find(event => event.type === 'tool/result' && event.data.message.source.callId === callId))
+          .toMatchObject({ data: { error: { code: 'INVALID_ARGS' } } })
+      }
+      expect(taskResult('list-after-rejected-target-change').objects.targets.some(item => item.text === '说明成果核验步骤。')).toBe(false)
+      expect(taskResult('insert-answer-target').objects.targets.find(item => item.kind === 'must_answer'
+        && item.text === '说明访问控制与安全审计措施。')?.position).not.toBe(0)
+      expect(taskResult('prepare-current-answer-targets').after.answer_plan).toHaveLength(4)
+      expect(taskResult('reorder-answer-targets').after.answer_plan).toHaveLength(4)
+      expect(taskResult('restore-answer-targets').after.answer_plan).toHaveLength(3)
+      expect(childLog).not.toContain('位置 -1')
       expect(childLog).toContain('submit_section_research_assessment')
       const researchCalls = events.filter(event => event.type === 'tool/call'
         && event.data.name === 'submit_section_research_assessment')

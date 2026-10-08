@@ -6,7 +6,8 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-fs'
 import { CallId, CONTEXT_WINDOW_EXCEEDED_CODE, EMPTY_RESPONSE_CODE } from '@deepseek-ai/dsh-llm'
 import { estimateHeader } from '@deepseek-ai/dsh-token-meter'
-import { buildOutlineReviewRequests, OutlineReviewContextTooLargeError } from './outline-review-context.ts'
+import { bindOutlineReviewIssue, buildOutlineReviewRequest, buildOutlineReviewRequests, OutlineReviewContextTooLargeError,
+  type OutlineReviewRequest, type OutlineReviewIssueKind } from './outline-review-context.ts'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { JsonSchemaNode, ObjectJsonSchema, ToolExecution, ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { ToolArgsError, validateJsonSchemaValue } from '@deepseek-ai/dsh-tools'
@@ -86,8 +87,9 @@ import { deriveResearchDiagnostics, observeResearchTool, researchDiagnosticsSche
 import { buildWebEvidenceChunkIndex, webEvidenceChunkIndexPath, webEvidenceChunkSourceId } from './web-evidence-chunks.ts'
 import { outlineReassignmentSchema } from './outline-capability-update.ts'
 import { readChapterLocation } from './chapter-storage.ts'
-import { bindSectionAnswerPlan, buildSectionAnswerChecklist, sectionAnswerPlanInputSchema,
-  validateSectionAnswerPlan, type SectionAnswerPlan } from './section-answer-plan.ts'
+import { answerTargetKey, bindSectionAnswerPlan, buildSectionAnswerChecklist, reconcileSectionAnswerPlan,
+  sectionAnswerPlanInputSchema, type AnswerChecklistItem, type SectionAnswerPlan } from './section-answer-plan.ts'
+import { validateMappingAnswerPlan } from './section-answer-readiness.ts'
 
 function record(value: unknown): Record<string, unknown> | undefined {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -892,6 +894,47 @@ function currentSectionMapping(state: MappingSubmissionState, task: EvidenceMapp
   return bindMappingResponsePoints(empty, state.responsePoints)
 }
 
+function mappingSectionAnswerChecklist(
+  outline: OutlineArtifact, mapping: Pick<PartialSectionMapping, 'section_id' | 'writing_brief'>, inputs: EvidenceMappingInputs,
+): AnswerChecklistItem[] {
+  const section = outline.sections.find(item => item.id === mapping.section_id)
+  if (section === undefined) throw new ToolArgsError([`section_id: 未知章节 ${mapping.section_id}。`])
+  return buildSectionAnswerChecklist({ section: mapping.writing_brief,
+    requirements: sectionVisibleRequirements({ ...section,
+      requirement_ids: mapping.writing_brief.requirement_ids }, inputs.requirements),
+    responsePoints: inputs.responsePoints.points.filter(item => mapping.writing_brief.scoring_response_point_ids.includes(item.id)),
+    compliance: inputs.compliance.compliance_items.filter(item => section.compliance_ids.includes(item.id)),
+  })
+}
+
+function mappingAnswerPlanS2Keys(
+  outline: OutlineArtifact, mapping: Pick<PartialSectionMapping, 'section_id' | 'writing_brief'>, inputs: EvidenceMappingInputs,
+): Set<string> {
+  return new Set(['s2:project:',
+    ...mappingSectionAnswerChecklist(outline, mapping, inputs).flatMap(item => item.id === null ? [] : [`s2:${item.kind}:${item.id}`]),
+    ...inputs.scoring.scoring_items.filter(item => mapping.writing_brief.scoring_ids.includes(item.id))
+      .map(item => `s2:scoring:${item.id}`),
+  ])
+}
+
+/** 同一 Child 的目标位置按章节和完整身份只追加，R 别名不随任务清单重排。 */
+function registeredMappingAnswerChecklist(
+  targets: string[], sectionId: string, checklist: readonly AnswerChecklistItem[],
+): AnswerChecklistItem[] {
+  return checklist.map((item) => {
+    const key = JSON.stringify([sectionId, answerTargetKey(item.target)])
+    let position = targets.indexOf(key)
+    if (position < 0) { position = targets.length; targets.push(key) }
+    return { ...item, item_ref: `R${position + 1}` }
+  })
+}
+
+function mappingAnswerTargetPosition(targets: readonly string[], sectionId: string, item: AnswerChecklistItem): number {
+  const position = targets.indexOf(JSON.stringify([sectionId, answerTargetKey(item.target)]))
+  if (position < 0) throw new Error(`EVIDENCE_MAPPING_TARGET_CONTEXT_INCONSISTENT: ${sectionId}:${item.item_ref}`)
+  return position
+}
+
 function applySectionTaskOperation(
   state: MappingSubmissionState, task: EvidenceMappingTask, raw: unknown,
   bindPlan: (mapping: PartialSectionMapping, input: z.infer<typeof sectionAnswerPlanInputSchema>) => SectionAnswerPlan,
@@ -942,9 +985,18 @@ function applySectionTaskOperation(
     writing_brief: { ...before.writing_brief, ...operation.writing_brief, ...operation.coverage_override },
     writing_dimensions: operation.writing_dimensions ?? before.writing_dimensions,
     missing_topics: operation.missing_topics ?? before.missing_topics,
-    answer_plan: operation.writing_brief !== undefined || operation.coverage_override !== undefined
-      ? undefined : before.answer_plan,
+    answer_plan: before.answer_plan,
   }, state.responsePoints)
+  const beforeChecklist = mappingSectionAnswerChecklist(state.stagedOutline, before, inputs)
+  const afterChecklist = mappingSectionAnswerChecklist(state.stagedOutline, after, inputs)
+  const targetsChanged = JSON.stringify(beforeChecklist.map(item => answerTargetKey(item.target)))
+    !== JSON.stringify(afterChecklist.map(item => answerTargetKey(item.target)))
+  if (targetsChanged && operation.answer_plan !== undefined) {
+    throw new ToolArgsError([
+      'answer_plan.target_positions: 本次任务修改会改变回答检查项，不能同时提交回应计划；请先单独提交 writing_brief / coverage_override，读取返回的 answer_checklist 与 objects.targets，再提交完整 answer_plan。本次修改未接纳。',
+    ])
+  }
+  if (targetsChanged) after.answer_plan = reconcileSectionAnswerPlan(before.answer_plan, beforeChecklist, afterChecklist)
   if (operation.answer_plan !== undefined) after.answer_plan = bindPlan(after, operation.answer_plan)
   const change = { operation, before: structuredClone(before), after: structuredClone(after) }
   state.mappings.set(operation.section_id, after)
@@ -1122,6 +1174,26 @@ function successfulLocalResearchRefs(
   return refs
 }
 
+function mappingResearchValidRefs(
+  visibleTenderContext: ReturnType<typeof mappingTaskVisibleTenderContext>,
+  inputs: EvidenceMappingInputs,
+  locations: readonly MappingCorpusLocation[],
+  captured: Iterable<CapturedWebResult>,
+  readWebChunkRefs: ReadonlySet<string>,
+): Record<z.infer<typeof topicDispositionBasisSchema>['kind'], ReadonlySet<string>> {
+  return {
+    requirement: new Set(visibleTenderContext.requirements.map(item => item.id)),
+    scoring: new Set(visibleTenderContext.scoring.map(item => item.id)),
+    response_point: new Set(visibleTenderContext.responsePoints.map(item => item.id)),
+    user_framework: new Set(inputs.frameworks.flatMap((framework, frameworkIndex) => framework.headings
+      .map((_heading, headingIndex) => userFrameworkHeadingRef(frameworkIndex, headingIndex)))),
+    reference_outline: new Set(locations.flatMap((location, locationIndex) => (location.outline ?? [])
+      .map((_heading, headingIndex) => referenceOutlineHeadingRef(locationIndex, headingIndex)))),
+    local_material: successfulLocalResearchRefs(captured, locations),
+    web_material: readWebChunkRefs,
+  }
+}
+
 function assertResearchFindingReferences(
   assessment: SectionResearchAssessment,
   visibleTenderContext: ReturnType<typeof mappingTaskVisibleTenderContext>,
@@ -1130,18 +1202,7 @@ function assertResearchFindingReferences(
   captured: Iterable<CapturedWebResult>,
   readWebChunkRefs: ReadonlySet<string>,
 ): void {
-  const capturedResults = [...captured]
-  const validRefs = {
-    requirement: new Set(visibleTenderContext.requirements.map(item => item.id)),
-    scoring: new Set(visibleTenderContext.scoring.map(item => item.id)),
-    response_point: new Set(visibleTenderContext.responsePoints.map(item => item.id)),
-    user_framework: new Set(inputs.frameworks.flatMap((framework, frameworkIndex) => framework.headings
-      .map((_heading, headingIndex) => userFrameworkHeadingRef(frameworkIndex, headingIndex)))),
-    reference_outline: new Set(locations.flatMap((location, locationIndex) => (location.outline ?? [])
-      .map((_heading, headingIndex) => referenceOutlineHeadingRef(locationIndex, headingIndex)))),
-    local_material: successfulLocalResearchRefs(capturedResults, locations),
-    web_material: readWebChunkRefs,
-  }
+  const validRefs = mappingResearchValidRefs(visibleTenderContext, inputs, locations, captured, readWebChunkRefs)
   const violations: string[] = []
   const seen = new Set<string>()
   for (const [findingIndex, finding] of assessment.key_findings.entries()) {
@@ -1625,24 +1686,18 @@ async function validateCompletedMappingState(
         requirement_ids: mapping.writing_brief.requirement_ids }, inputs.requirements)
       const responsePoints = inputs.responsePoints.points.filter(item => mapping.writing_brief.scoring_response_point_ids.includes(item.id))
       const compliance = inputs.compliance.compliance_items.filter(item => section.compliance_ids.includes(item.id))
-      const checklist = buildSectionAnswerChecklist({ section: mapping.writing_brief, requirements, responsePoints, compliance })
-      const sourceKeys = new Set([
-        's2:project:', `section:${section.id}`,
-        ...requirements.map(item => `s2:requirement:${item.id}`),
-        ...inputs.scoring.scoring_items.filter(item => mapping.writing_brief.scoring_ids.includes(item.id))
-          .map(item => `s2:scoring:${item.id}`),
-        ...responsePoints.map(item => `s2:response_point:${item.id}`),
-        ...compliance.map(item => `s2:compliance:${item.id}`),
-        ...mapping.local_materials.map(item => `local:${item.file_id}:${item.chunk}`),
-        ...mapping.answer_plan?.flatMap(item => item.basis.flatMap(basis => basis.kind === 'web'
-          && mapping.web_materials.some(material => basis.chunk_refs.every(ref => material.chunk_refs.includes(ref)))
-          ? [`web:${basis.source_id}:${basis.chunk_refs.join(',')}`] : [])) ?? [],
-      ])
-      for (const problem of validateSectionAnswerPlan(mapping.answer_plan, checklist, sourceKeys)) {
-        const unanswered = checklist.find(item => problem === `answer_plan: 未回应 ${item.item_ref}。`)
+      const checklist = registeredMappingAnswerChecklist(state.objectPositions.targets, section.id,
+        mappingSectionAnswerChecklist(state.stagedOutline, mapping, inputs))
+      for (const problem of validateMappingAnswerPlan({ id: section.id, must_answer: mapping.writing_brief.must_answer }, mapping, {
+        requirements, responsePoints, compliance,
+        scoring: inputs.scoring.scoring_items.filter(item => mapping.writing_brief.scoring_ids.includes(item.id)),
+      })) {
+        const canonical = mappingSectionAnswerChecklist(state.stagedOutline, mapping, inputs)
+        const missingIndex = canonical.findIndex(item => problem === `answer_plan: 未回应 ${item.item_ref}。`)
+        const unanswered = missingIndex < 0 ? undefined : checklist[missingIndex]
         issues.push({ code: 'EVIDENCE_MAPPING_ANSWER_PLAN_INVALID',
           message: unanswered === undefined ? `${section.id}：${problem}`
-            : `answer_plan.target_refs: 尚未回应 objects.targets 中的位置 ${state.objectPositions.targets.indexOf(unanswered.item_ref)}；请补齐该检查项的回应计划。`,
+            : `answer_plan.target_refs: 尚未回应 objects.targets 中的位置 ${mappingAnswerTargetPosition(state.objectPositions.targets, section.id, unanswered)}；请补齐该检查项的回应计划。`,
           path: unanswered === undefined ? 'answer_plan' : 'answer_plan.target_refs' })
       }
     }
@@ -1867,10 +1922,6 @@ function mappingNavigationReferences(locations: readonly MappingCorpusLocation[]
   ])])
 }
 
-function mappingAnswerTargets(checklists: readonly { items: readonly { item_ref: string }[] }[]): string[] {
-  return uniqueStrings(checklists.flatMap(checklist => checklist.items.map(item => item.item_ref)))
-}
-
 /** Install the phase-specific, repeatable S4 tools in one Child scope. */
 function attachMappingSubmissionRuntime(
   childCtx: Context,
@@ -1924,16 +1975,37 @@ function attachMappingSubmissionRuntime(
   const answerChecklists = () => mappingTaskWritingSections(state.stagedOutline, task).map((section) => {
     const mapping = currentSectionMapping(state, task, section.id)
     return { section_position: currentSectionObjects().indexOf(section.id),
-      items: buildSectionAnswerChecklist({ section: mapping.writing_brief,
-        requirements: sectionVisibleRequirements({ ...section,
-          requirement_ids: mapping.writing_brief.requirement_ids }, inputs.requirements),
-        responsePoints: inputs.responsePoints.points.filter(item =>
-          mapping.writing_brief.scoring_response_point_ids.includes(item.id)),
-        compliance: inputs.compliance.compliance_items.filter(item => section.compliance_ids.includes(item.id)),
-      }) }
+      reference_choices: answerPlanReferenceChoices(mapping),
+      items: registeredMappingAnswerChecklist(targetObjects, section.id,
+        mappingSectionAnswerChecklist(state.stagedOutline, mapping, inputs)) }
   })
   const currentSourceObjects = () => registerObjects(sourceObjects, webReferences())
-  const currentTargetObjects = () => registerObjects(targetObjects, mappingAnswerTargets(answerChecklists()))
+  const currentTargetObjects = () => {
+    answerChecklists()
+    return targetObjects.map((_key, position) => `R${position + 1}`)
+  }
+  const referencePositions = () => {
+    const visible = mappingTaskVisibleTenderContext(task, inputs)
+    return createMappingReferencePositions(currentReferenceObjects(), topicDispositionBasisSchema.shape.kind.options, {
+      research: new Set(Object.values(mappingResearchValidRefs(visible, inputs, locations, captured(), readWebChunkRefs()))
+        .flatMap(refs => [...refs])),
+      s2: new Set(['s2:project:', ...visible.requirements.map(item => item.id), ...visible.scoring.map(item => item.id),
+        ...visible.responsePoints.map(item => item.id), ...visible.compliance.map(item => item.id)]),
+    })
+  }
+  const referenceChoices = () => {
+    const readLocal = new Set(buildTaskResearchCandidates(captured(), readWebChunkRefs()).local_material_refs)
+    return { ...referencePositions().choices(),
+      local: currentReferenceObjects().filter(item => item.kind === 'local_material' && readLocal.has(item.id)).map(item => item.position),
+      web: currentReferenceObjects().filter(item => item.kind === 'web_material' && readWebChunkRefs().has(item.id)).map(item => item.position),
+    }
+  }
+  const answerPlanReferenceChoices = (mapping: PartialSectionMapping) => {
+    const s2Keys = mappingAnswerPlanS2Keys(state.stagedOutline, mapping, inputs)
+    const { local, web } = referenceChoices()
+    return { local, web, s2: currentReferenceObjects().flatMap(item =>
+      s2Keys.has(`s2:${item.kind}:${item.kind === 'project' ? '' : item.id}`) ? [item.position] : []) }
+  }
   const registerNavigationReferences = (value: unknown): void => {
     if (Array.isArray(value)) { for (const item of value) registerNavigationReferences(item); return }
     const object = record(value)
@@ -1978,9 +2050,13 @@ function attachMappingSubmissionRuntime(
       position: currentSectionObjects().indexOf(section.id), id: section.id, title: section.title,
     })),
     ...mappingBusinessObjectView(task, inputs),
-    references: [...currentReferenceObjects()],
+    references: currentReferenceObjects().map(item => ({ ...item, allowed_uses: referencePositions().uses(item.position) })),
+    reference_choices: referenceChoices(),
     sources: currentSourceObjects().map((id, position) => ({ position, id })),
-    targets: currentTargetObjects().map((id, position) => ({ position, id })),
+    targets: answerChecklists().flatMap(checklist => checklist.items.map(item => ({
+      position: Number(item.item_ref.slice(1)) - 1, id: item.item_ref,
+      section_position: checklist.section_position, kind: item.kind, text: item.text,
+    }))),
     findings: state.researchAssessment?.key_findings.map(item => ({
       position: currentFindingObjects().indexOf(item.finding_ref), id: item.finding_ref, text: item.finding,
     })) ?? [],
@@ -1991,8 +2067,6 @@ function attachMappingSubmissionRuntime(
     current_coverage_ownership: mappingCoveragePositions(inputs, state.assignedCoverage),
   })
   const register = (definition: Parameters<typeof childCtx.tools.register>[0]): void => {
-    const referencePositions = () => createMappingReferencePositions(
-      currentReferenceObjects(), topicDispositionBasisSchema.shape.kind.options)
     disposers.push(childCtx.tools.register({ ...definition,
       parameters: createChapterObjectPositions(objectFields()).schema(referencePositions().schema(definition.parameters)),
       async execute(args, exec) {
@@ -2061,31 +2135,21 @@ function attachMappingSubmissionRuntime(
   const bindPlan = (mapping: PartialSectionMapping, input: z.infer<typeof sectionAnswerPlanInputSchema>): SectionAnswerPlan => {
     const section = state.stagedOutline.sections.find(item => item.id === mapping.section_id)
     if (section === undefined) throw new ToolArgsError([`section_id: 未知章节 ${mapping.section_id}。`])
-    const requirements = sectionVisibleRequirements({ ...section,
-      requirement_ids: mapping.writing_brief.requirement_ids }, inputs.requirements)
-    const responsePoints = inputs.responsePoints.points.filter(item => mapping.writing_brief.scoring_response_point_ids.includes(item.id))
-    const compliance = inputs.compliance.compliance_items.filter(item => section.compliance_ids.includes(item.id))
-    const scoring = inputs.scoring.scoring_items.filter(item => mapping.writing_brief.scoring_ids.includes(item.id))
-    const checklist = buildSectionAnswerChecklist({ section: mapping.writing_brief, requirements, responsePoints, compliance })
+    const checklist = registeredMappingAnswerChecklist(targetObjects, section.id,
+      mappingSectionAnswerChecklist(state.stagedOutline, mapping, inputs))
     const readLocal = new Set(buildTaskResearchCandidates(captured(), readWebChunkRefs()).local_material_refs)
     const local = new Map(locations.flatMap((location, index) => location.chunks.flatMap((chunk) => {
       const ref = mappingMaterialRef(index, chunk.id)
       return readLocal.has(ref) ? [[ref, { file_id: location.file_id, chunk: chunk.id }] as const] : []
     })))
-    const s2Keys = new Set([
-      's2:project:',
-      ...requirements.map(item => `s2:requirement:${item.id}`),
-      ...scoring.map(item => `s2:scoring:${item.id}`),
-      ...responsePoints.map(item => `s2:response_point:${item.id}`),
-      ...compliance.map(item => `s2:compliance:${item.id}`),
-    ])
+    const s2Keys = mappingAnswerPlanS2Keys(state.stagedOutline, mapping, inputs)
     try {
       return bindSectionAnswerPlan(input, checklist, { s2Keys, local, webChunkRefs: readWebChunkRefs(), sectionId: section.id })
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       const fields: Readonly<Record<string, string>> = {
         ANSWER_PLAN_TARGET_UNKNOWN: 'target_positions: 所选检查项已过期或不属于当前章节；请读取当前 objects.targets 与 answer_checklists。',
-        ANSWER_PLAN_S2_UNKNOWN: 'basis.record_position: 所选 S2 记录不属于当前章节任务；请从 objects.references 选择本章依据。',
+        ANSWER_PLAN_S2_UNKNOWN: `basis.record_position: 所选 S2 记录不属于当前章节任务；本章可选位置：${JSON.stringify(answerPlanReferenceChoices(mapping).s2)}。请从当前章节 reference_choices.s2 选择依据。`,
         ANSWER_PLAN_LOCAL_UNREAD: 'basis.material_position: 所选本地材料未由当前 Child 成功读取；请先读取，再从 objects.references 选择材料位置。',
         ANSWER_PLAN_WEB_UNREAD: 'basis.chunk_positions: 所选 Web Chunk 未由当前 Child 成功读取；请先读取，再从 objects.references 选择材料位置。',
         ANSWER_PLAN_WEB_MIXED_SOURCE: 'basis.chunk_positions: 同一 Web 依据必须选择同一网页快照的 Chunk 位置。',
@@ -2093,7 +2157,7 @@ function attachMappingSubmissionRuntime(
       throw new ToolArgsError(message.split('\n').map((problem) => {
         const unanswered = checklist.find(item => problem === `answer_plan: 未回应 ${item.item_ref}。`)
         return unanswered === undefined ? fields[problem.split(':')[0] ?? ''] ?? problem
-          : `answer_plan.target_positions: 尚未回应 objects.targets 中的位置 ${currentTargetObjects().indexOf(unanswered.item_ref)}；请补齐该检查项的回应计划。`
+          : `answer_plan.target_positions: 尚未回应 objects.targets 中的位置 ${mappingAnswerTargetPosition(targetObjects, section.id, unanswered)}；请补齐该检查项的回应计划。`
       }))
     }
   }
@@ -2164,7 +2228,7 @@ function attachMappingSubmissionRuntime(
   if (task.task_kind !== 'branch_summary') register({
     name: 'update_section_task',
     description: [
-      '研究充分性判断通过后，记录或修改章节 Writing Brief、展开维度、职责内缺口、覆盖关联和 answer_plan；材料仍须锁定后另行提交。修改 must_answer 或 coverage 后先读取返回的 answer_checklist，再提交完整 answer_plan；list_mapping_objects 也返回当前 answer_checklists。answer_plan 的 target_positions 使用当前 objects.targets 清单，S2 basis 仅提交 kind=s2 与 objects.references 中的 record_position，程序派生 artifact；local basis 使用本 Child 已读取的 material_position，web basis 使用已读取的 chunk_positions，Host 绑定真实身份。必须提供招标要求、用户修改或章节职责依据，资料命中本身不能扩大任务。',
+      '研究充分性判断通过后，记录或修改章节 Writing Brief、展开维度、职责内缺口、覆盖关联和 answer_plan；材料仍须锁定后另行提交。修改 must_answer 或 coverage 后先读取返回的 answer_checklist，再提交完整 answer_plan；list_mapping_objects 也返回当前 answer_checklists。answer_plan 的 target_positions 使用当前 objects.targets 清单，S2 basis 仅提交 kind=s2 与本章 reference_choices.s2 / answer_plan_reference_choices.s2 中的 record_position，程序派生 artifact；local basis 使用本 Child 已读取的 material_position，web basis 使用已读取的 chunk_positions，Host 绑定真实身份。必须提供招标要求、用户修改或章节职责依据，资料命中本身不能扩大任务。',
       state.assignedCoverage.requirement_ids.size === 0
         ? '当前任务 requirement_positions 可写集合为空；基于章节职责更新时使用 section_responsibility + requirement_positions=[]；Related Requirements 仅为只读上下文。'
         : `basis.requirement_positions / coverage_override.requirement_positions 只能选择 objects.requirements 中的允许位置：${JSON.stringify(mappingCoveragePositions(inputs, state.assignedCoverage).requirement_positions)}。`,
@@ -2178,16 +2242,12 @@ function attachMappingSubmissionRuntime(
         operation: change.operation,
         before: sectionTaskSemanticState(change.before),
         after: sectionTaskSemanticState(change.after),
+        answer_plan_reference_choices: answerPlanReferenceChoices(change.after),
         answer_checklist: (() => {
           const section = state.stagedOutline.sections.find(item => item.id === change.after.section_id)
           if (section === undefined) return []
-          return buildSectionAnswerChecklist({ section: change.after.writing_brief,
-            requirements: sectionVisibleRequirements({ ...section,
-              requirement_ids: change.after.writing_brief.requirement_ids }, inputs.requirements),
-            responsePoints: inputs.responsePoints.points.filter(item =>
-              change.after.writing_brief.scoring_response_point_ids.includes(item.id)),
-            compliance: inputs.compliance.compliance_items.filter(item => section.compliance_ids.includes(item.id)),
-          })
+          return registeredMappingAnswerChecklist(targetObjects, section.id,
+            mappingSectionAnswerChecklist(state.stagedOutline, change.after, inputs))
         })(),
         ...(taskOwnsOutlineRefinement(task) ? { structure_assessment_stale: state.structureAssessment?.stale ?? false } : {}),
         ...(task.phase === 'final_check' ? { review_progress: reviewProgress(state, task) } : {}) }
@@ -2942,14 +3002,24 @@ export function renderEvidenceMappingSubagentTask(
   const coverageOwnership = mappingTaskAssignedCoverage(inputs.outline, task)
   const currentSectionScope = inputs.outline.sections.filter(section => currentScope.has(section.id))
     .map(section => ({ ...section, heading_path: sectionEvidenceContext(inputs.outline, section).heading_path }))
-  const answerChecklists = currentSectionScope.filter(section => section.writable).map(section => ({
-    section_id: section.id,
-    items: buildSectionAnswerChecklist({ section,
-      requirements: sectionVisibleRequirements(section, inputs.requirements),
-      responsePoints: responsePoints.filter(item => (section.scoring_response_point_ids ?? []).includes(item.id)),
-      compliance: compliance.filter(item => section.compliance_ids.includes(item.id)),
-    }),
-  }))
+  const references = mappingReferenceObjects(task, inputs, locations, webRefs)
+  const targetObjects: string[] = []
+  const answerChecklists = mappingTaskWritingSections(inputs.outline, task).map((section) => {
+    const mapping = { section_id: section.id,
+      writing_brief: { ...section, scoring_response_point_ids: section.scoring_response_point_ids ?? [] } }
+    const s2Keys = mappingAnswerPlanS2Keys(inputs.outline, mapping, inputs)
+    return { section_id: section.id,
+      items: registeredMappingAnswerChecklist(targetObjects, section.id,
+        mappingSectionAnswerChecklist(inputs.outline, mapping, inputs)),
+      reference_choices: { local: [], web: [], s2: references.flatMap(item =>
+        s2Keys.has(`s2:${item.kind}:${item.kind === 'project' ? '' : item.id}`) ? [item.position] : []) },
+    }
+  })
+  const referencePositions = createMappingReferencePositions(references, topicDispositionBasisSchema.shape.kind.options, {
+    research: new Set(Object.values(mappingResearchValidRefs(
+      mappingTaskVisibleTenderContext(task, inputs), inputs, locations, [], new Set())).flatMap(refs => [...refs])),
+    s2: new Set(references.map(item => item.id)),
+  })
   const phaseTools = task.task_kind === 'branch_summary'
     ? BRANCH_SUMMARY_TOOLS
     : task.phase === 'final_check' ? FINAL_CHECK_TOOLS
@@ -2966,9 +3036,15 @@ export function renderEvidenceMappingSubagentTask(
     `allow_outline_refinement：${JSON.stringify(allowOutlineRefinement)}`,
     ...(!allowOutlineRefinement ? ['当前为固定目录研究：不得修改已确认章节的 title、结构、purpose、must_answer、writing_brief 或业务覆盖；Final Check 中发现职责问题须报告阻断，不得借任务修正改变 Blueprint。'] : []),
     `current_section_scope：${JSON.stringify(currentSectionScope)}`,
-    `对象位置：${JSON.stringify({ sections: inputs.outline.sections.map((section, position) => ({ position, id: section.id, title: section.title })), ...mappingBusinessObjectView(task, inputs), references: mappingReferenceObjects(task, inputs, locations, webRefs),
+    `对象位置：${JSON.stringify({ sections: inputs.outline.sections.map((section, position) => ({ position, id: section.id, title: section.title })), ...mappingBusinessObjectView(task, inputs),
+      references: references.map(item => ({ ...item, allowed_uses: referencePositions.uses(item.position) })),
+      reference_choices: { ...referencePositions.choices(), local: [], web: [] },
       sources: uniqueStrings([...mappingNavigationReferences(locations), ...webRefs]).map((id, position) => ({ position, id })),
-      targets: mappingAnswerTargets(answerChecklists).map((id, position) => ({ position, id })),
+      targets: answerChecklists.flatMap(checklist => checklist.items.map(item => ({
+        position: Number(item.item_ref.slice(1)) - 1, id: item.item_ref,
+        section_position: inputs.outline.sections.findIndex(section => section.id === checklist.section_id),
+        kind: item.kind, text: item.text,
+      }))),
     })}`,
     '所有工具使用对象表中的 position 选择章节、业务条目、资料范围和回答检查项；section_position、requirement_position(s)、scoring_position(s)、compliance_position(s)、response_point_positions、source_position、scope_position、target_positions 由程序绑定实际身份。编辑同级顺序只选择 sibling_position，正式排序值由程序生成。不得回填 ID 或短引用。后续工具结果的 objects 是当前对象位置；结构变化或读取新资料后使用最新结果。',
     '研究 basis 只提交 {reference_position}，S2 answer_plan basis 只提交 {kind:"s2",record_position}；两个位置都选择 objects.references 的统一 position，不使用 requirements、scoring 或其他业务表的位置。来源 kind、artifact、ref 与 record_id 由程序派生，禁止重复填写。研究依据可选 requirement、scoring、response_point、user_framework、reference_outline 及本 Child 已读取的 local_material/web_material；S2 记录可选 project、requirement、scoring、response_point、compliance，其他来源仍按 local/web 协议提交。',
@@ -3787,6 +3863,8 @@ function outlineQualityOutputSchema(): ObjectJsonSchema {
     description: '仅记录不阻断发布的业务层级、章节边界或覆盖建议；没有问题时返回空数组。' },
     blocking_issues: { type: 'array', items: closedObject({
       section_position: { type: 'integer', description: '全书职责索引中的位置；程序绑定实际章节。' },
+      issue_kind: { type: 'string', enum: ['detail', 'relationship', 'coverage', 'user_request'],
+        description: 'detail 判断有详细卡片的章节展开程度；relationship 检查职责冲突或断裂；coverage 检查未承接要求；user_request 检查明确用户目标。跨片索引复核不接受 detail。' },
       reason: { type: 'string', description: '具体结构问题及业务理由。' },
     }), description: '目录过粗、任务越界、扩展缺少依据或职责冲突等必须返回相关章节；不能以资料符合修改后任务为由放行。' },
   })
@@ -3862,14 +3940,17 @@ export async function reviewRefinedOutline(
       `本次用户修改目标：${request}`,
       '逐项核对实际目录与本次目标。要求的结构变化必须体现在目录节点及其关系中，写作说明、覆盖关联或子任务完成不能替代。尚未实现的目录目标必须列为 blocking_issues；子任务无权修改不代表目标已经满足，不得降为建议。',
     ]),
-    '这是目录质量的独立第二意见，不以第一次 KEEP 为依据。先独立阅读 Structure Review Cards 的 S3 职责、最终 Blueprint 和中性 Research Findings，再核对已有判断。优先检查叶子过粗、过度拆分、同级职责重复或断裂，以及重要主题的目录导航价值；最后核对 Requirement/Scoring/Response Point 覆盖。引用身份和结构操作绑定由 Host 检查，不把 bookkeeping 当作本次主要任务。',
-    '进行 Hidden Heading Pressure 验收：假设 S5 禁止自行创建正式目录标题，逐叶判断能否自然、完整地写成技术标正文。若多个不同对象、方法体系、输入输出或成果质量责任只能依赖事实上的子标题表达，应在 blocking_issues 中说明遗漏的目录深化。连续流程或没有独立评分点不能单独证明 KEEP；同一方法的普通步骤、参数和短注意事项也不应机械成节。不得用固定节点数量、维度条数、关键词或零新增判断。',
-    '区分“同一方法内部的处理步骤”与“需要分别论证的技术任务”：每个步骤都能列出输入、输出和责任，不能仅据此认定需要正式章节。核对它们是否仍对同一对象运用同一方法、形成同一成果，并尝试用段落衔接、步骤列表和表格完整表达。若这些表达足够，保留叶子；若不足，blocking issue 必须指出实际方法或成果责任的差异及具体定位障碍，不能只罗列 writing_dimensions 或偏好更多标题。例行登记、过程质量记录和结果交接也不自动获得独立章节。',
-    '通过结构化输出返回语义复核结果；issues 只返回具体建议 message。具体结构问题、任务越界和职责冲突必须在 blocking_issues 中返回全书职责索引的 section_position 与业务理由 reason，Host 绑定章节并只重开所属子树。全书覆盖依据均须核对，核对记录由程序生成。不要生成问题代码、编号、scope 或 severity。不能把资料命中当作扩大章节任务的依据。',
+    '优先复核已报告问题及当前修改引入的问题；新发现的真实覆盖漏项、职责冲突和无依据事实仍须阻断。相同资料下的分章偏好不能反复改变完成标准。',
+    '通过结构化输出返回语义复核结果；issues 只返回具体建议 message。blocking_issues 返回本片职责索引的 section_position、issue_kind 与具体业务理由 reason，Host 绑定章节并只重开所属子树。全书覆盖依据均须核对，核对记录由程序生成。不要生成问题代码、编号、scope 或 severity。不能把资料命中当作扩大章节任务的依据。',
     '在本章职责内，允许依据资料提出作业方法和组织建议；招标未逐字指定步骤不等于禁止设计方案。区分方案建议与已确认项目事实，不能把旧项目的具体流程、责任主体或承诺当成本项目既定条件。',
   ].join('\n')
+  const detailInstructions = [
+    '这是目录质量的独立第二意见，不以第一次 KEEP 为依据。只对本片详细卡片独立阅读 S3 职责、最终 Blueprint 和中性 Research Findings，判断叶子过粗、过度拆分及隐藏标题压力；其他索引只用于核对职责关系和覆盖。',
+    '进行 Hidden Heading Pressure 验收：假设 S5 禁止自行创建正式目录标题，逐叶判断能否自然、完整地写成技术标正文。若多个不同对象、方法体系、输入输出或成果质量责任只能依赖事实上的子标题表达，应在 blocking_issues 中说明遗漏的目录深化。连续流程或没有独立评分点不能单独证明 KEEP；同一方法的普通步骤、参数和短注意事项也不应机械成节。不得用固定节点数量、维度条数、关键词或零新增判断。',
+    '区分“同一方法内部的处理步骤”与“需要分别论证的技术任务”：每个步骤都能列出输入、输出和责任，不能仅据此认定需要正式章节。核对它们是否仍对同一对象运用同一方法、形成同一成果，并尝试用段落衔接、步骤列表和表格完整表达。若这些表达足够，保留叶子；若不足，blocking issue 必须指出实际方法或成果责任的差异及具体定位障碍，不能只罗列 writing_dimensions 或偏好更多标题。例行登记、过程质量记录和结果交接也不自动获得独立章节。',
+  ].join('\n')
   const reviewContext = {
-    instructions, cards,
+    instructions, detailInstructions, cards,
     coverage: {
       requirements: inputs.requirements.requirements.map(({ id, normalized_requirement }) => ({ id, text: normalized_requirement })),
       scoring: inputs.scoring.scoring_items.map(({ id, criterion }) => ({ id, text: criterion })),
@@ -3897,8 +3978,10 @@ export async function reviewRefinedOutline(
     system: persona, tools: [{ name: 'structured_output', description: '返回目录质量报告。', parameters: { ...outlineQualityOutputSchema() } }] })
   let inputBudgetTokens = Math.min(FINAL_REVIEW_PROMPT_CHAR_BUDGET / 4,
     (metadata?.context?.contextWindow ?? 16_384) - outputTokens - envelopeTokens - 1_024)
+  type ReviewIssue = { issue: OutlineStructureIssue; kind: OutlineReviewIssueKind; request: OutlineReviewRequest }
   let lastOverflow: unknown
   let previousRequests: string[] = []
+  let previousConsolidationPrompt: string | undefined
   for (let contextAttempt = 0; contextAttempt <= 2; contextAttempt++) {
     let requests: ReturnType<typeof buildOutlineReviewRequests>
     try { requests = buildOutlineReviewRequests(reviewContext, inputBudgetTokens) } catch (error) {
@@ -3911,10 +3994,10 @@ export async function reviewRefinedOutline(
         message: '目录审查单个对象无法继续缩减，保留原上下文超限原因。' }], false, true, undefined, 0, 'subagent', lastOverflow)
     }
     previousRequests = requests.map(item => item.prompt)
-    const collected: Array<{ quality: OutlineQualityReport; blockingIssues: OutlineStructureIssue[] }> = []
+    const collected: Array<{ quality: OutlineQualityReport; blockingIssues: ReviewIssue[] }> = []
     let overflow: unknown
     for (const [requestIndex, reviewRequest] of requests.entries()) {
-      try { collected.push(await reviewOne(reviewRequest.prompt, requestIndex)) } catch (error) {
+      try { collected.push(await reviewOne(reviewRequest, requestIndex)) } catch (error) {
         if (!isContextOverflow(error)) throw error
         overflow = error
         break
@@ -3925,24 +4008,81 @@ export async function reviewRefinedOutline(
       inputBudgetTokens = Math.floor(inputBudgetTokens / 2)
       continue
     }
+    const grouped = new Map<string, ReviewIssue[]>()
+    for (const issue of collected.flatMap(item => item.blockingIssues)) {
+      const group = grouped.get(issue.issue.section_id) ?? []
+      group.push(issue)
+      grouped.set(issue.issue.section_id, group)
+    }
+    const resolved: OutlineStructureIssue[] = []
+    for (const [sectionId, group] of grouped) {
+      const opinions = [...new Map(group.map(item => [item.issue.reason, item.issue])).values()]
+      if (opinions.length < 2) { resolved.push(...opinions); continue }
+      const position = inputs.outline.sections.findIndex(section => section.id === sectionId)
+      const consolidationContext = { ...reviewContext,
+        cards: cards.filter(card => card.section_id === sectionId),
+        instructions: [instructions,
+          `只整理 section_position=${String(position)} 的意见：同一问题合并成一条，相反意见依据详细职责裁决为可执行问题，独立问题分别保留。其他章节仅作依据。不能按不同措辞重复计数，也不能因意见冲突放过真实漏项、职责冲突或无依据事实。`,
+        ].join('\n'),
+        operations: { changes: reviewContext.operations, opinions: opinions.map(item => item.reason) },
+      }
+      let consolidation: OutlineReviewRequest
+      try {
+        consolidation = buildOutlineReviewRequest(consolidationContext, inputBudgetTokens)
+      } catch (error) {
+        if (!(error instanceof OutlineReviewContextTooLargeError)) throw error
+        const requiredPositions = new Set([position, ...group.filter(item => item.kind !== 'detail')
+          .flatMap(item => item.request.sectionPositions)])
+        try {
+          consolidation = buildOutlineReviewRequest({ ...consolidationContext,
+            index: reviewContext.index.filter(item => requiredPositions.has(item.position)),
+          }, inputBudgetTokens)
+        } catch (narrowError) {
+          if (!(narrowError instanceof OutlineReviewContextTooLargeError)) throw narrowError
+          throw new MappingSubagentInfrastructureError([{ code: CONTEXT_WINDOW_EXCEEDED_CODE,
+            message: narrowError.message }], false, true, undefined, 0, 'subagent', narrowError)
+        }
+      }
+      if (consolidation.prompt === previousConsolidationPrompt) {
+        throw new MappingSubagentInfrastructureError([{ code: CONTEXT_WINDOW_EXCEEDED_CODE,
+          message: '目录意见整理无法继续缩减，保留原上下文超限原因。' }], false, true, undefined, 0, 'subagent', lastOverflow)
+      }
+      try {
+        const result = await reviewOne({ ...consolidation, sectionPositions: [position],
+          cardPositions: consolidation.cardPositions.filter(item => item === position) }, requests.length)
+        collected.push({ ...result, blockingIssues: [] })
+        resolved.push(...result.blockingIssues.map(item => item.issue))
+      } catch (error) {
+        if (!isContextOverflow(error)) throw error
+        previousConsolidationPrompt = consolidation.prompt
+        overflow = error
+        break
+      }
+    }
+    if (overflow !== undefined) {
+      lastOverflow = overflow
+      previousRequests = []
+      inputBudgetTokens = Math.floor(inputBudgetTokens / 2)
+      continue
+    }
     const quality = { ...collected.map(item => item.quality).reduce(first => first),
       issues: [...new Map(collected.flatMap(item => item.quality.issues).map(issue => [issue.message, issue])).values()] }
     await writeJson(qualityPath, quality, commits)
-    return { outline: inputs.outline, blockingIssues: [...new Map(collected.flatMap(item => item.blockingIssues)
+    return { outline: inputs.outline, blockingIssues: [...new Map(resolved
       .map(issue => [`${issue.section_id}:${issue.reason}`, issue])).values()] }
   }
   throw new MappingSubagentInfrastructureError([{ code: CONTEXT_WINDOW_EXCEEDED_CODE,
     message: '目录审查缩减上下文预算后仍超限，已耗尽两轮分片调整。' }], false, true, undefined, 0, 'subagent', lastOverflow)
 
-  async function reviewOne(review: string, requestIndex: number):
-  Promise<{ quality: OutlineQualityReport; blockingIssues: OutlineStructureIssue[] }> {
+  async function reviewOne(review: OutlineReviewRequest, requestIndex: number):
+  Promise<{ quality: OutlineQualityReport; blockingIssues: ReviewIssue[] }> {
     let repairIssues: StageValidationIssue[] = []
     for (let attempt = 0; attempt <= maxRepairAttempts; attempt++) {
       signal.throwIfAborted()
       const run = await reviewSubagents.start('spawn', {
         label: `S4 · 全局目录复核 · 分片 ${String(requestIndex + 1)}${attempt === 0 ? '' : ` · 修复 ${attempt}`}`,
         parent: agent,
-        prompt: [{ type: 'text', text: [review, ...attempt === 0 ? [] : [
+        prompt: [{ type: 'text', text: [review.prompt, ...attempt === 0 ? [] : [
           '上一份质量报告未通过校验。只修复报告字段并重新返回完整报告。',
           ...renderStageRepairIssues(repairIssues),
         ]].join('\n') }],
@@ -3954,7 +4094,7 @@ export async function reviewRefinedOutline(
         persona,
       })
       let quality: OutlineQualityReport | undefined
-      let blockingIssues: OutlineStructureIssue[] = []
+      let blockingIssues: ReviewIssue[] = []
       const issues: StageValidationIssue[] = []
       try {
         const result = await run.result
@@ -3971,11 +4111,9 @@ export async function reviewRefinedOutline(
           const violations = validateJsonSchemaValue(outlineQualityOutputSchema(), result.structured)
           if (violations.length > 0) throw new ToolArgsError(violations)
           const { blocking_issues: blocking, issues: advisory, ...report } = result.structured as Record<string, unknown>
-          blockingIssues = (blocking as Array<{ section_position: number; reason: string }>).map((issue) => {
-            const section = inputs.outline.sections[issue.section_position]
-            if (section === undefined) throw new ToolArgsError(['section_position: 未知目录位置。'])
-            return { section_id: section.id, reason: issue.reason, code: 'OUTLINE_STRUCTURE_REVIEW' }
-          })
+          blockingIssues = (blocking as Array<{ section_position: number; issue_kind: OutlineReviewIssueKind; reason: string }>)
+            .map(issue => ({ issue: { ...bindOutlineReviewIssue(issue, review, inputs.outline.sections),
+              code: 'OUTLINE_STRUCTURE_REVIEW' }, kind: issue.issue_kind, request: review }))
           quality = parseOutlineQualityReport({
             ...report,
             checked_requirement_ids: inputs.requirements.requirements.map(item => item.id),
@@ -4863,7 +5001,8 @@ async function executeEvidenceMappingRun(
         }]
       })
       const remapContext = options.remap === undefined ? undefined : await localRemapContext(workspace, mappingTask)
-      const assignment = renderEvidenceMappingSubagentTask(mappingTask, runInputs, locations, promptTask,
+      const assignment = renderEvidenceMappingSubagentTask(mappingTask,
+        { ...runInputs, outline: submissionRequest.state.stagedOutline }, locations, promptTask,
         webSearchEnabled, options.remap?.allow_outline_refinement ?? true,
         uniqueStrings([...submissionRequest.state.baselineMappings.values(), ...submissionRequest.state.mappings.values()]
           .flatMap(mapping => mapping.web_materials.flatMap(material => material.chunk_refs))))

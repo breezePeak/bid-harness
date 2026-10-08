@@ -98,6 +98,45 @@ export function buildSectionAnswerChecklist(context: {
 }
 
 /**
+ * 为正式目标生成完整身份键；必答项的位置与原文均参与相等判断。
+ * @param target Host 已绑定的业务目标。
+ * @returns 目标比较及 Child 位置登记共用的确定性键。
+ */
+export function answerTargetKey(target: AnswerTarget): string {
+  return target.kind === 'must_answer' ? JSON.stringify([target.kind, target.position, target.text])
+    : JSON.stringify([target.kind, target.id])
+}
+
+/**
+ * 保留仍有效的目标回应；唯一必答原文可重绑定位置，重复原文不推断对应关系。
+ * @param plan 任务修改前的已绑定计划。
+ * @param before 修改前的规范任务。
+ * @param after 修改后的规范任务。
+ * @returns 保留语义内容和依据、移除失效目标后的计划；历史缺失仍保持缺失。
+ */
+export function reconcileSectionAnswerPlan(
+  plan: SectionAnswerPlan | undefined,
+  before: readonly AnswerChecklistItem[],
+  after: readonly AnswerChecklistItem[],
+): SectionAnswerPlan | undefined {
+  if (plan === undefined) return undefined
+  const current = new Map(after.map(item => [answerTargetKey(item.target), item.target]))
+  const uniqueMustAnswer = (items: readonly AnswerChecklistItem[], value: string) =>
+    items.filter(item => item.target.kind === 'must_answer' && item.target.text === value)
+  return plan.flatMap((item) => {
+    const targets = item.targets.flatMap((target) => {
+      const exact = current.get(answerTargetKey(target))
+      if (exact !== undefined) return [exact]
+      if (target.kind !== 'must_answer' || uniqueMustAnswer(before, target.text).length !== 1) return []
+      const matches = uniqueMustAnswer(after, target.text)
+      const matched = matches.length === 1 ? matches[0]?.target : undefined
+      return matched === undefined ? [] : [matched]
+    })
+    return targets.length === 0 ? [] : [{ ...item, targets }]
+  })
+}
+
+/**
  * 校验计划仍覆盖当前任务，并且所有来源属于本次已接受的材料。
  * @param plan 已绑定的计划。
  * @param checklist 当前规范任务。
@@ -110,12 +149,12 @@ export function validateSectionAnswerPlan(
   sourceKeys: ReadonlySet<string>,
 ): string[] {
   if (plan === undefined) return ['answer_plan: 当前章节尚未完成任务级依据准备。']
-  const targets = new Set(checklist.map(item => JSON.stringify(item.target)))
+  const targets = new Set(checklist.map(item => answerTargetKey(item.target)))
   const covered = new Set<string>()
   const issues: string[] = []
   for (const [index, item] of plan.entries()) {
     for (const target of item.targets) {
-      const key = JSON.stringify(target)
+      const key = answerTargetKey(target)
       if (!targets.has(key)) issues.push(`answer_plan.${index}.targets: 目标不属于当前章节任务。`)
       covered.add(key)
     }
@@ -127,7 +166,7 @@ export function validateSectionAnswerPlan(
       if (!sourceKeys.has(key)) issues.push(`answer_plan.${index}.basis: 未接受的依据 ${key}。`)
     }
   }
-  for (const item of checklist) if (!covered.has(JSON.stringify(item.target))) {
+  for (const item of checklist) if (!covered.has(answerTargetKey(item.target))) {
     issues.push(`answer_plan: 未回应 ${item.item_ref}。`)
   }
   return issues
