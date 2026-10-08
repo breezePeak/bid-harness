@@ -659,7 +659,7 @@ export async function attachTenderAnalysisSubmissionRuntime(
         ...Object.fromEntries(PROJECT_SINGLE_FIELDS.map(field => [field, singles.get(field)?.value ?? null])),
         ...Object.fromEntries(PROJECT_LIST_FIELDS.map(field => [field, [...(lists.get(field)?.keys() ?? [])]])),
         source_refs: projectSources,
-        analyzed_tender_files: locators.map(locator => locator.file_id),
+        analyzed_tender_files: [...new Set(locators.map(locator => locator.file_id))],
       })
       const requirementsArtifact = parseTenderRequirementsArtifact({
         schema_version: TENDER_ANALYSIS_SCHEMA_VERSION,

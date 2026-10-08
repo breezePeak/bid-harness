@@ -23,7 +23,7 @@ const REQUIREMENT_QUOTE = '系统功能要求：应支持统一身份认证和�
 const SCORING_QUOTE = '技术评分标准：总体技术方案完整合理得 10 分。'
 const COMPLIANCE_QUOTE = '投标技术方案必须提供数据安全措施。'
 
-async function fixture() {
+async function fixture(duplicateTender = false) {
   const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-tender-submit-')), {
     ...DEFAULT_BID_CONFIG,
     documentChunk: { minChars: 200, targetChars: 400, maxChars: 500 },
@@ -31,18 +31,16 @@ async function fixture() {
   const second = Array.from({ length: 50 }, (_, index) => (
     `第二份招标技术要求第${String(index + 1).padStart(2, '0')}段：系统应保持稳定运行并提交验收记录。`
   )).join('\n\n')
+  const mainBytes = new TextEncoder().encode([
+    '# 项目概况', PROJECT_QUOTE,
+    '# 技术要求', REQUIREMENT_QUOTE, COMPLIANCE_QUOTE,
+    '# 技术评分', SCORING_QUOTE,
+    '重复短语。', '重复短语。',
+  ].join('\n\n'))
   await workspace.import([
-    {
-      name: 'main-tender.md',
-      role: 'tender',
-      bytes: new TextEncoder().encode([
-        '# 项目概况', PROJECT_QUOTE,
-        '# 技术要求', REQUIREMENT_QUOTE, COMPLIANCE_QUOTE,
-        '# 技术评分', SCORING_QUOTE,
-        '重复短语。', '重复短语。',
-      ].join('\n\n')),
-    },
+    { name: 'main-tender.md', role: 'tender', bytes: mainBytes },
     { name: 'second-tender.md', role: 'tender', bytes: new TextEncoder().encode(second) },
+    ...(duplicateTender ? [{ name: 'main-tender-copy.md', role: 'tender' as const, bytes: mainBytes }] : []),
     { name: 'reference.md', role: 'reference', bytes: new TextEncoder().encode('旧项目技术要求仅供参考。') },
   ])
   const definitions = new Map<string, ToolDefinition>()
@@ -75,21 +73,21 @@ function source(anchor_text: string, chunk_position?: number, file_position = 0)
   return { file_position, chunk_position: resolvedChunk, anchor_text }
 }
 
-function completeSubmission() {
+function completeSubmission(file_position = 0) {
   return {
-    project_facts: [{ field: 'project_name', value: '智慧审计平台', sources: [source(PROJECT_QUOTE)] }],
+    project_facts: [{ field: 'project_name', value: '智慧审计平台', sources: [source(PROJECT_QUOTE, undefined, file_position)] }],
     requirements: [{
       category: '功能要求', normalized_requirement: '系统应支持统一身份认证和审计日志。',
-      mandatory: true, sources: [source(REQUIREMENT_QUOTE)],
+      mandatory: true, sources: [source(REQUIREMENT_QUOTE, undefined, file_position)],
     }],
     scoring_items: [{
       group: '技术方案', title: '总体技术方案',
       criterion: '根据总体技术方案的完整性与合理性评分。', score: 10, score_range: null,
-      must_answer: true, sources: [source(SCORING_QUOTE)],
+      must_answer: true, sources: [source(SCORING_QUOTE, undefined, file_position)],
     }],
     compliance_items: [{
       type: '强制要求', normalized_rule: '技术方案必须提供数据安全措施。',
-      severity: 'mandatory', sources: [source(COMPLIANCE_QUOTE)],
+      severity: 'mandatory', sources: [source(COMPLIANCE_QUOTE, undefined, file_position)],
     }],
   }
 }
@@ -237,6 +235,49 @@ describe('tender-analysis complete submission runtime', () => {
     await expect(value.call({ repair: { scoring_item: completeSubmission().scoring_items[0] } }))
       .resolves.toMatchObject({ completed: true, summary: { scoring_items: 1 } })
     expect(value.runtime.completed).toBe(true)
+    value.runtime.dispose()
+  })
+
+  it('重复上传保留全部文件位置，提交引用最后一份副本并按唯一身份通过覆盖校验', async () => {
+    const value = await fixture(true)
+    const manifest = await value.workspace.readManifest()
+    const [first, second, copy] = value.runtime.locators
+    expect(value.runtime.locators.map(locator => [locator.file_ref, locator.name])).toEqual([
+      ['T1', 'main-tender.md'], ['T2', 'second-tender.md'], ['T3', 'main-tender-copy.md'],
+    ])
+    expect(copy!.file_id).toBe(first!.file_id)
+    expect(second!.file_id).not.toBe(first!.file_id)
+    expect(copy!.chunks.get('chunk_0001')!.artifactPath).not.toBe(first!.chunks.get('chunk_0001')!.artifactPath)
+
+    await expect(value.call(completeSubmission(2))).resolves.toEqual({
+      completed: true,
+      summary: { tender_files: 3, requirements: 1, scoring_items: 1, compliance_items: 1 },
+    })
+    expect(value.runtime.completed).toBe(true)
+    const [project, requirements, scoring, compliance] = await Promise.all([
+      readFile(join(value.workspace.projectRoot, 'analysis/project.json'), 'utf8').then(JSON.parse).then(parseTenderProjectArtifact),
+      readFile(join(value.workspace.projectRoot, 'analysis/requirements.json'), 'utf8').then(JSON.parse).then(parseTenderRequirementsArtifact),
+      readFile(join(value.workspace.projectRoot, 'analysis/scoring-origin.json'), 'utf8').then(JSON.parse).then(parseTenderScoringArtifact),
+      readFile(join(value.workspace.projectRoot, 'analysis/compliance.json'), 'utf8').then(JSON.parse).then(parseTenderComplianceArtifact),
+    ])
+    expect(project.analyzed_tender_files).toEqual([first!.file_id, second!.file_id])
+    for (const [refs, chunkId] of [
+      [project.source_refs, 'chunk_0001'],
+      [requirements.requirements[0]!.source_refs, 'chunk_0002'],
+      [scoring.scoring_items[0]!.source_refs, 'chunk_0003'],
+      [compliance.compliance_items[0]!.source_refs, 'chunk_0002'],
+    ] as const) {
+      expect(refs).toEqual([expect.objectContaining({
+        file_id: copy!.file_id, chunk: copy!.chunks.get(chunkId)!.artifactPath,
+      })])
+    }
+    expect(await value.workspace.readManifest()).toEqual(manifest)
+    await expect(validateTenderAnalysis(value.workspace, 'tender_analysis', [
+      { stage: 'tender_analysis', type: 'tender_project', path: 'analysis/project.json' },
+      { stage: 'tender_analysis', type: 'tender_requirements', path: 'analysis/requirements.json' },
+      { stage: 'tender_analysis', type: 'tender_scoring_origin', path: 'analysis/scoring-origin.json' },
+      { stage: 'tender_analysis', type: 'tender_compliance', path: 'analysis/compliance.json' },
+    ])).resolves.toEqual({ ok: true })
     value.runtime.dispose()
   })
 

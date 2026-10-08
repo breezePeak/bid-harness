@@ -3,7 +3,7 @@ import { fileURLToPath } from 'node:url'
 import { LOADER_SMOKE_TEST_TIMEOUT_MS, runLoaderSmoke } from '@deepseek-ai/dsh-loader-smoke'
 import { expect, it } from 'vitest'
 
-it('S2 通过真实完整提交工具生成并校验原始评分 Artifact', async () => {
+it('S2 重复上传保留位置，真实完整提交生成唯一覆盖身份与原始评分 Artifact', async () => {
   const result = await runLoaderSmoke({
     label: 'S2 complete submission 源码装配', tempDirPrefix: 'dsh-bid-s2-submission-snapshot-',
     binScript: fileURLToPath(new URL('./fixtures/bid-tender-analysis-driver.ts', import.meta.url)),
@@ -29,13 +29,16 @@ it('S2 通过真实完整提交工具生成并校验原始评分 Artifact', asyn
       ],
       "project": {
         "name": "智慧审计平台建设项目",
+        "source_files": [
+          "tender-copy.md",
+        ],
         "source_lines": [
           [
             1,
             12,
           ],
         ],
-        "tender_files": 1,
+        "tender_files": 2,
       },
       "requirements": [
         {
@@ -52,6 +55,11 @@ it('S2 通过真实完整提交工具生成并校验原始评分 Artifact', asyn
       ],
       "selected_scoring_ids": [
         "SC-001",
+      ],
+      "uploaded_tender_files": [
+        "tender.md",
+        "appendix.md",
+        "tender-copy.md",
       ],
       "validation": {
         "ok": true,

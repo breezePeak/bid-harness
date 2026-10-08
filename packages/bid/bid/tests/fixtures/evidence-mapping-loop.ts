@@ -251,7 +251,7 @@ export function registerIntegrationTools(ctx: Context, root: string, sourceUrls:
 }
 
 /**
- * 通过真实 Agent loop 和五个 staged 工具执行 S2 Host 提交协议。
+ * 通过真实 Agent loop 提交 S2 分析，覆盖重复上传身份与文件位置绑定。
  * @param ctx - Loader 组装的 Agent、工具和文件服务。
  * @param root - 本用例的隔离工作区。
  * @returns 模型工具调用、正式 Artifact 摘要和最终校验结果。
@@ -264,16 +264,19 @@ export async function runTenderAnalysisLoop(ctx: Context, root: string) {
     '技术评分：总体技术方案完整合理得 10 分。',
     '技术方案必须提供数据安全措施。',
   ].join('\n')
-  const [tender] = await workspace.import([
+  const files = await workspace.import([
     { name: 'tender.md', role: 'tender', bytes: new TextEncoder().encode(tenderText) },
+    { name: 'appendix.md', role: 'tender', bytes: new TextEncoder().encode('实施过程应提交验收记录。') },
+    { name: 'tender-copy.md', role: 'tender', bytes: new TextEncoder().encode(tenderText) },
   ])
+  const tender = files[2]
   if (tender === undefined || tender.chunkIndexPath === null) throw new Error('S2 integration corpus missing')
   const index = JSON.parse(await readFile(join(workspace.projectRoot, tender.chunkIndexPath), 'utf8')) as {
     chunks: Array<{ id: string }>
   }
   const chunk = index.chunks[0]?.id
   if (chunk === undefined) throw new Error('S2 integration chunk missing')
-  const source = (anchor_text: string) => ({ file_position: 0, chunk_position: 0, anchor_text })
+  const source = (anchor_text: string) => ({ file_position: 2, chunk_position: 0, anchor_text })
   const sessionId = SessionId('s2-real-loop')
   const parentScript = [
     toolCall('submit-analysis', 'submit_tender_analysis', {
@@ -317,14 +320,20 @@ export async function runTenderAnalysisLoop(ctx: Context, root: string) {
     JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/tender-analysis-selection.json'), 'utf8')),
     scoring,
   )
+  const manifest = await workspace.readManifest()
+  if (!isDeepStrictEqual(manifest.files.map(file => ({ id: file.id, inputPath: file.inputPath })),
+    files.map(file => ({ id: file.id, inputPath: file.inputPath })))) throw new Error('S2 integration upload records changed')
   return {
     calls: agent.session.events.flatMap(event => event.type === 'tool/call' ? [event.data.name] : []),
     validation,
     artifacts: artifacts.map(artifact => artifact.path),
+    uploaded_tender_files: manifest.files.map(file => file.originalName),
     project: {
       name: project.project_name,
       tender_files: project.analyzed_tender_files.length,
       source_lines: project.source_refs.map(ref => [ref.line_start, ref.line_end]),
+      source_files: project.source_refs.map(ref => manifest.files.find(file => file.chunksPath !== null
+        && ref.chunk.startsWith(`${file.chunksPath}/`))?.originalName),
     },
     requirements: requirements.requirements.map(item => ({ id: item.id, mandatory: item.mandatory })),
     scoring: scoring.scoring_items.map(item => ({ id: item.id, parent: item.parent, score: item.score })),
