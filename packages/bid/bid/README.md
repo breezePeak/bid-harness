@@ -29,6 +29,8 @@ S6 只对流程图、表格和图片执行最终页面视觉审核；标题、�
 
 ## Control plane types
 
+模型通过位置选择程序持有的对象。招标评分修改及重新选择使用完整原始评分表 `objects.scoring_origin`，字段为 `origin_scoring_position` 与 `selected_origin_scoring_positions`；后续章节关联的 `scoring_positions` 继续使用已确认评分表。新增可写章节必须提供非空 `must_answer`。Writer 的网页位置区分同来源的不同片段集合，本章已核验的新网页在修复、视觉确认及恢复中保持可再次绑定；未知来源和失效快照拒绝引用。Reviewer 的缺项回执直接返回可补交位置，语义验收必须提交 `evidence_quote_positions`，无需引句时填写 `[]`。
+
 独立 Word 导出以 `bid.docx_export.changed` 记录有界里程碑，并由同名 Session 投影恢复最新任务；运行、完成和失败属于导出记录，不改变 `bid.runtime` 主任务。完成态保留项目内 `path` 供下载，同时记录生成时的绝对 `filePath` 供聊天显示文件位置；旧记录允许缺少绝对路径。导出与 S5 可并行，同一会话的重复请求复用执行句柄；宿主重启后，失去句柄的运行态在详情读取时结算为中断失败。
 
 本包导出固定的 `BidStage`、`BidTaskStatus` 和唯一判别联合 `BidTaskState`。只有 `running` 与 `suspended` 分支携带 Run 执行数据；browser-safe 子路径 `@deepseek-ai/dsh-bid/control-plane` 直接向客户端暴露同一状态结构。

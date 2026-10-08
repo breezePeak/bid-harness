@@ -1998,6 +1998,10 @@ function attachMappingSubmissionRuntime(
       async execute(args, exec) {
         const bound = createChapterObjectPositions(objectFields()).bind(referencePositions().bind(args))
         const operation = record(bound)?.operation
+        if (definition.name === 'apply_section_outline_edit' && record(operation)?.type === 'add_section'
+          && !z.array(z.string().trim().min(1)).min(1).safeParse(record(operation)?.must_answer).success) {
+          throw new ToolArgsError(['operation.must_answer: 新增可写章节必须提交至少一项非空的具体写作要求。'])
+        }
         const input = definition.name === 'apply_section_outline_edit' && record(operation)?.type === 'add_section'
           ? { ...record(bound), operation: { ...record(operation), writable: true } } : bound
         let result: unknown

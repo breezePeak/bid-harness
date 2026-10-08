@@ -48,7 +48,7 @@ export function chapterModelCandidate(candidate: { markdown: string; metadata: R
     title: string
     purpose?: string
     nodes: Array<{ key?: string; id?: string; type: string; text: string }>
-    edges: Array<{ from: string; to: string; label?: string }>
+    edges: Array<{ from?: string; to?: string; from_position?: number; to_position?: number; label?: string }>
   }> | undefined
   let markdown = candidate.markdown
   const charts = flowcharts?.map((chart, index) => {
@@ -58,8 +58,8 @@ export function chapterModelCandidate(candidate: { markdown: string; metadata: R
     }
     return { title: chart.title, ...(chart.purpose === undefined ? {} : { purpose: chart.purpose }),
       nodes: chart.nodes.map(({ type, text }) => ({ type, text })), edges: chart.edges.map(edge => ({
-        from_position: chart.nodes.findIndex(node => (node.key ?? node.id) === edge.from),
-        to_position: chart.nodes.findIndex(node => (node.key ?? node.id) === edge.to),
+        from_position: edge.from_position ?? chart.nodes.findIndex(node => (node.key ?? node.id) === edge.from),
+        to_position: edge.to_position ?? chart.nodes.findIndex(node => (node.key ?? node.id) === edge.to),
         ...(edge.label === undefined ? {} : { label: edge.label }),
       })) }
   })

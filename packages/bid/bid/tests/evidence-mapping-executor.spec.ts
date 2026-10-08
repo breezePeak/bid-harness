@@ -17,6 +17,7 @@ import SessionStore, { SessionId, snapshotJsonValue } from '@deepseek-ai/dsh-ses
 import { Context } from '@deepseek-ai/cordis'
 import type { ContinuableStartSpec, SubagentProvider } from '@deepseek-ai/dsh-subagent'
 import type { ToolDefinition, ToolExecution, ToolExecutionResult, ToolRunContext } from '@deepseek-ai/dsh-tools'
+import { validateJsonSchemaValue } from '@deepseek-ai/dsh-tools'
 import { CONTEXT_WINDOW_EXCEEDED_CODE, createUserMessage, CallId, LlmAdapter, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import { boot } from '@deepseek-ai/dsh-app-boot'
 import {
@@ -1183,6 +1184,20 @@ describe('evidence-mapping Agent executor', () => {
     expect(JSON.stringify(edit.parameters)).toContain('"sibling_position"')
     expect(JSON.stringify(edit.parameters)).not.toContain('"order"')
     expect(JSON.stringify(edit.parameters)).not.toContain('"writable"')
+    expect(edit.parameters).toMatchObject({ properties: { operation: { oneOf: expect.arrayContaining([
+      expect.objectContaining({ required: expect.arrayContaining(['must_answer']),
+        properties: expect.objectContaining({ must_answer: expect.objectContaining({ minItems: 1 }) }) }),
+    ]) } } })
+    const addition = { operation: { type: 'add_section', parent_position: 0, sibling_position: 0,
+      title: '质量控制', purpose: '说明质量核验', must_answer: ['明确核验方法'] },
+    basis: { explanation: '独立质量职责。', finding_indices: [1] } }
+    expect(validateJsonSchemaValue(edit.parameters, addition)).toEqual([])
+    for (const must_answer of [undefined, []]) {
+      const invalid = { ...addition, operation: { ...addition.operation, must_answer } }
+      if (must_answer === undefined) Reflect.deleteProperty(invalid.operation, 'must_answer')
+      if (must_answer === undefined) expect(validateJsonSchemaValue(edit.parameters, invalid)).not.toEqual([])
+      await expect(edit.execute(invalid, exec)).rejects.toThrow('operation.must_answer')
+    }
     expect(JSON.stringify(task.parameters)).toContain('"target_positions"')
     expect(JSON.stringify(task.parameters)).not.toContain('"target_refs"')
     for (const tool of ['read', 'write', 'exec']) {

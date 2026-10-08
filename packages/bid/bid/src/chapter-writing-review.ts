@@ -170,15 +170,30 @@ export function attachChapterReview(
 ): ChapterProtocol<ChapterReview> {
   const runtime = createChapterProtocol<ChapterReview>(agent, 'finish_chapter_review', maxContinuations)
   const checklist = buildChapterReviewChecklist(context)
-  const positions = createChapterObjectPositions([
-    { canonical: 'criterion_id', model: 'criterion_position', ids: context.sectionWritingPlan.acceptance_criteria.filter(item => item.evaluator.kind === 'semantic').map(item => item.id) },
+  const semanticCriteria = context.sectionWritingPlan.acceptance_criteria.filter(item => item.evaluator.kind === 'semantic')
+  const positionFields = [
+    { canonical: 'criterion_id', model: 'criterion_position', ids: semanticCriteria.map(item => item.id) },
     { canonical: 'compliance_id', model: 'compliance_position', ids: context.globalCompliance.map(item => item.id) },
     { canonical: 'related_section_ids', model: 'related_section_positions', ids: context.outlineSections.map(item => item.id), many: true },
     { canonical: 'item_ref', model: 'item_position', ids: checklist.map(item => item.item_ref) },
     { canonical: 'evidence_quote_refs', model: 'evidence_quote_positions', ids: [...quotes.keys()], many: true },
     { canonical: 'claim_quote_ref', model: 'claim_quote_position', ids: [...quotes.keys()] },
     { canonical: 'source_reference', model: 'source_position', ids: evidence.map(item => item.source_ref) },
-  ])
+  ]
+  const positions = createChapterObjectPositions(positionFields)
+  const diagnostic = (message: string): string => {
+    const replacements = positionFields.map<[string, string]>(field => [field.canonical, field.model])
+      .sort((a, b) => b[0].length - a[0].length)
+    const mapping = new Map(replacements)
+    const pattern = new RegExp([...mapping.keys()].map(value => value.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')).join('|'), 'gu')
+    return message.replace(pattern, match => mapping.get(match) as string)
+  }
+  const reviewArgs = <T>(schema: z.ZodType<T>, value: unknown): T => {
+    try { return chapterToolArgs(schema, positions.bind(value)) } catch (error: unknown) {
+      if (!(error instanceof ToolArgsError)) throw error
+      throw new ToolArgsError(error.violations.map(diagnostic))
+    }
+  }
   const coverage = new Map<string, z.infer<typeof coverageInput>>()
   const acceptance = new Map<string, z.infer<typeof acceptanceInput>>()
   const globalChecks = new Map<string, z.infer<typeof globalCheckInput>>()
@@ -187,24 +202,27 @@ export function attachChapterReview(
   let summary: z.infer<typeof summaryInput> | undefined
   const quote = (ref: string): string => {
     const content = quotes.get(ref)
-    if (content === undefined) throw new ToolArgsError([`未知当前候选原文引用 ${ref}。`])
+    if (content === undefined) throw new ToolArgsError(['evidence_quote_positions: 引句不属于当前候选。'])
     return content
   }
-  const batch = (args: unknown, accept: (value: unknown) => string) => {
+  const batch = (args: unknown, accept: (value: unknown) => number | { claim_quote_position: number; kind: string }) => {
     const input = chapterToolArgs(z.object({ items: z.array(z.unknown()) }).strict(), args)
-    const recorded = new Set<string>()
+    const recorded = new Map<string, ReturnType<typeof accept>>()
     const rejected: Array<{ index: number; issue: string }> = []
     for (const [index, value] of input.items.entries()) {
-      try { recorded.add(accept(value)) } catch (error: unknown) {
+      let accepted: ReturnType<typeof accept>
+      try { accepted = accept(value) } catch (error: unknown) {
         if (!(error instanceof ToolArgsError)) throw error
-        rejected.push({ index, issue: error.message })
+        rejected.push({ index, issue: diagnostic(error.message) })
+        continue
       }
+      recorded.set(JSON.stringify(accepted), accepted)
     }
-    return Promise.resolve({ recorded: [...recorded], rejected })
+    return Promise.resolve({ recorded: [...recorded.values()], rejected })
   }
   try {
     runtime.register({
-      name: 'review_coverage_items', description: '分批记录 R 项的实际正文覆盖。每项独立接受或报告错误；同一 R 后续合法条目覆盖已有判断。',
+      name: 'review_coverage_items', description: '分批选择 item_position 记录实际正文覆盖。每项独立接受或报告错误；同一位置后续合法条目覆盖已有判断。',
       parameters: positions.schema({
         type: 'object', properties: { items: { type: 'array', items: {
           type: 'object', properties: { item_ref: stringParameter, status: { type: 'string', enum: ['covered', 'missing'] }, evidence_quote_refs: { type: 'array', items: stringParameter }, issue: nullableText },
@@ -212,13 +230,13 @@ export function attachChapterReview(
         } } }, required: ['items'], additionalProperties: false,
       }),
       execute: args => batch(args, (value) => {
-        const item = chapterToolArgs(coverageInput, positions.bind(value))
-        if (!checklist.some(entry => entry.item_ref === item.item_ref)) throw new ToolArgsError([`item_ref: 未知 ${item.item_ref}。`])
+        const item = reviewArgs(coverageInput, value)
+        if (!checklist.some(entry => entry.item_ref === item.item_ref)) throw new ToolArgsError(['item_position: 审核项不属于当前清单。'])
         for (const ref of item.evidence_quote_refs) quote(ref)
-        if (item.status === 'covered' && (item.evidence_quote_refs.length === 0 || item.issue !== null)) throw new ToolArgsError([`${item.item_ref}: covered 至少引用一个 Q，issue 必须为 null。`])
-        if (item.status === 'missing' && (item.evidence_quote_refs.length !== 0 || item.issue === null)) throw new ToolArgsError([`${item.item_ref}: missing 不得引用 Q，必须说明具体 issue。`])
+        if (item.status === 'covered' && (item.evidence_quote_refs.length === 0 || item.issue !== null)) throw new ToolArgsError([`item_position ${checklist.findIndex(entry => entry.item_ref === item.item_ref)}: covered 的 evidence_quote_positions 至少选择一条原文，issue 必须为 null。`])
+        if (item.status === 'missing' && (item.evidence_quote_refs.length !== 0 || item.issue === null)) throw new ToolArgsError([`item_position ${checklist.findIndex(entry => entry.item_ref === item.item_ref)}: missing 不得引用原文，必须说明具体 issue。`])
         coverage.set(item.item_ref, item)
-        return item.item_ref
+        return checklist.findIndex(entry => entry.item_ref === item.item_ref)
       }),
     })
     runtime.register({
@@ -234,42 +252,46 @@ export function attachChapterReview(
         } } }, required: ['items'], additionalProperties: false,
       }),
       execute: args => batch(args, (value) => {
-        const item = chapterToolArgs(globalCheckInput, positions.bind(value))
-        if (!context.globalCompliance.some(entry => entry.id === item.compliance_id)) throw new ToolArgsError([`compliance_id: 未知全局合规 ID ${item.compliance_id}。`])
+        const item = reviewArgs(globalCheckInput, value)
+        if (!context.globalCompliance.some(entry => entry.id === item.compliance_id)) throw new ToolArgsError(['compliance_position: 约束不属于当前全局清单。'])
         for (const ref of item.evidence_quote_refs) quote(ref)
         if (item.status === 'conforms' && (item.evidence_quote_refs.length === 0 || item.issue !== null)) {
-          throw new ToolArgsError([`${item.compliance_id}: conforms 必须引用适用正文且 issue 为 null。`])
+          throw new ToolArgsError([`compliance_position ${context.globalCompliance.findIndex(entry => entry.id === item.compliance_id)}: conforms 必须引用适用正文且 issue 为 null。`])
         }
         if (item.status === 'violates' && (item.evidence_quote_refs.length === 0 || item.issue === null)) {
-          throw new ToolArgsError([`${item.compliance_id}: violates 必须引用违规正文并说明问题。`])
+          throw new ToolArgsError([`compliance_position ${context.globalCompliance.findIndex(entry => entry.id === item.compliance_id)}: violates 必须引用违规正文并说明问题。`])
         }
         if (item.status === 'not_applicable' && (item.evidence_quote_refs.length > 0 || item.issue === null)) {
-          throw new ToolArgsError([`${item.compliance_id}: not_applicable 不得引用正文，必须说明为何本章不适用。`])
+          throw new ToolArgsError([`compliance_position ${context.globalCompliance.findIndex(entry => entry.id === item.compliance_id)}: not_applicable 不得引用正文，必须说明为何本章不适用。`])
         }
         globalChecks.set(item.compliance_id, item)
-        return item.compliance_id
+        return context.globalCompliance.findIndex(entry => entry.id === item.compliance_id)
       }),
     })
     runtime.register({
-      name: 'review_acceptance_criteria', description: '按独立的 met/unmet 协议记录本章 semantic acceptance；引用可为空，但填写的 Q 必须来自当前正文。',
+      name: 'review_acceptance_criteria', description: '按 met/unmet 记录本章语义验收；evidence_quote_positions 字段必填，无需引句时填 []，非空位置必须来自当前候选正文。',
       parameters: positions.schema({
         type: 'object', properties: { items: { type: 'array', items: {
           type: 'object', properties: {
             criterion_id: stringParameter,
             status: { type: 'string', enum: ['met', 'unmet'] },
-            evidence_quote_refs: { type: 'array', items: stringParameter },
+            evidence_quote_refs: { type: 'array', items: stringParameter, description: '字段必填，无需引句时填 []。' },
             reason: stringParameter,
           }, required: ['criterion_id', 'status', 'evidence_quote_refs', 'reason'], additionalProperties: false,
         } } }, required: ['items'], additionalProperties: false,
       }),
       execute: args => batch(args, (value) => {
-        const item = chapterToolArgs(acceptanceInput, positions.bind(value))
+        const bound = positions.bind(value)
+        if (typeof bound === 'object' && bound !== null && !('evidence_quote_refs' in bound)) {
+          throw new ToolArgsError(['evidence_quote_positions: 字段必填，无需引句时填 []。'])
+        }
+        const item = reviewArgs(acceptanceInput, value)
         const criterion = context.sectionWritingPlan.acceptance_criteria.find(candidate =>
           candidate.id === item.criterion_id && candidate.evaluator.kind === 'semantic')
-        if (criterion === undefined) throw new ToolArgsError([`criterion_id: 未知 semantic criterion ${item.criterion_id}。`])
+        if (criterion === undefined) throw new ToolArgsError(['criterion_position: 条件不属于当前语义验收清单。'])
         for (const ref of item.evidence_quote_refs) quote(ref)
         acceptance.set(item.criterion_id, item)
-        return item.criterion_id
+        return semanticCriteria.findIndex(entry => entry.id === item.criterion_id)
       }),
     })
     runtime.register({
@@ -281,17 +303,17 @@ export function attachChapterReview(
         } } }, required: ['items'], additionalProperties: false,
       }),
       execute: args => batch(args, (value) => {
-        const item = chapterToolArgs(claimInput, positions.bind(value))
+        const item = reviewArgs(claimInput, value)
         quote(item.claim_quote_ref)
         const source = evidence.find(entry => entry.source_ref === item.source_reference)
-        if (item.source_reference !== null && source === undefined) throw new ToolArgsError([`source_reference: 未知 ${item.source_reference}。`])
+        if (item.source_reference !== null && source === undefined) throw new ToolArgsError(['source_position: 证据不属于当前清单。'])
         if (item.status === 'supported' && (source === undefined || !source.allowed_claim_kinds.includes(item.kind) || item.issue !== null)) {
           throw new ToolArgsError(['supported 必须引用有资格支撑当前声明种类的 E，且 issue 为 null；S2 不能证明企业业绩，旧标书、Web 和 handoff 不能证明本项目企业事实。'])
         }
         if (item.status === 'unsupported' && item.issue === null) throw new ToolArgsError(['unsupported 必须说明具体 issue。'])
         const key = `${item.claim_quote_ref}/${item.kind}`
         claims.set(key, item)
-        return key
+        return { claim_quote_position: [...quotes.keys()].indexOf(item.claim_quote_ref), kind: item.kind }
       }),
     })
     runtime.register({
@@ -311,19 +333,19 @@ export function attachChapterReview(
         }, required: ['quality_checks', 'blocking_issues', 'assignment_conflicts', 'external_input_gaps', 'external_input_only'], additionalProperties: false,
       }),
       execute(args) {
-        summary = chapterToolArgs(summaryInput, positions.bind(args))
+        summary = reviewArgs(summaryInput, args)
         summary.blocking_issues = [...new Set(summary.blocking_issues.map(value => value.trim()))]
         for (const conflict of summary.assignment_conflicts) for (const sectionId of conflict.related_section_ids) {
-          if (!context.outlineSections.some(section => section.id === sectionId)) throw new ToolArgsError([`assignment_conflicts: 未知章节 ${sectionId}。`])
+          if (!context.outlineSections.some(section => section.id === sectionId)) throw new ToolArgsError(['assignment_conflicts.related_section_positions: 章节不属于当前目录。'])
         }
         const gapRefs = new Set<string>()
         for (const gap of summary.external_input_gaps) {
           const item = checklist.find(entry => entry.item_ref === gap.item_ref)
-          if (item === undefined) throw new ToolArgsError([`external_input_gaps: 未知审核项 ${gap.item_ref}。`])
-          if (gapRefs.has(gap.item_ref)) throw new ToolArgsError([`external_input_gaps: 重复审核项 ${gap.item_ref}。`])
+          if (item === undefined) throw new ToolArgsError(['external_input_gaps.item_position: 审核项不属于当前清单。'])
+          if (gapRefs.has(gap.item_ref)) throw new ToolArgsError([`external_input_gaps.item_position: 重复审核项位置 ${checklist.indexOf(item)}。`])
           gapRefs.add(gap.item_ref)
           if (coverage.get(gap.item_ref)?.status !== 'missing') {
-            throw new ToolArgsError([`external_input_gaps: ${gap.item_ref} 必须已经记录为 missing。`])
+            throw new ToolArgsError([`external_input_gaps.item_position: 位置 ${checklist.indexOf(item)} 必须已经记录为 missing。`])
           }
         }
         if (summary.external_input_only && summary.external_input_gaps.length === 0) {
@@ -353,7 +375,7 @@ export function attachChapterReview(
           const issue = revisionIssues[item.issue_position]
           if (issue === undefined) throw new ToolArgsError([`issue_position: 未知审批意见位置 ${item.issue_position}。`])
           revisionChecks.set(issue.issue_id, { issue_id: issue.issue_id, status: item.status, reason: item.reason })
-          return String(item.issue_position)
+          return item.issue_position
         }),
       })
     }
@@ -362,19 +384,18 @@ export function attachChapterReview(
       parameters: { type: 'object', properties: {}, additionalProperties: false },
       execute(args, exec) {
         chapterToolArgs(z.object({}).strict(), args)
-        const missing = checklist.filter(item => !coverage.has(item.item_ref)).map(item => item.item_ref)
-        const missingAcceptance = context.sectionWritingPlan.acceptance_criteria
-          .filter(item => item.evaluator.kind === 'semantic' && !acceptance.has(item.id)).map(item => item.id)
-        const missingGlobal = context.globalCompliance.filter(item => !globalChecks.has(item.id)).map(item => item.id)
-        const missingRevisionIssues = revisionIssues.filter(item => !revisionChecks.has(item.issue_id)).map(item => item.issue_id)
+        const missing = checklist.flatMap((item, position) => coverage.has(item.item_ref) ? [] : [position])
+        const missingAcceptance = semanticCriteria.flatMap((item, position) => acceptance.has(item.id) ? [] : [position])
+        const missingGlobal = context.globalCompliance.flatMap((item, position) => globalChecks.has(item.id) ? [] : [position])
+        const missingRevisionIssues = revisionIssues.flatMap((item, position) => revisionChecks.has(item.issue_id) ? [] : [position])
         if (missing.length > 0 || missingAcceptance.length > 0 || missingGlobal.length > 0
           || summary === undefined || missingRevisionIssues.length > 0) {
           return Promise.resolve({
             completed: false,
-            missing_items: missing,
-            missing_acceptance_criterion_ids: missingAcceptance,
-            missing_global_compliance_ids: missingGlobal,
-            ...(missingRevisionIssues.length > 0 ? { missing_revision_issue_ids: missingRevisionIssues } : {}),
+            missing_item_positions: missing,
+            missing_criterion_positions: missingAcceptance,
+            missing_compliance_positions: missingGlobal,
+            ...(missingRevisionIssues.length > 0 ? { missing_issue_positions: missingRevisionIssues } : {}),
             missing_summary: summary === undefined,
           })
         }

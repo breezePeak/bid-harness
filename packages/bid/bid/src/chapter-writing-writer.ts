@@ -75,11 +75,15 @@ export const chapterWriterOutputSchema: ObjectJsonSchema = {
   }, required: ['markdown', 'metadata'], additionalProperties: false,
 }
 
-/** 同一章节各次 Writer 尝试共享稳定编号；已发 Web 身份永久保留，不可重用编号。 */
+/** 同一章节各次 Writer 尝试共享位置；已发网页材料位置保留，不可重用。 */
 export interface ChapterWriterReferences {
+  readonly sectionId: string
   readonly materials: ReadonlyMap<string, LocalEvidenceMaterial>
   readonly files: ReadonlyMap<string, ChapterContext['availableLocalCorpus'][number]>
-  readonly web: Map<string, WebEvidenceSource & { read_path: string }>
+  readonly web: Map<string, WebEvidenceSource & { read_path: string; chunks: ReturnType<typeof buildWebEvidenceChunkIndex>['chunks'] }>
+  /** 每个位置唯一绑定来源和精确片段集合；后续材料只追加。 */
+  readonly webMaterials: Map<string, Pick<WebEvidenceMaterial, 'source_id' | 'snapshot_path' | 'chunk_refs'>
+    & Partial<Pick<WebEvidenceMaterial, 'summary' | 'supports'>>>
   /** source_id 对应的当前不可用原因；包含尚未获发 W 的坏来源。 */
   readonly unavailable: Map<string, string>
   readonly chunks: Map<string, readonly { id: string; path: string; heading_path: string[] }[]>
@@ -90,14 +94,16 @@ export interface ChapterWriterReferences {
  * 为当前章节分配稳定的已映射材料和补搜文件编号。
  * @param context 当前章节输入。
  * @param dependencyFlowcharts 已完成强依赖章节的可引用图表，按冻结顺序排列。
- * @returns 章节内 M/F 引用表，不包含框架 Evidence。
+ * @returns 章节内文件、分块与精确网页材料位置表，不包含框架 Evidence。
  */
 export function createChapterWriterReferences(context: ChapterContext,
   dependencyFlowcharts: ChapterWriterReferences['dependencyFlowcharts'] = []): ChapterWriterReferences {
   return {
+    sectionId: context.section.id,
     materials: new Map([...context.relatedMaterials, ...context.referenceBidMaterials].map((value, index) => [`M${index + 1}`, value])),
     files: new Map(context.availableLocalCorpus.filter(file => file.role !== 'outline_framework').map((value, index) => [`F${index + 1}`, value])),
     web: new Map(),
+    webMaterials: new Map(context.webMaterials.map(material => [webMaterialIdentity(material), material])),
     unavailable: new Map(),
     chunks: new Map(),
     dependencyFlowcharts,
@@ -153,7 +159,7 @@ async function readWebSnapshot(workspace: BidWorkspace, snapshotPath: string): P
 }
 
 /**
- * 复验完整候选集合，隔离单来源错误并追加有效来源；移除或损坏的已发 W 保留身份，恢复后沿用编号。
+ * 复验来源并追加本章核验快照的完整片段材料；来源移除或损坏时保留已发位置，恢复后沿用。
  * @param workspace 当前工作区。
  * @param refs 当前章节稳定引用表。
  * @param sources 当前允许暴露的完整账本来源，不能只传新增来源。
@@ -167,8 +173,9 @@ export async function appendChapterWebReferences(
     if (!currentIds.has(source.source_id)) refs.unavailable.set(source.source_id, '来源已从当前账本移除。')
   }
   for (const source of sources) {
+    let content: string
     try {
-      await readChapterWebSource(workspace, source)
+      content = await readChapterWebSource(workspace, source)
     } catch (error: unknown) {
       if (!(error instanceof ChapterWebSourceUnavailable)) throw error
       refs.unavailable.set(source.source_id, error.message)
@@ -176,10 +183,20 @@ export async function appendChapterWebReferences(
     }
     const existing = [...refs.web].find(([, value]) => value.source_id === source.source_id)
     if (existing !== undefined) {
-      if (!sameWebIdentity(existing[1], source)) refs.unavailable.set(source.source_id, '当前账本与已发 W 的来源身份不匹配。')
-      continue
+      if (!sameWebIdentity(existing[1], source)) {
+        refs.unavailable.set(source.source_id, '当前账本与已发 W 的来源身份不匹配。')
+        continue
+      }
+    } else {
+      refs.web.set(`W${refs.web.size + 1}`, { ...source, read_path: within(workspace.projectRoot, source.snapshot_path).replaceAll('\\', '/'),
+        chunks: buildWebEvidenceChunkIndex(source, content).chunks })
     }
-    refs.web.set(`W${refs.web.size + 1}`, { ...source, read_path: within(workspace.projectRoot, source.snapshot_path).replaceAll('\\', '/') })
+    if (source.chapter_context?.section_id === refs.sectionId) {
+      const material = { source_id: source.source_id, snapshot_path: source.snapshot_path,
+        chunk_refs: buildWebEvidenceChunkIndex(source, content).chunks.map(chunk => chunk.chunk_ref) }
+      const key = webMaterialIdentity(material)
+      if (!refs.webMaterials.has(key)) refs.webMaterials.set(key, material)
+    }
   }
 }
 
@@ -222,22 +239,22 @@ export function renderChapterWriterReferences(context: ChapterContext, refs: Cha
       allowed_usage: usage(file.role), chunks: (refs.chunks.get(ref) ?? []).map((chunk, chunk_position) => ({
         chunk_position, read_path: chunk.path, heading_path: chunk.heading_path,
       })) })))}`,
-    `Verified Web Chunks：${JSON.stringify([...refs.web.values()].flatMap((source, web_position) => {
-      if (unavailable.has(source.source_id)) return []
-      const materials = context.webMaterials.filter(material => material.source_id === source.source_id)
-      return (materials.length === 0 ? [undefined] : materials).map(material => ({
+    `Verified Web Chunks：${JSON.stringify([...refs.webMaterials.values()].flatMap((material, web_position) => {
+      const source = [...refs.web.values()].find(value => value.source_id === material.source_id)
+      if (source === undefined || unavailable.has(source.source_id)) return []
+      return [{
         web_position, url: source.final_url,
         allowed_usage: ['reference', 'background'], truncated: source.truncated,
-        ...(material === undefined ? {} : { summary: material.summary, supports: material.supports }),
-        mapped_chunks: context.webReadLocations.filter(location => location.source_id === source.source_id
-          && (material === undefined || material.chunk_refs.includes(location.chunk_ref))).map(location => ({
-          read_path: location.read_path, offset: location.start_line,
-          limit: location.end_line - location.start_line + 1,
+        summary: material.summary, supports: material.supports,
+        mapped_chunks: source.chunks.filter(chunk => material.chunk_refs.includes(chunk.chunk_ref)).map(chunk => ({
+          read_path: source.read_path, offset: chunk.start_line,
+          limit: chunk.end_line - chunk.start_line + 1,
         })),
-      }))
+      }]
     }))}`,
     `不可用 Web 来源：${JSON.stringify([...unavailable].map(([source_id, reason]) => ({
-      web_position: [...refs.web.values()].findIndex(source => source.source_id === source_id), reason,
+      web_positions: [...refs.webMaterials.values()].flatMap((material, position) => material.source_id === source_id ? [position] : []),
+      reason,
       mapped_materials: context.webMaterials.filter(material => material.source_id === source_id).map(material => ({
         usage: material.usage, summary: material.summary, supports: material.supports,
       })),
@@ -263,7 +280,7 @@ function uniqueEvidence<T>(values: readonly T[], identity: (value: T) => string,
 /**
  * 按真实 Web 身份合并相同记录，拒绝冲突的语义字段。
  * @param materials 已解析的 Web 引用。
- * @returns 按真实来源去重的条目；语义冲突可恢复地拒绝。
+ * @returns 按来源和精确片段集合去重的条目；语义冲突可恢复地拒绝。
  */
 export function mergeChapterWebMaterials(materials: readonly WebEvidenceMaterial[]): WebEvidenceMaterial[] {
   const normalized = materials.map(material => ({ ...material, chunk_refs: canonicalWebChunkRefs(material.chunk_refs) }))
@@ -333,7 +350,6 @@ export async function bindChapterWriterInput(
   }
   const web: WebEvidenceMaterial[] = []
   const webMaterials = input.metadata.web_materials_used ?? []
-  const mappedUses = new Map<string, number>()
   let currentSources: readonly WebEvidenceSource[] = []
   if (webMaterials.length > 0) {
     const ledgerPath = within(workspace.projectRoot, 'analysis/web-evidence-sources.json')
@@ -341,18 +357,18 @@ export async function bindChapterWriterInput(
     currentSources = parseWebEvidenceSourcesArtifact(JSON.parse(await readFile(ledgerPath, 'utf8'))).sources
   }
   for (const [index, material] of webMaterials.entries()) {
-    const source = [...refs.web.values()][material.web_position]
-    if (source === undefined) throw new ToolArgsError([`metadata.web_materials_used.${index}.web_position: 未知位置 ${material.web_position}。`])
+    const mapped = [...refs.webMaterials.values()][material.web_position]
+    const source = [...refs.web.values()].find(value => value.source_id === mapped?.source_id)
+    if (mapped === undefined || source === undefined) throw new ToolArgsError([`metadata.web_materials_used.${index}.web_position: 未知位置 ${material.web_position}。`])
     const current = currentSources.find(value => value.source_id === source.source_id)
     if (current === undefined || !sameWebIdentity(current, source)) {
       throw new ToolArgsError([`metadata.web_materials_used.${index}.web_position: 位置 ${material.web_position} 的来源已从账本移除或身份不匹配。`])
     }
-    await readChapterWebSource(workspace, current)
-    const candidates = context.webMaterials.filter(value => value.source_id === source.source_id)
-    const use = mappedUses.get(source.source_id) ?? 0
-    const mapped = candidates[use] ?? candidates[0]
-    if (mapped === undefined) throw new ToolArgsError([`metadata.web_materials_used.${index}.web_position: 位置 ${material.web_position} 不属于当前章节的 S4 映射。`])
-    mappedUses.set(source.source_id, use + 1)
+    const content = await readChapterWebSource(workspace, current)
+    const chunks = new Set(buildWebEvidenceChunkIndex(current, content).chunks.map(chunk => chunk.chunk_ref))
+    if (mapped.snapshot_path !== source.snapshot_path || mapped.chunk_refs.some(ref => !chunks.has(ref))) {
+      throw new ToolArgsError([`metadata.web_materials_used.${index}.web_position: 位置 ${material.web_position} 的快照或片段身份不匹配。`])
+    }
     web.push({
       source_id: source.source_id, snapshot_path: source.snapshot_path,
       chunk_refs: mapped.chunk_refs,
@@ -419,9 +435,11 @@ export function projectChapterWriterCandidate(candidate: AcceptedChapterCandidat
           : { file_position: filePosition, chunk_position: fileRef === undefined ? -1
             : refs.chunks.get(fileRef)?.findIndex(chunk => chunk.id === material.chunk) ?? -1, ...semantics }
       }),
-      web_materials_used: candidate.metadata.web_materials_used.map(material => ({
-        web_position: [...refs.web.values()].findIndex(value => value.source_id === material.source_id),
-        usage: material.usage, summary: material.summary, supports: material.supports })),
+      web_materials_used: candidate.metadata.web_materials_used.map((material) => {
+        const web_position = [...refs.webMaterials.keys()].indexOf(webMaterialIdentity(material))
+        if (web_position < 0) throw new Error('CHAPTER_WRITER_WEB_MATERIAL_UNREGISTERED')
+        return { web_position, usage: material.usage, summary: material.summary, supports: material.supports }
+      }),
       unresolved_topics: candidate.metadata.unresolved_topics, handoff,
       flowcharts: candidate.metadata.flowcharts
         .filter(flowchart => !preservedFlowcharts.some(original => original.key === flowchart.key)).map(flowchart => ({

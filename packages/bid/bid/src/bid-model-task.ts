@@ -21,6 +21,7 @@ import { parseWritingPlan, writingPlanInputSchema, writingRequestSchema } from '
 import { bidProjectInspectSchema } from './bid-project-inspect.ts'
 import { readBidWorkDescriptor, readBidWorkRequest } from './work-descriptor.ts'
 import { readBidProjectState } from './project-state.ts'
+import { requireWritableSectionAnswers } from './chapter-object-positions.ts'
 
 const position = z.number().int().nonnegative()
 const revisionTaskId = (sectionId: string): string => 'revision-' + createHash('sha256').update(sectionId).digest('hex').slice(0, 16)
@@ -29,8 +30,8 @@ const fields = {
   parent_id: ['parent_position', 'sections'], source_section_ids: ['source_section_positions', 'sections'],
   related_sections: ['related_section_positions', 'sections'],
   requirement_id: ['requirement_position', 'requirements'], requirement_ids: ['requirement_positions', 'requirements'],
-  scoring_id: ['scoring_position', 'scoring'], scoring_ids: ['scoring_positions', 'scoring'],
-  selected_scoring_ids: ['selected_scoring_positions', 'scoring'],
+  scoring_id: ['origin_scoring_position', 'scoring_origin'], scoring_ids: ['scoring_positions', 'scoring'],
+  selected_scoring_ids: ['selected_origin_scoring_positions', 'scoring_origin'],
   scoring_response_point_ids: ['response_point_positions', 'response_points'],
   compliance_ids: ['compliance_positions', 'compliance'],
   compliance_id: ['compliance_position', 'compliance'],
@@ -85,6 +86,7 @@ export async function collectBidModelTaskCatalog(workspace: BidWorkspace, sessio
   const draft = nativeDraft && outlineSource !== undefined ? await getOrCreateOutlineDraft(workspace) : baseline
   const requirements = await optionalText(workspace, 'analysis/requirements.json')
   const scoring = await optionalText(workspace, 'analysis/scoring.json')
+  const scoringOrigin = await optionalText(workspace, 'analysis/scoring-origin.json')
   const compliance = await optionalText(workspace, 'analysis/compliance.json')
   const points = await optionalText(workspace, 'analysis/scoring-response-points.json')
   const queue = await readRevisionQueue(workspace)
@@ -133,6 +135,8 @@ export async function collectBidModelTaskCatalog(workspace: BidWorkspace, sessio
       requirements: requirements === undefined ? [] : parseTenderRequirementsArtifact(JSON.parse(requirements)).requirements
         .map(item => ({ id: item.id, label: item.normalized_requirement })),
       scoring: scoring === undefined ? [] : parseTenderScoringArtifact(JSON.parse(scoring)).scoring_items
+        .map(item => ({ id: item.id, label: item.criterion })),
+      scoring_origin: scoringOrigin === undefined ? [] : parseTenderScoringArtifact(JSON.parse(scoringOrigin)).scoring_items
         .map(item => ({ id: item.id, label: item.criterion })),
       compliance: compliance === undefined ? [] : parseTenderComplianceArtifact(JSON.parse(compliance)).compliance_items
         .map(item => ({ id: item.id, label: item.normalized_rule })),
@@ -231,12 +235,7 @@ export function bidModelTaskJsonSchema(schema: JsonSchemaNode): JsonSchemaNode {
           .map(name => name === 'order' ? 'sibling_position' : fieldMap.get(name)?.[0] ?? name)
       } else output[key] = visit(value)
     }
-    if ((record.properties as { type?: { const?: unknown } } | undefined)?.type?.const === 'add_section') {
-      const properties = output.properties as Record<string, object>
-      output.properties = { ...properties, must_answer: { ...properties.must_answer, minItems: 1 } }
-      output.required = [...new Set([...(output.required as string[]), 'must_answer'])]
-    }
-    return output
+    return requireWritableSectionAnswers(output)
   }
   return visit(schema) as JsonSchemaNode
 }

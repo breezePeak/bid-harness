@@ -9,6 +9,7 @@ import { appendChapterWebReferences, bindChapterWriterInput, createChapterWriter
 import { buildChapterReviewEvidence } from '../src/chapter-writing-review.ts'
 import { webEvidenceContentSha256, webEvidenceSourceId } from '../src/web-evidence-source-artifacts.ts'
 import { buildWebEvidenceChunkIndex, webEvidenceChunkIndexPath } from '../src/web-evidence-chunks.ts'
+import { webMaterialIdentity } from '../src/evidence-mapping-artifacts.ts'
 import type { WebEvidenceSnapshot } from '../src/web-evidence-snapshot.ts'
 import { normalizeFlowchartInputs } from '../src/flowchart.ts'
 import { selectOriginalChapterContent } from '../src/chapter-content-reuse.ts'
@@ -57,6 +58,7 @@ async function fixture() {
     chunk_refs: webIndex.chunks.map(chunk => chunk.chunk_ref),
     usage: 'reference', summary: '公开资料', supports: '技术方法',
   }]
+  for (const material of context.webMaterials) refs.webMaterials.set(webMaterialIdentity(material), material)
   await appendChapterWebReferences(workspace, refs, [web.source])
   const bind = (metadata: unknown, snapshots: readonly WebEvidenceSnapshot[] = []) => bindChapterWriterInput(
     workspace, manifest, context, refs,
@@ -363,6 +365,7 @@ describe('S5 Writer 短引用与语义输入', () => {
       usage: index === 0 ? 'reference' as const : 'background' as const,
       summary: index === 0 ? '实施流程' : '质量控制', supports: index === 0 ? '支持外业实施步骤' : '支持质量检查机制',
     }))
+    for (const material of context.webMaterials) refs.webMaterials.set(webMaterialIdentity(material), material)
     await appendChapterWebReferences(workspace, refs, [large.source])
     const rendered = renderChapterWriterReferences(context, refs)
     const verified = JSON.parse(rendered.split('\n').find(line => line.startsWith('Verified Web Chunks：'))!.slice('Verified Web Chunks：'.length)) as Array<{ mapped_chunks: Array<{ offset: number; limit: number }> }>
@@ -372,10 +375,21 @@ describe('S5 Writer 短引用与语义输入', () => {
       markdown: `# ${context.section.title}\n\n完整正文与具体技术方案。`,
       metadata: { web_materials_used: [
         { web_position: 1, usage: 'reference', summary: '实施流程', supports: '支持外业实施步骤' },
-        { web_position: 1, usage: 'background', summary: '质量控制', supports: '支持质量检查机制' },
+        { web_position: 2, usage: 'background', summary: '质量控制', supports: '支持质量检查机制' },
       ] },
     }, [])
     expect(candidate.metadata.web_materials_used.map(material => material.chunk_refs)).toEqual(chunks.map(chunk => [chunk.chunk_ref]))
+    const projected = projectChapterWriterCandidate(candidate, refs) as {
+      markdown: string
+      metadata: { web_materials_used: unknown[] }
+    }
+    for (const materials of [projected.metadata.web_materials_used.slice(1), [...projected.metadata.web_materials_used].reverse()]) {
+      const selected = await bindChapterWriterInput(workspace, manifest, context, refs,
+        { ...projected, metadata: { ...projected.metadata, web_materials_used: materials } }, [])
+      expect(selected.metadata.web_materials_used[0]).toEqual(candidate.metadata.web_materials_used[1])
+    }
+    expect((await bindChapterWriterInput(workspace, manifest, context, refs, projected, [])).metadata.web_materials_used)
+      .toEqual(candidate.metadata.web_materials_used)
     const same = { source_id: large.source.source_id, snapshot_path: large.source.snapshot_path, chunk_refs: [chunks[0]!.chunk_ref, chunks[1]!.chunk_ref], usage: 'reference' as const, summary: '同一资料', supports: '同一支撑' }
     expect(mergeChapterWebMaterials([{ ...same, chunk_refs: [...same.chunk_refs].reverse() }, same])).toHaveLength(1)
     expect(() => mergeChapterWebMaterials([same, { ...same, supports: '冲突支撑' }])).toThrow('冲突')
@@ -407,6 +421,7 @@ describe('S5 Writer 短引用与语义输入', () => {
   it('修复只追加 W 编号，候选投影不带内部身份或任务覆盖索引', async () => {
     const { bind, web, workspace, refs, context } = await fixture()
     const second = snapshot('新增公开技术资料', 'https://official.example/new')
+    second.source.chapter_context = { section_id: context.section.id, child_session_id: 'writer', writer_attempt: 1 }
     await writeFile(join(workspace.projectRoot, second.source.snapshot_path), second.content)
     await ledger(workspace, [web, second])
     await appendChapterWebReferences(workspace, refs, [second.source, web.source])
@@ -424,9 +439,45 @@ describe('S5 Writer 短引用与语义输入', () => {
     for (const key of ['section_id', 'covered_', 'source_id', 'file_id', 'snapshot_path']) expect(projected).not.toContain(key)
   })
 
+  it.each([false, true])('本章新增网页投影、视觉确认和恢复后保持资料身份，含流程图=%s', async (withFlowchart) => {
+    const { workspace, manifest, context, refs, web } = await fixture()
+    const fresh = snapshot('新抓取的质量检查流程。', 'https://official.example/fresh')
+    const input = { markdown: `# ${context.section.title}\n\n说明质量检查。${withFlowchart ? '\n\n{{flowchart:0}}' : ''}`,
+      metadata: { additional_web_materials: [{ url: fresh.source.final_url, usage: 'reference', summary: '质量检查', supports: '检查步骤' }],
+        ...(withFlowchart ? { flowcharts: [{ title: '检查流程', nodes: [{ type: 'start', text: '开始' }, { type: 'end', text: '完成' }],
+          edges: [{ from_position: 0, to_position: 1 }] }] } : {}) } }
+    const first = await bindChapterWriterInput(workspace, manifest, context, refs, input, [fresh])
+    fresh.source.chapter_context = { section_id: context.section.id, child_session_id: 'writer', writer_attempt: 1 }
+    await writeFile(join(workspace.projectRoot, fresh.source.snapshot_path), fresh.content)
+    await ledger(workspace, [web, fresh])
+    await appendChapterWebReferences(workspace, refs, [web.source, fresh.source])
+    const { additional_web_materials: _additional, ...metadata } = first.metadata
+    const accepted = { ...first, metadata: { ...metadata, web_materials_used: [{
+      source_id: fresh.source.source_id, snapshot_path: fresh.source.snapshot_path,
+      chunk_refs: buildWebEvidenceChunkIndex(fresh.source, fresh.content).chunks.map(chunk => chunk.chunk_ref),
+      usage: 'reference' as const, summary: '质量检查', supports: '检查步骤',
+    }] } }
+    const restored = createChapterWriterReferences(context)
+    await appendChapterWebReferences(workspace, restored, [fresh.source, web.source])
+    for (const table of [refs, restored]) {
+      const projected = projectChapterWriterCandidate(accepted, table)
+      expect(JSON.stringify(projected)).not.toContain('"web_position":-1')
+      const rebound = await bindChapterWriterInput(workspace, manifest, context, table, projected, [])
+      expect(rebound.metadata.web_materials_used).toEqual(accepted.metadata.web_materials_used)
+      expect(rebound.metadata.flowcharts).toEqual(accepted.metadata.flowcharts)
+    }
+    const foreign = createChapterWriterReferences({ ...context, section: { ...context.section, id: 'another-chapter' } })
+    await appendChapterWebReferences(workspace, foreign, [fresh.source, web.source])
+    expect(() => projectChapterWriterCandidate(accepted, foreign)).toThrow('CHAPTER_WRITER_WEB_MATERIAL_UNREGISTERED')
+    await writeFile(join(workspace.projectRoot, fresh.source.snapshot_path), '错误哈希')
+    await expect(bindChapterWriterInput(workspace, manifest, context, refs,
+      projectChapterWriterCandidate(accepted, refs), [])).rejects.toThrow('Hash')
+  })
+
   it('Evidence Pack 包含新增 F chunk 与新增 Web 原文，保持来源证明范围', async () => {
     const { workspace, manifest, context, refs, bind } = await fixture()
     const newWeb = snapshot('新 fetch 的实际技术正文', 'https://official.example/new')
+    newWeb.source.chapter_context = { section_id: context.section.id, child_session_id: 'writer', writer_attempt: 1 }
     await writeFile(join(workspace.projectRoot, newWeb.source.snapshot_path), newWeb.content)
     await writeFile(
       join(workspace.projectRoot, webEvidenceChunkIndexPath(newWeb.source.source_id)),

@@ -595,7 +595,7 @@ export async function runEvidenceMappingLoop(ctx: Context, root: string, repair:
 }
 
 /**
- * 通过真实 Writer 工具和 Reviewer 私有分批提交，补充 S4 未映射的本地资料。
+ * 通过真实 Writer 工具和 Reviewer 分批提交，验证补搜资料回流及网页引用在修复中的往返。
  * @param ctx - Loader 组装的 Agent、工具、持久化和 Subagent 服务。
  * @param root - 本用例的隔离工作区。
  * @returns 章节阶段产物及工作区；S4 map 变更时抛错。
@@ -667,10 +667,12 @@ export async function runChapterWritingLoop(ctx: Context, root: string) {
   const tender = manifest.files.find(file => file.role === 'tender')!
   if (corpus === undefined || tender.chunksPath === null) throw new Error('缺少 S5 回放资料')
   const workspacePath = relative(root, workspace.projectRoot).replaceAll('\\', '/')
+  const webUrl = 'https://official.example/standard'
   const candidate = {
     markdown: '# 访问控制与安全审计\n\n本项目先核查角色与访问权限，再组织安全审计和结果复核。实施流程以本地资料为编排参考，按权限授予、执行检查、记录留存三个步骤说明责任与交付结果。\n\n表 访问控制与安全审计管理台账\n| 管理事项 | 台账记录内容 |\n| --- | --- |\n| 权限授予 | 访问权限 |\n| 执行检查 | 安全审计 |\n| 记录留存 | 复核结果 |',
     metadata: {
       local_materials_used: [{ file_ref: 'F1', chunk: corpus.chunks[0]!.id, usage: 'reference', summary: '支撑本章实施流程的组织与步骤安排。' }],
+      additional_web_materials: [{ url: webUrl, usage: 'reference', summary: '要求访问控制与审计。', supports: '支持安全方案。' }],
     },
   }
   const coverage = { status: 'covered', evidence_quote_refs: ['Q2'], issue: null }
@@ -705,6 +707,7 @@ export async function runChapterWritingLoop(ctx: Context, root: string) {
     toolCall('read-forbidden-tender', 'read', { file_path: `${workspacePath}/${tender.chunksPath}/chunk_0001.md` }),
     toolCall('grep-supplement', 'grep', { pattern: '实施流程', path: corpus.chunks_path }),
     toolCall('read-supplement', 'read', { file_path: corpus.chunks[0]!.path }),
+    toolCall('fetch-writing-source', 'web_fetch', { url: webUrl }),
     toolCall('reject-bad-reference', 'submit_chapter', { ...candidate, metadata: { local_materials_used: [{ ...candidate.metadata.local_materials_used[0], file_ref: 'F999' }] } }),
     toolCall('reject-bad-web-reference', 'submit_chapter', { ...candidate, metadata: { web_materials_used: [{ web_ref: 'W1', usage: 'reference', summary: '不可用的公开资料', supports: '安全审计要求' }] } }),
     toolCall('reject-new-atx-heading', 'submit_chapter', { ...candidate, markdown: `${candidate.markdown}\n\n## 补充服务方案\n\n我方组织访问控制实施。` }),
@@ -712,6 +715,7 @@ export async function runChapterWritingLoop(ctx: Context, root: string) {
     toolCall('reject-internal-id', 'submit_chapter', { ...candidate, markdown: `${candidate.markdown}\n\n我方按 REQ-1 组织访问控制实施。` }),
     toolCall('submit-chapter', 'submit_chapter', candidate),
     toolCall('research-read-local', 'read_source', { source_ref: 'M1:chunk_0001' }),
+    toolCall('research-read-web', 'read_source', { source_ref: expectedWebChunkRef(webUrl) }),
     toolCall('research-ready', 'submit_section_research_assessment', researchAssessment(true, false)),
     toolCall('research-plan', 'update_section_task', {
       section_id: section.id, basis: { kind: 'tender_requirement', explanation: '核对访问控制任务的实施组织。', requirement_ids: ['REQ-1'] },
@@ -728,7 +732,7 @@ export async function runChapterWritingLoop(ctx: Context, root: string) {
     toolCall('research-submit', 'submit_section_mapping', {
       section_id: section.id,
       local_materials: [{ material_ref: 'M1:chunk_0001', usage: 'reference', summary: '支撑本章实施流程的组织与步骤安排。' }],
-      web_materials: [],
+      web_materials: [transientWebMaterial(webUrl)],
     }),
     toolCall('research-finish', 'finish_mapping_task', {}),
     toolCall('research-quality', 'structured_output', {
@@ -736,10 +740,18 @@ export async function runChapterWritingLoop(ctx: Context, root: string) {
       checked_scoring_response_point_ids: ['RP-000001'], issues: [], blocking_issues: [],
     }),
     toolCall('research-final-list', 'list_review_items', {}),
+    toolCall('research-final-read-web', 'read_source', { source_ref: expectedWebChunkRef(webUrl) }),
     reviewPendingMappingItems,
     toolCall('research-final-finish', 'finish_final_check', {}),
+    (options: GenerateOptions) => {
+      const text = options.messages.flatMap(message => message.content).flatMap(block => block.type === 'text' ? [block.text] : []).join('\n')
+      const line = text.split('\n').findLast(line => line.startsWith('当前候选：'))
+      if (line === undefined) throw new Error('修复请求缺少程序投影的候选')
+      const projected = JSON.parse(line.slice('当前候选：'.length)) as { markdown: string; metadata: object }
+      return toolCall('resubmit-web-candidate', 'submit_chapter', { ...projected, markdown: projected.markdown + '\n\n质量检查由实施负责人组织，审计结果由复核人员确认。' })
+    },
   ]
-  const reviewScript = [
+  const reviewRound = (blocking_issues: string[]): ScriptStep[] => [
     toolCall('review-incomplete', 'finish_chapter_review', {}),
     toolCall('submit-coverage', 'review_coverage_items', { items: Array.from({ length: section.must_answer.length + section.requirement_ids.length + (section.scoring_response_point_ids ?? []).length + 1 }, (_, index) => ({ item_ref: `R${index + 1}`, ...coverage })) }),
     toolCall('review-global-constraint', 'review_global_constraints', {
@@ -748,16 +760,17 @@ export async function runChapterWritingLoop(ctx: Context, root: string) {
     toolCall('review-acceptance', 'review_acceptance_criteria', {
       items: [{ criterion_position: 0, status: 'met', evidence_quote_refs: ['Q2'], reason: '正文详细说明了访问控制实施流程。' }],
     }),
-    toolCall('submit-summary', 'set_review_summary', summary),
+    toolCall('submit-summary', 'set_review_summary', { ...summary, blocking_issues }),
     toolCall('finish-review', 'finish_chapter_review', {}),
   ]
+  const reviewScript = [...reviewRound(['补充质量检查责任。']), ...reviewRound([])]
   const adapter = new ScriptedAdapter(sessionId, parentScript, childScript)
   adapter.reviewScript.push(...reviewScript)
   ctx.effect(() => ctx.llm.registerAdapter(['mock'], adapter))
   registerIntegrationTools(ctx, root, 'https://official.example/standard')
   const agent = ctx.agentLoop.create(sessionId, { provider: 'mock', model: 'mock' }, { cwd: root })
   const artifacts = await executeChapterWriting(agent, workspace, buildBidStageTask('chapter_writing'), {
-    maxRepairAttempts: 0, maxConcurrency: 1, run: createTestBidRunContext(),
+    maxRepairAttempts: 1, maxConcurrency: 1, run: createTestBidRunContext(),
   })
   const mapped = parseEvidenceMapArtifact(JSON.parse(await readFile(evidencePath, 'utf8')))
   const metadata = parseChapterMetadata(JSON.parse(await readFile(join(workspace.projectRoot,

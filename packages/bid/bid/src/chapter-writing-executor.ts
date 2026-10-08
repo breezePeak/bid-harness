@@ -1074,7 +1074,7 @@ function renderChapterReviewerTask(
     '先按 Current Chapter Path 和 Confirmed Outline Responsibilities 核对每段正文与当前、祖先和同级节点的主题关系及展开程度，再检查清单覆盖。structure_complete 同时要求本节承担正确职责、没有自创目录或侵入其他章节。结合证据原文语境判断内容是否适合当前任务，不凭标题或材料关键词判定归属。Host 明确列出的必须保留原文载体可完整展示跨节点整体关系，不能仅因原图、原表含有后续节点就判定 structure_complete=false 或要求删改原载体；范围检查针对其周围新增或可改内容。若原载体与当前任务确有无法同时满足的业务冲突，记录 assignment_conflicts，由 Main 调整分配。其他正文发现越界时将 structure_complete 设为 false，并在 blocking_issues 指出具体段落和应归属的章节；资料确有依据或清单已覆盖不能抵消放错章节的问题。',
     '若 must_answer、Writing Brief 或其他既定任务与目录职责冲突，明确记录该任务冲突，不要求 Writer 按错误位置扩写。允许本节概述相关主题并说明其与本节任务的关系；属于其他节点的内容由对应章节展开。',
     '全局要求不属于 R 覆盖项，不要求本章复述。逐项判断 conforms、violates 或 not_applicable：conforms/violates 引用适用正文，not_applicable 说明本章为何不适用且不代表整份文档已经满足。只有当前正文真实违反全局约束时才形成可执行修复意见。',
-    '逐项审查 Review Checklist 的 item_position；covered 必须至少选择一个当前 evidence_quote_position 且 issue=null，missing 不得选择原文且必须说明具体 issue。Semantic Acceptance 逐项提交 criterion_position、met/unmet、reason 和可选 evidence_quote_positions；全局约束使用 compliance_position，任务冲突使用 related_section_positions；程序绑定实际身份。负向条件未满足时可引用违规句，全文性条件不因缺少单句引文而失效。',
+    '逐项审查 Review Checklist 的 item_position；covered 必须至少选择一个当前 evidence_quote_position 且 issue=null，missing 不得选择原文且必须说明具体 issue。Semantic Acceptance 逐项提交 criterion_position、met/unmet、reason 和 evidence_quote_positions；evidence_quote_positions 字段必填，无需引句时填 []；全局约束使用 compliance_position，任务冲突使用 related_section_positions；程序绑定实际身份。负向条件未满足时可引用违规句，全文性条件不因缺少单句引文而失效。',
     '正文包含 metadata.flowcharts 时，将其作为正文的一部分审核：核对流程图与正文步骤、角色、分支和整改闭环是否一致，检查关键评分响应流程是否遗漏、连线是否断裂、判断节点是否缺少分支或与招标要求矛盾。只报告业务问题，不操作布局坐标或生成 Visio/OOXML。',
     '所有 evidence_quote_positions 与 claim_quote_position 只选择当前 Quote Options 的位置；不得手抄或自造引用身份。',
     '只对实质影响方案、事实或承诺的声明登记 claim，source_position 选择 Evidence Pack 的位置或 null。supported 必须实际看到适用原文，来源存在本身不表示语义支持；unsupported 说明具体问题。',
@@ -2943,7 +2943,9 @@ async function runChapterWriting(
             responsePointCatalog: responsePointCatalog.points, outline, writingPlan })
           await resolveChapterReadLocations(workspace, manifest, webSources.sources, context)
           contexts.set(sectionId, context)
-          references = createChapterWriterReferences(context, dependencyFlowcharts)
+          const updatedReferences = createChapterWriterReferences(context, dependencyFlowcharts)
+          references = { ...updatedReferences,
+            webMaterials: new Map([...references.webMaterials, ...updatedReferences.webMaterials]) }
           await loadChapterWriterChunkReferences(workspace, references)
           await appendChapterWebReferences(workspace, references, chapterWebSources())
           const activeWriterId = activeWriterIds.get(sectionId)
@@ -3287,6 +3289,7 @@ async function runChapterWriting(
           const captured = capturedByChild.get(String(run.id)) ?? new Map()
           const snapshots = buildWebEvidenceSnapshots(captured.values())
           const attemptSnapshots = await persistWebSnapshots(sectionId, String(run.id), writerAttempt, snapshots)
+          await appendChapterWebReferences(workspace, references, chapterWebSources())
           if (result.stopReason !== 'completed') {
             issues.push({ code: 'CHAPTER_SUBAGENT_STOP_REASON_INVALID', message: `Chapter Subagent 未正常完成：${result.stopReason}。${result.diagnostic ?? ''}` })
             retryInfrastructure = result.stopReason === 'error' && infrastructureRetries < options.maxRepairAttempts

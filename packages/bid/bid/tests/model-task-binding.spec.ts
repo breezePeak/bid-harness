@@ -15,6 +15,9 @@ import { verifyCapabilityTaskScope } from '../src/bid-capability-registry.ts'
 import { readCapabilityOutlineBaseline } from '../src/outline-draft-store.ts'
 import { addRevisionIssue, readRevisionQueue, writeRevisionQueue } from '../src/chapter-revision-queue.ts'
 import { seedMainTaskPlanningProject } from './fixtures/main-task-planning-loop.ts'
+import { applyTenderAnalysisEdits, createConfirmedTenderScoring, parseTenderAnalysisEditOperations, parseTenderScoringSelection } from '../src/tender-analysis-confirmation.ts'
+import { parseTenderProjectArtifact, parseTenderRequirementsArtifact, parseTenderScoringArtifact,
+  parseTenderComplianceArtifact } from '../src/tender-analysis-artifacts.ts'
 
 const disposals: Array<() => Promise<void>> = []
 afterEach(async () => { for (const dispose of disposals.splice(0)) await dispose() })
@@ -48,6 +51,52 @@ it('模型只选择真实章节位置，任务身份及目录编辑目标由程�
   expect(schema).not.toContain('"content_sha256":')
   expect(schema).not.toContain('"defer_content_migration":')
   expect(schema).not.toContain('"writable":')
+})
+
+it('S2 使用完整原始评分的位置编辑和重新选择，已确认评分保持独立位置', async () => {
+  const { workspace } = await fixture()
+  const scoringPath = join(workspace.projectRoot, 'analysis/scoring.json')
+  const scoring = JSON.parse(await readFile(scoringPath, 'utf8')) as { scoring_items: Array<{ id: string; criterion: string }> }
+  const origin = { ...scoring, scoring_items: ['original-alpha', 'original-beta', 'original-gamma']
+    .map((id, index) => ({ ...scoring.scoring_items[0]!, id, criterion: ['权限控制', '备份恢复', '数据审计'][index]! })) }
+  await writeFile(join(workspace.projectRoot, 'analysis/scoring-origin.json'), JSON.stringify(origin))
+  await rm(scoringPath)
+  const source = {
+    project: parseTenderProjectArtifact(JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/project.json'), 'utf8'))),
+    requirements: parseTenderRequirementsArtifact(JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/requirements.json'), 'utf8'))),
+    compliance: parseTenderComplianceArtifact(JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/compliance.json'), 'utf8'))),
+    scoring: parseTenderScoringArtifact(origin), selected_scoring_ids: ['original-beta'],
+  }
+  const task = { goal: '修改审计要求并重新选择权限控制', scope: { kind: 'project' }, steps: [{
+    description: '调整原始评分', scope: { source: 'task' }, call: { capability: 'tender.update', input: {
+      operations: [{ type: 'update_scoring_item', origin_scoring_position: 2, fields: { criterion: '明确审计结果' } }],
+      selected_origin_scoring_positions: [0, 1],
+    } },
+  }] }
+  for (const confirmed of [undefined, { ...scoring, scoring_items: [origin.scoring_items[1]!] }]) {
+    if (confirmed !== undefined) await writeFile(scoringPath, JSON.stringify(confirmed))
+    const catalog = await collectBidModelTaskCatalog(workspace)
+    expect(catalog.objects.scoring.map(item => item.id)).toEqual(confirmed === undefined ? [] : ['original-beta'])
+    expect(presentBidModelTaskCatalog(catalog)).toMatchObject({ scoring_origin: [
+      { position: 0, label: '权限控制' }, { position: 1, label: '备份恢复' }, { position: 2, label: '数据审计' },
+    ] })
+    const call = bindBidModelTask(task, catalog).steps[0]!.call
+    expect(call.input).toMatchObject({
+      operations: [{ scoring_id: 'original-gamma' }], selected_scoring_ids: ['original-alpha', 'original-beta'],
+    })
+    if (call.capability !== 'tender.update') throw new Error('测试必须使用招标修改能力')
+    const edited = applyTenderAnalysisEdits(source, parseTenderAnalysisEditOperations(call.input.operations))
+    const selection = parseTenderScoringSelection({ schema_version: 1,
+      selected_scoring_ids: call.input.selected_scoring_ids }, edited.scoring)
+    expect(edited.scoring.scoring_items[2]).toMatchObject({ id: 'original-gamma', criterion: '明确审计结果' })
+    expect(edited.scoring.scoring_items.slice(0, 2)).toEqual(source.scoring.scoring_items.slice(0, 2))
+    expect(createConfirmedTenderScoring({ ...edited, ...selection }).scoring_items.map(item => item.id))
+      .toEqual(['original-alpha', 'original-beta'])
+  }
+  const schema = JSON.stringify(bidModelTaskJsonSchema(zodJsonSchema(bidCapabilityTaskSchema)))
+  expect(schema).toContain('objects.scoring_origin')
+  expect(schema).toContain('"selected_origin_scoring_positions"')
+  expect(schema).toContain('"scoring_positions"')
 })
 
 it('模型新增章节只给业务内容，程序确定叶节状态并拒绝模型填可写标记', async () => {

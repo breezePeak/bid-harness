@@ -49,7 +49,7 @@ export function createChapterObjectPositions(fields: readonly ChapterObjectPosit
   const schema = (value: unknown): unknown => {
     if (Array.isArray(value)) return (value as unknown[]).map(schema)
     if (value === null || typeof value !== 'object') return value
-    return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([name, child]) => {
+    return requireWritableSectionAnswers(Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([name, child]) => {
       if (name === 'required' && Array.isArray(child)) {
         return [name, (child as unknown[]).filter(item => item !== 'writable')
           .map(item => item === 'order' ? 'sibling_position' : canonical.get(String(item))?.model ?? item)]
@@ -66,9 +66,25 @@ export function createChapterObjectPositions(fields: readonly ChapterObjectPosit
         return [field.model, field.many ? { ...source, description, items: position }
           : source.oneOf !== undefined || source.anyOf !== undefined ? { oneOf: [position, { type: 'null' }], description } : position]
       }))]
-    }))
+    })))
   }
   return { bind, schema: input => schema(input) as Record<string, unknown> }
+}
+
+/**
+ * 在程序强制新增叶节可写的模型 Schema 中公开其必答条件。
+ * @param schema 已投影位置字段的单个 Schema 节点。
+ * @returns 新叶节要求非空 must_answer，其他节点原样返回。
+ */
+export function requireWritableSectionAnswers(schema: Record<string, unknown>): Record<string, unknown> {
+  const properties = schema.properties as Record<string, Record<string, unknown>> | undefined
+  if (properties?.type?.const !== 'add_section') return schema
+  return {
+    ...schema,
+    properties: { ...properties,
+      must_answer: { ...properties.must_answer, minItems: 1, description: '新增可写章节的具体写作要求，必填且至少一项。' } },
+    required: [...new Set([...(schema.required as string[]), 'must_answer'])],
+  }
 }
 
 function chapterPosition(value: unknown): number {

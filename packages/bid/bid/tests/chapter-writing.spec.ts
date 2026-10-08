@@ -1249,6 +1249,36 @@ describe('chapter-writing executor', () => {
     expect(fixture.subagents.followup.mock.calls.filter(call => call[2].some(block => block.type === 'image'))).toHaveLength(1)
   })
 
+  it('首次新增网页在流程图视觉回传前获得材料位置，原样确认仍能保存同一来源', async () => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-s5-web-visual-roundtrip-')))
+    const outline = await writeInputs(workspace)
+    await mockWriterEvidenceResearch(workspace, outline)
+    let returnedWeb: unknown
+    const fixture = fixtureAgent(workspace, outline, {}, true, () => true, (_attempt, request) => {
+      if (request.prompt.some(block => block.type === 'image')) {
+        const line = promptText(request).split('\n').find(value => value.startsWith('当前完整 candidate：'))!
+        const projected = JSON.parse(line.slice('当前完整 candidate：'.length)) as { metadata: { web_materials_used: unknown[] } }
+        returnedWeb = projected.metadata.web_materials_used
+        expect(returnedWeb).toEqual([{ web_position: 0, usage: 'reference', summary: '官方正文摘要', supports: '公开技术要求' }])
+        return { stopReason: 'completed', output: [], structured: projected }
+      }
+      const first = writerSectionId(request) === 'SEC-1'
+      const candidate = candidateFrom(request, true, first)
+      if (!first) return { stopReason: 'completed', output: [], structured: candidate }
+      return { stopReason: 'completed', output: [], structured: { ...candidate,
+        markdown: candidate.markdown + '\n\n{{flowchart:route}}', metadata: { ...candidate.metadata, flowcharts: [{
+          key: 'route', title: '执行流程', nodes: [{ key: 'start', type: 'start', text: '开始' }, { key: 'end', type: 'end', text: '完成' }],
+          edges: [{ from: 'start', to: 'end' }],
+        }] } } }
+    }, true)
+    await executeChapterWriting(fixture.agent, workspace, buildBidStageTask('chapter_writing'), { maxRepairAttempts: 0, maxConcurrency: 1 })
+    expect(returnedWeb).toBeDefined()
+    const metadata = parseChapterMetadata(JSON.parse(await readFile(join(workspace.projectRoot, 'chapters/meta/0001.json'), 'utf8')))
+    expect(metadata.web_materials_used).toHaveLength(1)
+    expect(metadata.web_materials_used[0]).toMatchObject({ summary: '官方正文摘要', supports: '公开技术要求' })
+    expect(metadata.flowcharts).toHaveLength(1)
+  })
+
   it('把真实流程图 PNG 发回同一 Writer，修改后重新渲染并由原会话确认', async () => {
     const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-s5-flowchart-visual-')))
     const outline = await writeInputs(workspace)

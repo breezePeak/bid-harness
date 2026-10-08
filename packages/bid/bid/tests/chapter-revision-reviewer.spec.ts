@@ -266,7 +266,7 @@ describe('任务 01: Reviewer 真正审核 RevisionIssue', () => {
     expect(output).toContain('未知审批意见位置 999')
   })
 
-  it('7. 漏 issue 时 finish 失败并返回 missing_revision_issue_ids', async () => {
+  it('7. 漏 issue 时 finish 失败并返回 missing_issue_positions', async () => {
     const { agent, call } = await harness()
     const context = makeContext()
     const runtime = attachChapterReview(agent, context, new Map([['Q1', '正文内容']]), evidence, 0, [], issues)
@@ -279,9 +279,9 @@ describe('任务 01: Reviewer 真正审核 RevisionIssue', () => {
     await call('set_review_summary', { quality_checks: quality, blocking_issues: [], assignment_conflicts: [], external_input_gaps: [], external_input_only: false })
     const finishRes = await call('finish_chapter_review', {})
     const text = (finishRes as { content?: Array<{ text?: string }> }).content?.[0]?.text ?? '{}'
-    const output = JSON.parse(text) as { completed: boolean; missing_revision_issue_ids: string[] }
+    const output = JSON.parse(text) as { completed: boolean; missing_issue_positions: number[] }
     expect(output.completed).toBe(false)
-    expect(output.missing_revision_issue_ids).toEqual(['REV-002'])
+    expect(output.missing_issue_positions).toEqual([1])
     expect(runtime.captured()).toBeUndefined()
   })
 

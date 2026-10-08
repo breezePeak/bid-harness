@@ -510,6 +510,7 @@ it('S4 waiting_user 通过源码 Loader 执行受控对话修改', async () => {
         "bid_evidence_remap",
         "bid_project_inspect",
         "bid_run_task",
+        "bid_plan_task",
         "bid_confirm_writing_plan",
       ],
     }

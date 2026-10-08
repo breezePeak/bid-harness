@@ -5048,6 +5048,139 @@
             },
             {
               "type": "element",
+              "name": "w:p",
+              "elements": [
+                {
+                  "type": "element",
+                  "name": "w:pPr",
+                  "elements": [
+                    {
+                      "type": "element",
+                      "name": "w:keepNext",
+                      "attributes": {
+                        "w:val": "false"
+                      }
+                    },
+                    {
+                      "type": "element",
+                      "name": "w:keepLines",
+                      "attributes": {
+                        "w:val": "false"
+                      }
+                    },
+                    {
+                      "type": "element",
+                      "name": "w:spacing",
+                      "attributes": {
+                        "w:after": "0",
+                        "w:before": "0",
+                        "w:line": "360",
+                        "w:lineRule": "auto"
+                      }
+                    },
+                    {
+                      "type": "element",
+                      "name": "w:ind",
+                      "attributes": {
+                        "w:firstLineChars": "200"
+                      }
+                    },
+                    {
+                      "type": "element",
+                      "name": "w:jc",
+                      "attributes": {
+                        "w:val": "both"
+                      }
+                    }
+                  ]
+                },
+                {
+                  "type": "element",
+                  "name": "w:r",
+                  "elements": [
+                    {
+                      "type": "element",
+                      "name": "w:rPr",
+                      "elements": [
+                        {
+                          "type": "element",
+                          "name": "w:rFonts",
+                          "attributes": {
+                            "w:ascii": "Times New Roman",
+                            "w:eastAsia": "宋体",
+                            "w:hAnsi": "Times New Roman"
+                          }
+                        },
+                        {
+                          "type": "element",
+                          "name": "w:b",
+                          "attributes": {
+                            "w:val": "false"
+                          }
+                        },
+                        {
+                          "type": "element",
+                          "name": "w:bCs",
+                          "attributes": {
+                            "w:val": "false"
+                          }
+                        },
+                        {
+                          "type": "element",
+                          "name": "w:i",
+                          "attributes": {
+                            "w:val": "false"
+                          }
+                        },
+                        {
+                          "type": "element",
+                          "name": "w:iCs",
+                          "attributes": {
+                            "w:val": "false"
+                          }
+                        },
+                        {
+                          "type": "element",
+                          "name": "w:color",
+                          "attributes": {
+                            "w:val": "000000"
+                          }
+                        },
+                        {
+                          "type": "element",
+                          "name": "w:sz",
+                          "attributes": {
+                            "w:val": "24"
+                          }
+                        },
+                        {
+                          "type": "element",
+                          "name": "w:szCs",
+                          "attributes": {
+                            "w:val": "24"
+                          }
+                        }
+                      ]
+                    },
+                    {
+                      "type": "element",
+                      "name": "w:t",
+                      "attributes": {
+                        "xml:space": "preserve"
+                      },
+                      "elements": [
+                        {
+                          "type": "text",
+                          "text": "质量检查由实施负责人组织，审计结果由复核人员确认。"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "element",
               "name": "w:sectPr",
               "elements": [
                 {

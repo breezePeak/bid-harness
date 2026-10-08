@@ -260,6 +260,44 @@ const evidence: ChapterReviewEvidence[] = [
 const covered = (item_ref: string) => ({ item_ref, status: 'covered', evidence_quote_refs: ['Q1'], issue: null })
 
 describe('S5 Reviewer 分批记录', () => {
+  it('未完成回执直接提供可补交位置，空引句合法，省略或越界引句明确拒绝', async () => {
+    const { ctx, agent } = await harness()
+    const context = reviewContext()
+    context.sectionWritingPlan.acceptance_criteria[0]!.id = 'semantic-arbitrary-key'
+    context.globalCompliance[0]!.id = 'global-arbitrary-key'
+    const runtime = attachChapterReview(agent, context, new Map([['quote-arbitrary-key', '当前正文。']]), evidence, 0, [], [{
+      issue_id: 'revision-arbitrary-key', scope: 'chapter', instruction: '说明检查职责', suggestion: null, reference_text: null,
+    }])
+    const execute = (name: string, args: unknown) => ctx.tools.execute({ agent, name, arguments: args,
+      callId: CallId('review-feedback'), signal: new AbortController().signal })
+    const missing = (await execute('finish_chapter_review', {})).value as {
+      missing_item_positions: number[]
+      missing_criterion_positions: number[]
+      missing_compliance_positions: number[]
+      missing_issue_positions: number[]
+    }
+    expect(JSON.stringify(missing)).not.toMatch(/arbitrary-key|"R\d/u)
+    expect((await execute('review_coverage_items', { items: missing.missing_item_positions.map(item_position => ({
+      item_position, status: 'covered', evidence_quote_positions: [0], issue: null,
+    })) })).value).toMatchObject({ recorded: missing.missing_item_positions, rejected: [] })
+    const criterion = { criterion_position: missing.missing_criterion_positions[0], status: 'met', reason: '已检查全文。' }
+    expect((await execute('review_acceptance_criteria', { items: [criterion] })).value)
+      .toMatchObject({ recorded: [], rejected: [{ index: 0, issue: expect.stringContaining('evidence_quote_positions: 字段必填，无需引句时填 []') }] })
+    expect((await execute('review_acceptance_criteria', { items: [{ ...criterion, evidence_quote_positions: [1] }] })).value)
+      .toMatchObject({ recorded: [], rejected: [{ index: 0, issue: expect.stringContaining('未知对象位置') }] })
+    expect((await execute('review_acceptance_criteria', { items: [{ ...criterion, evidence_quote_positions: [] }] })).value)
+      .toMatchObject({ recorded: missing.missing_criterion_positions, rejected: [] })
+    await execute('review_global_constraints', { items: missing.missing_compliance_positions.map(compliance_position => ({
+      compliance_position, status: 'not_applicable', evidence_quote_positions: [], issue: '本章不涉及。',
+    })) })
+    await execute('review_revision_issues', { items: missing.missing_issue_positions.map(issue_position => ({
+      issue_position, status: 'satisfied', reason: '已说明职责。',
+    })) })
+    await execute('set_review_summary', { quality_checks: quality, blocking_issues: [], assignment_conflicts: [], external_input_gaps: [], external_input_only: false })
+    expect((await execute('finish_chapter_review', {})).value).toEqual({ completed: true })
+    expect(runtime.captured()?.revision_issue_checks).toEqual([{ issue_id: 'revision-arbitrary-key', status: 'satisfied', reason: '已说明职责。' }])
+  })
+
   it('真实审核工具仅选择条目、原文和证据位置，拒绝原 R/Q/E 引用', async () => {
     const { ctx, agent } = await harness()
     const runtime = attachChapterReview(agent, reviewContext(), new Map([['Q1', '当前正文。']]), evidence, 0)
@@ -282,7 +320,7 @@ describe('S5 Reviewer 分批记录', () => {
     expect(runtime.captured()).toBeUndefined()
     const accepted = await execute('review_coverage_items', { items: [{ item_position: 0,
       status: 'covered', evidence_quote_positions: [0], issue: null }] })
-    expect(accepted.value).toMatchObject({ recorded: ['R1'], rejected: [] })
+    expect(accepted.value).toMatchObject({ recorded: [0], rejected: [] })
     runtime.dispose()
   })
   it('negative semantic criterion 可引用违规正文并判为 unmet', async () => {
@@ -353,8 +391,8 @@ describe('S5 Reviewer 分批记录', () => {
     for (const schema of ctx.tools.schemas(agent)) assertSupportedJsonSchema(schema.parameters)
     await call('review_coverage_items', { items: [covered('R5'), covered('R2')] })
     expect((await call('finish_chapter_review', {})).value).toEqual({
-      completed: false, missing_items: ['R1', 'R3', 'R4'], missing_acceptance_criterion_ids: ['AC-000002'],
-      missing_global_compliance_ids: ['GLOBAL-1'], missing_summary: true,
+      completed: false, missing_item_positions: [0, 2, 3], missing_criterion_positions: [0],
+      missing_compliance_positions: [0], missing_summary: true,
     })
     await call('review_coverage_items', { items: [covered('R4'), { item_ref: 'R1', status: 'missing', evidence_quote_refs: [], issue: '未响应' }, covered('R1'), covered('R3')] })
     await call('review_acceptance_criteria', { items: [{ criterion_position: 0, status: 'met', evidence_quote_refs: [], reason: '未发现无依据能力。' }] })
@@ -389,10 +427,10 @@ describe('S5 Reviewer 分批记录', () => {
       { ...covered('R2'), status: 'missing', evidence_quote_refs: [] },
     ] })
     expect(result.isError).toBeFalsy()
-    expect(result.value).toMatchObject({ recorded: ['R1'] })
+    expect(result.value).toMatchObject({ recorded: [0] })
     expect((result.value as { rejected: unknown[] }).rejected).toHaveLength(6)
     expect((await call('finish_chapter_review', {})).value).toMatchObject({
-      missing_items: ['R2', 'R3', 'R4', 'R5'], missing_acceptance_criterion_ids: ['AC-000002'],
+      missing_item_positions: [1, 2, 3, 4], missing_criterion_positions: [0],
     })
     expect(runtime.captured()).toBeUndefined()
   })
@@ -489,7 +527,7 @@ describe('S5 Reviewer 分批记录', () => {
     const result = await call('review_claims', { items: [base, { ...base, source_reference: 'E999' }, { ...base, source_reference: 'E2' }, { ...base, source_reference: 'E3' }, { ...base, claim_quote_ref: 'Q999' }, { ...base, status: 'unsupported', source_reference: null }] })
     expect(result.isError).toBeFalsy()
     expect((result.value as { rejected: unknown[] }).rejected).toHaveLength(5)
-    expect(result.value).toMatchObject({ recorded: ['Q1/project_fact'] })
+    expect(result.value).toMatchObject({ recorded: [{ claim_quote_position: 0, kind: 'project_fact' }] })
   })
 
   it('三章注册互不可见，释放一个 scope 不影响其他章', async () => {

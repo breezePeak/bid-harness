@@ -26,7 +26,7 @@ it('S5 通过真实 Loader 在 Writer 补搜后重研 Evidence 并审核最终�
       const paths = (await readdir(store, { recursive: true })).filter(path => path.endsWith('.jsonl'))
       const logs = await Promise.all(paths.map(async path => readFile(join(store, path), 'utf8')))
       const childLogs = logs.filter(log => (JSON.parse(log.split('\n')[0]!) as SessionHeader).parentSession !== undefined)
-      expect(childLogs).toHaveLength(4)
+      expect(childLogs).toHaveLength(5)
       const writerLog = childLogs.find(log => log.includes('Available Evidence Files：'))
       if (writerLog === undefined) throw new Error('缺少持久化 Writer 日志')
       const [headerLine, ...eventLines] = writerLog.trimEnd().split('\n')
@@ -34,12 +34,16 @@ it('S5 通过真实 Loader 在 Writer 补搜后重研 Evidence 并审核最终�
       const events = eventLines.map(line => JSON.parse(line) as SessionEvent)
       const calls = events.filter(event => event.type === 'tool/call')
       expect(calls.map(event => event.data.name)).toEqual([
-        'read', 'grep', 'read', 'submit_chapter', 'submit_chapter', 'submit_chapter', 'submit_chapter', 'submit_chapter', 'submit_chapter',
+        'read', 'grep', 'read', 'web_fetch', 'submit_chapter', 'submit_chapter', 'submit_chapter', 'submit_chapter', 'submit_chapter', 'submit_chapter', 'submit_chapter',
       ])
       expect(writerLog).toContain('不能新增目录标题“补充服务方案”')
       expect(writerLog).toContain('Current Chapter Path：')
       expect(writerLog).toContain('Confirmed Outline Responsibilities：')
-      const reviewerLog = childLogs.find(log => log.includes('Evidence Pack：'))!
+      const reviewerLogs = childLogs.filter(log => log.includes('Evidence Pack：'))
+        .sort((left, right) => Number(left.includes('质量检查由实施负责人')) - Number(right.includes('质量检查由实施负责人')))
+      const reviewerLog = reviewerLogs[0]!
+      expect(reviewerLogs).toHaveLength(2)
+      expect(reviewerLog).toContain('missing_item_positions')
       expect(reviewerLog).toContain('Confirmed Outline Responsibilities：')
       expect(reviewerLog).toContain('清单已覆盖不能抵消放错章节的问题')
       expect(reviewerLog).toContain('结合已验证的实施流程资料')
@@ -62,10 +66,14 @@ it('S5 通过真实 Loader 在 Writer 补搜后重研 Evidence 并审核最终�
       const projectRoot = join(cwd, '.bid-harness')
       const map = parseEvidenceMapArtifact(JSON.parse(await readFile(join(projectRoot, 'analysis/evidence-map.json'), 'utf8')))
       const metadata = parseChapterMetadata(JSON.parse(await readFile(join(projectRoot, 'chapters/meta/0001.json'), 'utf8')))
+      expect(metadata.web_materials_used).toHaveLength(1)
+      const resubmitted = calls.find(event => String(event.data.callId) === 'resubmit-web-candidate')!
+      expect(JSON.parse(resubmitted.data.arguments)).toMatchObject({ metadata: { web_materials_used: [{ web_position: 0 }] } })
+      expect(map.section_mappings[0]?.web_materials).toEqual(metadata.web_materials_used)
       expect(metadata.local_materials_used).toEqual([{
         source_kind: 'reference', file_id: metadata.local_materials_used[0]?.file_id, chunk: 'chunk_0001', usage: 'reference', summary: '支撑本章实施流程的组织与步骤安排。',
       }])
-      expect(metadata.web_materials_used).toEqual([])
+      expect(metadata.web_materials_used[0]).toMatchObject({ summary: '要求访问控制与审计。', supports: '支持安全方案。' })
       expect(map.section_mappings[0]!.local_materials).toEqual(metadata.local_materials_used)
       expect(map.section_mappings[0]!.answer_plan?.length).toBeGreaterThan(0)
       const manifest = parseChapterWritingManifest(JSON.parse(await readFile(join(projectRoot, 'chapters/manifest.json'), 'utf8')))
@@ -98,6 +106,7 @@ it('S5 通过真实 Loader 在 Writer 补搜后重研 Evidence 并审核最终�
       const expected = {
         'export.expected.json': exportSnapshot,
         'writer.expected.jsonl': normalizeSessionSnapshot(writerLog, { sessionIds, cwd, cwdAliases: [cwd.replaceAll('\\', '/')] }),
+        'reviewer-repair.expected.jsonl': normalizeSessionSnapshot(reviewerLogs[1]!, { sessionIds, cwd, cwdAliases: [cwd.replaceAll('\\', '/')] }),
         'reviewer.expected.jsonl': normalizeSessionSnapshot(reviewerLog, { sessionIds, cwd, cwdAliases: [cwd.replaceAll('\\', '/')] }),
         'research-initial.expected.jsonl': normalizeSessionSnapshot(researchInitial, { sessionIds, cwd, cwdAliases: [cwd.replaceAll('\\', '/')] }),
         'research-final.expected.jsonl': normalizeSessionSnapshot(researchFinal, { sessionIds, cwd, cwdAliases: [cwd.replaceAll('\\', '/')] }),

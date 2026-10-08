@@ -11,7 +11,18 @@
             "summary": "支撑本章实施流程的组织与步骤安排。"
           }
         ],
-        "web_materials": [],
+        "web_materials": [
+          {
+            "source_id": "WEB-0e9a5edb153f120c",
+            "snapshot_path": "analysis/web-sources/WEB-0e9a5edb153f120c.md",
+            "chunk_refs": [
+              "W:WEB-0e9a5edb153f120c:C0001"
+            ],
+            "usage": "reference",
+            "summary": "要求访问控制与审计。",
+            "supports": "支持安全方案。"
+          }
+        ],
         "missing_topics": [
           "缺少实施流程参考资料。"
         ],
@@ -100,7 +111,18 @@
         "summary": "支撑本章实施流程的组织与步骤安排。"
       }
     ],
-    "web_materials_used": [],
+    "web_materials_used": [
+      {
+        "source_id": "WEB-0e9a5edb153f120c",
+        "snapshot_path": "analysis/web-sources/WEB-0e9a5edb153f120c.md",
+        "chunk_refs": [
+          "W:WEB-0e9a5edb153f120c:C0001"
+        ],
+        "usage": "reference",
+        "summary": "要求访问控制与审计。",
+        "supports": "支持安全方案。"
+      }
+    ],
     "unresolved_topics": [],
     "handoff": {
       "section_id": "SEC-SECURITY",
@@ -114,7 +136,7 @@
     },
     "flowcharts": []
   },
-  "markdown": "# 1 访问控制与安全审计\n\n本项目先核查角色与访问权限，再组织安全审计和结果复核。实施流程以本地资料为编排参考，按权限授予、执行检查、记录留存三个步骤说明责任与交付结果。\n\n表 访问控制与安全审计管理台账\n| 管理事项 | 台账记录内容 |\n| --- | --- |\n| 权限授予 | 访问权限 |\n| 执行检查 | 安全审计 |\n| 记录留存 | 复核结果 |\n",
+  "markdown": "# 1 访问控制与安全审计\n\n本项目先核查角色与访问权限，再组织安全审计和结果复核。实施流程以本地资料为编排参考，按权限授予、执行检查、记录留存三个步骤说明责任与交付结果。\n\n表 访问控制与安全审计管理台账\n| 管理事项 | 台账记录内容 |\n| --- | --- |\n| 权限授予 | 访问权限 |\n| 执行检查 | 安全审计 |\n| 记录留存 | 复核结果 |\n\n质量检查由实施负责人组织，审计结果由复核人员确认。\n",
   "globalReview": {
     "schema_version": 1,
     "scope": "technical_bid",
@@ -133,14 +155,14 @@
         "checked_chapters": [
           {
             "section_id": "SEC-SECURITY",
-            "candidate_sha256": "98ab5c935901a7e45b222a1a323c69010eedc707b397bc659b68810dac7698bf"
+            "candidate_sha256": "6c1ef5294bd9ab19078a4d5495ce6f21b18cee450192c5b700f1d8be07385cf3"
           }
         ],
         "evidence": [
           {
             "kind": "chapter_quote",
             "section_id": "SEC-SECURITY",
-            "quote": "# 1 访问控制与安全审计\n\n本项目先核查角色与访问权限，再组织安全审计和结果复核。实施流程以本地资料为编排参考，按权限授予、执行检查、记录留存三个步骤说明责任与交付结果。\n\n表 访问控制与安全审计管理台账\n| 管理事项 | 台账记录内容 |\n| --- | --- |\n| 权限授予 | 访问权限 |\n| 执行检查 | 安全审计 |\n| 记录留存 | 复核结果 |"
+            "quote": "# 1 访问控制与安全审计\n\n本项目先核查角色与访问权限，再组织安全审计和结果复核。实施流程以本地资料为编排参考，按权限授予、执行检查、记录留存三个步骤说明责任与交付结果。\n\n表 访问控制与安全审计管理台账\n| 管理事项 | 台账记录内容 |\n| --- | --- |\n| 权限授予 | 访问权限 |\n| 执行检查 | 安全审计 |\n| 记录留存 | 复核结果 |\n\n质量检查由实施负责人组织，审计结果由复核人员确认。"
           }
         ],
         "affected_section_ids": [],
@@ -156,8 +178,8 @@
       "plan_version": 1,
       "format_revision": 0,
       "format_template_id": null,
-      "pages": 0.25218882570629114,
-      "document_sha256": "332bdac3e2421dd7bdccd84a48f6f00018ecd0ade2caa49ee3e52bbc5ce55c0d",
+      "pages": 0.27798086469898,
+      "document_sha256": "1b86cebddd8ef8d827bbf802655b4807c7f958f9cc0b770c15d0fc1206df025a",
       "reason": "章节与整书 required 条件均已满足。",
       "document_acceptance_results": [
         {
