@@ -700,14 +700,16 @@ export async function runEvidenceMappingStructureRecoveryLoop(ctx: Context, root
   const done = Promise.withResolvers<undefined>()
   const off = ctx.on('session/event', (session, event) => {
     if (session === result.agent.session && event.type === 'bid.user_confirmation.required' && event.data.stage === 'evidence_mapping') done.resolve(undefined)
-    if (session === result.agent.session && event.type === 'bid.run.failed') done.reject(new Error('S4 定向补修失败：' + JSON.stringify(event.data)))
+    if (session === result.agent.session && event.type === 'bid.task.changed' && event.data.state.status === 'failed') {
+      done.reject(new Error('S4 定向补修失败：' + JSON.stringify(event.data.state.failure)))
+    }
   }, { global: true })
   let timer: ReturnType<typeof setTimeout> | undefined
   try {
     result.agent.followup(createUserMessage({ content: [{ type: 'text', text: instruction }], source: { kind: 'user' } }))
     await Promise.race([done.promise, new Promise<never>((_, reject) => {
       timer = setTimeout(() => { reject(new Error('S4 定向补修未完成：' + JSON.stringify(result.agent.session.events
-        .filter(event => event.type === 'tool/result' || event.type === 'bid.run.failed').slice(-5)))) }, 45_000)
+        .filter(event => event.type === 'tool/result' || event.type === 'bid.task.changed').slice(-5)))) }, 45_000)
     })])
     const operations = (ctx.bid as unknown as { inFlight: Map<string, { done: Promise<void> }> }).inFlight
     await Promise.all([...operations.values()].map(operation => operation.done))

@@ -99,7 +99,10 @@ it('S4 完整研究及首代结构修复后，Main 恢复工具实际补修原 W
       const headers = logs.map(log => JSON.parse(log.split('\n')[0]!) as SessionHeader)
       const sessionIds = headers.map(header => header.id)
       const canonicalCwd = await realpath(cwd)
-      const cwdSpellings = [...new Set(headers.map(header => header.cwd))]
+      const cwdSpellings = [...new Set(headers.map((header) => {
+        if (header.cwd === undefined) throw new Error(`结构恢复会话 ${header.id} 缺少工作目录`)
+        return header.cwd
+      }))]
       for (const spelling of cwdSpellings) {
         const resolved = await realpath(spelling)
         expect(process.platform === 'win32' ? resolved.toLowerCase() : resolved)

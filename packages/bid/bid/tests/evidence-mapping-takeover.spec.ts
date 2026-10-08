@@ -45,7 +45,9 @@ async function failedCandidate() {
     result.agent.session.append('bid.project.resumed', { state: result.outcome, revision: saved.revision })
     const run = bidRecoverableRun(result.agent.session, result.outcome)
     const eligible = bidRunRecoveryEligibility(result.agent.session, 3)
-    if (run === undefined || !eligible.eligible || eligible.target === undefined) throw new Error('未找到结构失败 Work')
+    if (run === undefined || !eligible.eligible || eligible.target === undefined || eligible.fingerprint === undefined) {
+      throw new Error('未找到结构失败 Work')
+    }
     for (let attempt = 0; attempt < 3; attempt++) result.agent.session.append('bid.recovery.requested', {
       ownerSessionId: String(result.agent.session.id), target: eligible.target, unit: run.error?.recovery?.unit ?? run.work.workId,
       instruction: `已耗尽的原授权补修 ${String(attempt + 1)}`, progressFingerprint: eligible.fingerprint,
@@ -88,7 +90,7 @@ describe('S4 新明确授权接管', () => {
         if (saved?.status !== 'suspended') throw new Error('新 Work 未保存取消：' + JSON.stringify(saved))
         expect(saved.run.cause).toBe('user_stop')
         const other = (await ctx.agentLoop.createAgent(ctx, { sessionId: SessionId('s4-other-owner'),
-          agentOptions: { provider: 'mock', model: 'mock', agentPreset: 'bid' }, meta: { cwd: workspace.root, agentPreset: 'bid' } })).agent
+          agentOptions: { provider: 'mock', model: 'mock' }, meta: { cwd: workspace.root, agentPreset: 'bid' } })).agent
         await vi.waitFor(() => {
           expect(other.session.events.some(event => event.type === 'bid.project.resumed')).toBe(true)
           expect(operations.size).toBe(0)
@@ -104,7 +106,7 @@ describe('S4 新明确授权接管', () => {
       await vi.waitFor(() => {
         const completed = agent.session.events.findLast(event => event.type === 'bid.run.completed')
         if (completed?.type !== 'bid.run.completed') throw new Error(JSON.stringify(agent.session.events
-          .filter(event => event.type === 'tool/result' || event.type === 'bid.run.failed').slice(-4)))
+          .filter(event => event.type === 'tool/result' || event.type === 'bid.task.changed').slice(-4)))
         expect(completed.data.run.work.workId).not.toBe(run.work.workId)
       }, { timeout: 45_000 })
       const operations = (ctx.bid as unknown as { inFlight: Map<string, { done: Promise<void> }> }).inFlight
