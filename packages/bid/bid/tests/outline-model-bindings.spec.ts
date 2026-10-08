@@ -207,7 +207,7 @@ describe('S3 程序绑定身份', () => {
       { title: '组织职责', purpose: '说明组织职责', must_answer: ['明确组织岗位职责'], response_point_positions: [0] },
       { title: '进度控制', purpose: '说明进度控制', must_answer: ['明确进度控制措施'], response_point_positions: [1] },
     ] },
-  ])('响应点修复 $type 的模型输出能经正式操作器应用，并拒绝范围外关联', (operation) => {
+  ] satisfies z.infer<typeof outlineModelResponsePointRepairOperationSchema>[])('响应点修复 $type 的模型输出能经正式操作器应用，并拒绝范围外关联', (operation) => {
     const original = outline()
     const accepted = outlineModelResponsePointRepairOperationSchema.parse(operation)
     const bound = bindOutlineModelRepairOperations([accepted], original, inputs, true)
