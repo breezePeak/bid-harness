@@ -2,7 +2,7 @@ import { modelTaskArguments } from './fixtures/model-task.ts'
 import { prepareBidWorkingTree } from '../src/working-tree.ts'
 import { executorTestVerifier, scriptedVerificationCall } from './fixtures/task-verifier.ts'
 /* oxlint-disable typescript/no-unsafe-assignment -- Vitest asymmetric matchers return any. */
-import { mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from 'node:fs/promises'
+import { access, mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { tmpdir } from 'node:os'
@@ -56,9 +56,11 @@ import { buildRevisionComparisonPath, createRevisionComparisonArtifact } from '.
 import { BID_UPLOAD_FILES_HEADER, BID_UPLOAD_SESSION_HEADER, BidStageExecutionError } from '../src/control-plane-contract.ts'
 import {
   DOCX_TEMPLATE_NAME_HEADER,
+  DOCX_TEMPLATE_PARSER_VERSION,
   DOCX_TEMPLATE_REVISION_HEADER,
   DOCX_TEMPLATE_SIZE_HEADER,
 } from '../src/docx-format-contract.ts'
+import { readBuiltInDocxTemplateBytes, saveDocxTemplate } from '../src/docx-format-store.ts'
 import { persistBidWorkRequest, readBidWorkRequest } from '../src/work-descriptor.ts'
 import type { CapabilityTaskDispatcher } from '../src/bid-capability-task.ts'
 import { capabilityPlanPatchRepeated, capabilityTaskCheckpointSchema, capabilityTaskRequestSchema, persistCapabilityTaskRequest } from '../src/bid-capability-task.ts'
@@ -1279,7 +1281,7 @@ describe('Workspace 项目与独立 Session', () => {
       && event.data.noticeId === `run:${oldRun.runId}:superseded`)).toBe(true)
   }, 20_000)
 
-  it('主 Agent 工具以真实用户消息执行跨阶段能力任务并返回发布文件', async () => {
+  it('主 Agent 工具执行跨阶段能力任务，重置后清除历史计划且请求损坏仍报错', async () => {
     const { ctx, workspace, fresh } = await fixture({ withPersistence: true })
     await seedCapabilityProject(workspace, 'complete')
     await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'completed' })
@@ -1317,6 +1319,20 @@ describe('Workspace 项目与独立 Session', () => {
     const restarted = await fixture({ root: workspace.root, withPersistence: true })
     const restored = await restarted.fresh('capability-main-tool')
     expect(await restarted.ctx.bid.getCapabilityTaskPlan(restored.session)).toEqual(plan)
+    const capabilityRun = restored.session.events.findLast(event => event.type === 'bid.run.started'
+      && event.data.run.work.kind === 'capability_task')
+    if (capabilityRun?.type !== 'bid.run.started') throw new Error('缺少历史能力任务')
+    const requestPath = join(workspace.projectRoot, capabilityRun.data.run.work.requestRef)
+    const requestBytes = await readFile(requestPath)
+    await writeFile(requestPath, Buffer.concat([requestBytes, Buffer.from('\n')]))
+    await expect(restarted.ctx.bid.getCapabilityTaskPlan(restored.session))
+      .rejects.toThrow('BID_WORK_REQUEST_IDENTITY_MISMATCH')
+    await writeFile(requestPath, requestBytes)
+    await expect(restarted.ctx.bid.resetStage(restored, 'file_intake')).resolves.toEqual({
+      stage: 'file_intake', status: 'waiting_user', run: null,
+    })
+    await expect(access(requestPath)).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(restarted.ctx.bid.getCapabilityTaskPlan(restored.session)).resolves.toBeNull()
   })
 
   it('能力工具先报告已启动并接纳同一 Main 后续排队，后台失败不报告完成', async () => {
@@ -3552,6 +3568,96 @@ describe('Workspace 项目与独立 Session', () => {
     expect(runtime(b.session)).toEqual({ stage: 'outline_generation', status: 'waiting_user', run: null })
     expect(b.session.deriveMessages()).toEqual([])
   })
+
+  it.each([
+    { name: 'S1 重置清空项目资料与 Word 配置，重新上传只分析新批次', stage: 'file_intake' },
+    { name: 'S2 重置保留项目资料与 Word 模板和格式配置', stage: 'tender_analysis' },
+  ] as const)('$name', async ({ stage }) => {
+    const { ctx, workspace, fresh, adapter } = await fixture({ realOrchestrator: stage === 'file_intake' })
+    await seedProjectArtifacts(workspace)
+    for (const path of ['flowcharts', 'output']) {
+      await mkdir(join(workspace.projectRoot, path), { recursive: true })
+      await writeFile(join(workspace.projectRoot, path, 'previous.txt'), '旧项目产物')
+    }
+    const original = join(workspace.root, 'original-tender.md')
+    await writeFile(original, '项目目录外的原文件')
+    const builtInTemplate = await readBuiltInDocxTemplateBytes()
+    const template = await saveDocxTemplate(workspace, { revision: 0, name: '项目模板.docx', bytes: builtInTemplate })
+    await checkpointBidProjectState(workspace, { stage: 'docx_export', status: 'completed' })
+    const agent = await fresh(`reset-${stage}-uploads`)
+    await ctx.bid.saveDocxFormat(agent.session, template.templateId, {
+      revision: template.state.revision, userConfirmed: { 'body.size': 14 },
+    })
+    await ctx.bid.saveDocxFormat(agent.session, null, { revision: 0, userConfirmed: { 'page.left': 25 } })
+    seedConversation(agent.session)
+    const history = [...agent.session.events]
+    const previousState = (await readBidProjectState(workspace))!
+    const manifest = await workspace.readManifest()
+    const tender = manifest.files[0]!
+    const index = parseDocumentChunkIndex(JSON.parse(await readFile(join(workspace.projectRoot, tender.chunkIndexPath!), 'utf8')))
+    const preservedPaths = [
+      workspace.manifestPath,
+      ...[tender.inputPath, tender.documentPath!, tender.chunkIndexPath!,
+        ...index.chunks.map(chunk => `${tender.chunksPath!}/${chunk.path}`),
+        'word-export/templates.json', 'word-export/default.config.json',
+        `word-export/templates/${template.templateId!}.docx`,
+        `word-export/templates/${template.templateId!}.config.json`,
+        `word-export/templates/${template.templateId!}.format-${DOCX_TEMPLATE_PARSER_VERSION}.json`,
+      ].map(path => join(workspace.projectRoot, path)),
+    ]
+    const preservedBytes = await Promise.all(preservedPaths.map(path => readFile(path)))
+
+    await expect(ctx.bid.resetStage(agent, stage)).resolves.toEqual({
+      stage, status: stage === 'file_intake' ? 'waiting_user' : 'ready', run: null,
+    })
+    await settleCapabilityOperations(ctx)
+    expect(agent.session.events.slice(0, history.length)).toEqual(history)
+    expect(await readFile(original, 'utf8')).toBe('项目目录外的原文件')
+    expect(await readBuiltInDocxTemplateBytes()).toEqual(builtInTemplate)
+    expect(await readBidProjectState(workspace)).toMatchObject({ stage })
+    expect((await readBidProjectState(workspace))!.revision).toBeGreaterThan(previousState.revision)
+    for (const path of ['outline', 'chapters', 'flowcharts', 'output']) {
+      await expect(access(join(workspace.projectRoot, path))).rejects.toMatchObject({ code: 'ENOENT' })
+    }
+    if (stage === 'tender_analysis') {
+      expect(await workspace.readManifest()).toEqual(manifest)
+      expect(await Promise.all(preservedPaths.map(path => readFile(path)))).toEqual(preservedBytes)
+      await expect(access(join(workspace.projectRoot, 'analysis'))).rejects.toMatchObject({ code: 'ENOENT' })
+      return
+    }
+    expect(runtime(agent.session)).toEqual({ stage: 'file_intake', status: 'waiting_user', run: null })
+    for (const path of ['input', 'corpus', 'manifest.json', 'analysis', 'word-export']) {
+      await expect(access(join(workspace.projectRoot, path))).rejects.toMatchObject({ code: 'ENOENT' })
+    }
+    await ctx.plugin(LocalSubprocessRuntime)
+    await ctx.plugin(LocalFileSystem, { cwd: workspace.root })
+    await ctx.plugin(ToolFsSearch, { sampleOverCapGlobResults: true })
+    await ctx.plugin(ToolFs)
+    const source = (anchor_text: string) => ({ file_position: 0, chunk_position: 0, anchor_text })
+    const newBytes = new TextEncoder().encode([
+      '# 新资料建设项目', '系统必须支持统一身份认证和审计日志。',
+      '技术评分：总体技术方案完整合理得 10 分。', '技术方案必须提供数据安全措施。',
+    ].join('\n'))
+    adapter.script.push(toolCall('submit_tender_analysis', {
+      project_facts: [{ field: 'project_name', value: '新资料建设项目', sources: [source('新资料建设项目')] }],
+      requirements: [{ category: '功能要求', normalized_requirement: '系统必须支持统一身份认证和审计日志。',
+        mandatory: true, sources: [source('系统必须支持统一身份认证和审计日志。')] }],
+      scoring_items: [{ group: '技术评分', title: '总体技术方案', criterion: '总体技术方案完整合理得 10 分。',
+        score: 10, score_range: null, must_answer: true, sources: [source('技术评分：总体技术方案完整合理得 10 分。')] }],
+      compliance_items: [{ type: '强制要求', normalized_rule: '技术方案必须提供数据安全措施。',
+        severity: 'mandatory', sources: [source('技术方案必须提供数据安全措施。')] }],
+    }), answer('已提交新批次招标分析。'))
+
+    const uploaded = await ctx.bid.uploadIncomingFiles(agent.session, [{ name: 'new-tender.md', role: 'tender', bytes: newBytes }])
+
+    expect(uploaded, JSON.stringify(uploaded)).toMatchObject({ ok: true, value: { stage: 'tender_analysis', status: 'waiting_user' } })
+    const newManifest = await workspace.readManifest()
+    expect(newManifest.files.map(file => [file.originalName, file.parseStatus])).toEqual([['new-tender.md', 'success']])
+    expect(newManifest.files[0]!.id).not.toBe(tender.id)
+    expect(await readFile(join(workspace.projectRoot, newManifest.files[0]!.inputPath))).toEqual(Buffer.from(newBytes))
+    expect(parseTenderProjectArtifact(JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/project.json'), 'utf8'))))
+      .toMatchObject({ project_name: '新资料建设项目', analyzed_tender_files: [newManifest.files[0]!.id] })
+  }, 20_000)
 
   it('S5 重置后保持等待用户输入且不提出已删除的阶段开始问题', async () => {
     const { ctx, workspace, fresh } = await fixture()

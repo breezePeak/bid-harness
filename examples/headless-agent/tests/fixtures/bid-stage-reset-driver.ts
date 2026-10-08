@@ -1,5 +1,5 @@
-/** 真实源码 Loader 的 S1 命令重置，保留上传资料并清理后续产物。 */
-import { access, mkdir, readFile, readdir, writeFile } from 'node:fs/promises'
+/** 真实源码 Loader 的 S1 命令重置，清空项目资料与 Word 配置并保留原文件和聊天日志。 */
+import { access, mkdir, readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { boot } from '@deepseek-ai/dsh-app-boot'
@@ -10,6 +10,7 @@ import {
 import { LlmAdapter, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { seedConversation, seedProjectArtifacts } from '../../../../packages/bid/bid/tests/fixtures/project-session.ts'
+import { readDocxFormat, saveDocxFormat, saveDocxTemplate } from '../../../../packages/bid/bid/src/docx-format-store.ts'
 
 /** 模型请求计数只观察外部模型调用；重置命令应由 Host 完成。 */
 class StageResetAdapter extends LlmAdapter {
@@ -25,13 +26,6 @@ class StageResetAdapter extends LlmAdapter {
   }
 }
 
-async function filesBelow(root: string): Promise<Record<string, string>> {
-  const paths = await readdir(root, { recursive: true, withFileTypes: true })
-  const files = paths.filter(entry => entry.isFile()).map(entry => join(entry.parentPath, entry.name)).sort()
-  const values = await Promise.all(files.map(async path => [path, (await readFile(path)).toString('base64')] as const))
-  return Object.fromEntries(values)
-}
-
 const configPath = process.argv[2]
 if (configPath === undefined) throw new Error('缺少 S1 重置回放配置')
 let ctx: Context | undefined
@@ -41,14 +35,24 @@ try {
   ctx.effect(() => ctx!.llm.registerAdapter(['mock'], adapter))
   const workspace = new BidWorkspace(process.cwd())
   await seedProjectArtifacts(workspace)
+  const originalTender = await readFile(join(workspace.inputRoot, 'tender.md'))
+  await writeFile(join(workspace.root, 'tender.md'), originalTender)
+  const builtInTemplatePath = new URL('../../../../packages/bid/bid/assets/templates/default-technical-bid.docx', import.meta.url)
+  const builtInTemplate = await readFile(builtInTemplatePath)
+  await writeFile(join(workspace.root, 'layout.docx'), builtInTemplate)
+  const template = await saveDocxTemplate(workspace, { revision: 0, name: 'layout.docx', bytes: builtInTemplate })
+  await saveDocxFormat(workspace, template.templateId, {
+    revision: template.state.revision, userConfirmed: { 'body.font': '仿宋' },
+  })
+  const defaultFormat = await readDocxFormat(workspace, null)
+  await saveDocxFormat(workspace, null, {
+    revision: defaultFormat.state.revision, userConfirmed: { 'body.font': '楷体' },
+  })
   for (const path of ['flowcharts', 'output']) {
     await mkdir(join(workspace.projectRoot, path), { recursive: true })
     await writeFile(join(workspace.projectRoot, path, 'prior-artifact.txt'), '重置前产物\n')
   }
   await checkpointBidProjectState(workspace, { stage: 'evidence_mapping', status: 'waiting_user', run: null })
-  const originalInputs = await filesBelow(workspace.inputRoot)
-  const originalCorpus = await filesBelow(workspace.corpusRoot)
-  const originalManifest = await readFile(workspace.manifestPath, 'utf8')
   let executionAgents = 0
   ctx.on('agent/created', ({ agent }) => {
     if (agent.session.header.origin === 'subagent') executionAgents++
@@ -71,6 +75,7 @@ try {
   }
   const agent = await createFresh('bid-reset-s1')
   seedConversation(agent.session)
+  const conversation = [...agent.session.events]
   const listed = ctx.commands.list(agent).find(command => command.name === 'bid-reset-s1')
   const command = await ctx.commands.execute(agent, '/bid-reset-s1', [], new AbortController().signal)
   if (command === undefined) throw new Error('缺少 /bid-reset-s1 命令')
@@ -80,19 +85,27 @@ try {
   const saved = await readBidProjectState(workspace)
   const restored = await createFresh('bid-reset-s1-restored')
   const restoredTask = restored.session.events.reduce(reduceBidTaskState, BID_INITIAL_TASK_STATE)
-  const removed = await Promise.all(['analysis', 'outline', 'chapters', 'flowcharts', 'output'].map(async path => ({
+  const removed = await Promise.all([
+    'input', 'corpus', 'manifest.json', 'word-export', 'analysis', 'outline', 'chapters', 'flowcharts', 'output',
+  ].map(async path => ({
     path, removed: await access(join(workspace.projectRoot, path)).then(() => false, () => true),
   })))
+  const library = await ctx.bid.getDocxTemplateLibrary(agent.session)
+  const resetFormat = await ctx.bid.getDocxFormat(agent.session, null)
   const commandEvents = agent.session.events.filter(event => event.type === 'command/run' || event.type === 'command/done')
   process.stdout.write(`${JSON.stringify({
     listed, result: command.result, task, restoredTask,
     durableTask: saved === undefined ? null : { stage: saved.stage, status: saved.status, run: saved.run },
     allowedActions: getBidClientProjection(task).allowedActions,
+    emptyManifest: (await workspace.readManifest()).files,
     preserved: {
-      inputs: JSON.stringify(await filesBelow(workspace.inputRoot)) === JSON.stringify(originalInputs),
-      corpus: JSON.stringify(await filesBelow(workspace.corpusRoot)) === JSON.stringify(originalCorpus),
-      manifest: await readFile(workspace.manifestPath, 'utf8') === originalManifest,
+      originalTender: (await readFile(join(workspace.root, 'tender.md'))).equals(originalTender),
+      originalTemplate: (await readFile(join(workspace.root, 'layout.docx'))).equals(builtInTemplate),
+      builtInTemplate: (await readFile(builtInTemplatePath)).equals(builtInTemplate),
+      chatHistory: conversation.every(event => agent.session.events.includes(event)),
     },
+    wordFormat: { templateCount: library.templates.length, estimateTemplateId: library.estimateTemplateId,
+      userConfirmed: resetFormat.state.userConfirmed, systemDefaultAvailable: resetFormat.state.extracted.paragraphs.length > 0 },
     removed, modelRequests: adapter.calls, executionAgents,
     runs: [...agent.session.events, ...restored.session.events].filter(event => event.type === 'bid.run.started').length,
     locksReleased: host.inFlight.size === 0,

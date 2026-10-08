@@ -526,7 +526,7 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
       },
       {
         signature: 'async resetStage(agent: Agent, stage: BidStage): Promise<BidTaskState>',
-        description: 'Rewind to the current or an earlier Bid stage and apply its fixed restart policy. Active work is cancelled and drained before artifacts owned by the selected stage and every later stage are removed.',
+        description: 'Rewind to the current or an earlier Bid stage and apply its fixed restart policy. Active work is cancelled and drained before artifacts owned by the selected stage and every later stage are removed. S1 同时清理项目内上传资料、解析语料、资料清单与 Word 模板及格式配置。',
         parameters: [{ name: 'agent', description: 'live Bid Agent receiving the scoped command.' }, { name: 'stage', description: 'current or earlier stage named by that command.' }],
         returns: 'S2-S4 已提交的 ready 状态；S1 与 S5 返回 waiting_user。',
       },
@@ -561,15 +561,15 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         returns: 'the durable S1 outcome.',
       },
       {
-        signature: 'async runCapabilityTask( agent: Agent, task: BidCapabilityTask, authorization: CapabilityTaskRequest[\'authorization\'], inputPaths: readonly string[], onAdmitted?: (run: BidRunContext) => Promise<void>, ): Promise<BidTaskState>',
+        signature: 'async runCapabilityTask( agent: Agent, task: BidCapabilityTask, authorization: CapabilityTaskRequest[\'authorization\'], inputPaths: readonly string[], onAdmitted?: (run: BidRunContext) => Promise<void>, supersede?: CapabilitySupersede, completeTask?: BidCapabilityTask, ): Promise<BidTaskState>',
         description: '接纳一个由真实用户消息授权的能力序列。',
-        parameters: [{ name: 'agent', description: '公开主会话的 Agent。' }, { name: 'task', description: '有序能力步骤与任务范围。' }, { name: 'authorization', description: '用户消息身份。' }, { name: 'inputPaths', description: '本次任务读取的正式输入文件。' }, { name: 'onAdmitted', description: 'Run 落盘后调用的可选接纳回调。' }],
+        parameters: [{ name: 'agent', description: '公开主会话的 Agent。' }, { name: 'task', description: '有序能力步骤与任务范围。' }, { name: 'authorization', description: '用户消息身份。' }, { name: 'inputPaths', description: '本次任务读取的正式输入文件。' }, { name: 'onAdmitted', description: 'Run 落盘后调用的可选接纳回调。' }, { name: 'supersede', description: '精确接管当前挂起或失败能力任务的 Run 身份与项目修订号。' }, { name: 'completeTask', description: '含独立导出尾步骤的完整任务。' }],
         returns: 'Run 结算后的项目状态。',
       },
       {
-        signature: 'async resumeCurrentRun( session: Session, suspendedRunId: string, expectedProjectRevision: number, onAccepted?: (run: BidRunContext) => void, recovery?: { goalId: string; instruction: string }, ): Promise<BidTaskState>',
+        signature: 'async resumeCurrentRun( session: Session, suspendedRunId: string, expectedProjectRevision: number, onAccepted?: (run: BidRunContext) => void, recovery?: { instruction: string }, ): Promise<BidTaskState>',
         description: 'Resume one exact suspended Run after checking its project revision and durable checkpoints.',
-        parameters: [{ name: 'session', description: 'Bid Session that owns the suspended Run.' }, { name: 'suspendedRunId', description: 'Exact suspended attempt selected by the client.' }, { name: 'expectedProjectRevision', description: 'Project revision observed by the client.' }, { name: 'onAccepted', description: 'Callback invoked after the replacement Run is durable.' }, { name: 'recovery', description: 'Bound Goal request revalidated and recorded inside the project lock.' }],
+        parameters: [{ name: 'session', description: 'Bid Session that owns the suspended Run.' }, { name: 'suspendedRunId', description: 'Exact suspended attempt selected by the client.' }, { name: 'expectedProjectRevision', description: 'Project revision observed by the client.' }, { name: 'onAccepted', description: 'Callback invoked after the replacement Run is durable.' }, { name: 'recovery', description: '主 Agent 修复指令，在项目锁内重验并记录。' }],
         returns: 'State reached when the resumed work next settles.',
       },
       {
@@ -676,15 +676,15 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
       },
       {
         signature: '@Remote(\'getCapabilityTaskPlan\') async getCapabilityTaskPlan(session: Session): Promise<BidCapabilityPlanView | null>',
-        description: '读取当前能力 Work 或已登记请求的计划；只返回检查点中的步骤状态。',
+        description: '读取有效能力计划，导出尾步骤的完成状态来自正式导出回执。',
         parameters: [{ name: 'session', description: '项目公开主会话。' }],
-        returns: '最近任务的只读摘要；尚无能力任务时为 null。',
+        returns: '最近任务的只读摘要；尚无能力任务或历史任务已清理时为 null。',
       },
       {
         signature: '@Remote(\'getEvidenceMappingProgress\') async getEvidenceMappingProgress( session: Session, observed?: BidClientProjection, ): Promise<BidEvidenceMappingProgress | null>',
-        description: 'Read the current S4 Mapping Task counts while evidence mapping is active or reviewable.',
-        parameters: [{ name: 'session', description: 'Bid Session that owns the S4 execution log.' }, { name: 'observed', description: 'caller projection used to reject stale observations.' }],
-        returns: 'task counts, or null when S4 has not reached an observable state or has not produced its log.',
+        description: '读取当前阶段或当前能力 Work 的资料研究进度与诊断。',
+        parameters: [{ name: 'session', description: '研究 Work 所属公开会话。' }, { name: 'observed', description: '调用方观察到的项目状态，用于拒绝过期读取。' }],
+        returns: '对应执行日志的统计；尚无日志或身份不匹配时为 null。',
       },
       {
         signature: '@Remote(\'getDetails\') async getDetails(session: Session): Promise<BidDetailsView>',
@@ -2394,8 +2394,8 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
       },
       {
         signature: 'restrict(filter: ToolRestriction): () => void',
-        description: 'Restrict global tools for the calling agent scope. Empty filters, unknown names, scope-local names, and reserved transport names fail. Restrictions intersect; scoped registrations remain visible.',
-        parameters: [{ name: 'filter', description: 'global-tool mask: `allow` (keep only) and/or `deny` (remove).' }],
+        description: 'Restrict inherited tools and explicitly denied own tools for the calling scope. Empty filters, unknown names, and reserved transport names fail.',
+        parameters: [{ name: 'filter', description: 'inherited allow-list and inherited or own-scope deny-list.' }],
         returns: 'the exact disposer that lifts this restriction.',
       },
       {
@@ -3356,11 +3356,11 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'BidCapabilityExecutionContext',
-    declaration: 'export interface BidCapabilityExecutionContext {\n    readonly canonical: BidWorkspace;\n    readonly working: BidWorkspace;\n    readonly agent: Agent;\n    readonly sourceSession?: WritingMessageSession;\n    readonly run: BidRunContext;\n    readonly sectionIds: ReadonlySet<string> | null;\n    readonly authorizedNewDescendants?: ReadonlySet<string>;\n    readonly stepDirectory: string;\n    readonly inputSources: ReadonlyMap<string, string>;\n    readonly baselineHashes: ReadonlyMap<string, string>;\n    readonly allowedWrites: ReadonlySet<string>;\n    readonly stepId: string;\n    readonly rootWorkId: string;\n    readonly authorization: {\n        readonly session_id: string;\n        readonly message_id: string;\n    };\n    readonly inputSha256: string;\n    readonly inputAnswer?: AskUserQuestionAnswerItem;\n}',
+    declaration: 'export interface BidCapabilityExecutionContext {\n    readonly canonical: BidWorkspace;\n    readonly working: BidWorkspace;\n    readonly checkpointWorkspace?: BidWorkspace;\n    readonly agent: Agent;\n    readonly sourceSession?: WritingMessageSession;\n    readonly sourceSnapshot?: BidTaskSourceSnapshot;\n    readonly preserveMigratedContent?: boolean;\n    readonly originalSectionIds?: ReadonlySet<string>;\n    readonly originalTaskRequirements?: readonly string[];\n    readonly run: BidRunContext;\n    readonly recovery?: ModelStageExecutionOptions[\'recovery\'];\n    readonly sectionIds: ReadonlySet<string> | null;\n    readonly sectionScopeRoots?: readonly string[];\n    readonly authorizedNewDescendants?: ReadonlySet<string>;\n    readonly stepDirectory: string;\n    readonly inputSources: ReadonlyMap<string, string>;\n    readonly baselineHashes: ReadonlyMap<string, string>;\n    readonly allowedWrites: ReadonlySet<string>;\n    readonly stepId: string;\n    readonly rootWorkId: string;\n    readonly authorization: {\n        readonly session_id: string;\n        readonly message_id: string;\n    };\n    readonly inputSha256: string;\n    readonly inputAnswer?: AskUserQuestionAnswerItem;\n    readonly resumeCandidate?: boolean;\n}',
   },
   {
     name: 'BidCapabilityPlanView',
-    declaration: 'export interface BidCapabilityPlanView {\n    readonly workId: string;\n    readonly title: string;\n    readonly scope: string;\n    readonly status: \'queued\' | \'running\' | \'awaiting_input\' | \'suspended\' | \'completed\' | \'failed\';\n    readonly steps: readonly {\n        readonly id: string;\n        readonly capability: string;\n        readonly status: \'pending\' | \'running\' | \'awaiting_input\' | \'completed\' | \'failed\';\n        readonly detail: string | null;\n    }[];\n}',
+    declaration: 'export interface BidCapabilityPlanView {\n    readonly workId: string;\n    readonly title: string;\n    readonly scope: string;\n    readonly status: \'queued\' | \'running\' | \'awaiting_input\' | \'suspended\' | \'completed\' | \'failed\';\n    readonly steps: readonly {\n        readonly id: string;\n        readonly capability: string;\n        readonly description: string;\n        readonly status: \'pending\' | \'running\' | \'awaiting_input\' | \'completed\' | \'failed\' | \'suspended\';\n        readonly detail: string | null;\n    }[];\n}',
   },
   {
     name: 'BidCapabilityResult',
@@ -3456,7 +3456,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'BidEvidenceMappingProgress',
-    declaration: 'export interface BidEvidenceMappingProgress {\n    readonly initial: number;\n    readonly supplemental: number;\n    readonly total: number;\n    readonly completed: number;\n    readonly running: number;\n    readonly not_started: number;\n    readonly failed: number;\n    readonly failed_section_ids: readonly string[];\n    readonly tasks: readonly {\n        readonly task_id: string;\n        readonly title: string;\n        readonly phase: \'initial\' | \'final_check\';\n        readonly status: \'pending\' | \'running\' | \'completed\' | \'failed\';\n        readonly section_ids: readonly string[];\n        readonly child_session_id: string | null;\n        readonly latest_issue: string | null;\n    }[];\n}',
+    declaration: 'export interface BidEvidenceMappingProgress {\n    readonly initial: number;\n    readonly supplemental: number;\n    readonly total: number;\n    readonly completed: number;\n    readonly running: number;\n    readonly not_started: number;\n    readonly failed: number;\n    readonly failed_section_ids: readonly string[];\n    readonly tasks: readonly {\n        readonly task_id: string;\n        readonly title: string;\n        readonly phase: \'initial\' | \'final_check\';\n        readonly status: \'pending\' | \'running\' | \'completed\' | \'failed\';\n        readonly section_ids: readonly string[];\n        readonly child_session_id: string | null;\n        readonly latest_issue: string | null;\n        readonly research_diagnostics?: BidResearchDiagnostics;\n    }[];\n}',
   },
   {
     name: 'BidFileId',
@@ -3505,6 +3505,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'BidPageTargetStatus',
     declaration: 'export type BidPageTargetStatus = {\n    readonly status: \'not_set\';\n} | {\n    readonly status: \'not_required\';\n} | {\n    readonly status: \'unavailable\';\n    readonly target: BidPageTarget | null;\n    readonly reason: string;\n} | {\n    readonly status: \'met\' | \'below\' | \'above\';\n    readonly target: BidPageTarget;\n    readonly estimated_pages: number;\n    readonly difference: number;\n    readonly format_revision: number;\n    readonly format_source: \'default\' | \'template\';\n    readonly format_template_id: DocxTemplateId | null;\n    readonly estimate_method: \'fast\' | \'rendered\';\n};',
+  },
+  {
+    name: 'BidResearchDiagnostics',
+    declaration: 'export type BidResearchDiagnostics = z.infer<typeof researchDiagnosticsSchema>;',
   },
   {
     name: 'BidReviewChapterView',
@@ -3600,11 +3604,27 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'BidTaskFailure',
-    declaration: 'export interface BidTaskFailure {\n    readonly code?: string | undefined;\n    readonly message: string;\n    readonly issues?: readonly StageValidationIssue[] | undefined;\n    readonly recovery?: {\n        readonly kind: \'retry\' | \'repair\' | \'blocked\';\n        readonly unit: string;\n        readonly reason: string;\n        readonly candidateSha256?: string | undefined;\n    } | undefined;\n}',
+    declaration: 'export interface BidTaskFailure {\n    readonly code?: string | undefined;\n    readonly message: string;\n    readonly cause?: {\n        readonly code?: string | undefined;\n        readonly message: string;\n        readonly status?: number | undefined;\n        readonly retryable?: boolean | undefined;\n    } | undefined;\n    readonly issues?: readonly StageValidationIssue[] | undefined;\n    readonly recovery?: {\n        readonly kind: \'retry\' | \'repair\' | \'blocked\';\n        readonly unit: string;\n        readonly reason: string;\n        readonly candidateSha256?: string | undefined;\n    } | undefined;\n}',
+  },
+  {
+    name: 'BidTaskRequirement',
+    declaration: 'export type BidTaskRequirement = z.infer<typeof requirementSchema>;',
+  },
+  {
+    name: 'BidTaskSourceSnapshot',
+    declaration: 'export type BidTaskSourceSnapshot = z.infer<typeof bidTaskSourceSnapshotSchema>;',
   },
   {
     name: 'BidTaskState',
     declaration: 'export type BidTaskState = {\n    readonly stage: BidStage;\n    readonly status: \'ready\';\n    readonly run: null;\n} | {\n    readonly stage: BidStage;\n    readonly status: \'running\';\n    readonly run: BidRunData;\n} | {\n    readonly stage: BidStage;\n    readonly status: \'waiting_user\';\n    readonly run: null;\n    readonly reason?: string | undefined;\n    readonly issues?: readonly StageValidationIssue[] | undefined;\n} | {\n    readonly stage: BidStage;\n    readonly status: \'suspended\';\n    readonly run: BidRunData & {\n        readonly cause: BidRunSuspensionCause;\n        readonly error?: BidTaskFailure | undefined;\n    };\n} | {\n    readonly stage: BidStage;\n    readonly status: \'failed\';\n    readonly run: null;\n    readonly failure: BidTaskFailure;\n} | {\n    readonly stage: BidStage;\n    readonly status: \'completed\';\n    readonly run: null;\n};',
+  },
+  {
+    name: 'BidTaskVerificationInput',
+    declaration: 'export interface BidTaskVerificationInput {\n    readonly phase: \'plan\' | \'result\';\n    readonly source: BidTaskSourceSnapshot;\n    readonly task: BidCapabilityTask;\n    readonly requirements?: readonly BidTaskRequirement[];\n    readonly scope_constraints?: readonly z.infer<typeof scopeConstraintSchema>[];\n    readonly accepted_plan_sha256?: string;\n    readonly original_section_ids?: readonly string[];\n    readonly written_section_ids?: readonly string[];\n    readonly execution_history?: {\n        readonly prior_plan_rejections: readonly {\n            scope_authorized: boolean;\n            unmet: readonly string[];\n        }[];\n        readonly plan_patch_count: number;\n        readonly completed_steps: readonly {\n            description: string;\n            capability: string;\n        }[];\n    };\n    readonly preservation_evidence?: {\n        readonly retained: boolean;\n        readonly missing: readonly string[];\n    };\n    readonly evidence: readonly {\n        path: string;\n        sha256: string;\n        text: string;\n    }[];\n    readonly scope_evidence?: readonly {\n        section_id: string;\n        object: string;\n        outside_scope: boolean;\n        before_section?: OutlineArtifact[\'sections\'][number];\n        before_sha256: string | null;\n        after_sha256: string | null;\n    }[];\n}',
+  },
+  {
+    name: 'BidTaskVerifier',
+    declaration: 'export type BidTaskVerifier = (input: BidTaskVerificationInput, agent: Agent, signal: AbortSignal) => Promise<z.input<typeof decisionSchema>>;',
   },
   {
     name: 'BidTenderAnalysisConfirmationResult',
@@ -3640,7 +3660,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'CapabilityTaskDispatcher',
-    declaration: 'export interface CapabilityTaskDispatcher {\n    allowedWrites(call: BidCapabilityCall, sectionIds: ReadonlySet<string> | null, working: BidWorkspace, stepId: string): Promise<ReadonlySet<string>>;\n    allowedWritesAfter?(call: BidCapabilityCall, working: BidWorkspace): Promise<ReadonlySet<string>>;\n    execute(call: BidCapabilityCall, context: BidCapabilityExecutionContext): Promise<{\n        readonly result: BidCapabilityResult;\n        readonly removedPaths?: readonly string[];\n    }>;\n    validate(call: BidCapabilityCall, context: BidCapabilityExecutionContext, result: BidCapabilityResult): Promise<void>;\n}',
+    declaration: 'export interface CapabilityTaskDispatcher {\n    readonly verifyTask?: BidTaskVerifier;\n    allowedWrites(call: BidCapabilityCall, sectionIds: ReadonlySet<string> | null, working: BidWorkspace, stepId: string): Promise<ReadonlySet<string>>;\n    allowedWritesAfter?(call: BidCapabilityCall, working: BidWorkspace): Promise<ReadonlySet<string>>;\n    execute(call: BidCapabilityCall, context: BidCapabilityExecutionContext): Promise<{\n        readonly result: BidCapabilityResult;\n        readonly removedPaths?: readonly string[];\n    }>;\n    validate(call: BidCapabilityCall, context: BidCapabilityExecutionContext, result: BidCapabilityResult): Promise<void>;\n}',
   },
   {
     name: 'CapabilityTaskRequest',
@@ -4567,6 +4587,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export interface ModelModalityMap {\n    text: \'text\';\n    image: \'image\';\n}',
   },
   {
+    name: 'ModelStageExecutionOptions',
+    declaration: 'export interface ModelStageExecutionOptions {\n    maxRepairAttempts: number;\n    run: BidRunContext;\n    recovery?: {\n        readonly workId: string;\n        readonly authorizationWorkId?: string;\n        readonly ownerSessionId?: string;\n        readonly requestSeq?: number;\n        readonly unit: string;\n        readonly instruction: string;\n        readonly issues: readonly StageValidationIssue[];\n    };\n}',
+  },
+  {
     name: 'NativeVisioExport',
     declaration: 'export interface NativeVisioExport {\n    readonly visio: VisioBackend;\n    readonly word: WordVisioEmbedder;\n    readonly finalizer?: WordDocumentFinalizer;\n}',
   },
@@ -4604,15 +4628,15 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'OutlineEditOperation',
-    declaration: 'export type OutlineEditOperation = {\n    readonly type: \'update_section\';\n    readonly section_id: string;\n    readonly title?: string;\n    readonly purpose?: string;\n    readonly summary?: string;\n    readonly must_answer?: readonly string[];\n} | {\n    readonly type: \'add_section\';\n    readonly parent_id: string | null;\n    readonly order: number;\n    readonly writable: boolean;\n    readonly title: string;\n    readonly purpose: string;\n    readonly summary?: string;\n    readonly must_answer?: readonly string[];\n} | {\n    readonly type: \'delete_section\';\n    readonly section_id: string;\n} | {\n    readonly type: \'split_section\';\n    readonly section_id: string;\n    readonly children: readonly {\n        readonly title: string;\n        readonly purpose: string;\n        readonly must_answer: readonly string[];\n    }[];\n} | {\n    readonly type: \'merge_sections\';\n    readonly section_ids: readonly string[];\n    readonly title: string;\n    readonly purpose: string;\n} | {\n    readonly type: \'move_section\';\n    readonly section_id: string;\n    readonly parent_id: string | null;\n    readonly order: number;\n};',
-  },
-  {
-    name: 'OutlineReviewContext',
-    declaration: 'export interface OutlineReviewContext {\n    readonly baseline: OutlineArtifact | null;\n    readonly requirements: TenderRequirementsArtifact;\n    readonly scoring: TenderScoringArtifact;\n    readonly evidence: EvidenceMapArtifact | null;\n}',
+    declaration: 'export type OutlineEditOperation = {\n    readonly type: \'update_section\';\n    readonly section_id: string;\n    readonly title?: string;\n    readonly purpose?: string;\n    readonly summary?: string;\n    readonly must_answer?: readonly string[];\n    readonly writing_notes?: readonly string[];\n} | {\n    readonly type: \'add_section\';\n    readonly parent_id: string | null;\n    readonly order: number;\n    readonly writable: boolean;\n    readonly title: string;\n    readonly purpose: string;\n    readonly summary?: string;\n    readonly must_answer?: readonly string[];\n} | {\n    readonly type: \'delete_section\';\n    readonly section_id: string;\n} | {\n    readonly type: \'split_section\';\n    readonly section_id: string;\n    readonly children: readonly {\n        readonly title: string;\n        readonly purpose: string;\n        readonly must_answer: readonly string[];\n    }[];\n} | {\n    readonly type: \'merge_sections\';\n    readonly section_ids: readonly string[];\n    readonly title: string;\n    readonly purpose: string;\n} | {\n    readonly type: \'move_section\';\n    readonly section_id: string;\n    readonly parent_id: string | null;\n    readonly order: number;\n};',
   },
   {
     name: 'ParseStatus',
     declaration: 'export type ParseStatus = \'pending\' | \'success\' | \'needs_ocr\' | \'failed\';',
+  },
+  {
+    name: 'PdfReviewAnchor',
+    declaration: 'export type PdfReviewAnchor = string | readonly string[];',
   },
   {
     name: 'PermissionSelect',
@@ -5832,7 +5856,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'VisualSensitiveBlock',
-    declaration: 'export interface VisualSensitiveBlock {\n    readonly blockId: string;\n    readonly kind: VisualBlockKind;\n    readonly inputHash: string;\n    readonly anchor: string;\n    readonly boundary: \'within-page\' | \'overflow\';\n}',
+    declaration: 'export interface VisualSensitiveBlock {\n    readonly blockId: string;\n    readonly kind: VisualBlockKind;\n    readonly inputHash: string;\n    readonly anchor: PdfReviewAnchor;\n    readonly boundary: \'within-page\' | \'overflow\';\n}',
   },
   {
     name: 'WebBootEntry',

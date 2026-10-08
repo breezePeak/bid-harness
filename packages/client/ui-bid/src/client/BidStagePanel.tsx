@@ -4,6 +4,7 @@ import type { BidCapabilityPlanView } from '@deepseek-ai/dsh-bid/control-plane'
 import { applyOutlineEdits, BID_DOCX_EXPORT_PROJECTION_KEY, BID_RUNTIME_PROJECTION_KEY, BID_STAGES, BID_WRITING_ENTRY_PROJECTION_KEY } from '@deepseek-ai/dsh-bid/control-plane'
 import type { BidClientProjection, BidDocumentRole, BidEvidenceMappingProgress, BidFileIntakeFileResult, BidStage, BidTaskStatus, OutlineDraftView, OutlineReviewContext, OutlineEditOperation, StageValidationIssue, TenderAnalysisConfirmationView } from '@deepseek-ai/dsh-bid/control-plane'
 import type { InjectFace, PropsLocale, PropsRuntime, PropsStore } from '@deepseek-ai/dsh-client-ui-slots'
+import type { ChatNode } from '@deepseek-ai/dsh-client-ui-conversation/client'
 import {
   Button,
   IconBrowseOutline16,
@@ -332,6 +333,7 @@ function IconInfoOutline14({ className }: { className?: string }) {
  */
 export function BidStagePanel({
   sessionId,
+  useSession,
   useProjection,
   useSessions,
   setRealtimeChatMode,
@@ -369,6 +371,9 @@ export function BidStagePanel({
   actions,
   t,
 }: BidStagePanelProps) {
+  const resetCommandSeq = useSession(snapshot => (snapshot.chat.nodes.values() as readonly ChatNode[]).reduce((seq, node) => node.kind === 'command'
+    && node.data.name === 'bid-reset-s1' && node.data.outcome?.kind === 'success' ? Math.max(seq, node.anchorSeq) : seq, -1))
+  const lastNodeSeq = useSession(snapshot => snapshot.chat.nodes.values().reduce((seq, node) => Math.max(seq, node.anchorSeq), -1))
   const sessionSummary = useSessions(state => state.byId[sessionId])
   const isBidSession = isBidMainSessionSummary(sessionSummary)
   const isSubagent = sessionSummary?.origin === 'subagent'
@@ -417,7 +422,7 @@ export function BidStagePanel({
     }
     void refresh()
     return () => { active = false; window.clearTimeout(timer) }
-  }, [getCapabilityTaskPlan, isBidSession, sessionId])
+  }, [getCapabilityTaskPlan, isBidSession, resetCommandSeq, sessionId])
 
   const progressStage = projection?.task.stage
   const progressStatus = projection?.task.status
@@ -438,6 +443,9 @@ export function BidStagePanel({
   const selectedFilesRef = useRef<readonly SelectedFile[]>([])
   const selectedTemplateRef = useRef<SelectedTemplate | null>(null)
   const selectedFilesSessionId = useRef(sessionId)
+  // 补齐旧历史或重连不能清除本次页面中尚未上传的选择。
+  const selectedFilesResetSeq = useRef(lastNodeSeq)
+  const selectedFilesEpoch = useRef(0)
   const nextFileId = useRef(0)
   const pendingAction = useRef<PendingAction | null>(null)
   const requestEpoch = useRef(0)
@@ -658,14 +666,27 @@ export function BidStagePanel({
   }, [reviewStateKey, reviewViewAvailable, selectReviewView, reviewViewId])
 
   useEffect(() => {
-    if (projection?.task.stage === 'file_intake' && selectedFilesSessionId.current === sessionId) return
+    const resetApplied = selectedFilesSessionId.current === sessionId
+      && resetCommandSeq >= 0 && resetCommandSeq >= selectedFilesResetSeq.current
+    if (projection?.task.stage === 'file_intake' && selectedFilesSessionId.current === sessionId && !resetApplied) return
+    if (resetApplied || selectedFilesSessionId.current !== sessionId) selectedFilesEpoch.current += 1
     selectedFilesSessionId.current = sessionId
+    selectedFilesResetSeq.current = Math.max(lastNodeSeq, resetCommandSeq + 1)
     selectedFilesRef.current = []
     selectedTemplateRef.current = null
     setSelectedFiles([])
     setSelectedTemplate(null)
     setDocxTemplateMessage('')
-  }, [projection?.task.stage, sessionId])
+    if (resetApplied) {
+      requestEpoch.current += 1
+      pendingAction.current = null
+      setRequestPending(null)
+      actionErrorVisible.current = false
+      setDocxLibrary(null)
+      setCapabilitySnapshot(null)
+      setRequestError(null)
+    }
+  }, [projection?.task.stage, resetCommandSeq, lastNodeSeq, sessionId])
 
   useEffect(() => {
     if (!hasProjection || projection.task.stage !== 'file_intake') { setDocxLibrary(null); return }
@@ -674,7 +695,7 @@ export function BidStagePanel({
       if (active) setDocxTemplateMessage(reason instanceof Error ? reason.message : 'Word 模板库读取失败。')
     })
     return () => { active = false }
-  }, [getDocxLibrary, hasProjection, projection?.task.stage, sessionId])
+  }, [getDocxLibrary, hasProjection, projection, resetCommandSeq, sessionId])
 
   useEffect(() => {
     setOutlineFeedback('')
@@ -810,6 +831,8 @@ export function BidStagePanel({
   }
 
   const uploadSelectedFiles = async (): Promise<void> => {
+    const epoch = selectedFilesEpoch.current
+    const isCurrent = (): boolean => alive.current && selectedFilesEpoch.current === epoch
     const files = selectedFilesRef.current
     const template = selectedTemplateRef.current
     if (files.length > 0 && !files.some(file => file.role === 'tender')) {
@@ -821,11 +844,13 @@ export function BidStagePanel({
       setDocxTemplateMessage('正在解析 Word 模板…')
       try {
         const view = await uploadDocxTemplate(template.file, docxLibrary.revision)
+        if (!isCurrent()) return
         updateSelectedTemplate(file => file === null ? null : { ...file, progress: 100, status: 'completed', error: undefined })
         setDocxLibrary(view.library)
         setDocxTemplateMessage(view.warnings.find(warning => warning.startsWith('模板解析完成；自动格式解释未应用'))
           ?? '模板已加入项目模板库')
       } catch (reason: unknown) {
+        if (!isCurrent()) return
         updateSelectedTemplate(file => file === null ? null : { ...file, progress: 100, status: 'failed', error: reason instanceof Error ? reason.message : String(reason) })
         throw reason
       }
@@ -836,11 +861,13 @@ export function BidStagePanel({
       const results = await uploadFiles(
         files.map(({ file, role }) => ({ file, role })),
         (file, progress) => {
+          if (!isCurrent()) return
           updateSelectedFiles(current => current.map(item => item.file === file.file && item.role === file.role
             ? { ...item, progress, status: progress >= 50 ? 'uploading' : 'encoding' }
             : item))
         },
       )
+      if (!isCurrent()) return
       applyFileResults(results)
       const failed = results.filter(file => file.status === 'failed')
       if (failed.length > 0) {
@@ -852,6 +879,7 @@ export function BidStagePanel({
         })
       }
     } catch (reason: unknown) {
+      if (!isCurrent()) return
       if (reason instanceof BidActionError && reason.files.length > 0) applyFileResults(reason.files)
       else updateSelectedFiles(current => current.map(file => ({ ...file, progress: 100, status: 'failed', error: reason instanceof Error ? reason.message : String(reason) })))
       throw reason

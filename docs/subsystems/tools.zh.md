@@ -506,10 +506,9 @@ presentAs(mode: ToolPresentationMode): () => void
 register(definition: ToolDefinition): () => void
 
 /**
- * Restrict global tools for the calling agent scope. Empty filters, unknown
- * names, scope-local names, and reserved transport names fail. Restrictions
- * intersect; scoped registrations remain visible.
- * @param filter - global-tool mask: `allow` (keep only) and/or `deny` (remove).
+ * Restrict inherited tools and explicitly denied own tools for the calling scope.
+ * Empty filters, unknown names, and reserved transport names fail.
+ * @param filter - inherited allow-list and inherited or own-scope deny-list.
  * @returns the exact disposer that lifts this restriction.
  */
 restrict(filter: ToolRestriction): () => void

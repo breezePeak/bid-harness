@@ -14,7 +14,7 @@ const COMMANDS: ReadonlyArray<{
   readonly stage: BidStage
   readonly label: string
 }> = [
-  { name: 'bid-reset-s1', description: '回退资料上传阶段（S1）并等待重新上传，保留已上传资料', stage: 'file_intake', label: '资料上传' },
+  { name: 'bid-reset-s1', description: '清空已上传资料与 Word 模板及格式配置，回退资料上传阶段（S1）并等待重新上传', stage: 'file_intake', label: '资料上传' },
   { name: 'bid-reset-s2', description: '回退并重新执行招标分析阶段（S2）', stage: 'tender_analysis', label: '招标分析' },
   { name: 'bid-reset-s3', description: '回退并重新执行初步目录阶段（S3）', stage: 'outline_generation', label: '初步目录' },
   { name: 'bid-reset-s4', description: '回退并重新执行资料映射阶段（S4）', stage: 'evidence_mapping', label: '资料映射' },
@@ -51,7 +51,7 @@ async function resetStage(
 }
 
 /**
- * 仅在 Bid Agent Preset 中注册 S1–S5 重置命令；S1 保留已上传资料并等待上传。
+ * 仅在 Bid Agent Preset 中注册 S1–S5 重置命令；S1 清空已上传资料与 Word 模板及格式配置并等待上传。
  * @param ctx - agent-scoped Context carrying the Host Bid runtime and command registry.
  */
 export function apply(ctx: Context): void {

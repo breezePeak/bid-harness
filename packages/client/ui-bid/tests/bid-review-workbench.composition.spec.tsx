@@ -175,6 +175,7 @@ describe('S5 Review Workbench & Composer REAL-Composition Integration', () => {
 
       const stagePanelProps = {
         sessionId: 'bid' as SessionId,
+        useSession: <S,>(selector: (state: never) => S): S => selector({ chat: { nodes: { values: () => [] } } } as never),
         disabled: false,
         useSessions: <S,>(selector: (state: never) => S): S => selector({ byId: { bid: { agentPreset: 'bid' } } } as never),
         useProjection: (key: string) => key === 'bid.runtime' ? ({

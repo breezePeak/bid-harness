@@ -4526,6 +4526,7 @@ export class BidHostRuntime extends TypertRemoteService {
    * Rewind to the current or an earlier Bid stage and apply its fixed restart policy.
    * Active work is cancelled and drained before artifacts owned by the selected
    * stage and every later stage are removed.
+   * S1 同时清理项目内上传资料、解析语料、资料清单与 Word 模板及格式配置。
    * @param agent - live Bid Agent receiving the scoped command.
    * @param stage - current or earlier stage named by that command.
    * @returns S2-S4 已提交的 ready 状态；S1 与 S5 返回 waiting_user。
@@ -4581,7 +4582,7 @@ export class BidHostRuntime extends TypertRemoteService {
       if (BID_STAGES.indexOf(stage) > BID_STAGES.indexOf(runtime.stage)) throw new BidOrchestratorError('BID_STAGE_RESET_NOT_ALLOWED', '不能重置尚未开始的阶段。')
       const workspace = new BidWorkspace(session.header.cwd, workspaceConfig(this.config))
       const resetPaths: Readonly<Record<BidStage, readonly string[]>> = {
-        file_intake: ['analysis', 'outline', 'chapters', 'flowcharts'],
+        file_intake: ['input', 'corpus', 'manifest.json', 'word-export', 'analysis', 'outline', 'chapters', 'flowcharts'],
         tender_analysis: ['analysis', 'outline', 'chapters', 'flowcharts'],
         outline_generation: [
           'analysis/scoring-response-points.candidate.json',
@@ -7640,7 +7641,7 @@ export class BidHostRuntime extends TypertRemoteService {
   /**
    * 读取有效能力计划，导出尾步骤的完成状态来自正式导出回执。
    * @param session 项目公开主会话。
-   * @returns 最近任务的只读摘要；尚无能力任务时为 null。
+   * @returns 最近任务的只读摘要；尚无能力任务或历史任务已清理时为 null。
    */
   @Remote('getCapabilityTaskPlan')
   async getCapabilityTaskPlan(session: Session): Promise<BidCapabilityPlanView | null> {
@@ -7667,7 +7668,13 @@ export class BidHostRuntime extends TypertRemoteService {
       : lastStarted?.type === 'bid.run.started' && lastStarted.data.run.work.kind === 'capability_task'
         ? lastStarted.data.run : null
     if (run !== null) {
-      const request = capabilityTaskRequestSchema.parse(await readBidWorkRequest(workspace, run.work))
+      let requestValue: unknown
+      try { requestValue = await readBidWorkRequest(workspace, run.work) }
+      catch (error: unknown) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT' && current?.work.kind !== 'capability_task') return null
+        throw error
+      }
+      const request = capabilityTaskRequestSchema.parse(requestValue)
       const path = within(workspace.projectRoot, `runs/${run.work.workId}/task-checkpoint.json`)
       await assertNoLinkedPath(workspace.root, path)
       let checkpoint: ReturnType<typeof capabilityTaskCheckpointSchema.parse> | null = null

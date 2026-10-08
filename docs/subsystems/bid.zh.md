@@ -30,6 +30,7 @@ registerCapabilityTaskDispatcher(dispatcher: CapabilityTaskDispatcher): () => vo
  * Rewind to the current or an earlier Bid stage and apply its fixed restart policy.
  * Active work is cancelled and drained before artifacts owned by the selected
  * stage and every later stage are removed.
+ * S1 同时清理项目内上传资料、解析语料、资料清单与 Word 模板及格式配置。
  * @param agent - live Bid Agent receiving the scoped command.
  * @param stage - current or earlier stage named by that command.
  * @returns S2-S4 已提交的 ready 状态；S1 与 S5 返回 waiting_user。
@@ -82,9 +83,11 @@ async uploadIncomingFiles( session: Session, incoming: readonly IncomingFile[], 
  * @param authorization 用户消息身份。
  * @param inputPaths 本次任务读取的正式输入文件。
  * @param onAdmitted Run 落盘后调用的可选接纳回调。
+ * @param supersede 精确接管当前挂起或失败能力任务的 Run 身份与项目修订号。
+ * @param completeTask 含独立导出尾步骤的完整任务。
  * @returns Run 结算后的项目状态。
  */
-async runCapabilityTask( agent: Agent, task: BidCapabilityTask, authorization: CapabilityTaskRequest['authorization'], inputPaths: readonly string[], onAdmitted?: (run: BidRunContext) => Promise<void>, ): Promise<BidTaskState>
+async runCapabilityTask( agent: Agent, task: BidCapabilityTask, authorization: CapabilityTaskRequest['authorization'], inputPaths: readonly string[], onAdmitted?: (run: BidRunContext) => Promise<void>, supersede?: CapabilitySupersede, completeTask?: BidCapabilityTask, ): Promise<BidTaskState>
 
 /**
  * Resume one exact suspended Run after checking its project revision and durable checkpoints.
@@ -92,10 +95,10 @@ async runCapabilityTask( agent: Agent, task: BidCapabilityTask, authorization: C
  * @param suspendedRunId - Exact suspended attempt selected by the client.
  * @param expectedProjectRevision - Project revision observed by the client.
  * @param onAccepted - Callback invoked after the replacement Run is durable.
- * @param recovery - Bound Goal request revalidated and recorded inside the project lock.
+ * @param recovery - 主 Agent 修复指令，在项目锁内重验并记录。
  * @returns State reached when the resumed work next settles.
  */
-async resumeCurrentRun( session: Session, suspendedRunId: string, expectedProjectRevision: number, onAccepted?: (run: BidRunContext) => void, recovery?: { goalId: string; instruction: string }, ): Promise<BidTaskState>
+async resumeCurrentRun( session: Session, suspendedRunId: string, expectedProjectRevision: number, onAccepted?: (run: BidRunContext) => void, recovery?: { instruction: string }, ): Promise<BidTaskState>
 
 /** 读取项目 Word 模板列表，不解析模板或生成文件。
  * @param session 当前标书会话。
@@ -225,17 +228,17 @@ async resumeCurrentRun( session: Session, suspendedRunId: string, expectedProjec
 @Remote('deleteRevisionIssue') async deleteRevisionIssue(session: Session, request: BidDeleteRevisionIssueRequest): Promise<BidRevisionQueueResult>
 
 /**
- * 读取当前能力 Work 或已登记请求的计划；只返回检查点中的步骤状态。
+ * 读取有效能力计划，导出尾步骤的完成状态来自正式导出回执。
  * @param session 项目公开主会话。
- * @returns 最近任务的只读摘要；尚无能力任务时为 null。
+ * @returns 最近任务的只读摘要；尚无能力任务或历史任务已清理时为 null。
  */
 @Remote('getCapabilityTaskPlan') async getCapabilityTaskPlan(session: Session): Promise<BidCapabilityPlanView | null>
 
 /**
- * Read the current S4 Mapping Task counts while evidence mapping is active or reviewable.
- * @param session - Bid Session that owns the S4 execution log.
- * @param observed - caller projection used to reject stale observations.
- * @returns task counts, or null when S4 has not reached an observable state or has not produced its log.
+ * 读取当前阶段或当前能力 Work 的资料研究进度与诊断。
+ * @param session 研究 Work 所属公开会话。
+ * @param observed 调用方观察到的项目状态，用于拒绝过期读取。
+ * @returns 对应执行日志的统计；尚无日志或身份不匹配时为 null。
  */
 @Remote('getEvidenceMappingProgress') async getEvidenceMappingProgress( session: Session, observed?: BidClientProjection, ): Promise<BidEvidenceMappingProgress | null>
 

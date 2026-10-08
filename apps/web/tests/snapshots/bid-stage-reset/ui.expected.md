@@ -1,0 +1,111 @@
+## 重置前的失败队列
+
+- region "技术标生成":
+  - text: 资料上传
+  - status: 请添加本项目资料
+  - text: 等待用户确认
+  - paragraph: 支持 .pdf, .docx, .doc, .xlsx, .xls, .txt, .md，最多 20 个文件
+  - list "已选择文件":
+    - listitem:
+      - img
+      - text: 旧招标资料.md 15 B 招标文件
+      - 'button "移除文件: 旧招标资料.md"':
+        - img
+    - listitem:
+      - img
+      - text: 失败模板.docx 11 B 文件不是有效的 DOCX ZIP。 (BID_DOCX_TEMPLATE_UPLOAD_FAILED) 导入模板
+      - 'button "移除文件: 失败模板.docx"':
+        - img
+  - button "Choose File"
+  - status: 正在解析 Word 模板…
+  - button "Choose File"
+  - button "Choose File"
+  - button "Choose File"
+  - button "Choose File"
+  - button "招标文件":
+    - img
+    - text: 招标文件
+  - button "人工框架":
+    - img
+    - text: 人工框架
+  - button "参考旧标书":
+    - img
+    - text: 参考旧标书
+  - button "其他技术资料":
+    - img
+    - text: 其他技术资料
+  - button "导入模板":
+    - img
+    - text: 导入模板
+  - button "上传并解析"
+  - alert:
+    - paragraph: 操作失败：文件不是有效的 DOCX ZIP。 (BID_DOCX_TEMPLATE_UPLOAD_FAILED)
+
+## 同阶段重置后
+
+- region "技术标生成":
+  - text: 资料上传
+  - status: 请添加本项目资料
+  - text: 等待用户确认
+  - paragraph: 支持 .pdf, .docx, .doc, .xlsx, .xls, .txt, .md，最多 20 个文件
+  - button "Choose File"
+  - button "Choose File"
+  - button "Choose File"
+  - button "Choose File"
+  - button "Choose File"
+  - button "招标文件":
+    - img
+    - text: 招标文件
+  - button "人工框架":
+    - img
+    - text: 人工框架
+  - button "参考旧标书":
+    - img
+    - text: 参考旧标书
+  - button "其他技术资料":
+    - img
+    - text: 其他技术资料
+  - button "导入模板":
+    - img
+    - text: 导入模板
+  - button "上传并解析" [disabled]
+
+## 重连后的新选择
+
+- region "技术标生成":
+  - text: 资料上传
+  - status: 请添加本项目资料
+  - text: 等待用户确认
+  - paragraph: 支持 .pdf, .docx, .doc, .xlsx, .xls, .txt, .md，最多 20 个文件
+  - list "已选择文件":
+    - listitem:
+      - img
+      - text: 新招标资料.md 15 B 招标文件
+      - 'button "移除文件: 新招标资料.md"':
+        - img
+    - listitem:
+      - img
+      - text: 新项目模板.docx 19.1 KB 导入模板
+      - 'button "移除文件: 新项目模板.docx"':
+        - img
+  - button "Choose File"
+  - button "Choose File"
+  - button "Choose File"
+  - button "Choose File"
+  - button "Choose File"
+  - button "招标文件":
+    - img
+    - text: 招标文件
+  - button "人工框架":
+    - img
+    - text: 人工框架
+  - button "参考旧标书":
+    - img
+    - text: 参考旧标书
+  - button "其他技术资料":
+    - img
+    - text: 其他技术资料
+  - button "导入模板":
+    - img
+    - text: 导入模板
+  - button "上传并解析"

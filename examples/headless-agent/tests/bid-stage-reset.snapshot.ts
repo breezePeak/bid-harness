@@ -2,13 +2,13 @@
 import { access, readFile, readdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { BID_INITIAL_TASK_STATE, reduceBidTaskState } from '@deepseek-ai/dsh-bid'
+import { BID_INITIAL_TASK_STATE, BidWorkspace, reduceBidTaskState } from '@deepseek-ai/dsh-bid'
 import type {} from '@deepseek-ai/dsh-commands'
 import { LOADER_SMOKE_TEST_TIMEOUT_MS, runLoaderSmoke } from '@deepseek-ai/dsh-loader-smoke'
 import type { SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
 import { expect, it } from 'vitest'
 
-it('源码 Loader 的 /bid-reset-s1 保留资料并回到等待上传状态', async () => {
+it('源码 Loader 的 /bid-reset-s1 清空项目资料与 Word 配置，保留原文件和聊天并等待重新上传', async () => {
   const result = await runLoaderSmoke({
     label: 'S1 命令重置', tempDirPrefix: 'dsh-bid-stage-reset-snapshot-',
     binScript: fileURLToPath(new URL('./fixtures/bid-stage-reset-driver.ts', import.meta.url)),
@@ -19,9 +19,11 @@ it('源码 Loader 的 /bid-reset-s1 保留资料并回到等待上传状态', as
       expect(JSON.parse(await readFile(join(project, 'project-state.json'), 'utf8'))).toMatchObject({
         schema_version: 4, stage: 'file_intake', status: 'waiting_user', run: null,
       })
-      expect(await readFile(join(project, 'input/tender.md'), 'utf8')).toBe('技术要求：必须按期交付，技术方案得 10 分。')
-      expect((JSON.parse(await readFile(join(project, 'manifest.json'), 'utf8')) as { files: unknown[] }).files).toHaveLength(1)
-      for (const path of ['analysis', 'outline', 'chapters', 'flowcharts', 'output']) {
+      expect(await readFile(join(cwd, 'tender.md'), 'utf8')).toBe('技术要求：必须按期交付，技术方案得 10 分。')
+      expect(await readFile(join(cwd, 'layout.docx'))).toEqual(
+        await readFile(new URL('../../../packages/bid/bid/assets/templates/default-technical-bid.docx', import.meta.url)),
+      )
+      for (const path of ['input', 'corpus', 'manifest.json', 'word-export', 'analysis', 'outline', 'chapters', 'flowcharts', 'output']) {
         await expect(access(join(project, path))).rejects.toMatchObject({ code: 'ENOENT' })
       }
       const store = join(cwd, '.session-store')
@@ -35,6 +37,19 @@ it('源码 Loader 的 /bid-reset-s1 保留资料并回到等待上传状态', as
       expect(commands[0]).toMatchObject({ data: { name: 'bid-reset-s1', args: '' } })
       expect(commands[1]).toMatchObject({ data: { kind: 'success' } })
       expect(commands[0]?.data.commandId).toBe(commands[1]?.data.commandId)
+      expect(events.find(event => event.type === 'user/message' && event.data.source.kind === 'user'))
+        .toMatchObject({ data: { content: [{ type: 'text', text: 'aaa' }] } })
+      expect(events.flatMap(event => event.type === 'assistant/message' ? event.data.message.content : []))
+        .toContainEqual({ type: 'text', text: 'bbb' })
+      const workspace = new BidWorkspace(cwd)
+      expect((await workspace.readManifest()).files).toEqual([])
+      const files = await workspace.import([{
+        name: 'tender.md', role: 'tender', bytes: new TextEncoder().encode('新项目要求：提供独立验收方案。'),
+      }])
+      expect((await workspace.readManifest()).files).toHaveLength(1)
+      expect(files[0]?.inputPath).toBe('input/tender.md')
+      expect(await readFile(join(project, 'input/tender.md'), 'utf8')).toBe('新项目要求：提供独立验收方案。')
+      expect(await readFile(join(cwd, 'tender.md'), 'utf8')).toBe('技术要求：必须按期交付，技术方案得 10 分。')
     },
   })
   expect(JSON.parse(result.stdout)).toMatchInlineSnapshot(`
@@ -55,9 +70,10 @@ it('源码 Loader 的 /bid-reset-s1 保留资料并回到等待上传状态', as
         "stage": "file_intake",
         "status": "waiting_user",
       },
+      "emptyManifest": [],
       "executionAgents": 0,
       "listed": {
-        "description": "回退资料上传阶段（S1）并等待重新上传，保留已上传资料",
+        "description": "清空已上传资料与 Word 模板及格式配置，回退资料上传阶段（S1）并等待重新上传",
         "name": "bid-reset-s1",
       },
       "locksReleased": true,
@@ -79,11 +95,28 @@ it('源码 Loader 的 /bid-reset-s1 保留资料并回到等待上传状态', as
       ],
       "modelRequests": 0,
       "preserved": {
-        "corpus": true,
-        "inputs": true,
-        "manifest": true,
+        "builtInTemplate": true,
+        "chatHistory": true,
+        "originalTemplate": true,
+        "originalTender": true,
       },
       "removed": [
+        {
+          "path": "input",
+          "removed": true,
+        },
+        {
+          "path": "corpus",
+          "removed": true,
+        },
+        {
+          "path": "manifest.json",
+          "removed": true,
+        },
+        {
+          "path": "word-export",
+          "removed": true,
+        },
         {
           "path": "analysis",
           "removed": true,
@@ -120,6 +153,12 @@ it('源码 Loader 的 /bid-reset-s1 保留资料并回到等待上传状态', as
         "run": null,
         "stage": "file_intake",
         "status": "waiting_user",
+      },
+      "wordFormat": {
+        "estimateTemplateId": null,
+        "systemDefaultAvailable": true,
+        "templateCount": 0,
+        "userConfirmed": {},
       },
     }
   `)

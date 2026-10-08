@@ -610,6 +610,7 @@ export const TYPE_LINK_EXEMPTIONS: Readonly<Record<string, string>> = {
   BidAddRevisionIssueRequest: 'Bid control-plane contract is owned by packages/bid/bid/README.md',
   BidCapabilityPlanView: 'Bid control-plane contract is owned by packages/bid/bid/README.md',
   BidCapabilityTask: 'Bid control-plane contract is owned by packages/bid/bid/README.md',
+  CapabilitySupersede: '能力任务接管契约由 packages/bid/bid/README.zh.md 说明。',
   BidChapterRevisionRequest: 'Bid control-plane contract is owned by packages/bid/bid/README.md',
   BidChapterRevisionResult: 'Bid control-plane contract is owned by packages/bid/bid/README.md',
   BidChapterWritingGateResult: 'Bid control-plane contract is owned by packages/bid/bid/README.md',
