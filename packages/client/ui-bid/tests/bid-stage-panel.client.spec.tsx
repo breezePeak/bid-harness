@@ -1138,48 +1138,49 @@ describe('BidStagePanel', () => {
     expect(screen.getByTestId('bid-capability-plan').textContent).toContain('研究各章节资料并复核评分点覆盖')
   })
 
-  it.each([
-    ['not_started', '尚未发起研究'], ['not_required', '无需外部资料'], ['local_sufficient', '本地资料足够'],
-    ['search_empty', '检索无相关结果'], ['search_failed', '检索失败'], ['fetch_failed', '抓取失败'], ['read_excluded', '已读但未采用'],
-    ['saved_unbound', '已保存未绑定'], ['display_omitted', '已绑定资料未展示'], ['bound', '资料已绑定'],
-    ['insufficient', '证据仍有缺口'],
-  ] as const)('资料研究区分 %s 并呈现真实交接统计', async (status, label) => {
-    render(<BidStagePanel {...props(projection({ runtime: { stage: 'evidence_mapping', status: 'waiting_user' } }), {
-      getEvidenceMappingProgress: async () => researchProgress(status),
-    })} />)
-    expect(await screen.findByText(`${label}：需核对现行验收标准`)).toBeTruthy()
-    expect(screen.getByText('检索 2 · 抓取 1 · 读取 1 · 采用 0 · 绑定 0 · 展示 0')).toBeTruthy()
-    expect(screen.getByText('检索词：验收标准')).toBeTruthy()
-    expect(screen.getByText('候选来源：https://example.test/standard')).toBeTruthy()
-    expect(screen.getByText('未采用原因：该标准不适用于本项目')).toBeTruthy()
-    expect(screen.getByText('具体缺口：标准的适用范围')).toBeTruthy()
-    expect(screen.getByText('失败原因：抓取服务暂时不可用')).toBeTruthy()
+  it.each(['running', 'waiting_user', 'completed'] as const)('S4 %s 不显示逐章研究诊断', async (status) => {
+    await act(async () => {
+      render(<BidStagePanel {...props(projection({ runtime: { stage: 'evidence_mapping', status } }), {
+        getEvidenceMappingProgress: async () => researchProgress('not_required'),
+      })} />)
+    })
+    if (status === 'running') expect(screen.getByTestId('bid-stage-plan').textContent).toContain('100%')
+    else expect(screen.getByRole('region', { name: '技术标生成' })).toBeTruthy()
+    expect(screen.queryByText('资料研究过程')).toBeNull()
+    expect(screen.queryByText(/需核对现行验收标准|检索 2 · 抓取 1|具体缺口：/)).toBeNull()
   })
 
-  it.each(['evidence.research', 'outline.refine'] as const)('%s 完成并回到正文等待态后仍显示原 Work 的研究过程', async (capability) => {
+  it.each(['evidence.research', 'outline.refine'] as const)('%s 完成并回到正文等待态后收起计划和研究诊断', async (capability) => {
     const plan: BidCapabilityPlanView = { workId: 'research-work', title: '核对现行验收标准', scope: 'sections', status: 'completed',
       steps: [{ id: 'research', capability, description: '核对现行验收标准', status: 'completed', detail: null }] }
     const getEvidenceMappingProgress = vi.fn(async () => researchProgress('saved_unbound'))
-    render(<BidStagePanel {...props(projection({ runtime: { stage: 'chapter_writing', status: 'waiting_user' } }), {
-      getCapabilityTaskPlan: async () => plan, getEvidenceMappingProgress,
-    })} />)
-    expect(await screen.findByText('已保存未绑定：需核对现行验收标准')).toBeTruthy()
+    await act(async () => {
+      render(<BidStagePanel {...props(projection({ runtime: { stage: 'chapter_writing', status: 'waiting_user' } }), {
+        getCapabilityTaskPlan: async () => plan, getEvidenceMappingProgress,
+      })} />)
+    })
     expect(getEvidenceMappingProgress).toHaveBeenCalled()
-    expect(screen.getByText('资料研究过程')).toBeTruthy()
+    expect(screen.queryByTestId('bid-capability-plan')).toBeNull()
+    expect(screen.queryByText('资料研究过程')).toBeNull()
+    expect(screen.queryByText(/已保存未绑定：/)).toBeNull()
   })
 
-  it.each(['stage', 'evidence.research', 'outline.refine'] as const)('%s 运行中持续显示实际研究过程', async (capability) => {
+  it.each(['stage', 'evidence.research', 'outline.refine'] as const)('%s 运行中显示计划，不显示逐章研究诊断', async (capability) => {
     const plan: BidCapabilityPlanView | null = capability === 'stage' ? null : {
       workId: 'research-work', title: '核对现行验收标准', scope: 'sections', status: 'running',
       steps: [{ id: 'research', capability, description: '核对现行验收标准', status: 'running', detail: null }],
     }
-    render(<BidStagePanel {...props(projection({ runtime: {
-      stage: capability === 'stage' ? 'evidence_mapping' : 'chapter_writing', status: 'running',
-    } }), {
-      getCapabilityTaskPlan: async () => plan, getEvidenceMappingProgress: async () => researchProgress('researching'),
-    })} />)
-    expect(await screen.findByText('正在研究：需核对现行验收标准')).toBeTruthy()
-    expect(screen.getByText('检索词：验收标准')).toBeTruthy()
+    await act(async () => {
+      render(<BidStagePanel {...props(projection({ runtime: {
+        stage: capability === 'stage' ? 'evidence_mapping' : 'chapter_writing', status: 'running',
+      } }), {
+        getCapabilityTaskPlan: async () => plan, getEvidenceMappingProgress: async () => researchProgress('researching'),
+      })} />)
+    })
+    expect(screen.getByTestId(capability === 'stage' ? 'bid-stage-plan' : 'bid-capability-plan')).toBeTruthy()
+    expect(screen.queryByText('资料研究过程')).toBeNull()
+    expect(screen.queryByText('正在研究：需核对现行验收标准')).toBeNull()
+    expect(screen.queryByText('检索词：验收标准')).toBeNull()
   })
 
   it('重规划更新具体步骤，完成后从当前面板收起', async () => {

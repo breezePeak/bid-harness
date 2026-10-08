@@ -57,6 +57,7 @@ describe('web e2e: Bid 后台 Run 进度', () => {
       tasks: ['completed', 'completed', 'completed', 'running', 'running', 'pending', 'pending', 'pending', 'pending', 'pending'].map((status, index) => ({
         task_id: `MAP-${String(index + 1)}`, title: `研究任务 ${String(index + 1)}`,
         phase: index < 8 ? 'initial' : 'final_check', status, attempts: [], final_child_session_id: null,
+        active_child_session_id: status === 'running' ? `mapping-child-${String(index + 1)}` : null,
       })),
     }))
     run = { ...run, runId: 'web-s4-progress', epoch: run.epoch + 1,
@@ -95,6 +96,7 @@ describe('web e2e: Bid 后台 Run 进度', () => {
     agent = found
     workspaceCwd = found.session.header.cwd
     const workspace = new BidWorkspace(found.session.header.cwd)
+    await seedProjectArtifacts(workspace)
     run = {
       runId: 'web-progress', interactionSessionId: String(agent.session.id), executionSessionId: 'execution',
       epoch: 1, baseProjectRevision: 0,
@@ -195,6 +197,7 @@ describe('web e2e: Bid 后台 Run 进度', () => {
     await plan.getByTitle('进行中 2', { exact: true }).waitFor({ timeout: 15_000 })
     expect(await plan.getByTitle('已完成 3', { exact: true }).count()).toBe(1)
     expect(await plan.getByTitle('未开始 5', { exact: true }).count()).toBe(1)
+    expect(await page.getByText('资料研究过程', { exact: true }).count()).toBe(0)
     const executing = plan.getByTitle('进行中 2', { exact: true })
     expect(await executing.evaluate(element => getComputedStyle(element).animationName)).not.toBe('none')
     const colors = await Promise.all(['已完成 3', '进行中 2', '未开始 5'].map(text =>
