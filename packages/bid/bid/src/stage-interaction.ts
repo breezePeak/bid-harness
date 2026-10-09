@@ -40,7 +40,7 @@ import { readRevisionQueue } from './chapter-revision-queue.ts'
 import { revisionBatchTaskInputSchema } from './chapter-revision-batch.ts'
 import { buildWritableSectionWorklist } from './section-evidence-context.ts'
 import { assertNoLinkedPath, within } from './workspace-path.ts'
-import type { BidRunData } from './control-plane-contract.ts'
+import type { BidRunData, BidTaskFailure, BidTaskState, BidEvidenceMappingProgress } from './control-plane-contract.ts'
 import { bidCapabilityTakeoverRun, bidCompletedCapabilityRun, bidEvidenceMappingTakeoverRun,
   bidRecoverableRun, bidRunRecoveryEligibility, bidWritingPlanRecoveryEligibility } from './bid-recovery.ts'
 import { resolveBidToolAuthorization } from './bid-tool-authorization.ts'
@@ -237,12 +237,24 @@ async function inspectBidStageValue(
   view: 'summary' | 'task_contract_context' | 'recovery' = 'summary',
 ) {
   const task = session.events.reduce(reduceBidTaskState, BID_INITIAL_TASK_STATE)
+  const recoveryDecision = task.stage === 'chapter_writing' && task.status === 'waiting_user'
+    ? bidWritingPlanRecoveryEligibility(session) : bidRunRecoveryEligibility(session)
+  const availableActions = [
+    ...(recoveryDecision.eligible ? ['bid_recover_task'] : []),
+    ...(task.status === 'suspended' && task.run.cause !== 'awaiting_input' ? ['bid_resume_current_run'] : []),
+    ...(bidCapabilityTakeoverRun(session, task) ?? bidEvidenceMappingTakeoverRun(session, task)) === undefined
+      ? [] : ['bid_run_task(supersede=true)'],
+  ]
+  const briefTask = { stage: task.stage, status: task.status,
+    ...(task.status === 'failed' ? { failure: summarizeFailure(task.failure) } : {}),
+    run: task.run === null ? null : { runId: task.run.runId, work: { kind: task.run.work.kind, workId: task.run.work.workId },
+      ...(task.status === 'suspended' ? { cause: task.run.cause } : {}) },
+  }
   if (view === 'recovery') {
     const run = bidRecoverableRun(session, task)
     const runNotice = task.status === 'suspended' ? session.events.findLast(event =>
       event.type === 'bid.run.notice' && event.data.noticeId === `run:${task.run.runId}:resume-failed`) : undefined
-    const decision = task.stage === 'chapter_writing' && task.status === 'waiting_user'
-      ? bidWritingPlanRecoveryEligibility(session) : bidRunRecoveryEligibility(session)
+    const decision = recoveryDecision
     let writingPlanDiagnostic: { readable: boolean; matchesTarget: boolean; error?: string } | undefined
     let artifactDiagnostic: { path: string; readable: boolean; reason?: string } | undefined
     const artifact = run?.error?.issues?.map(issue => issue.artifact)
@@ -277,9 +289,10 @@ async function inspectBidStageValue(
       }
     }
     return {
-      task,
+      task: briefTask,
+      available_actions: availableActions,
       eligible: decision.eligible && (writingPlanDiagnostic?.matchesTarget ?? true),
-      reason: task.status === 'failed' ? task.failure.message : decision.reason,
+      reason: decision.reason.slice(0, 600),
       attempts: decision.attempts,
       same_problem_count: decision.sameProblemCount,
       requires_strategy_change: decision.requiresStrategyChange,
@@ -289,21 +302,28 @@ async function inspectBidStageValue(
       writing_plan_diagnostic: writingPlanDiagnostic ?? null,
       artifact_diagnostic: artifactDiagnostic ?? null,
       mapping_progress: task.stage === 'evidence_mapping' && workspace !== undefined
-        ? await readEvidenceMappingProgress(workspace) : null,
+        ? summarizeMappingProgress(await readEvidenceMappingProgress(workspace)) : null,
+      ...(task.stage !== 'evidence_mapping' || workspace === undefined ? {} : { current_artifacts_summary: {
+        evidence_map: await readOptionalStageJson(workspace, 'analysis/evidence-map.json', parseEvidenceMapArtifact) === null
+          ? 'pending' : 'available',
+      } }),
       latest_run_notice: runNotice?.type === 'bid.run.notice'
-        ? { kind: runNotice.data.kind, severity: runNotice.data.severity, message: runNotice.data.message } : null,
+        ? { kind: runNotice.data.kind, severity: runNotice.data.severity, message: runNotice.data.message.slice(0, 600) } : null,
       run_id: run?.runId ?? null,
       cause: run?.cause ?? null,
-      failure: task.status === 'suspended' ? task.run.error ?? null
-        : task.status === 'failed' ? task.failure : null,
+      failure: summarizeFailure(task.status === 'suspended' ? task.run.error : task.status === 'failed' ? task.failure : undefined),
       unit: run?.error?.recovery?.unit ?? null,
     }
   }
   if (workspace === undefined) throw new Error('BID_STAGE_INSPECT_WORKSPACE_REQUIRED')
   const started = task.run
   const base = {
-    task,
-    run_progress: task.run?.progress ?? null,
+    task: view === 'summary' ? briefTask : task,
+    available_actions: availableActions,
+    recovery: { eligible: recoveryDecision.eligible, reason: recoveryDecision.reason.slice(0, 600) },
+    run_progress: task.run?.progress === undefined ? null : { ...task.run.progress,
+      summary: task.run.progress.summary.slice(0, 400), ...(task.run.progress.details === undefined ? {}
+        : { details: task.run.progress.details.slice(0, 4).map(detail => detail.slice(0, 160)) }) },
     started_at: started === null ? null : new Date(started.startedAt).toISOString(),
     latest_public_events: latestPublicEvents(session),
   }
@@ -477,7 +497,7 @@ async function inspectBidStageValue(
   const mappingProgress = task.stage === 'evidence_mapping' ? await readEvidenceMappingProgress(workspace) : null
   const mappingTasks = task.stage === 'evidence_mapping' ? (await readEvidenceMappingLog(workspace))?.tasks ?? [] : []
   const sections = draft?.outline.sections ?? initialConfirmedOutline?.sections ?? []
-  const includeMappingDetails = view === 'task_contract_context' || task.status === 'waiting_user'
+  const includeMappingDetails = view === 'task_contract_context'
   const sectionSummary = buildOutlineView(sections).slice(0, MAX_INSPECT_SECTIONS).map(item => ({ ...item,
     ...(includeMappingDetails ? { evidence: mappings.get(item.section.id) ?? null } : {}),
     local_material_count: mappings.get(item.section.id)?.local_materials.length ?? 0,
@@ -501,17 +521,37 @@ async function inspectBidStageValue(
       compliance_items: compliance?.compliance_items.length ?? 0,
       response_points: response_points?.points.length ?? 0,
       outline_sections: sections.length,
+      evidence_map: evidence === null ? 'pending' as const : 'available' as const,
       evidence_mappings: evidence?.section_mappings.length ?? 0,
     },
     ...(includeMappingDetails
       ? { project, requirements, scoring, compliance, response_points, draft } : {}),
-    sections: sectionSummary,
-    writable_section_ids: sections.filter(item => item.writable)
-      .slice(0, includeMappingDetails ? sections.length : MAX_INSPECT_SECTIONS)
-      .map(item => item.id),
+    ...(includeMappingDetails ? { sections: sectionSummary } : {}),
+    ...(includeMappingDetails ? { writable_section_ids: sections.filter(item => item.writable).map(item => item.id) } : {}),
     ...(includeMappingDetails ? { mapping_plan: mappingPlan, mapping_tasks: mappingTasks.slice(-MAX_INSPECT_SECTIONS) } : {}),
-    mapping_progress: mappingProgress,
+    mapping_progress: includeMappingDetails ? mappingProgress : summarizeMappingProgress(mappingProgress),
   }
+}
+
+function summarizeFailure(failure: BidTaskFailure | undefined) {
+  if (failure === undefined) return null
+  return { ...(failure.code === undefined ? {} : { code: failure.code }), message: failure.message.slice(0, 600),
+    ...(failure.issues === undefined ? {} : { issues: failure.issues.slice(0, 5).map(issue => ({ code: issue.code.slice(0, 160),
+      message: issue.message.slice(0, 400), ...(issue.artifact === undefined ? {} : { artifact: issue.artifact.slice(0, 200) }),
+      ...(issue.path === undefined ? {} : { path: issue.path.slice(0, 200) }) })) }),
+    issue_count: failure.issues?.length ?? 0,
+    ...(failure.recovery === undefined ? {} : { recovery: { ...failure.recovery,
+      reason: failure.recovery.reason.slice(0, 600), unit: failure.recovery.unit.slice(0, 200) } }),
+    ...(failure.cause === undefined ? {} : { cause: { ...failure.cause, message: failure.cause.message.slice(0, 400) } }),
+  }
+}
+
+function summarizeMappingProgress(progress: BidEvidenceMappingProgress | null) {
+  if (progress === null) return null
+  const { total, initial, supplemental, completed, running, not_started, failed } = progress
+  return { total, initial, supplemental, completed, running, not_started, failed,
+    research_completed: progress.tasks.filter(task => task.phase === 'initial' && task.status === 'completed').length,
+    final_check_completed: progress.tasks.filter(task => task.phase === 'final_check' && task.status === 'completed').length }
 }
 
 /**
@@ -608,16 +648,25 @@ export function renderLiveStageInteractionPrompt(stage: string, status: 'running
 function renderIdleStageInteractionPrompt(
   stage: string,
   status: 'ready' | 'failed',
+  task?: BidTaskState,
+  recoveryAvailable = false,
+  takeoverAvailable = false,
 ): string {
   return [
     `当前 Bid 阶段：${stage}；当前状态：${status}。`,
     '先调用 bid_stage_inspect(view=summary) 获取权威状态。普通聊天只负责查询、解释和理解用户意图，不得直接 read/write Artifact。',
     status === 'ready' ? '普通问答不启动写操作；用户明确授权的局部修改可调用 bid_run_task，不能把该任务当作原生阶段确认。'
-      : '先读取失败诊断。已终止的能力任务不能沿用原授权重试；用户明确澄清或给出新目标后，用 bid_run_task(supersede=true) 创建新 Work。Host 核对新的直接用户消息并保留旧候选；其他失败使用当前可用的恢复入口。',
+      : recoveryAvailable
+        ? '先用 bid_stage_inspect(view=recovery) 核对失败、原目标和检查点。同一目标的继续或修复使用 bid_recover_task；Host 重验原 Work、输入、候选与有限恢复预算，保留已完成研究和正式确认。'
+        : takeoverAvailable
+          ? '先读取失败诊断。原目标当前不可恢复；只有用户给出新目标时，才用 bid_run_task(supersede=true) 创建新 Work。Host 核对新的直接用户授权并保留旧候选。'
+          : '当前失败不可恢复。读取具体诊断，说明实际阻断及需要补齐的输入、凭证或程序修复；解释和建议不代表修复已执行。',
     '若用户询问为什么没开始或现在能不能继续，应解释当前 Host 状态和正式入口。',
     status === 'ready'
       ? '阶段已经准备好；Host 将自动驱动，不把普通聊天当作启动命令。'
-      : '当前阶段失败且没有可运行任务。读取 Host 失败诊断，说明程序或输入故障；由主会话处理根因，不得将相同模型候选当作恢复执行。',
+      : task?.stage === 'evidence_mapping'
+        ? '章节研究完成量、目录最终审查和 evidence-map 发布是独立事实；evidence_mappings=0 不表示研究未完成。恢复接纳不等于阶段完成，以实际审核产物和正式确认状态为准。'
+        : '恢复接纳不等于任务完成；按实际产物和核验状态说明结果。',
   ].join('\n')
 }
 
@@ -979,11 +1028,13 @@ export function installStageInteractionTools(
               if (name === 'bid_stage_inspect') {
                 const request = z.object({ view: z.enum(['summary', 'task_contract_context', 'recovery']).optional(),
                   reference: z.unknown().optional() }).strict().parse(args)
-                const catalog = modelCatalogs.get(agent) ?? await collectBidModelTaskCatalog(workspaceFor(agent.session), agent.session)
-                const reference = request.reference === undefined ? undefined : bindBidModelReference(request.reference, catalog)
+                const catalog = request.reference === undefined && request.view !== 'task_contract_context' ? undefined
+                  : modelCatalogs.get(agent) ?? await collectBidModelTaskCatalog(workspaceFor(agent.session), agent.session)
+                const reference = request.reference === undefined || catalog === undefined
+                  ? undefined : bindBidModelReference(request.reference, catalog)
                 const result = await execute(agent, { action: name, view: request.view,
                   ...reference === undefined ? {} : { reference } }, exec.signal)
-                // 状态与恢复查询沿用最近对象表；正文读取才切换到其正式项目来源。
+                if (catalog === undefined) return result
                 const current = reference === undefined ? catalog
                   : await collectBidModelTaskCatalog(workspaceFor(agent.session), agent.session)
                 modelCatalogs.set(agent, current)
@@ -1081,8 +1132,10 @@ export function installStageInteractionTools(
       if (!goalRound && !hasUser && !failureMessage) return decision
       const resumed = agent.session.events.findLast(event => event.type === 'bid.project.resumed')
       const suspended = task.status === 'suspended' ? task.run : undefined
-      const prompt = failureMessage
-        ? '你是当前 Bid Main Agent。Host 已保存真实失败状态。先调用 bid_stage_inspect(view="recovery") 分析 failure、issues、checkpoint 和已完成成果。eligible=true 时判断是执行失败还是能力计划无法完成目标；需要换能力时先用 bid_plan_task 调整未完成步骤，再调用 bid_recover_task；eligible=false 时向用户解释真实阻断及需要的动作，不机械重试。'
+      const prompt = failureMessage && task.status === 'failed'
+        ? renderIdleStageInteractionPrompt(task.stage, task.status, task,
+          bidRunRecoveryEligibility(agent.session).eligible || bidWritingPlanRecoveryEligibility(agent.session).eligible,
+          (bidCapabilityTakeoverRun(agent.session, task) ?? bidEvidenceMappingTakeoverRun(agent.session, task)) !== undefined)
         : suspended !== undefined ? renderSuspendedRunPrompt(
           task.stage,
           suspended.runId,
@@ -1097,10 +1150,19 @@ export function installStageInteractionTools(
             : task.status === 'running' || task.status === 'completed'
               ? renderLiveStageInteractionPrompt(task.stage, task.status)
               : task.status === 'ready' || task.status === 'failed'
-                ? renderIdleStageInteractionPrompt(task.stage, task.status) : undefined
+                ? renderIdleStageInteractionPrompt(task.stage, task.status, task,
+                  bidRunRecoveryEligibility(agent.session).eligible || bidWritingPlanRecoveryEligibility(agent.session).eligible,
+                  (bidCapabilityTakeoverRun(agent.session, task) ?? bidEvidenceMappingTakeoverRun(agent.session, task)) !== undefined)
+                : undefined
       if (prompt === undefined) return decision
       const progress = task.status === 'running' ? renderCurrentRunProgress(task.run) : undefined
-      const context = `${prompt}\nBid 模式不通过模型创建 Goal。Goal 只能由用户显式 /goal 创建；已有 Goal 可正常读取和更新。后台失败交由你分析并通过当前公开能力处理；Host 只校验和执行。\n${CAPABILITY_TASK_GUIDANCE}${progress === undefined ? '' : `\n${progress}`}`
+      const taskToolsAvailable = task.status !== 'failed'
+        || (bidCapabilityTakeoverRun(agent.session, task) ?? bidEvidenceMappingTakeoverRun(agent.session, task)) !== undefined
+        || bidRecoverableRun(agent.session, task)?.work.kind === 'capability_task' && bidRunRecoveryEligibility(agent.session).eligible
+      const context = [prompt,
+        'Bid 模式不通过模型创建 Goal。Goal 只能由用户显式 /goal 创建；已有 Goal 可正常读取和更新。后台失败交由你分析并通过当前公开能力处理；Host 只校验和执行。',
+        ...(taskToolsAvailable ? [CAPABILITY_TASK_GUIDANCE] : []), ...(progress === undefined ? [] : [progress]),
+      ].join('\n')
       return { kind: 'enter', messages: [createUserMessage({ content: [{ type: 'text', text: context }], source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'instructions' } }), ...decision.messages] }
     }, { global: true })
     for (const agent of ctx.agents.list()) sync(agent)

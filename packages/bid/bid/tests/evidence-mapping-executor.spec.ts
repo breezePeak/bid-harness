@@ -78,6 +78,7 @@ import { persistBidWorkRequest } from '../src/work-descriptor.ts'
 import { bidRecoverableRun, safeRecoverableBidFailure } from '../src/bid-recovery.ts'
 import { reviewRefinedOutline } from '../src/evidence-mapping-executor.ts'
 import { estimateMessage } from '@deepseek-ai/dsh-token-meter'
+import { BidStageExecutionError } from '../src/control-plane-contract.ts'
 
 const executeEvidenceMapping = (
   agent: Agent,
@@ -236,7 +237,7 @@ it.each(['wrong_file', 'wrong_chunk', 'wrong_corpus', 'wrong_metadata', 'line_ra
   },
 )
 
-it.each([16_384, 32_768])('目录复核的大章按模型容量 %i 接纳或拒绝，完整原文不受分片目标截断', async (modelContextWindow) => {
+it.each([16_384, 32_768])('目录复核按模型容量 %i 完整或分段核对大章原文', async (modelContextWindow) => {
   const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-outline-review-model-budget-')))
   const material = await writeInputs(workspace)
   const fixture = mappingFixture(workspace, material, false, {}, true, modelContextWindow)
@@ -253,8 +254,12 @@ it.each([16_384, 32_768])('目录复核的大章按模型容量 %i 接纳或拒�
     outline: parseOutlineArtifact(await read('outline/initial-confirmed-outline.json')), frameworks: [],
   }, [], 0, new AbortController().signal, createTestBidRunContext().commits)
   if (modelContextWindow === 16_384) {
-    await expect(result).rejects.toThrow('目录审查对象超过输入预算')
-    expect(fixture.outlineReviewPrompts).toHaveLength(0)
+    expect((await result).blockingIssues).toEqual([])
+    expect(fixture.outlineReviewPrompts.some(prompt => prompt.includes('本片依据分段：'))).toBe(true)
+    expect(fixture.outlineReviewPrompts.every(prompt => estimateMessage(createUserMessage({
+      content: [{ type: 'text', text: prompt }], source: { kind: 'user' },
+    })) < 12_000)).toBe(true)
+    expect(fixture.outlineReviewPrompts.some(prompt => prompt.includes('原文末尾验收要求。'))).toBe(true)
   } else {
     expect((await result).blockingIssues).toEqual([])
     expect(fixture.outlineReviewPrompts.length).toBeGreaterThan(1)
@@ -267,22 +272,33 @@ it.each([16_384, 32_768])('目录复核的大章按模型容量 %i 接纳或拒�
   }
 })
 
-it('决定性采购原文超出单片预算时明确拒绝，不截断后启动Reviewer', async () => {
+it('大原文按硬预算分段，任一分段缺少有效审核都不写入最终质量报告', async () => {
   const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-outline-review-source-budget-')))
   const material = await writeInputs(workspace)
   const fixture = mappingFixture(workspace, material)
   const tenderChunk = join(workspace.projectRoot, material.tender.path)
   await writeFile(tenderChunk, `${await readFile(tenderChunk, 'utf8')}\n${'采购原文不可截断。'.repeat(40_000)}`)
   const read = async (path: string) => JSON.parse(await readFile(join(workspace.projectRoot, path), 'utf8')) as unknown
-  await expect(reviewRefinedOutline(fixture.agent, workspace, {
+  const inputs = {
     project: parseTenderProjectArtifact(await read('analysis/project.json')),
     requirements: parseTenderRequirementsArtifact(await read('analysis/requirements.json')),
     scoring: parseTenderScoringArtifact(await read('analysis/scoring.json')),
     responsePoints: parseScoringResponsePointCatalog(await read('analysis/scoring-response-points.json')),
     compliance: parseTenderComplianceArtifact(await read('analysis/compliance.json')),
     outline: parseOutlineArtifact(await read('outline/initial-confirmed-outline.json')), frameworks: [],
-  }, [], 0, new AbortController().signal, createTestBidRunContext().commits)).rejects.toThrow('目录审查对象超过输入预算')
-  expect(fixture.outlineReviewPrompts).toHaveLength(0)
+  }
+  const start = fixture.subagents.start.getMockImplementation()!
+  let parts = 0
+  fixture.subagents.start.mockImplementation(async (provider, request) => {
+    if (request.prompt.some(block => block.text?.includes('本片依据分段：')) && ++parts === 2) {
+      throw new Error('第二片没有有效审核结果')
+    }
+    return start(provider, request)
+  })
+  await expect(reviewRefinedOutline(fixture.agent, workspace, inputs, [], 0, new AbortController().signal,
+    createTestBidRunContext().commits)).rejects.toThrow('第二片没有有效审核结果')
+  expect(parts).toBe(2)
+  await expect(readFile(join(workspace.projectRoot, 'analysis/evidence-mapping-quality.candidate.json'))).rejects.toMatchObject({ code: 'ENOENT' })
 })
 
 it('全局目录复核按预算审完尾节与跨章职责，共享索引不在逐叶展开 siblings', async () => {
@@ -362,8 +378,9 @@ it('目录复核把同章相反与重复意见交语义环节整理，并保留�
     scoring: parseTenderScoringArtifact(await read('analysis/scoring.json')),
     responsePoints: parseScoringResponsePointCatalog(await read('analysis/scoring-response-points.json')),
     compliance: parseTenderComplianceArtifact(await read('analysis/compliance.json')), outline, frameworks: [],
-  }, [], 0, new AbortController().signal, createTestBidRunContext().commits)).rejects.toThrow('目录审查对象超过输入预算')
-  expect(fixture.outlineReviewPrompts).toHaveLength(3)
+  }, [], 0, new AbortController().signal, createTestBidRunContext().commits)).resolves.toMatchObject({ blockingIssues: [] })
+  expect(fixture.outlineReviewPrompts.length).toBeGreaterThan(3)
+  expect(fixture.outlineReviewPrompts.slice(3).every(prompt => prompt.includes('只整理 section_position=0'))).toBe(true)
 })
 
 it('单章粒度意见整理保留详细卡片且不被无关章节索引阻断', async () => {
@@ -459,6 +476,45 @@ function mappingTaskId(request: { prompt: readonly { type: string; text?: string
   if (line === undefined) throw new Error('missing Mapping Task prompt line')
   return (JSON.parse(line.slice('Mapping Task：'.length)) as { task_id: string }).task_id
 }
+
+it('原 S4 的 25 个 completed 研究检查点从预算失败续审，损坏候选不重新 spawn', async () => {
+  const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-s4-25-review-recovery-')))
+  const material = await writeInputs(workspace, Array.from({ length: 25 }, (_, index) => `SEC-${String(index + 1)}`))
+  const first = mappingFixture(workspace, material)
+  const issue = { code: 'CONTEXT_WINDOW_EXCEEDED', message: '目录审查对象超过输入预算：位置 0，估算 15496 token，预算 12000 token。' }
+  first.subagents.start.mockRejectedValue(new BidStageExecutionError([issue]))
+  const work = { ...createTestBidRunContext().work, kind: 'stage_execution' as const, stage: 'evidence_mapping' as const }
+  const failed = executeEvidenceMapping(first.agent, workspace, buildBidStageTask('evidence_mapping'), {
+    run: createTestBidRunContext({ work }), maxConcurrency: 8, maxRepairAttempts: 0,
+  }).catch((error: unknown) => error)
+  for (let index = 0; index < 25; index++) {
+    await vi.waitFor(() => { expect(first.starts.length).toBeGreaterThan(index) }, { timeout: 10_000 })
+    first.starts[index]!.resolve()
+  }
+  expect(await failed).toBeInstanceOf(BidStageExecutionError)
+  const checkpointPath = join(workspace.projectRoot, 'analysis/evidence-mapping-checkpoint.json')
+  const checkpoint = await readFile(checkpointPath, 'utf8')
+  expect((JSON.parse(checkpoint) as { tasks: Array<{ completed: boolean }> }).tasks.filter(task => task.completed)).toHaveLength(25)
+  const options = { run: createTestBidRunContext({ work, resumeOf: { runId: 'old-run', cause: 'executor_error' } }),
+    maxConcurrency: 8, maxRepairAttempts: 0,
+    recovery: { workId: work.workId, unit: work.workId, instruction: '只重组目录审核，保留原研究。', issues: [issue] } }
+  const invalid = mappingFixture(workspace, material)
+  const original = JSON.parse(checkpoint) as { tasks: Array<{ input_fingerprint: string }> }
+  original.tasks[0]!.input_fingerprint = '0'.repeat(64)
+  await writeFile(checkpointPath, JSON.stringify(original))
+  await expect(executeEvidenceMapping(invalid.agent, workspace, buildBidStageTask('evidence_mapping'), options))
+    .rejects.toThrow('检查点不匹配')
+  expect(invalid.starts).toHaveLength(0)
+  expect(invalid.outlineReviewPrompts).toHaveLength(0)
+  await writeFile(checkpointPath, checkpoint)
+  const restored = mappingFixture(workspace, material)
+  await executeEvidenceMapping(restored.agent, workspace, buildBidStageTask('evidence_mapping'), options)
+  expect(restored.starts).toHaveLength(0)
+  expect(restored.outlineReviewPrompts.length).toBeGreaterThan(0)
+  expect(restored.finalStarts.length).toBeGreaterThan(0)
+  expect(parseEvidenceMapArtifact(JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/evidence-map.json'), 'utf8')))
+    .section_mappings).toHaveLength(25)
+}, 30_000)
 
 it('S4 Prompt 分开显示技术偏离表的全量只读 Requirement 与空 coverage ownership', () => {
   const source = [{ file_id: 'tender', chunk: 'chunk', line_start: 1, line_end: 1 }]
@@ -4176,7 +4232,7 @@ describe('evidence-mapping Agent executor', () => {
       expect(events.some(event => event.type === 'bid.user_confirmation.received'
         || (event.type === 'user/message' && event.data.source.kind === 'user'))).toBe(false)
       expect(adapter.requests[0]?.messages.some(message => message.content.some(block => block.type === 'text'
-        && block.text.includes('真实失败状态')))).toBe(true)
+        && block.text.includes('同一目标的继续或修复使用 bid_recover_task')))).toBe(true)
     } finally { await ctx.fiber.dispose(); await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }) }
   }, 30_000)
 

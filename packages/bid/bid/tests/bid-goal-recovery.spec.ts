@@ -6,7 +6,8 @@ import { afterEach, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import SessionStore from '@deepseek-ai/dsh-session'
 import { BidWorkspace } from '../src/index.ts'
-import { safeRecoverableBidFailure, bidRunRecoveryEligibility, bidRecoveryInstructionRepeated, bidWritingPlanRecoveryEligibility } from '../src/bid-recovery.ts'
+import { safeRecoverableBidFailure, bidRunRecoveryEligibility, bidRecoveryInstructionRepeated, bidWritingPlanRecoveryEligibility,
+  isLegacyOutlineReviewBudgetFailure } from '../src/bid-recovery.ts'
 import { inspectBidStage } from '../src/stage-interaction.ts'
 import type { BidRunData, BidWorkDescriptor } from '../src/control-plane-contract.ts'
 import { BidStageExecutionError } from '../src/control-plane-contract.ts'
@@ -19,6 +20,41 @@ const work: BidWorkDescriptor = {
   kind: 'stage_execution', stage: 'outline_generation', workId: 's3-work',
   requestRef: 'requests/s3-work.json', requestSha256: '0'.repeat(64), inputFingerprint: '1'.repeat(64),
 }
+
+it('旧 S4 本地预算 blocked 重算资格但保留有限恢复历史和其他故障边界', async () => {
+  const ctx = new Context()
+  cleanup.push(() => ctx.fiber.dispose())
+  await ctx.plugin(SessionStore)
+  const session = ctx.sessions.create()
+  const s4 = { ...work, stage: 'evidence_mapping' as const }
+  const issue = { code: 'CONTEXT_WINDOW_EXCEEDED', message: '目录审查对象超过输入预算：位置 0，估算 15496 token，预算 12000 token。' }
+  const failure = safeRecoverableBidFailure(s4, new BidStageExecutionError([issue]))
+  const original = { ...run('old-s4'), work: s4 }
+  session.append('bid.run.started', { run: original })
+  session.append('bid.run.notice', { runId: original.runId, stage: s4.stage, kind: 'interrupted', severity: 'error',
+    noticeId: `run:${original.runId}:failed`, supersedesTurn: null, message: issue.message })
+  session.append('bid.task.changed', { state: { stage: s4.stage, status: 'failed', run: null, failure } })
+  const target = { kind: 'run' as const, runId: original.runId, workId: s4.workId }
+  session.append('bid.recovery.round', { ownerSessionId: String(session.id), target,
+    fingerprint: 'old', round: 0, budget: 3, state: 'blocked', reason: issue.message })
+  expect(failure.recovery?.kind).toBe('blocked')
+  expect(bidRunRecoveryEligibility(session)).toMatchObject({ eligible: true, attempts: 0, target })
+  expect(await inspectBidStage(undefined, session, undefined, 'recovery')).toMatchObject({ eligible: true,
+    available_actions: ['bid_recover_task'], failure: { recovery: { kind: 'blocked' } } })
+  for (const code of ['AUTH', 'EACCES', 'CREDENTIAL_MISSING', 'INPUT_CHANGED', 'FILE_CORRUPT']) {
+    expect(isLegacyOutlineReviewBudgetFailure(s4, { ...failure, issues: [issue, { code, message: '真实阻断' }] })).toBe(false)
+  }
+  expect(isLegacyOutlineReviewBudgetFailure(work, failure)).toBe(false)
+  expect(isLegacyOutlineReviewBudgetFailure({ ...s4, kind: 'capability_task' }, failure)).toBe(false)
+  expect(isLegacyOutlineReviewBudgetFailure(s4, { ...failure, issues: [{ ...issue, message: 'provider context window exceeded' }] })).toBe(false)
+  expect(isLegacyOutlineReviewBudgetFailure(s4, { ...failure, issues: [{ ...issue, message: issue.message.replace('12000', '5000') }] })).toBe(false)
+  session.append('bid.recovery.round', { ownerSessionId: String(session.id), target,
+    fingerprint: 'old', round: 0, budget: 3, state: 'blocked', reason: 'BID_RECOVERY_DISPATCH_BUDGET_EXHAUSTED' })
+  expect(bidRunRecoveryEligibility(session).eligible).toBe(false)
+  session.append('bid.recovery.round', { ownerSessionId: String(session.id), target,
+    fingerprint: 'old', round: 3, budget: 3, state: 'blocked', reason: issue.message })
+  expect(bidRunRecoveryEligibility(session).eligible).toBe(false)
+})
 
 it.each(['TIMEOUT', 'TRANSPORT', 'SERVER', 'RATE_LIMIT'])('已保存写作要求的 %s 进入原计划恢复', async (code) => {
   const ctx = new Context()

@@ -10,6 +10,18 @@ export interface OutlineReviewRequest {
   cardPositions: number[]
   estimatedInputTokens: number
   kind: 'complete' | 'sections' | 'cross_sections'
+  /** 硬预算分组时实际提供的字段及完整字符串范围，由程序核对覆盖。 */
+  evidenceParts?: OutlineReviewEvidencePart[]
+}
+
+/** 保留字段位置与原文身份的无损审查分段；偏移使用 UTF-16 字符位置。 */
+interface OutlineReviewEvidencePart {
+  path: Array<string | number>
+  value: unknown
+  start?: number
+  end?: number
+  total?: number
+  source?: Omit<OutlineReviewSource, 'text'>
 }
 
 /** 分片前的共享职责索引和叶子审查资料。 */
@@ -23,6 +35,7 @@ export interface OutlineReviewContext {
   operations: unknown
   sources?: readonly OutlineReviewSource[]
   projectSourceKeys?: readonly string[]
+  evidenceParts?: OutlineReviewEvidencePart[]
 }
 
 /** Host 校验并按采购文件身份去重的完整审核原文。 */
@@ -84,8 +97,13 @@ function renderOutlineReviewRequest(
     `全书职责索引：${JSON.stringify(index)}`,
     `S3→S4 结构 diff：${JSON.stringify(input.differences)}`,
     `实际 Outline Operations：${JSON.stringify(input.operations)}`,
+    ...(input.evidenceParts === undefined ? [] : [
+      '本片只核对以下字段和原文分段。path、来源和 start/end 由程序绑定；未在本片出现不能判为缺证。全部分段成功后程序才接纳完整审核，不宣称已读未提供的原文。',
+      `本片依据分段：${JSON.stringify(input.evidenceParts)}`,
+    ]),
   ].join('\n')
   return { prompt, kind, sectionPositions: index.map(item => item.position), cardPositions,
+    ...(input.evidenceParts === undefined ? {} : { evidenceParts: input.evidenceParts }),
     estimatedInputTokens: estimateMessage(createUserMessage({ content: [{ type: 'text', text: prompt }], source: { kind: 'user' } })) }
 }
 
@@ -104,14 +122,23 @@ export function buildOutlineReviewRequest(input: OutlineReviewContext, budgetTok
 }
 
 /**
- * 根据完整请求的固定密度估算生成有界分片。每个叶子恰好进入一个详细审查；共享索引跨片时逐对检查所有片间职责关系。
+ * 按目标预算组装完整章节；硬预算不足时无损细分业务字段和原文，共享索引逐对检查跨片职责关系。
  * @param input - 全量审查依据及程序绑定位置。
  * @param budgetTokens - 已扣除 system、工具和输出余量后的输入 token 预算。
  * @param targetTokens - 常规分片目标；不可拆分的单章或跨片关系可使用剩余模型预算。
- * @returns 完整请求和可验证覆盖位置；单对象超限时抛错。
+ * @returns 全部必需请求及程序绑定的覆盖位置；最小请求仍超限时抛错。
  */
 export function buildOutlineReviewRequests(
   input: OutlineReviewContext, budgetTokens: number, targetTokens = budgetTokens,
+): OutlineReviewRequest[] {
+  try { return buildWholeOutlineReviewRequests(input, budgetTokens, targetTokens) } catch (error) {
+    if (!(error instanceof OutlineReviewContextTooLargeError)) throw error
+    return buildPartitionedOutlineReviewRequests(input, budgetTokens)
+  }
+}
+
+function buildWholeOutlineReviewRequests(
+  input: OutlineReviewContext, budgetTokens: number, targetTokens: number,
 ): OutlineReviewRequest[] {
   const target = Math.min(targetTokens, budgetTokens)
   const render = (cards: OutlineReviewContext['cards'], index: OutlineReviewContext['index'], kind: OutlineReviewRequest['kind']) =>
@@ -167,6 +194,86 @@ export function buildOutlineReviewRequests(
       assertFits(request)
       requests.push(request)
     }
+  }
+  return requests
+}
+
+function buildPartitionedOutlineReviewRequests(input: OutlineReviewContext, budget: number): OutlineReviewRequest[] {
+  const requests: OutlineReviewRequest[] = []
+  const record = (value: unknown): Record<string, unknown> | undefined =>
+    value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined
+  const scope = (cards: OutlineReviewContext['cards'], index: OutlineReviewContext['index'], kind: OutlineReviewRequest['kind'],
+    details = kind !== 'cross_sections') => {
+    const ids = new Set(index.map(item => item.id))
+    const sourceKeys = new Set(!details ? [] : [...(input.projectSourceKeys ?? []), ...(cards.length === 0 ? index : cards)
+      .flatMap(item => item.source_keys as string[] | undefined ?? [])])
+    const businessIds = new Set(cards.flatMap(card => ['requirements', 'scoring', 'response_points', 'compliance']
+      .flatMap(key => (card[key] as Array<{ id: string }> | undefined ?? []).map(item => item.id)))
+      .concat(details ? index.flatMap(item => item.coverage_ids as string[] | undefined ?? []) : []))
+    const coverage = record(input.coverage)
+    const selectedCoverage = coverage === undefined ? input.coverage : Object.fromEntries(Object.entries(coverage)
+      .map(([key, value]) => [key, Array.isArray(value) ? value.filter((item) => {
+        const business = record(item)
+        return business === undefined || businessIds.has(String(business.id)) || !details
+      }).map((item: unknown) => {
+        const business = record(item)
+        return !details && business !== undefined ? { id: business.id } : item
+      })
+        : !details ? undefined : value]))
+    const related = (value: unknown) => {
+      const item = record(value)
+      return item === undefined || (typeof item.section_id === 'string' ? ids.has(item.section_id)
+        : Array.isArray(item.section_ids) ? item.section_ids.some(id => ids.has(String(id))) : true)
+    }
+    const payload = { cards, index, coverage: selectedCoverage,
+      differences: Array.isArray(input.differences) ? input.differences.filter(related) : input.differences,
+      operations: Array.isArray(input.operations) ? input.operations.filter(related) : input.operations }
+    const compactIndex = index.map(({ position, id, parent_id, title, writable }) => ({ position, id, parent_id, title, writable }))
+    const compactCards = cards.map(({ section_id, title }) => ({ section_id, title }))
+    const render = (parts: OutlineReviewEvidencePart[]) => renderOutlineReviewRequest({ ...input,
+      sources: [], coverage: { requirements: [], scoring: [], response_points: [], compliance: [] },
+      differences: [], operations: [], evidenceParts: parts,
+    }, compactCards, compactIndex, kind)
+    const empty = render([])
+    if (empty.estimatedInputTokens >= budget) {
+      throw new OutlineReviewContextTooLargeError(index[0]?.position, empty.estimatedInputTokens, budget)
+    }
+    let batch: OutlineReviewEvidencePart[] = []
+    const add = (part: OutlineReviewEvidencePart): void => {
+      if (render([...batch, part]).estimatedInputTokens <= budget) { batch.push(part); return }
+      if (batch.length > 0) { requests.push(render(batch)); batch = [] }
+      if (render([part]).estimatedInputTokens <= budget) { batch.push(part); return }
+      const object = record(part.value)
+      const entries = Array.isArray(part.value) ? part.value.map((value, position) => [position, value] as const)
+        : object === undefined ? [] : Object.entries(object)
+      if (entries.length > 0) {
+        for (const [key, value] of entries) add({ ...part, path: [...part.path, key], value })
+      } else if (typeof part.value === 'string' && part.value.length > 1) {
+        let middle = Math.floor(part.value.length / 2)
+        if (/^[\uDC00-\uDFFF]$/u.test(part.value.charAt(middle))) middle--
+        if (middle === 0) throw new OutlineReviewContextTooLargeError(index[0]?.position, render([part]).estimatedInputTokens, budget)
+        const start = part.start ?? 0
+        const total = part.total ?? part.value.length
+        add({ ...part, value: part.value.slice(0, middle), start, end: start + middle, total })
+        add({ ...part, value: part.value.slice(middle), start: start + middle, end: start + part.value.length, total })
+      } else throw new OutlineReviewContextTooLargeError(index[0]?.position, render([part]).estimatedInputTokens, budget)
+    }
+    // 先保留完整业务记录；只有该记录仍超限时才沿字段或原文位置细分。
+    for (const [key, value] of Object.entries(payload)) add({ path: [key], value })
+    for (const source of input.sources ?? []) {
+      if (!sourceKeys.has(source.key)) continue
+      const { text, ...identity } = source
+      add({ path: ['sources', source.key, 'text'], value: text, source: identity, start: 0, end: text.length, total: text.length })
+    }
+    if (batch.length > 0) requests.push(render(batch))
+  }
+  for (const card of input.cards) scope([card], input.index.filter(item => item.id === card.section_id), 'sections')
+  for (const item of input.index.filter(item => !input.cards.some(card => card.section_id === item.id))) {
+    scope([], [item], 'cross_sections', true)
+  }
+  // 每对职责都在同一关系范围内复核，原文和业务详情由各章分段核对。
+  for (const [left, item] of input.index.entries()) for (const right of input.index.slice(left)) {
+    scope([], item === right ? [item] : [item, right], 'cross_sections')
   }
   return requests
 }

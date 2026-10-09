@@ -173,7 +173,8 @@ try {
     process.stdout.write(`${JSON.stringify({
       noAutomaticGoal, decision, phase: ctx.goals.get(agent)?.phase, rounds: ctx.goals.get(agent)?.roundsStarted,
       goalPrompt: adapter.requests.some(request => request.messages.some(message => message.content.some(block => block.type === 'text' && block.text.includes('<goal_round>')))),
-      stagePrompt: adapter.requests[0]?.messages.some(message => message.content.some(block => block.type === 'text' && block.text.includes('真实失败状态'))),
+      stagePrompt: adapter.requests[0]?.messages.some(message => message.content.some(block => block.type === 'text'
+        && block.text.includes('同一目标的继续或修复使用 bid_recover_task'))),
       calls: events.filter(event => event.type === 'tool/call').map(event => event.data.name),
       recoveryEvents: events.filter(event => event.type === 'bid.recovery.requested').length,
       legacyEvents: events.filter(event => event.type === 'bid.goal.bound' || event.type === 'bid.goal.recovery.requested').length,

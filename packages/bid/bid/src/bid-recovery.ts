@@ -88,9 +88,25 @@ const BLOCKED_CODE = new RegExp(
   'INPUT_(?:INVALID|CHANGED|MISMATCH|MISSING|CORRUPT)|FILE_(?:MISSING|CORRUPT)|REVISION_(?:CONFLICT|MISMATCH)|RUN_RETIRED|EACCES|EPERM|'
   + 'CHAPTER_REVISION_(?:NOT_WRITABLE|SELECTION_INVALID|CONTEXT_UNAVAILABLE)|CREDENTIAL|QUOTA|PROVIDER|INFRASTRUCTURE|'
   + '^(?:AUTH|NO_ADAPTER|INVALID_REQUEST|PI_AI_ERROR)$|'
-  + 'CONTEXT_WINDOW_EXCEEDED|FATAL|CORRUPTION|FINGERPRINT|SEMANTIC_BLOCKED|CATALOG_MISMATCH|'
+  + 'CONTEXT_WINDOW_EXCEEDED|OUTLINE_REVIEW_INPUT_BUDGET_EXCEEDED|FATAL|CORRUPTION|FINGERPRINT|SEMANTIC_BLOCKED|CATALOG_MISMATCH|'
   + 'SCOPE_STALE|DEPENDENCY_STALE|STALE_BASE|PREVIOUS_TARGET_INVALID|INVARIANT|DOCX_FORMAT_CORRUPT|^EVIDENCE_MAPPING_GUARD_ERROR$', 'iu',
 )
+
+/**
+ * 识别固定 12,000 token 上限产生的旧 S4 本地组包失败，其他 blocked 保持阻断。
+ * @param work 原失败阶段的 Work。
+ * @param failure 已持久化的 Host 诊断。
+ * @returns 当前分组程序是否能重新核验这类旧失败；不授予跳过输入或候选检查的权限。
+ */
+export function isLegacyOutlineReviewBudgetFailure(work: BidWorkDescriptor, failure: BidTaskFailure): boolean {
+  const legacy = (code: string | undefined, message: string) => code === 'CONTEXT_WINDOW_EXCEEDED'
+    && /^目录审查对象超过输入预算：位置 (?:\d+|undefined)，估算 \d+ token，预算 12000 token。$/u.test(message)
+  if (work.kind !== 'stage_execution' || work.stage !== 'evidence_mapping'
+    || !failure.issues?.some(issue => legacy(issue.code, issue.message))) return false
+  return [failure, ...failure.issues, ...failure.cause === undefined ? [] : [failure.cause]]
+    .every(item => item.code === undefined || item.code === 'BID_EXECUTOR_ERROR'
+      || !BLOCKED_CODE.test(item.code) || legacy(item.code, item.message))
+}
 const RETRY_CODE = new RegExp(
   '^(?:EIO|ETIMEDOUT|ECONNRESET|EAI_AGAIN|TRANSPORT|TIMEOUT|SERVER|EMPTY_RESPONSE|RATE_LIMIT|'
   + '(?:EVIDENCE_MAPPING|CHAPTER)_SUBAGENT_INFRASTRUCTURE_ERROR|'
@@ -212,7 +228,8 @@ export function bidRunRecoveryEligibility(session: Session, budget?: number): {
   if (run.cause === 'user_stop' || run.cause === 'host_restart' || run.cause === 'awaiting_input') {
     return { eligible: false, reason: '用户停止、Host 重启或等待输入由各自边界处理。', ...details }
   }
-  if (run.error?.recovery === undefined || run.error.recovery.kind === 'blocked') {
+  const legacyBudget = run.error !== undefined && isLegacyOutlineReviewBudgetFailure(run.work, run.error)
+  if (run.error?.recovery === undefined || run.error.recovery.kind === 'blocked' && !legacyBudget) {
     return { eligible: false, reason: run.error?.recovery?.reason ?? run.error?.message ?? '故障未被认定可自动恢复。', ...details }
   }
   const settled = session.events.findLast(event => event.type === 'bid.recovery.round' && event.data.target.kind === 'run'
@@ -220,8 +237,12 @@ export function bidRunRecoveryEligibility(session: Session, budget?: number): {
   const storedBudget = settled?.type === 'bid.recovery.round' ? settled.data.budget : undefined
   const limit = Math.min(budget ?? storedBudget ?? DEFAULT_MODEL_STAGE_REPAIR_ATTEMPTS, storedBudget ?? Infinity)
   if (attempts >= limit) return { eligible: false, reason: 'BID_RECOVERY_BUDGET_EXHAUSTED: 原 Work 的执行恢复预算已耗尽。', ...details }
-  if (settled?.type === 'bid.recovery.round' && settled.data.state === 'blocked') return { eligible: false, reason: settled.data.reason, ...details }
-  return { eligible: true, reason: run.error.recovery.reason, ...details }
+  if (settled?.type === 'bid.recovery.round' && settled.data.state === 'blocked'
+    && !(legacyBudget && settled.data.round < limit && settled.data.reason === run.error.recovery.reason)) {
+    return { eligible: false, reason: settled.data.reason, ...details }
+  }
+  return { eligible: true, reason: legacyBudget
+    ? '原 S4 审查包可按当前模型预算重组；恢复时核对原输入和已完成检查点。' : run.error.recovery.reason, ...details }
 }
 
 /**

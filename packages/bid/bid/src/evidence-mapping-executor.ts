@@ -65,7 +65,8 @@ import {
   renderStageRepairIssues,
   waitForModelStageIdle,
 } from './model-stage-repair.ts'
-import { renderBidRecoveryContext } from './bid-recovery.ts'
+import { isLegacyOutlineReviewBudgetFailure, renderBidRecoveryContext } from './bid-recovery.ts'
+import { isDeepStrictEqual } from 'node:util'
 import { validateEvidenceMapping } from './evidence-mapping-validator.ts'
 import { catalogMatchesScoring, parseScoringResponsePointCatalog } from './scoring-response-point-artifacts.ts'
 import {
@@ -3997,6 +3998,8 @@ export async function reviewRefinedOutline(
       scoring: inputs.scoring.scoring_items.filter(item => section.scoring_ids.includes(item.id))
         .map(({ id, raw_text, criterion, source_refs }) => ({ id, raw_text, criterion, source_refs })),
       response_points: inputs.responsePoints.points.filter(item => section.scoring_response_point_ids?.includes(item.id)),
+      compliance: inputs.compliance.compliance_items.filter(item => section.compliance_ids.includes(item.id)
+        || inputs.outline.global_compliance_ids.includes(item.id)),
     }
   })
   const instructions = [
@@ -4031,7 +4034,9 @@ export async function reviewRefinedOutline(
     },
     index: inputs.outline.sections.map((section, position) => {
       const { id, parent_id, title, purpose, must_answer, writable } = section
-      return { position, id, parent_id, title, purpose, must_answer, writable, source_keys: sourceKeys(section) }
+      return { position, id, parent_id, title, purpose, must_answer, writable, source_keys: sourceKeys(section),
+        coverage_ids: [...section.requirement_ids, ...section.scoring_ids, ...section.compliance_ids,
+          ...section.scoring_response_point_ids ?? []] }
     }),
     differences: outlineStructureDifferences(initialOutline, inputs.outline),
     operations: researchResults.flatMap(item => item.outlineOperations === undefined ? [] : [{
@@ -4060,8 +4065,7 @@ export async function reviewRefinedOutline(
     let requests: ReturnType<typeof buildOutlineReviewRequests>
     try { requests = buildOutlineReviewRequests(reviewContext, inputBudgetTokens, targetTokens) } catch (error) {
       if (!(error instanceof OutlineReviewContextTooLargeError)) throw error
-      throw new MappingSubagentInfrastructureError([{ code: CONTEXT_WINDOW_EXCEEDED_CODE, message: error.message }], false, true,
-        undefined, 0, 'subagent', lastOverflow ?? error)
+      throw new BidStageExecutionError([{ code: 'OUTLINE_REVIEW_INPUT_BUDGET_EXCEEDED', message: error.message }])
     }
     if (lastOverflow !== undefined && JSON.stringify(requests.map(item => item.prompt)) === JSON.stringify(previousRequests)) {
       throw new MappingSubagentInfrastructureError([{ code: CONTEXT_WINDOW_EXCEEDED_CODE,
@@ -4101,35 +4105,38 @@ export async function reviewRefinedOutline(
         ].join('\n'),
         operations: { changes: reviewContext.operations, opinions: opinions.map(item => item.reason) },
       }
-      let consolidation: OutlineReviewRequest
+      let consolidations: OutlineReviewRequest[]
       try {
-        consolidation = buildOutlineReviewRequest(consolidationContext, targetTokens)
+        consolidations = [buildOutlineReviewRequest(consolidationContext, targetTokens)]
       } catch (error) {
         if (!(error instanceof OutlineReviewContextTooLargeError)) throw error
         const requiredPositions = new Set([position, ...group.filter(item => item.kind !== 'detail')
           .flatMap(item => item.request.sectionPositions)])
         try {
-          consolidation = buildOutlineReviewRequest({ ...consolidationContext,
+          const focused = { ...consolidationContext,
             index: reviewContext.index.filter(item => requiredPositions.has(item.position)),
-          }, inputBudgetTokens)
+          }
+          consolidations = buildOutlineReviewRequests(focused, inputBudgetTokens, inputBudgetTokens)
         } catch (narrowError) {
           if (!(narrowError instanceof OutlineReviewContextTooLargeError)) throw narrowError
-          throw new MappingSubagentInfrastructureError([{ code: CONTEXT_WINDOW_EXCEEDED_CODE,
-            message: narrowError.message }], false, true, undefined, 0, 'subagent', narrowError)
+          throw new BidStageExecutionError([{ code: 'OUTLINE_REVIEW_INPUT_BUDGET_EXCEEDED', message: narrowError.message }])
         }
       }
-      if (consolidation.prompt === previousConsolidationPrompt) {
+      const consolidationPrompt = JSON.stringify(consolidations.map(item => item.prompt))
+      if (consolidationPrompt === previousConsolidationPrompt) {
         throw new MappingSubagentInfrastructureError([{ code: CONTEXT_WINDOW_EXCEEDED_CODE,
           message: '目录意见整理无法继续缩减，保留原上下文超限原因。' }], false, true, undefined, 0, 'subagent', lastOverflow)
       }
       try {
-        const result = await reviewOne({ ...consolidation, sectionPositions: [position],
-          cardPositions: consolidation.cardPositions.filter(item => item === position) }, requests.length)
-        collected.push({ ...result, blockingIssues: [] })
-        resolved.push(...result.blockingIssues.map(item => item.issue))
+        for (const [offset, consolidation] of consolidations.entries()) {
+          const result = await reviewOne({ ...consolidation, sectionPositions: [position],
+            cardPositions: consolidation.cardPositions.filter(item => item === position) }, requests.length + offset)
+          collected.push({ ...result, blockingIssues: [] })
+          resolved.push(...result.blockingIssues.map(item => item.issue))
+        }
       } catch (error) {
         if (!isContextOverflow(error)) throw error
-        previousConsolidationPrompt = consolidation.prompt
+        previousConsolidationPrompt = consolidationPrompt
         overflow = error
         break
       }
@@ -4442,6 +4449,11 @@ async function executeEvidenceMappingRun(
   let checkpoint: EvidenceMappingCheckpoint = { tasks: [] }
   let executionLog: EvidenceMappingExecutionLog | undefined
   let resuming = false
+  const legacyBudgetRecovery = options.recovery !== undefined
+    && isLegacyOutlineReviewBudgetFailure(options.run.work, {
+      message: options.recovery.issues[0]?.message ?? '', issues: [...options.recovery.issues],
+    })
+  const preserveAccepted = options.preserveAcceptedCandidate === true || legacyBudgetRecovery
   if (!localRun || options.resumeCandidate === true) {
     const rawLog = await readOptionalJson(workspace, LOG_PATH)
     if (rawLog !== undefined && (options.run.resumeOf !== undefined || options.resumeCandidate === true)) {
@@ -4475,6 +4487,15 @@ async function executeEvidenceMappingRun(
           })),
         }))
       }
+      if (legacyBudgetRecovery && rawCheckpoint === undefined) throw new BidStageExecutionError([{
+        code: 'BID_S4_CHECKPOINT_FILE_MISSING', artifact: CHECKPOINT_PATH, message: '原 S4 研究检查点不存在，不能重新研究替代恢复。',
+      }])
+      const rawRefined = legacyBudgetRecovery ? await readOptionalJson(workspace, REFINED_OUTLINE_CANDIDATE_PATH) : undefined
+      if (legacyBudgetRecovery && rawRefined === undefined) throw new BidStageExecutionError([{
+        code: 'BID_S4_CANDIDATE_FILE_MISSING', artifact: REFINED_OUTLINE_CANDIDATE_PATH,
+        message: '原 S4 待审目录候选不存在，不能重新研究替代恢复。',
+      }])
+      const savedRefined = rawRefined === undefined ? undefined : parseOutlineArtifact(rawRefined)
       const savedCheckpoints = new Map(checkpoint.tasks.map(item => [item.task_id, item]))
       const rawPrevious = await readOptionalJson(workspace, MAPPING_CANDIDATE_PATH)
       const rawPreviousWeb = await readOptionalJson(workspace, 'analysis/web-evidence-sources.json')
@@ -4498,9 +4519,9 @@ async function executeEvidenceMappingRun(
         const currentTask = plan.tasks.find(task => task.task_id === item.task_id)
         // 完成日志与未完成检查点冲突时，该候选可以恢复复核进度，
         // 但不能作为完成事实跳过本轮验收。
-        if (options.preserveAcceptedCandidate && item.status === 'completed' && saved?.completed !== true) {
-          throw new BidStageExecutionError([{ code: 'BID_S4_SUPERSEDE_CANDIDATE_FINGERPRINT_MISMATCH',
-            message: `已接受任务 ${item.task_id} 缺少完整检查点，不能以新授权重跑初始研究。` }])
+        if (preserveAccepted && item.status === 'completed' && saved?.completed !== true) {
+          throw new BidStageExecutionError([{ code: 'BID_S4_SUPERSEDE_CANDIDATE_FINGERPRINT_MISMATCH', artifact: CHECKPOINT_PATH,
+            message: `已接受任务 ${item.task_id} 缺少完整检查点，不能重跑初始研究。` }])
         }
         if (item.status === 'completed' && saved?.completed !== true) item.status = 'pending'
         const dependsOnDiscarded = currentTask?.research_candidate_task_ids?.some(id => discarded.has(id)) === true
@@ -4542,9 +4563,9 @@ async function executeEvidenceMappingRun(
             for (const mapping of saved.result.section_mappings) fingerprintMappings.set(mapping.section_id, mapping)
             continue
           }
-          if (options.preserveAcceptedCandidate) throw new BidStageExecutionError([{
-            code: 'BID_S4_SUPERSEDE_CANDIDATE_FINGERPRINT_MISMATCH',
-            message: `已接受任务 ${item.task_id} 的输入或目录检查点不匹配，不能以新授权重跑初始研究。`,
+          if (preserveAccepted) throw new BidStageExecutionError([{
+            code: 'BID_S4_SUPERSEDE_CANDIDATE_FINGERPRINT_MISMATCH', artifact: CHECKPOINT_PATH,
+            message: `已接受任务 ${item.task_id} 的输入或目录检查点不匹配，不能重跑初始研究。`,
           }])
           if (!scopeExists || currentTask.task_kind === 'outline_repair') discarded.add(item.task_id)
           else item.status = 'pending'
@@ -4561,6 +4582,13 @@ async function executeEvidenceMappingRun(
       if (discarded.size > 0) {
         plan = { ...plan, tasks: plan.tasks.filter(task => !discarded.has(task.task_id)) }
         savedLog.tasks = savedLog.tasks.filter(task => !discarded.has(task.task_id))
+      }
+      if (savedRefined !== undefined && (!isDeepStrictEqual(savedRefined, fingerprintOutline)
+        || plan.tasks.some(task => task.phase === 'initial' && !reusable.has(task.task_id)))) {
+        throw new BidStageExecutionError([{
+          code: 'BID_S4_CANDIDATE_FINGERPRINT_MISMATCH', artifact: REFINED_OUTLINE_CANDIDATE_PATH,
+          message: '原 S4 待审目录与研究检查点不匹配，不能重跑已有研究。',
+        }])
       }
       checkpoint = { tasks: checkpoint.tasks.filter(item => reusable.has(item.task_id)) }
       delete savedLog.failure

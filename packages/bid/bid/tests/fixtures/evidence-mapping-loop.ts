@@ -27,6 +27,8 @@ import {
   checkpointBidProjectState, readBidProjectState,
 } from '@deepseek-ai/dsh-bid'
 import { persistBidWorkRequest } from '../../src/work-descriptor.ts'
+import { BidStageExecutionError } from '../../src/control-plane-contract.ts'
+import { bidRecoverableRun } from '../../src/bid-recovery.ts'
 
 function toolCall(callId: string, name: string, args: object): StreamChunk[] {
   const id = CallId(callId)
@@ -453,7 +455,7 @@ function researchAssessment(sufficient: boolean, affectsBlueprint: boolean, mode
  * @param root - 本用例的隔离工作区。
  * @param repair - 搜索错误后调整查询，跨 Child 轮次抓取 URL，并修复目录 Schema。
  * @param structureRecovery - 保留首代修复失败及后续补修脚本，供真实 Main 恢复或新授权使用。
- * @param largeReview - 装载超过常规分片目标的完整采购原文，并声明足够的模型上下文。
+ * @param largeReview - 大原文使用足够容量、硬预算分段或旧本地预算失败场景。
  * @returns 阶段结果、Host、工作区及模型实际请求。
  */
 export async function runEvidenceMappingLoop(ctx: Context, root: string, repair: boolean, interactive = false,
@@ -468,7 +470,8 @@ export async function runEvidenceMappingLoop(ctx: Context, root: string, repair:
     retryAfter?: string
     resume?: true
     production?: true
-  }, researchMode?: 'zero' | 'local' | 'external_unbound', structureRecovery = false, largeReview = false) {
+  }, researchMode?: 'zero' | 'local' | 'external_unbound', structureRecovery = false,
+  largeReview: boolean | 'partitioned' | 'legacy' = false) {
   const sessionId = SessionId('s3-real-loop')
   const workspace = new BidWorkspace(root)
   const s2 = fault?.resume === true ? { requirementId: 'REQ-1', scoringId: 'SCORE-1', responsePointId: 'RP-000001' }
@@ -643,7 +646,22 @@ export async function runEvidenceMappingLoop(ctx: Context, root: string, repair:
   }
   const parentScript: ScriptStep[] = []
   const adapter = new ScriptedAdapter(sessionId, parentScript, childScript)
-  if (largeReview) adapter.outlineReview = { contextWindow: 32_768, quality: parsedQuality }
+  if (largeReview) adapter.outlineReview = { contextWindow: largeReview === 'partitioned' ? 16_384 : 32_768, quality: parsedQuality }
+  if (largeReview === 'legacy') {
+    const start = ctx.subagents.start.bind(ctx.subagents)
+    let failed = false
+    ctx.effect(() => {
+      ctx.subagents.start = async (provider, request) => {
+        if (!failed && request.persona?.includes('技术标目录轻量复核')) {
+          failed = true
+          throw new BidStageExecutionError([{ code: 'CONTEXT_WINDOW_EXCEEDED',
+            message: '目录审查对象超过输入预算：位置 0，估算 15496 token，预算 12000 token。' }])
+        }
+        return start(provider, request)
+      }
+      return () => { ctx.subagents.start = start }
+    })
+  }
   adapter.structureRecovery = structureRecovery
   adapter.reviewOverflow = fault?.reviewOverflow === true
   ctx.effect(() => ctx.llm.registerAdapter(['mock'], adapter))
@@ -679,7 +697,7 @@ export async function runEvidenceMappingLoop(ctx: Context, root: string, repair:
     }) },
     { validate: (stage, artifacts) => validateEvidenceMapping(workspace, stage, artifacts) },
     undefined, undefined, undefined,
-    structureRecovery ? async (stage) => {
+    structureRecovery || largeReview === 'legacy' ? async (stage) => {
       const payload = { stage }
       const inputs = await Promise.all(buildBidStageTask(stage).inputs.map(async path => ({ path,
         sha256: createHash('sha256').update(await readFile(join(workspace.projectRoot, path))).digest('hex'),
@@ -693,30 +711,39 @@ export async function runEvidenceMappingLoop(ctx: Context, root: string, repair:
     ? await orchestrator.resume(suspended.data.run.runId)
     : await orchestrator.runCurrentAutomaticStage()
   adapter.interactive = interactive
-  return { agent, workspace, sourceUrl, outcome, requests: adapter.requests,
+  return { agent, workspace, sourceUrl, outcome, requests: adapter.requests, adapter,
     parentScript, childScript, reviewScript: adapter.reviewScript }
 }
 
 /**
- * 在完整研究及首代结构修复失败后，通过正式 Main 恢复工具定向补修原 Work。
+ * 在结构或旧本地预算失败后，通过正式 Main 恢复工具继续原 Work。
  * @param ctx 包含 Bid Host 的真实 Loader 装配。
  * @param root 临时项目目录。
+ * @param scenario 原失败类型。
  * @returns 原失败结果、恢复后状态及真实请求；恢复未完成时抛错。
  */
-export async function runEvidenceMappingStructureRecoveryLoop(ctx: Context, root: string) {
-  const result = await runEvidenceMappingLoop(ctx, root, false, true, undefined, 'local', true)
+export async function runEvidenceMappingRecoveryLoop(ctx: Context, root: string, scenario: 'structure' | 'legacy' = 'structure') {
+  const result = await runEvidenceMappingLoop(ctx, root, false, true, undefined, 'local', scenario === 'structure',
+    scenario === 'legacy' ? 'legacy' : false)
   if (result.outcome.status !== 'failed') throw new Error('结构恢复夹具未产生首代修复后的失败：' + JSON.stringify(result.outcome))
   const failedLog = JSON.parse(await readFile(join(result.workspace.projectRoot, 'analysis/evidence-mapping-log.json'), 'utf8')) as {
     tasks: Array<{ task_id: string; status: string }>
     failure?: unknown
   }
-  if (!failedLog.tasks.some(task => task.task_id.startsWith('MAP-REPAIR-') && task.status === 'completed')) {
+  if (scenario === 'structure' && !failedLog.tasks.some(task => task.task_id.startsWith('MAP-REPAIR-') && task.status === 'completed')) {
     throw new Error('首代结构修复未完成：' + JSON.stringify(failedLog))
+  }
+  if (scenario === 'legacy') {
+    const run = bidRecoverableRun(result.agent.session, result.outcome)!
+    result.agent.session.append('bid.recovery.round', { ownerSessionId: String(result.agent.id),
+      target: { kind: 'run', runId: run.runId, workId: run.work.workId }, fingerprint: 'legacy', round: 0, budget: 3,
+      state: 'blocked', reason: run.error!.recovery!.reason })
   }
   const saved = await checkpointBidProjectState(result.workspace, result.outcome)
   result.agent.session.append('bid.project.resumed', { state: result.outcome, revision: saved.revision })
   await result.agent.whenIdle()
-  const instruction = '保留已研究资料，明确授权岗位核验与审计岗位追溯责任，只补修失败章节后重新复核。'
+  const instruction = scenario === 'structure' ? '保留已研究资料，明确授权岗位核验与审计岗位追溯责任，只补修失败章节后重新复核。'
+    : '继续原 S4，按当前模型预算重新组织审核，保留已完成研究及正式确认。'
   result.parentScript.push(toolCall('inspect-structure-recovery', 'bid_stage_inspect', { view: 'recovery' }),
     toolCall('accept-structure-recovery', 'bid_recover_task', { target: 'run', instruction }), finalText('已接纳定向补修，等待实际修改及复核结果。'))
   const done = Promise.withResolvers<undefined>()

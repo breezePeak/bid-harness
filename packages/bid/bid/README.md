@@ -173,7 +173,9 @@ Section Child 通过 `submit_section_research_assessment` 只记录研究充分�
 
 无参数 `finish_final_check` 根据当前版本记录计算漏项、过期及阻断，不接受模型自报已审清单，baseline 也不算已审。首轮与修复轮次先用 `list_review_items` 取得当前 `objects.reviews`，再通过 `review_items.review_position` 选择复核对象；程序绑定正式复核引用。当 finish 发现 pending review 时返回 `review_pending`、待审位置、当前对象表和结构化诊断。可修问题必须通过 `review_items` 的 `correct` 实际修改 S4 产物；旧引用失效后生成新 fingerprint，重新读取对象表并 `keep`，不能继承旧结论。不可在当前边界修复的 `block` 直接终止当前 Final Check，不进入无意义的普通重试。全部收口后合并、去重、整体验证并发布正式产物；失败沿用有限修复及回滚。检查点保存研究发现、带 fingerprint/stale 的结构判断、失效次数、目录操作及 Host 绑定、任务与资料版本和完成状态；结构字段、任务身份及输入关系必须严格校验，旧 S4 数据必须重置。正式 Outline 与 S5 输入不变。日志的 statistics 和各任务 research_stats 记录叶子数、研究充分性、搜索次数与命中、Web 成败及原因、findings、KEEP/REFINE、stale、结构操作、全书复核问题和 Repair 结果，不保存完整 Prompt；日志只接受当前工具名 `web_search` 与 `web_fetch`。
 
-S4 全局目录审核同时接收 S2 项目事实、覆盖记录的规范化文本与原文引用，以及 Host 从这些引用装载的完整采购 Chunk。Host 核对文件角色、上传文件的 Corpus 归属、索引、真实路径及行范围，按当前卡片或跨章索引实际关联的 Chunk 去重分片，并在完整请求中计入预算；缺失、错挂或单个完整审查对象超过模型剩余输入容量时明确拒绝审核，不截断决定性原文。项目摘要和规范化文本用于导航，采购原文决定事实与任务；摘要遗漏须补充依据，绑定错误须修正关联，摘要与原文冲突须按原文纠正，缺证不能直接推导为要求删除。
+S4 全局目录审核同时接收 S2 项目事实、覆盖记录的规范化文本与原文引用，以及 Host 从这些引用装载的完整采购 Chunk。Host 核对文件角色、上传文件的 Corpus 归属、索引、真实路径及行范围，按当前卡片实际关联的 Chunk 去重。完整单章超出模型剩余输入容量时，程序按章节关联的业务字段、diff、operations 和原文无损分段，保留来源身份及字符范围；职责关系由共享索引单独复核。所有分段成功后才接纳审核；缺失、错挂来源或最小请求仍超限时明确拒绝。项目摘要和规范化文本用于导航，采购原文决定事实与任务；摘要遗漏须补充依据，绑定错误须修正关联，摘要与原文冲突须按原文纠正，缺证不能直接推导为要求删除。
+
+`bid_stage_inspect(view=summary)` 和 `view=recovery` 返回有界失败诊断、可用动作及完成数量，不展开完整章节、映射和对象表；详细对象通过 `bid_project_inspect` 分页读取。`mapping_progress.research_completed` 表示初始研究完成量，`final_check_completed` 表示最终检查完成量，`current_artifacts_summary.evidence_map` 表示正式产物是否存在。固定 12,000 token 本地上限造成的旧 S4 blocked 记录可在原 Work 有限预算内恢复；Host 重验原输入和已完成检查点，候选缺失或不匹配时明确失败，不能用重新研究替代续行。服务商真实上下文错误和权限、凭证阻断不适用该例外。
 
 开发验收可运行 `pnpm run bid:s4-replay -- --workspace <S1-S3 Workspace> --output <隔离输出目录> [--sections SEC-A,SEC-B]`。入口复制源 Workspace 的 `.bid-harness`，仅在副本中清除旧 S4 及后续产物，再通过真实 Agent、Child 可见的 `web_search`/`web_fetch` 和当前 S4 执行器重跑并写出 `s4-acceptance-report.json`；Section 参数只筛选逐节记录，不改变全书执行，也不内置项目 ID。报告复用执行日志和检查点，列出 S3/S4 叶节差异、研究判断、stale、结构操作、复核/Repair 及本地与 Web 工具成败，不设置拆分数量门槛。
 
@@ -224,7 +226,7 @@ Writer 在缺少真实项目数量、人员、设备或记录值时只保留正�
 
 #### Token effect
 
-文件清单按每份导入文档增加固定字段；S4 全局目录审查共享职责索引，详细资料不逐叶复制 siblings。完整输入按 token 估算，硬上限为模型上下文容量扣除 Header、工具、输出及安全余量；未知容量按 16,384 token 计算。常规分片目标为 12,000 token，超目标大章独立审核，跨片职责按完整索引或片间配对复核，完整单章及配对仅在超过硬上限时拒绝。Provider 实际报上下文超限时，硬上限和分片目标同时缩减；相同失败输入不重复调用。Final Check 详细上下文随 pending 项增长；S5 上下文随确认目录、适用任务条件和章节身份增长。旧标标题按完整顺序提供，不重复每个标题的祖先路径；全局合规审核与整书验收均按需读取正文分块，不在任务提示中复制完整正文。
+文件清单按每份导入文档增加固定字段；S4 全局目录审查共享职责索引，详细资料不逐叶复制 siblings。完整输入按 token 估算，硬上限为模型上下文容量扣除 Header、工具、输出及安全余量；未知容量按 16,384 token 计算。常规分片目标为 12,000 token，超目标大章独立审核，超硬上限时无损分组；跨片职责按完整索引或片间配对复核。Provider 实际报上下文超限时，硬上限和分片目标同时缩减；相同失败输入不重复调用。Final Check 详细上下文随 pending 项增长；S5 上下文随确认目录、适用任务条件和章节身份增长。旧标标题按完整顺序提供，不重复每个标题的祖先路径；全局合规审核与整书验收均按需读取正文分块，不在任务提示中复制完整正文。
 
 #### KV Cache effect
 

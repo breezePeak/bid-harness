@@ -257,14 +257,14 @@ it('corrects S4 tool arguments in one Child turn through the headless Loader', a
   })
 }, LOADER_SMOKE_TEST_TIMEOUT_MS)
 
-it('S4 大章超过常规分片目标时通过真实 Loader 完整审核并发布', async () => {
-  const budgetFixtureDir = join(fixtureDir, 'review-budget')
+it.each(['review-budget', 'review-partitioned'])('S4 大章通过真实 Loader 按模型预算完整审核并发布：%s', async (scenario) => {
+  const budgetFixtureDir = join(fixtureDir, scenario)
   const result = await runLoaderSmoke({
     label: 'S4 完整原文与模型硬预算', tempDirPrefix: 'dsh-s4-review-budget-',
     binScript, configPath, mode: 'src',
     processTimeoutMs: 90_000,
     tsconfigPath: fileURLToPath(new URL('../../../tsconfig.json', import.meta.url)),
-    env: { DSH_S4_RECOVERY_SCENARIO: 'review-budget' },
+    env: { DSH_S4_RECOVERY_SCENARIO: scenario },
     inspect: async (cwd) => {
       const store = join(cwd, '.session-store')
       const paths = (await readdir(store, { recursive: true })).filter(path => path.endsWith('.jsonl'))
@@ -278,20 +278,41 @@ it('S4 大章超过常规分片目标时通过真实 Loader 完整审核并发�
           .map(block => block.text).find(text => text.includes('Structure Review Cards：'))!
         return { log, header, events, prompt }
       }).sort((left, right) => left.prompt < right.prompt ? -1 : 1)
-      expect(reviews).toHaveLength(2)
+      if (scenario === 'review-budget') expect(reviews).toHaveLength(2)
+      else expect(reviews.length).toBeGreaterThan(2)
       const cardIds: string[] = []
+      const sourceParts: Array<{ source: { key: string }; start: number; end: number; total: number; value: string }> = []
       for (const review of reviews) {
         const tokens = estimateMessage(createUserMessage({ content: [{ type: 'text', text: review.prompt }], source: { kind: 'user' } }))
-        expect(tokens).toBeGreaterThan(12_000)
-        expect(tokens).toBeLessThan(32_768 - 2_048 - 1_024)
-        expect(review.prompt).toContain('采购原文完整保留。'.repeat(6_000))
-        expect(review.prompt).toContain('原文末尾验收要求。')
+        if (scenario === 'review-budget') {
+          expect(tokens).toBeGreaterThan(12_000)
+          expect(tokens).toBeLessThan(32_768 - 2_048 - 1_024)
+          expect(review.prompt).toContain('采购原文完整保留。'.repeat(6_000))
+          expect(review.prompt).toContain('原文末尾验收要求。')
+        } else {
+          expect(tokens).toBeLessThan(16_384 - 2_048 - 1_024)
+          const parts = review.prompt.split('\n').find(text => text.startsWith('本片依据分段：'))!
+          const parsed = JSON.parse(parts.slice('本片依据分段：'.length)) as typeof sourceParts
+          sourceParts.push(...parsed.filter(part => part.source !== undefined))
+        }
         const line = review.prompt.split('\n').find(text => text.startsWith('Structure Review Cards：'))!
         const cards = JSON.parse(line.slice('Structure Review Cards：'.length)) as Array<{ section_id: string }>
         cardIds.push(...cards.map(card => card.section_id))
         expect(review.events.some(event => event.type === 'turn/end' && event.data.reason.kind === 'completed')).toBe(true)
       }
-      expect(cardIds).toEqual(['SEC-SECURITY'])
+      expect([...new Set(cardIds)]).toEqual(['SEC-SECURITY'])
+      if (scenario === 'review-partitioned') {
+        const ordered = sourceParts.sort((left, right) => left.start - right.start)
+        expect(new Set(ordered.map(part => part.source.key)).size).toBe(1)
+        expect(ordered[0]?.start).toBe(0)
+        for (const [index, part] of ordered.entries()) {
+          expect(part.end - part.start).toBe(part.value.length)
+          expect(part.end).toBe(ordered[index + 1]?.start ?? part.total)
+        }
+        const original = ordered.map(part => part.value).join('')
+        expect(original).toContain('采购原文完整保留。'.repeat(6_000))
+        expect(original).toContain('原文末尾验收要求。')
+      }
       expect(reviews.some(review => review.prompt.includes('不同分片之间的职责冲突'))).toBe(true)
       const map = parseEvidenceMapArtifact(JSON.parse(await readFile(join(cwd, '.bid-harness/analysis/evidence-map.json'), 'utf8')))
       expect(map.section_mappings.some(mapping => mapping.section_id === 'SEC-SECURITY')).toBe(true)

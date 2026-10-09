@@ -1,4 +1,4 @@
-/** 固定共享职责输入的增长、逐对跨片覆盖及单节点超限拒绝。 */
+/** 固定共享职责输入的增长、逐对跨片覆盖及单节点无损分组。 */
 import { describe, expect, it } from 'vitest'
 import { bindOutlineReviewIssue, buildOutlineReviewRequest, buildOutlineReviewRequests,
   OutlineReviewContextTooLargeError, type OutlineReviewContext } from '../src/outline-review-context.ts'
@@ -30,10 +30,11 @@ describe('目录审查上下文', () => {
     expect(requests.flatMap(request => request.cardPositions).sort()).toEqual([0, 1, 2, 3])
     expect(requests.every(request => request.estimatedInputTokens <= 5_000)).toBe(true)
     expect(buildOutlineReviewRequests(input, large.estimatedInputTokens, 800)).toEqual(requests)
-    expect(() => buildOutlineReviewRequests(input, large.estimatedInputTokens - 1, 800)).toThrow(OutlineReviewContextTooLargeError)
-    expect(() => buildOutlineReviewRequests(input, 800, 5_000)).toThrow(OutlineReviewContextTooLargeError)
+    expect(buildOutlineReviewRequests(input, large.estimatedInputTokens - 1, 800)
+      .every(request => request.estimatedInputTokens < large.estimatedInputTokens)).toBe(true)
+    expect(buildOutlineReviewRequests(input, 800, 5_000).every(request => request.estimatedInputTokens <= 800)).toBe(true)
   })
-  it('共享原文超目标仍保留每章详细审查及全部跨章关系，真实超限明确拒绝', () => {
+  it('共享原文超目标保留完整请求，真实超限才按依据分段', () => {
     const input = context(3)
     input.sources = [{ key: 'C0', file_id: '采购文件', name: '采购文件.md', chunk: 'chunk_0001',
       text: '完整采购原文。'.repeat(600), line_count: 1 }]
@@ -48,7 +49,9 @@ describe('目录审查上下文', () => {
     expect(requests.every(request => request.prompt.includes(input.sources![0]!.text))).toBe(true)
     const hardLimit = Math.max(...requests.map(request => request.estimatedInputTokens))
     expect(buildOutlineReviewRequests(input, hardLimit, 800)).toEqual(requests)
-    expect(() => buildOutlineReviewRequests(input, hardLimit - 1, 800)).toThrow(OutlineReviewContextTooLargeError)
+    const partitioned = buildOutlineReviewRequests(input, hardLimit - 1, 800)
+    expect(partitioned.every(request => request.estimatedInputTokens < hardLimit)).toBe(true)
+    expect(partitioned.some(request => request.evidenceParts !== undefined)).toBe(true)
   })
   it('公共原文占满分片目标时全书索引仍共享，不退化为逐章配对', () => {
     const input = context(32)
@@ -100,11 +103,59 @@ describe('目录审查上下文', () => {
       .slice('Structure Review Cards：'.length)) as Array<{ section_id: string }>)
     expect(cards.map(card => card.section_id).sort()).toEqual(input.cards.map(card => card.section_id).sort())
   })
-  it('超大单叶明确拒绝且不截断研究依据', () => {
+  it('超大单叶无损分段，极小预算明确拒绝且不修改输入', () => {
     const input = context(1)
     input.cards[0]!.research = '巨大节点'.repeat(10_000)
-    expect(() => buildOutlineReviewRequests(input, 800)).toThrow(OutlineReviewContextTooLargeError)
+    const requests = buildOutlineReviewRequests(input, 800)
+    const parts = requests.flatMap(request => request.evidenceParts ?? [])
+      .filter(part => part.path.join('.') === 'cards.0.research')
+    expect(parts.map(part => part.value).join('')).toBe(input.cards[0]!.research)
+    let offset = 0
+    for (const part of parts) {
+      expect(part).toMatchObject({ start: offset, end: offset + String(part.value).length, total: 40_000 })
+      offset += String(part.value).length
+    }
+    expect(requests.every(request => request.estimatedInputTokens <= 800)).toBe(true)
+    expect(() => buildOutlineReviewRequests(input, 1)).toThrow(OutlineReviewContextTooLargeError)
     expect(input.cards[0]!.research).toBe('巨大节点'.repeat(10_000))
+  })
+  it('按章节筛选业务、diff 和 operations，带来源偏移的采购原文覆盖尾部', () => {
+    const input = context(2)
+    const source = { key: 'C0', file_id: '采购文件', name: '采购文件.md', chunk: 'chunk_0001',
+      text: '1: 必须保留完整技术要求😀。'.repeat(2_000) + '2: 尾部验收。', line_count: 2 }
+    input.sources = [source]
+    input.cards[0]!.source_keys = ['C0']
+    input.cards[0]!.requirements = [{ id: 'R0', raw_text: '本章技术要求。' }]
+    input.cards[1]!.requirements = [{ id: 'R1', raw_text: '其他业务要求。' }]
+    input.coverage = { requirements: [input.cards[0]!.requirements, input.cards[1]!.requirements].flat() }
+    input.differences = [{ section_id: 'S0', change: '本章改动' }, { section_id: 'S1', change: '其他改动' }]
+    input.operations = [{ section_ids: ['S0'], operations: ['本章操作'] }, { section_ids: ['S1'], operations: ['其他操作'] }]
+    const requests = buildOutlineReviewRequests(input, 800)
+    const details = requests.filter(request => request.cardPositions.includes(0))
+    expect(details.every(request => !request.prompt.includes('其他业务要求') && !request.prompt.includes('其他改动')
+      && !request.prompt.includes('其他操作'))).toBe(true)
+    const parts = details.flatMap(request => request.evidenceParts ?? []).filter(part => part.source?.key === source.key)
+    expect(parts.map(part => part.value).join('')).toBe(source.text)
+    expect(parts[0]?.start).toBe(0)
+    expect(parts.at(-1)?.end).toBe(source.text.length)
+    expect(parts.every(part => part.source?.file_id === source.file_id && part.total === source.text.length)).toBe(true)
+    for (let position = 1; position < parts.length; position++) expect(parts[position]!.start).toBe(parts[position - 1]!.end)
+    expect(requests.some(request => request.kind === 'cross_sections' && request.sectionPositions.length === 2)).toBe(true)
+  })
+  it('父节点独有业务依据及来源完整提供，其他叶节详情不能替代', () => {
+    const input = context(2)
+    input.cards = [input.cards[1]!]
+    input.index[0]!.coverage_ids = ['PARENT-REQ']
+    input.index[0]!.source_keys = ['parent-source']
+    input.sources = [{ key: 'parent-source', file_id: '采购文件', name: '采购文件.md', chunk: 'parent.md',
+      line_count: 1, text: '父节点原文。'.repeat(3_000) }]
+    input.coverage = { requirements: [{ id: 'PARENT-REQ', raw_text: '父节点业务原文' }] }
+    const requests = buildOutlineReviewRequests(input, 800)
+    const parent = requests.filter(request => request.kind === 'cross_sections' && request.sectionPositions.join() === '0')
+    expect(parent.some(request => request.prompt.includes('父节点业务原文'))).toBe(true)
+    expect(parent.flatMap(request => request.evidenceParts ?? []).filter(part => part.source?.key === 'parent-source')
+      .map(part => part.value).join('')).toBe(input.sources[0]!.text)
+    expect(parent.every(request => request.cardPositions.length === 0 && request.estimatedInputTokens <= 800)).toBe(true)
   })
   it('单章意见整理只校验既定范围的完整预算，无关索引的半预算不能阻断', () => {
     const input: OutlineReviewContext = { instructions: '', coverage: [], differences: [], operations: [],
