@@ -374,6 +374,11 @@ describe.skipIf(!process.env.DEEPSEEK_API_KEY && !process.env.DSH_BID_EVAL_PROVI
     procurement: '本项目调查工作范围为玉林市，调查面积约 12824.25 平方公里。建设市级年度国土调查数据库，纳入本项目国土空间规划“一张图”实施监督信息系统进行管理。具体接口字段、账号权限和实施参数未提供。',
     claim: '本项目调查面积约 12824.25 平方公里，调查数据库纳入本项目国土空间规划“一张图”实施监督信息系统管理。',
   }, {
+    id: 'supported-large', name: '完整采购原文超过常规分片目标', supported: true,
+    procurement: '本项目调查工作范围为玉林市，调查面积约 12824.25 平方公里。建设市级年度国土调查数据库，纳入本项目国土空间规划“一张图”实施监督信息系统进行管理。具体接口字段、账号权限和实施参数未提供。',
+    appendix: '采购范围及验收条件以本文件为准。'.repeat(4_000),
+    claim: '本项目调查面积约 12824.25 平方公里，调查数据库纳入本项目国土空间规划“一张图”实施监督信息系统管理。',
+  }, {
     id: 'unsupported', name: '摘要声称但原文不支持的面积与纳管任务', supported: false,
     procurement: '本项目按采购人移交的图斑清单开展线索核查，形成经审核的调查数据库。采购范围未规定固定调查面积或与其他系统集成的纳管任务。',
     claim: '本项目调查面积确定为 99999 平方公里，必须纳入区域综合平台管理。',
@@ -387,6 +392,12 @@ describe.skipIf(!process.env.DEEPSEEK_API_KEY && !process.env.DSH_BID_EVAL_PROVI
       const outline = await prepare(workspace, cases[0], scenario.procurement)
       const artifact = async (path: string): Promise<unknown> => JSON.parse(await readFile(join(workspace.projectRoot, path), 'utf8'))
       const project = parseTenderProjectArtifact(await artifact('analysis/project.json'))
+      if ('appendix' in scenario) {
+        const path = join(workspace.projectRoot, project.source_refs[0]!.chunk)
+        const original = `${await readFile(path, 'utf8')}\n${scenario.appendix}`
+        expect(original.length).toBeGreaterThan(48_000)
+        await writeFile(path, original)
+      }
       if (!scenario.supported) project.project_scope.push(scenario.claim)
       const implementation = outline.sections.find(section => section.id === 'IMPLEMENTATION')!
       implementation.must_answer.push(scenario.claim)

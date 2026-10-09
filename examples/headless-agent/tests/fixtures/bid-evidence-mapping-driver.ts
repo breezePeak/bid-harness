@@ -23,7 +23,8 @@ try {
     ? await runEvidenceMappingStructureRecoveryLoop(ctx, process.cwd())
     : await runEvidenceMappingLoop(ctx, process.cwd(), !recovery, false,
       recovery ? { code: 'WEB_PROVIDER_RATE_LIMITED', statusCode: 429, failures: 1,
-        ...(process.env.DSH_S4_RECOVERY_SCENARIO === 'fetch-backoff' ? { tool: 'web_fetch' as const } : {}) } : undefined)
+        ...(process.env.DSH_S4_RECOVERY_SCENARIO === 'fetch-backoff' ? { tool: 'web_fetch' as const } : {}) } : undefined,
+      undefined, false, process.env.DSH_S4_RECOVERY_SCENARIO === 'review-budget')
   if (outcome?.status !== 'waiting_user') throw new Error(JSON.stringify(outcome))
   process.stdout.write(`${JSON.stringify({ ...outcome, state_files: [...stateFiles].sort() })}\n`)
 } finally {

@@ -13,6 +13,58 @@ function context(count: number): OutlineReviewContext {
 }
 
 describe('目录审查上下文', () => {
+  it('超目标大章独立审核，普通章节仍按目标分片且全部原文保留', () => {
+    const input = context(4)
+    input.index.forEach((item) => { item.purpose = '章节职责。' })
+    input.cards[0]!.research = '完整章节研究。'.repeat(800)
+    input.sources = [{ key: 'C0', file_id: '采购文件', name: '采购文件.md', chunk: 'chunk_0001',
+      text: '决定性原文，不可截断。'.repeat(100), line_count: 1 }]
+    input.cards[0]!.source_keys = ['C0']
+    input.index[0]!.source_keys = ['C0']
+    const requests = buildOutlineReviewRequests(input, 5_000, 800)
+    const large = requests.find(request => request.cardPositions.includes(0))!
+    expect(large.cardPositions).toEqual([0])
+    expect(large.estimatedInputTokens).toBeGreaterThan(800)
+    expect(large.prompt).toContain(input.sources[0]!.text)
+    expect(requests.filter(request => request !== large).every(request => request.estimatedInputTokens <= 800)).toBe(true)
+    expect(requests.flatMap(request => request.cardPositions).sort()).toEqual([0, 1, 2, 3])
+    expect(requests.every(request => request.estimatedInputTokens <= 5_000)).toBe(true)
+    expect(buildOutlineReviewRequests(input, large.estimatedInputTokens, 800)).toEqual(requests)
+    expect(() => buildOutlineReviewRequests(input, large.estimatedInputTokens - 1, 800)).toThrow(OutlineReviewContextTooLargeError)
+    expect(() => buildOutlineReviewRequests(input, 800, 5_000)).toThrow(OutlineReviewContextTooLargeError)
+  })
+  it('共享原文超目标仍保留每章详细审查及全部跨章关系，真实超限明确拒绝', () => {
+    const input = context(3)
+    input.sources = [{ key: 'C0', file_id: '采购文件', name: '采购文件.md', chunk: 'chunk_0001',
+      text: '完整采购原文。'.repeat(600), line_count: 1 }]
+    input.projectSourceKeys = ['C0']
+    input.index.forEach((item) => { item.purpose = '职责索引。'.repeat(100) })
+    const requests = buildOutlineReviewRequests(input, 5_000, 800)
+    expect(requests.flatMap(request => request.cardPositions).sort()).toEqual([0, 1, 2])
+    for (let left = 0; left < 3; left++) for (let right = left; right < 3; right++) {
+      expect(requests.some(request => request.kind === 'cross_sections'
+        && request.sectionPositions.includes(left) && request.sectionPositions.includes(right))).toBe(true)
+    }
+    expect(requests.every(request => request.prompt.includes(input.sources![0]!.text))).toBe(true)
+    const hardLimit = Math.max(...requests.map(request => request.estimatedInputTokens))
+    expect(buildOutlineReviewRequests(input, hardLimit, 800)).toEqual(requests)
+    expect(() => buildOutlineReviewRequests(input, hardLimit - 1, 800)).toThrow(OutlineReviewContextTooLargeError)
+  })
+  it('公共原文占满分片目标时全书索引仍共享，不退化为逐章配对', () => {
+    const input = context(32)
+    input.index.forEach((item) => { item.purpose = '章节职责。' })
+    input.sources = [{ key: 'C0', file_id: '采购文件', name: '采购文件.md', chunk: 'chunk_0001',
+      text: '采购原文完整保留。'.repeat(6_000), line_count: 1 }]
+    input.projectSourceKeys = ['C0']
+    const requests = buildOutlineReviewRequests(input, 30_000, 12_000)
+    const cross = requests.filter(request => request.kind === 'cross_sections')
+    expect(cross).toHaveLength(1)
+    expect(cross[0]!.sectionPositions).toEqual(input.index.map(item => item.position))
+    expect(requests.filter(request => request.kind === 'sections')).toHaveLength(32)
+    expect(requests.flatMap(request => request.cardPositions).sort((left, right) => left - right))
+      .toEqual(input.index.map(item => item.position))
+    expect(requests.every(request => request.estimatedInputTokens <= 30_000)).toBe(true)
+  })
   it('详细分片只装载本片关联与项目原文，同一Chunk去重且按完整内容计入预算', () => {
     const input = context(4)
     input.sources = Array.from({ length: 5 }, (_, position) => ({ key: `C${String(position)}`, file_id: '采购文件',
@@ -63,7 +115,7 @@ describe('目录审查上下文', () => {
     const owner = original.find(request => request.cardPositions.includes(0))!
     expect(owner.sectionPositions).toEqual([0])
     const consolidation = { ...input, cards: [input.cards[0]!], operations: { opinions: ['y'.repeat(700)] } }
-    expect(() => buildOutlineReviewRequests(consolidation, 1_000)).toThrow(OutlineReviewContextTooLargeError)
+    expect(() => buildOutlineReviewRequest(consolidation, 1_000)).toThrow(OutlineReviewContextTooLargeError)
     const focused = { ...consolidation, index: input.index.filter(item => owner.sectionPositions.includes(item.position)) }
     const request = buildOutlineReviewRequest(focused, 1_000)
     expect(request).toMatchObject({ kind: 'complete', sectionPositions: [0], cardPositions: [0] })

@@ -107,13 +107,17 @@ export function buildOutlineReviewRequest(input: OutlineReviewContext, budgetTok
  * 根据完整请求的固定密度估算生成有界分片。每个叶子恰好进入一个详细审查；共享索引跨片时逐对检查所有片间职责关系。
  * @param input - 全量审查依据及程序绑定位置。
  * @param budgetTokens - 已扣除 system、工具和输出余量后的输入 token 预算。
+ * @param targetTokens - 常规分片目标；不可拆分的单章或跨片关系可使用剩余模型预算。
  * @returns 完整请求和可验证覆盖位置；单对象超限时抛错。
  */
-export function buildOutlineReviewRequests(input: OutlineReviewContext, budgetTokens: number): OutlineReviewRequest[] {
+export function buildOutlineReviewRequests(
+  input: OutlineReviewContext, budgetTokens: number, targetTokens = budgetTokens,
+): OutlineReviewRequest[] {
+  const target = Math.min(targetTokens, budgetTokens)
   const render = (cards: OutlineReviewContext['cards'], index: OutlineReviewContext['index'], kind: OutlineReviewRequest['kind']) =>
     renderOutlineReviewRequest(input, cards, index, kind)
   const complete = render(input.cards, input.index, 'complete')
-  if (complete.estimatedInputTokens <= budgetTokens) return [complete]
+  if (complete.estimatedInputTokens <= target) return [complete]
   const assertFits = (request: OutlineReviewRequest, position?: number): void => {
     if (request.estimatedInputTokens > budgetTokens) {
       throw new OutlineReviewContextTooLargeError(position, request.estimatedInputTokens, budgetTokens)
@@ -121,13 +125,13 @@ export function buildOutlineReviewRequests(input: OutlineReviewContext, budgetTo
   }
   assertFits(render([], [], 'sections'))
   const requests: OutlineReviewRequest[] = []
-  const sharedIndexFits = render([], input.index, 'sections').estimatedInputTokens <= Math.floor(budgetTokens / 2)
+  const sharedIndexFits = render([], input.index, 'sections').estimatedInputTokens <= Math.floor(target / 2)
   let cardBatch: OutlineReviewContext['cards'] = []
   const sectionRequest = (cards: OutlineReviewContext['cards']) => render(cards,
     sharedIndexFits ? input.index : input.index.filter(item => cards.some(card => card.section_id === item.id)), 'sections')
   for (const card of input.cards) {
     const candidate = sectionRequest([...cardBatch, card])
-    if (candidate.estimatedInputTokens > budgetTokens && cardBatch.length > 0) {
+    if (candidate.estimatedInputTokens > target && cardBatch.length > 0) {
       requests.push(sectionRequest(cardBatch))
       cardBatch = []
     }
@@ -135,13 +139,15 @@ export function buildOutlineReviewRequests(input: OutlineReviewContext, budgetTo
     cardBatch.push(card)
   }
   if (cardBatch.length > 0) requests.push(sectionRequest(cardBatch))
-  if (sharedIndexFits) {
-    requests.push(render([], input.index, 'cross_sections'))
+  const fixed = render([], [], 'cross_sections').estimatedInputTokens
+  const relationBudget = Math.min(budgetTokens, Math.max(target, fixed + Math.floor(target / 2)))
+  const crossSections = render([], input.index, 'cross_sections')
+  if (crossSections.estimatedInputTokens <= relationBudget) {
+    requests.push(crossSections)
     return requests
   }
-  // 一片至多使用可用数据空间的一半，使任意两片仍能放入同一请求。
-  const fixed = render([], [], 'cross_sections').estimatedInputTokens
-  const indexBudget = fixed + Math.floor((budgetTokens - fixed) / 2)
+  // 公共依据占满目标时仍为索引保留空间；两片配对和大单节点均受模型硬上限约束。
+  const indexBudget = fixed + Math.floor((relationBudget - fixed) / 2)
   const indexBatches: OutlineReviewContext['index'][] = []
   let indexBatch: OutlineReviewContext['index'] = []
   for (const item of input.index) {
@@ -151,9 +157,7 @@ export function buildOutlineReviewRequests(input: OutlineReviewContext, budgetTo
       indexBatch = []
     }
     const single = render([], [item], 'cross_sections')
-    if (single.estimatedInputTokens > indexBudget) {
-      throw new OutlineReviewContextTooLargeError(item.position, single.estimatedInputTokens, indexBudget)
-    }
+    assertFits(single, item.position)
     indexBatch.push(item)
   }
   if (indexBatch.length > 0) indexBatches.push(indexBatch)

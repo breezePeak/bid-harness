@@ -4050,15 +4050,15 @@ export async function reviewRefinedOutline(
   const outputTokens = Math.min(agent.options.maxTokens ?? metadata?.defaultMaxTokens ?? 2_048, 2_048)
   const envelopeTokens = estimateHeader({ config: { provider: agent.options.provider ?? 'unknown', model: agent.options.model ?? 'unknown' },
     system: persona, tools: [{ name: 'structured_output', description: '返回目录质量报告。', parameters: { ...outlineQualityOutputSchema() } }] })
-  let inputBudgetTokens = Math.min(FINAL_REVIEW_PROMPT_CHAR_BUDGET / 4,
-    (metadata?.context?.contextWindow ?? 16_384) - outputTokens - envelopeTokens - 1_024)
+  let inputBudgetTokens = (metadata?.context?.contextWindow ?? 16_384) - outputTokens - envelopeTokens - 1_024
+  let targetTokens = Math.min(FINAL_REVIEW_PROMPT_CHAR_BUDGET / 4, inputBudgetTokens)
   type ReviewIssue = { issue: OutlineStructureIssue; kind: OutlineReviewIssueKind; request: OutlineReviewRequest }
   let lastOverflow: unknown
   let previousRequests: string[] = []
   let previousConsolidationPrompt: string | undefined
   for (let contextAttempt = 0; contextAttempt <= 2; contextAttempt++) {
     let requests: ReturnType<typeof buildOutlineReviewRequests>
-    try { requests = buildOutlineReviewRequests(reviewContext, inputBudgetTokens) } catch (error) {
+    try { requests = buildOutlineReviewRequests(reviewContext, inputBudgetTokens, targetTokens) } catch (error) {
       if (!(error instanceof OutlineReviewContextTooLargeError)) throw error
       throw new MappingSubagentInfrastructureError([{ code: CONTEXT_WINDOW_EXCEEDED_CODE, message: error.message }], false, true,
         undefined, 0, 'subagent', lastOverflow ?? error)
@@ -4080,6 +4080,7 @@ export async function reviewRefinedOutline(
     if (overflow !== undefined) {
       lastOverflow = overflow
       inputBudgetTokens = Math.floor(inputBudgetTokens / 2)
+      targetTokens = Math.min(Math.floor(targetTokens / 2), inputBudgetTokens)
       continue
     }
     const grouped = new Map<string, ReviewIssue[]>()
@@ -4102,7 +4103,7 @@ export async function reviewRefinedOutline(
       }
       let consolidation: OutlineReviewRequest
       try {
-        consolidation = buildOutlineReviewRequest(consolidationContext, inputBudgetTokens)
+        consolidation = buildOutlineReviewRequest(consolidationContext, targetTokens)
       } catch (error) {
         if (!(error instanceof OutlineReviewContextTooLargeError)) throw error
         const requiredPositions = new Set([position, ...group.filter(item => item.kind !== 'detail')
@@ -4137,6 +4138,7 @@ export async function reviewRefinedOutline(
       lastOverflow = overflow
       previousRequests = []
       inputBudgetTokens = Math.floor(inputBudgetTokens / 2)
+      targetTokens = Math.min(Math.floor(targetTokens / 2), inputBudgetTokens)
       continue
     }
     const quality = { ...collected.map(item => item.quality).reduce(first => first),

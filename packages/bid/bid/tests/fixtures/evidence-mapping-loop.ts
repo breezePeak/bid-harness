@@ -9,11 +9,12 @@ import { isDeepStrictEqual } from 'node:util'
 import { createHash } from 'node:crypto'
 import { Context } from '@deepseek-ai/cordis'
 import LocalFileSystem from '@deepseek-ai/dsh-fs-local'
-import { CallId, CONTEXT_WINDOW_EXCEEDED_CODE, HarnessError, LlmAdapter, WebError, createUserMessage, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
+import { CallId, CONTEXT_WINDOW_EXCEEDED_CODE, HarnessError, LlmAdapter, WebError, createUserMessage, type GenerateOptions, type LlmResolvedModelInfo, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import { SessionId, type Session } from '@deepseek-ai/dsh-session'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { SearchError } from '@deepseek-ai/dsh-tool-fs-search'
 import type {} from '@deepseek-ai/dsh-fs'
+import type {} from '@deepseek-ai/dsh-web'
 import {
   BidOrchestrator, BidWorkspace, createScoringResponsePointCatalog, executeEvidenceMapping,
   validateEvidenceMapping, resolveMappingCorpusLocations, buildBidStageTask, executeChapterWriting,
@@ -69,6 +70,7 @@ class ScriptedAdapter extends LlmAdapter {
   interactive = false
   reviewOverflow = false
   structureRecovery = false
+  outlineReview?: { contextWindow: number; quality: object }
   readonly requests: GenerateOptions[] = []
   readonly reviewScript: ScriptStep[] = []
   constructor(
@@ -79,12 +81,17 @@ class ScriptedAdapter extends LlmAdapter {
     super()
   }
 
-  override resolveModel(provider: string, model: string): Promise<{ provider: string; id: string; name: string }> {
-    return Promise.resolve({ provider, id: model, name: model })
+  override resolveModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
+    return Promise.resolve({ provider, id: model, name: model,
+      ...(this.outlineReview === undefined ? {} : { context: { contextWindow: this.outlineReview.contextWindow } }) })
   }
 
   async * stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
     this.requests.push(options)
+    if (this.outlineReview !== undefined && options.system?.includes('技术标目录轻量复核 Subagent')) {
+      yield* mappingModelReply(toolCall('review-large-original', 'structured_output', this.outlineReview.quality), options)
+      return
+    }
     if (this.reviewOverflow && options.system?.includes('技术标目录轻量复核 Subagent')) {
       this.reviewOverflow = false
       yield { type: 'finish', reason: { kind: 'error', failure: { code: CONTEXT_WINDOW_EXCEEDED_CODE, message: '注入的 provider context overflow' } } }
@@ -446,6 +453,7 @@ function researchAssessment(sufficient: boolean, affectsBlueprint: boolean, mode
  * @param root - 本用例的隔离工作区。
  * @param repair - 搜索错误后调整查询，跨 Child 轮次抓取 URL，并修复目录 Schema。
  * @param structureRecovery - 保留首代修复失败及后续补修脚本，供真实 Main 恢复或新授权使用。
+ * @param largeReview - 装载超过常规分片目标的完整采购原文，并声明足够的模型上下文。
  * @returns 阶段结果、Host、工作区及模型实际请求。
  */
 export async function runEvidenceMappingLoop(ctx: Context, root: string, repair: boolean, interactive = false,
@@ -460,7 +468,7 @@ export async function runEvidenceMappingLoop(ctx: Context, root: string, repair:
     retryAfter?: string
     resume?: true
     production?: true
-  }, researchMode?: 'zero' | 'local' | 'external_unbound', structureRecovery = false) {
+  }, researchMode?: 'zero' | 'local' | 'external_unbound', structureRecovery = false, largeReview = false) {
   const sessionId = SessionId('s3-real-loop')
   const workspace = new BidWorkspace(root)
   const s2 = fault?.resume === true ? { requirementId: 'REQ-1', scoringId: 'SCORE-1', responsePointId: 'RP-000001' }
@@ -488,6 +496,10 @@ export async function runEvidenceMappingLoop(ctx: Context, root: string, repair:
   const tender = manifest.files.find(file => file.role === 'tender')!
   const framework = manifest.files.find(file => file.role === 'outline_framework')!
   if (corpus === undefined || tender.chunksPath === null || framework.chunksPath === null) throw new Error('missing mapping corpus')
+  if (largeReview) {
+    const path = join(workspace.projectRoot, tender.chunksPath, 'chunk_0001.md')
+    await writeFile(path, `${await readFile(path, 'utf8')}\n${'采购原文完整保留。'.repeat(6_000)}原文末尾验收要求。`)
+  }
   const parsedQuality = JSON.parse(quality) as Record<string, unknown>
   const blueprint = {
     section_id: 'SEC-SECURITY', basis: { kind: 'tender_requirement', explanation: '招标要求访问控制方案与安全审计，明确已有安全任务的组织方式。', requirement_ids: ['REQ-1'] },
@@ -600,10 +612,10 @@ export async function runEvidenceMappingLoop(ctx: Context, root: string, repair:
     ] : []),
     toolCall('finish-initial-mapping', 'finish_mapping_task', {}),
     ...(researchMode === 'external_unbound' ? [finalText('所需外部标准正文尚未绑定到章节材料，保留当前缺口。')] : []),
-    ...(repair ? [toolCall('submit-refinement-incomplete', 'structured_output', {
+    ...(repair && !largeReview ? [toolCall('submit-refinement-incomplete', 'structured_output', {
       ...parsedQuality, scope: 'commercial_bid',
     })] : []),
-    toolCall('submit-refinement-quality', 'structured_output', parsedQuality),
+    ...(largeReview ? [] : [toolCall('submit-refinement-quality', 'structured_output', parsedQuality)]),
     toolCall('reject-incomplete-final-check', 'finish_final_check', {}),
     toolCall('list-final-items', 'list_review_items', {}),
     ...(useWeb ? [toolCall('reread-final-web-chunk', 'read_source', { source_ref: expectedWebChunkRef(sourceUrl) })] : []),
@@ -631,6 +643,7 @@ export async function runEvidenceMappingLoop(ctx: Context, root: string, repair:
   }
   const parentScript: ScriptStep[] = []
   const adapter = new ScriptedAdapter(sessionId, parentScript, childScript)
+  if (largeReview) adapter.outlineReview = { contextWindow: 32_768, quality: parsedQuality }
   adapter.structureRecovery = structureRecovery
   adapter.reviewOverflow = fault?.reviewOverflow === true
   ctx.effect(() => ctx.llm.registerAdapter(['mock'], adapter))

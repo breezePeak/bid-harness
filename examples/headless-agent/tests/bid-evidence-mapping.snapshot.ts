@@ -7,6 +7,8 @@ import { type BidEvidenceMappingProgress, BidWorkspace, readEvidenceMappingProgr
   parseOutlineArtifact, parseOutlineQualityReport, parseWebEvidenceSourcesArtifact } from '@deepseek-ai/dsh-bid'
 import { LOADER_SMOKE_TEST_TIMEOUT_MS, runLoaderSmoke } from '@deepseek-ai/dsh-loader-smoke'
 import type { SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
+import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import { estimateMessage } from '@deepseek-ai/dsh-token-meter'
 import { expect, it } from 'vitest'
 
 const fixtureDir = fileURLToPath(new URL('./bid-evidence-mapping-snapshots/', import.meta.url))
@@ -254,3 +256,55 @@ it('corrects S4 tool arguments in one Child turn through the headless Loader', a
     state_files: [],
   })
 }, LOADER_SMOKE_TEST_TIMEOUT_MS)
+
+it('S4 大章超过常规分片目标时通过真实 Loader 完整审核并发布', async () => {
+  const budgetFixtureDir = join(fixtureDir, 'review-budget')
+  const result = await runLoaderSmoke({
+    label: 'S4 完整原文与模型硬预算', tempDirPrefix: 'dsh-s4-review-budget-',
+    binScript, configPath, mode: 'src',
+    processTimeoutMs: 90_000,
+    tsconfigPath: fileURLToPath(new URL('../../../tsconfig.json', import.meta.url)),
+    env: { DSH_S4_RECOVERY_SCENARIO: 'review-budget' },
+    inspect: async (cwd) => {
+      const store = join(cwd, '.session-store')
+      const paths = (await readdir(store, { recursive: true })).filter(path => path.endsWith('.jsonl'))
+      const logs = await Promise.all(paths.map(async path => readFile(join(store, path), 'utf8')))
+      const reviews = logs.filter(log => log.includes('review-large-original')).map((log) => {
+        const [headerLine, ...lines] = log.trimEnd().split('\n')
+        const header = JSON.parse(headerLine!) as SessionHeader
+        const events = lines.map(line => JSON.parse(line) as SessionEvent)
+        const prompt = events.filter(event => event.type === 'user/message')
+          .flatMap(event => event.data.content).filter(block => block.type === 'text')
+          .map(block => block.text).find(text => text.includes('Structure Review Cards：'))!
+        return { log, header, events, prompt }
+      }).sort((left, right) => left.prompt < right.prompt ? -1 : 1)
+      expect(reviews).toHaveLength(2)
+      const cardIds: string[] = []
+      for (const review of reviews) {
+        const tokens = estimateMessage(createUserMessage({ content: [{ type: 'text', text: review.prompt }], source: { kind: 'user' } }))
+        expect(tokens).toBeGreaterThan(12_000)
+        expect(tokens).toBeLessThan(32_768 - 2_048 - 1_024)
+        expect(review.prompt).toContain('采购原文完整保留。'.repeat(6_000))
+        expect(review.prompt).toContain('原文末尾验收要求。')
+        const line = review.prompt.split('\n').find(text => text.startsWith('Structure Review Cards：'))!
+        const cards = JSON.parse(line.slice('Structure Review Cards：'.length)) as Array<{ section_id: string }>
+        cardIds.push(...cards.map(card => card.section_id))
+        expect(review.events.some(event => event.type === 'turn/end' && event.data.reason.kind === 'completed')).toBe(true)
+      }
+      expect(cardIds).toEqual(['SEC-SECURITY'])
+      expect(reviews.some(review => review.prompt.includes('不同分片之间的职责冲突'))).toBe(true)
+      const map = parseEvidenceMapArtifact(JSON.parse(await readFile(join(cwd, '.bid-harness/analysis/evidence-map.json'), 'utf8')))
+      expect(map.section_mappings.some(mapping => mapping.section_id === 'SEC-SECURITY')).toBe(true)
+      const sessionIds = [reviews[0]!.header.parentSession!, ...reviews.map(review => review.header.id)]
+      const expected = reviews.map(review => normalizeSessionSnapshot(review.log,
+        { sessionIds, cwd, cwdAliases: [cwd.replaceAll('\\', '/')] })).join('')
+      const path = join(budgetFixtureDir, 'reviews.expected.jsonl')
+      if (process.env.DSH_SNAPSHOT === 'refresh') {
+        await mkdir(budgetFixtureDir, { recursive: true })
+        await writeFile(path, expected)
+      }
+      expect(expected).toBe(await readFile(path, 'utf8'))
+    },
+  })
+  expect(JSON.parse(result.stdout)).toMatchObject({ stage: 'evidence_mapping', status: 'waiting_user', run: null })
+}, 105_000)

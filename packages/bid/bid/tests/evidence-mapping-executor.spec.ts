@@ -236,6 +236,37 @@ it.each(['wrong_file', 'wrong_chunk', 'wrong_corpus', 'wrong_metadata', 'line_ra
   },
 )
 
+it.each([16_384, 32_768])('目录复核的大章按模型容量 %i 接纳或拒绝，完整原文不受分片目标截断', async (modelContextWindow) => {
+  const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-outline-review-model-budget-')))
+  const material = await writeInputs(workspace)
+  const fixture = mappingFixture(workspace, material, false, {}, true, modelContextWindow)
+  const original = `${'采购原文完整保留。'.repeat(6_000)}原文末尾验收要求。`
+  const tenderChunk = join(workspace.projectRoot, material.tender.path)
+  await writeFile(tenderChunk, `${await readFile(tenderChunk, 'utf8')}\n${original}`)
+  const read = async (path: string) => JSON.parse(await readFile(join(workspace.projectRoot, path), 'utf8')) as unknown
+  const result = reviewRefinedOutline(fixture.agent, workspace, {
+    project: parseTenderProjectArtifact(await read('analysis/project.json')),
+    requirements: parseTenderRequirementsArtifact(await read('analysis/requirements.json')),
+    scoring: parseTenderScoringArtifact(await read('analysis/scoring.json')),
+    responsePoints: parseScoringResponsePointCatalog(await read('analysis/scoring-response-points.json')),
+    compliance: parseTenderComplianceArtifact(await read('analysis/compliance.json')),
+    outline: parseOutlineArtifact(await read('outline/initial-confirmed-outline.json')), frameworks: [],
+  }, [], 0, new AbortController().signal, createTestBidRunContext().commits)
+  if (modelContextWindow === 16_384) {
+    await expect(result).rejects.toThrow('目录审查对象超过输入预算')
+    expect(fixture.outlineReviewPrompts).toHaveLength(0)
+  } else {
+    expect((await result).blockingIssues).toEqual([])
+    expect(fixture.outlineReviewPrompts.length).toBeGreaterThan(1)
+    for (const prompt of fixture.outlineReviewPrompts) {
+      expect(prompt).toContain(original)
+      const tokens = estimateMessage(createUserMessage({ content: [{ type: 'text', text: prompt }], source: { kind: 'user' } }))
+      expect(tokens).toBeGreaterThan(12_000)
+      expect(tokens).toBeLessThan(modelContextWindow - 2_048 - 1_024)
+    }
+  }
+})
+
 it('决定性采购原文超出单片预算时明确拒绝，不截断后启动Reviewer', async () => {
   const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-outline-review-source-budget-')))
   const material = await writeInputs(workspace)
@@ -576,6 +607,7 @@ function mappingFixture(
   repairFirst = false,
   outlineOperations: Readonly<Record<string, readonly OutlineEditOperation[]>> = {},
   autoFinal = true,
+  modelContextWindow?: number,
 ) {
   const webProviderIds = { search: 'fixture-web-search', fetch: 'fixture-web-fetch' }
   let pendingMain = ''
@@ -1261,7 +1293,9 @@ function mappingFixture(
   const sandboxPolicy = new SandboxPolicyService(filesystemContext, { mode: 'workspace-write' })
   const filesystem = new SandboxedFileSystem(filesystemContext, { cwd: workspace.root, diffBasisMaxBytes: 10 * 1024 * 1024 })
   const logger = { warn: vi.fn(), info: vi.fn() }
-  const agent = { id: 'session', options: {}, session: { id: 'session', header: { cwd: workspace.root }, events: [] }, ctx: { agents, logger, get: (name: string) => ({ fs: filesystem, sandboxPolicy, tools, subagents, web } as Record<string, unknown>)[name], emit: vi.fn(), on }, followup, whenIdle } as unknown as Agent
+  const llm = modelContextWindow === undefined ? undefined
+    : { resolveModelInfo: async () => ({ context: { contextWindow: modelContextWindow } }) }
+  const agent = { id: 'session', options: modelContextWindow === undefined ? {} : { provider: 'fixture', model: 'fixture' }, session: { id: 'session', header: { cwd: workspace.root }, events: [] }, ctx: { agents, logger, get: (name: string) => ({ fs: filesystem, sandboxPolicy, tools, subagents, web, llm } as Record<string, unknown>)[name], emit: vi.fn(), on }, followup, whenIdle } as unknown as Agent
   return {
     agent, filesystem, starts, finalStarts, summaryStarts, subagents, followup, whenIdle, currentPrompt: () => pendingMain,
     childGuards, disposed, maxActive: () => maxActive, taskAttempts, on, onReply, onFinalReply, serializeReply, submissionCandidates,
