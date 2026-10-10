@@ -2,7 +2,7 @@
 import { mkdtemp, mkdir, readFile, readdir, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, posix } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
@@ -30,6 +30,7 @@ import {
 } from '@deepseek-ai/dsh-bid'
 import { registerIntegrationTools } from '../../../packages/bid/bid/tests/fixtures/evidence-mapping-loop.ts'
 import { reviewRefinedOutline } from '../../../packages/bid/bid/src/evidence-mapping-executor.ts'
+import { loadOutlineReviewSources } from '../../../packages/bid/bid/src/outline-review-sources.ts'
 import { seedCapabilityProject } from '../../../packages/bid/bid/tests/capability-fixture.ts'
 
 const cases = [{
@@ -42,7 +43,7 @@ const cases = [{
 }, {
   id: 'library', name: '图书馆馆藏数据迁移', structure: 'unscored',
   scope: '馆藏盘点、书目转换、数据迁移及成果验收',
-  procedure: '书目转换先建立 MARC 字段映射，再校验字段编码、合并重复书目、导入测试库并逐批核对迁移结果。',
+  procedure: '馆藏盘点按确认的数据范围登记记录与载体清单，保存源数据快照。书目转换先建立 MARC 字段映射，再校验字段编码、合并重复书目、导入测试库并逐批核对迁移结果。试迁移按批次核对源目标记录数、关键字段及关联关系，登记异常、修正并复验；正式切换前备份源库并确认窗口，异常时按预定回退方案恢复原库。验收对照采购人确认的口径核对交付数据、对账报告和异常处置记录。上述仅提供可选择的专业方法，不证明本项目已有系统、接口、馆藏规模、质量阈值或验收标准。',
   unrelated: '国土线索核查通过影像比对、图斑变化判定和外业核查形成整改成果。',
   positive: '本项目涉及馆藏盘点、书目转换、数据迁移及成果验收，需求分析应明确数据范围与使用目标，为迁移方案提供依据。',
   negative: '本章需求背景先执行 MARC 字段映射，再逐条校验编码、合并重复书目、导入测试库并逐批核对迁移结果。',
@@ -107,10 +108,13 @@ async function prepare(workspace: BidWorkspace, scenario: typeof cases[number], 
     { name: 'technical-reference.md', role: 'reference_bid', bytes: new TextEncoder().encode(`# 旧项目实施方案\n\n业务范围涉及${scenario.scope}。\n\n## 实施流程\n\n${scenario.procedure}`) },
     { name: 'other-business.md', role: 'reference_bid', bytes: new TextEncoder().encode(`# 其他业务项目\n\n${scenario.unrelated}`) },
   ])
-  if (tender?.chunkIndexPath == null) throw new Error('真实模型样例缺少招标资料')
-  const index = JSON.parse(await readFile(join(workspace.projectRoot, tender.chunkIndexPath), 'utf8')) as { chunks: Array<{ id: string; source_line_start: number; source_line_end: number }> }
+  if (tender?.chunkIndexPath == null || tender.chunksPath == null) throw new Error('真实模型样例缺少招标资料')
+  const index = JSON.parse(await readFile(join(workspace.projectRoot, tender.chunkIndexPath), 'utf8')) as { chunks: Array<{ path: string }> }
   const chunk = index.chunks[0]!
-  const source_refs = [{ file_id: tender.id, chunk: chunk.id, line_start: chunk.source_line_start, line_end: chunk.source_line_end }]
+  const chunkPath = posix.join(tender.chunksPath, chunk.path)
+  const content = await readFile(join(workspace.projectRoot, chunkPath), 'utf8')
+  const source_refs = [{ file_id: tender.id, chunk: chunkPath, line_start: 1, line_end: content.split('\n').length }]
+  await loadOutlineReviewSources(workspace, source_refs)
   const scoring = { schema_version: 1 as const, scoring_items: [{ id: 'SCORE-1', parent: null, group: '技术', title: '技术方案', raw_text: '需求分析与实施方法完整合理', criterion: '需求分析与实施方法完整合理', score: 10, score_range: null, must_answer: true, source_refs }] }
   const points = createScoringResponsePointCatalog(scoring, { schema_version: 1, points: requirementTexts.map((text, index) => ({ scoring_id: 'SCORE-1', order: index + 1, text })) })
   const base = { parent_id: 'ROOT', level: 2, writable: true, compliance_ids: [], origin: 'generated', scoring_response_points: [], suggested_tables: [], suggested_figures: [], writing_notes: ['仅依据确认信息与实际资料展开，不增加未经确认的事实和承诺。'] }

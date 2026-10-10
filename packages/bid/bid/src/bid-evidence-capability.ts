@@ -3,7 +3,7 @@ import type { BidWorkspace } from './index.ts'
 import { join } from 'node:path'
 import type { BidCapabilityCall, BidCapabilityExecutionContext, BidCapabilityResult } from './bid-capability-contract.ts'
 import { capabilityFileHash, readCapabilityJson } from './bid-capability-files.ts'
-import { executeSectionResearch } from './evidence-mapping-executor.ts'
+import { executeSectionResearch, validateEvidenceMappingResearchReview } from './evidence-mapping-executor.ts'
 import { validateEvidenceMapping } from './evidence-mapping-validator.ts'
 import { parseEvidenceMapArtifact } from './evidence-mapping-artifacts.ts'
 import { parseOutlineArtifact } from './outline-generation-artifacts.ts'
@@ -186,6 +186,7 @@ export async function validateEvidenceCapability(
   context: BidCapabilityExecutionContext, result: BidCapabilityResult,
 ): Promise<void> {
   const workspace = context.working
+  await validateEvidenceMappingResearchReview(workspace, result.target_section_ids)
   const validation = await validateEvidenceMapping(workspace, 'evidence_mapping', [
     { stage: 'evidence_mapping', type: 'evidence_map', path: 'analysis/evidence-map.json' },
     { stage: 'evidence_mapping', type: 'web_evidence_sources', path: 'analysis/web-evidence-sources.json' },

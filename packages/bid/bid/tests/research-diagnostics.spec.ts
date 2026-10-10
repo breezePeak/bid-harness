@@ -13,7 +13,8 @@ const assessment = { evidence_requirement: { kind: 'not_required' as const, reas
 describe('研究执行与引用交接诊断', () => {
   it('模型充分性文字不能生成搜索或读取事实；合理无需资料仍可解释零引用', () => {
     expect(deriveResearchDiagnostics([], undefined)).toMatchObject({ status: 'not_started', searches: 0, read: 0, displayed: 0 })
-    expect(deriveResearchDiagnostics([], assessment)).toMatchObject({ status: 'not_required', requirement: assessment.evidence_requirement, searches: 0 })
+    expect(deriveResearchDiagnostics([], assessment)).toMatchObject({ status: 'not_started', requirement: assessment.evidence_requirement, searches: 0 })
+    expect(deriveResearchDiagnostics(undefined, assessment)).toMatchObject({ status: 'history_unknown', searches: null, read: null })
   })
   it('真实查询空结果与抓取故障保存具体原因和原始字段', () => {
     const search = observeResearchTool(execution('web_search', { queries: ['正式标准'] }), successful({ sources: [] }))
@@ -50,7 +51,16 @@ describe('研究执行与引用交接诊断', () => {
     const reading = observeResearchTool(execution('read_source', {}), successful({ file_id: 'FILE-LOCAL', body: '实施方法原文。', materials: [{ chunk: 'chunk_0001' }] }))
     const local = { ...assessment, evidence_requirement: { kind: 'local_sufficient' as const, reason: '该实施方法已有本地技术说明。' } }
     expect(deriveResearchDiagnostics([], local)).toMatchObject({ status: 'not_started', read: 0 })
-    expect(deriveResearchDiagnostics([reading], local)).toMatchObject({ status: 'local_sufficient', read: 1, searches: 0 })
+    expect(deriveResearchDiagnostics([reading], local)).toMatchObject({ status: 'read_excluded', read: 1, searches: 0 })
     expect(reading.read_refs).toEqual(['L:FILE-LOCAL:chunk_0001'])
+  })
+  it('目录、搜索分页和空白正文不获得阅读资格；重复事件不增加次数', () => {
+    const events = ['list_research_sources', 'list_web_chunks', 'read_source'].map(name =>
+      observeResearchTool(execution(name, {}), successful({ hits: [{ excerpt: '摘要' }], body: '  ' })))
+    expect(deriveResearchDiagnostics(events, assessment)).toMatchObject({ status: 'not_started', read: 0 })
+    const search = observeResearchTool(execution('search_sources', { keywords: ['方法'] }), successful({ hits: [] }))
+    expect(deriveResearchDiagnostics([search, search], assessment)).toMatchObject({ local_searches: 1, searches: 0, read: 0 })
+    const failure = observeResearchTool(execution('web_search', {}), { isError: true, error: { message: '认证失败' }, content: [] })
+    expect(deriveResearchDiagnostics([failure], assessment)).toMatchObject({ status: 'search_failed', failure_reasons: ['认证失败'] })
   })
 })

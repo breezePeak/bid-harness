@@ -49,7 +49,7 @@ describe('S4 Web evidence through a real Agent Tool loop', () => {
         expect(evidence.section_mappings[0]?.local_materials).toHaveLength(mode === 'zero' ? 0 : 1)
         const progress = await readEvidenceMappingProgress(workspace)
         expect(progress?.tasks[0]?.research_diagnostics).toMatchObject({
-          status: mode === 'zero' ? 'not_required' : 'bound', requirement: { kind: mode === 'zero' ? 'not_required' : 'local_sufficient' },
+          status: mode === 'zero' ? 'read_excluded' : 'bound', requirement: { kind: mode === 'zero' ? 'not_required' : 'local_sufficient' },
           searches: 0, fetched: 0, bound: mode === 'zero' ? 0 : 1, displayed: mode === 'zero' ? 0 : 1,
         })
       }
@@ -195,6 +195,7 @@ describe('S4 Web evidence through a real Agent Tool loop', () => {
   it.each([
     ['WEB_PROVIDER_RATE_LIMITED', 429, true], ['WEB_PROVIDER_ERROR', 503, true], ['WEB_FETCH_TIMEOUT', undefined, true],
     ['WEB_PROVIDER_AUTHENTICATION_FAILED', 401, false], ['WEB_PROVIDER_QUOTA_EXCEEDED', 429, false],
+    ['WEB_FETCH_FAILED', undefined, null],
   ] as const)('父级 raw fetch 和 Child Pool 封装统一恢复 %s', async (code, statusCode, retryable) => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-bid-s4-fetch-loop-'))
     const ctx = new Context()
@@ -222,7 +223,13 @@ describe('S4 Web evidence through a real Agent Tool loop', () => {
       const log = JSON.parse(await readFile(join(workspace.projectRoot, 'analysis/evidence-mapping-log.json'), 'utf8')) as {
         tasks: Array<{ attempts: Array<{ accepted: boolean; infrastructure_provider?: string; issues: Array<{ code: string }> }> }>
       }
-      if (retryable) {
+      if (retryable === null) {
+        expect(outcome, JSON.stringify(outcome)).toMatchObject({ status: 'waiting_user' })
+        expect(log.tasks[0]?.attempts).toMatchObject([{ accepted: true }])
+        expect(log.tasks[0]?.attempts).toHaveLength(1)
+        const progress = await readEvidenceMappingProgress(workspace)
+        expect(progress?.tasks[0]?.research_diagnostics?.failure_reasons).toContain('Web 获取失败：注入的联网故障')
+      } else if (retryable) {
         expect(outcome, JSON.stringify(outcome)).toMatchObject({ status: 'waiting_user' })
         expect(log.tasks[0]?.attempts).toMatchObject([
           { accepted: false, infrastructure_provider: 'web_fetch', issues: [{ code }] }, { accepted: true },

@@ -8,6 +8,8 @@ export interface ChapterObjectPositionField {
   readonly model: string
   readonly ids: readonly string[]
   readonly many?: boolean
+  /** 模型选择位置的 objects 表名；省略时不指定具体表。 */
+  readonly table?: string
 }
 
 /**
@@ -60,8 +62,9 @@ export function createChapterObjectPositions(fields: readonly ChapterObjectPosit
           description: '选择同级顺序的位置（从 0 开始），正式顺序由程序生成。' }]
         const field = canonical.get(property)
         if (field === undefined) return [property, schema(input)]
-        const description = `选择当前对象表中的${field.many ? '位置数组' : '位置'}，实际身份由程序绑定；不得填写 ID 或短引用。`
-        const position = { type: 'integer', description: '选择当前对象表中的位置，实际身份由程序绑定；不得填写 ID 或短引用。' }
+        const table = field.table === undefined ? '当前对象表' : `objects.${field.table}`
+        const description = `选择${table}中的${field.many ? '位置数组' : '位置'}，实际身份由程序绑定；不得填写 ID 或短引用。`
+        const position = { type: 'integer', description: `选择${table}中的位置，实际身份由程序绑定；不得填写 ID 或短引用。` }
         const source = input as Record<string, unknown>
         return [field.model, field.many ? { ...source, description, items: position }
           : source.oneOf !== undefined || source.anyOf !== undefined ? { oneOf: [position, { type: 'null' }], description } : position]

@@ -319,10 +319,17 @@ describe('HttpFetchProvider invalid URLs and abort', () => {
       .rejects.toThrow(expect.objectContaining({ code: 'WEB_FETCH_TIMEOUT' }))
   })
 
-  it('maps a connection failure to WEB_PROVIDER_ERROR', async () => {
+  it('maps a connection failure to WEB_FETCH_FAILED', async () => {
     // Port 1 on loopback is not listening: a real connection failure (not abort).
     await expect(provider().fetch({ url: 'http://127.0.0.1:1/' }))
-      .rejects.toThrow(expect.objectContaining({ code: 'WEB_PROVIDER_ERROR' }))
+      .rejects.toThrow(expect.objectContaining({ code: 'WEB_FETCH_FAILED' }))
+  })
+
+  it('保留网页 TLS 失败根因，允许调用方选择其他来源', async () => {
+    const failure = new TypeError('fetch failed', { cause: Object.assign(new Error('bad EC point'), { code: 'ERR_SSL_BAD_ECPOINT' }) })
+    vi.stubGlobal('fetch', vi.fn(async () => { throw failure }))
+    await expect(provider().fetch({ url: base }))
+      .rejects.toThrow(expect.objectContaining({ code: 'WEB_FETCH_FAILED', cause: failure }))
   })
 
 })

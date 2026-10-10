@@ -373,7 +373,7 @@ export async function runStageInteractionLoop(ctx: Context, root: string, checkR
         .map(id => businessObjects.response_points.findIndex(entry => entry.id === id)) : [],
       compliance_positions: index === 0 ? parent.compliance_positions : [] }))))
   })
-  await send('第一章拆成实施准备、实施过程、验收移交', [call('bid_outline_apply_operations', {
+  await send('第一章拆成实施准备、实施过程、验收移交', [call('bid_project_inspect', { query: { object: 'outline' } }), call('bid_outline_apply_operations', {
     operations: [{ type: 'split_section', draft_section_position: 0, children: ['实施准备', '实施过程', '验收移交'].map(title => ({ title, purpose: title, must_answer: [`${title}的安排`] })) }],
   }), answer('已更新，请重新确认。')])
   const split = await getOrCreateOutlineDraft(workspace)

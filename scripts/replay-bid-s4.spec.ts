@@ -1,11 +1,34 @@
 import { access, mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
+import { Context } from '@deepseek-ai/cordis'
 import { BidWorkspace } from '@deepseek-ai/dsh-bid'
-import { parseReplayBidS4Args, prepareBidS4ReplayWorkspace } from './replay-bid-s4.ts'
+import { SessionId } from '@deepseek-ai/dsh-session'
+import { configureReplayRuntime, parseReplayBidS4Args, prepareBidS4ReplayWorkspace } from './replay-bid-s4.ts'
 
 describe('S4 Workspace 回放入口', () => {
+  it('联网跟随回放 Agent 的 Provider 与模型，不依赖 Tavily 凭证', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-s4-replay-routing-'))
+    const options = parseReplayBidS4Args([
+      '--workspace', root, '--output', join(root, 'output'), '--dsh-home', join(root, 'settings'),
+      '--provider', 'pp', '--model', 'gpt-6-luna',
+    ])
+    const ctx = new Context()
+    try {
+      await configureReplayRuntime(ctx, options)
+      const search = vi.spyOn(ctx.llm, 'webSearch').mockResolvedValue({ sources: [], truncated: false })
+      const agent = ctx.agentLoop.create(SessionId('s4-replay-search'), { provider: options.provider, model: options.model })
+      const diagnostics = await ctx.web.diagnose()
+      expect(diagnostics.search.providers.map(provider => provider.id)).toEqual(['deepseek-official'])
+      expect(diagnostics.search.selectedProviderId).toBe('deepseek-official')
+      await ctx.agents.withInitiator(agent, () => ctx.web.search({ query: '资料研究' }))
+      expect(search).toHaveBeenCalledWith('pp', { query: '资料研究' }, expect.objectContaining({ model: 'gpt-6-luna' }))
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
   it('解析通用 Workspace、Section 过滤和执行参数，不内置项目 Section ID', () => {
     const options = parseReplayBidS4Args([
       '--workspace', 'source', '--output', 'target', '--sections', 'SEC-A, SEC-B',

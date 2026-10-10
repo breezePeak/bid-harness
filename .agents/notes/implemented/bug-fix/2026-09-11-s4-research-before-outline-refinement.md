@@ -8,7 +8,7 @@ Section Child 可以在研究过程中交替修改目录和起草 Writing Brief�
 
 ## Decision
 
-研究先行、局部作用域和无机械拆分的决策继续适用。研究字段、主题归位时机、目录锁定及 checkpoint 由[Blueprint 后结构判断](2026-09-12-s4-blueprint-structure-assessment.md)定义。
+研究先行、局部作用域和无机械拆分的决策继续适用。Research Ready 表示初始候选的充分性自评；正式通过须有当前独立 task 复核，执行事实、材料读取和恢复规则见[研究事实与独立复核](2026-10-10-s4-research-facts-and-independent-review.md)。研究字段、主题归位时机、目录锁定及 checkpoint 由[Blueprint 后结构判断](2026-09-12-s4-blueprint-structure-assessment.md)定义。
 
 Initial 与 Repair Mapping Child 先理解 S3 章节职责、识别研究问题并读取本地或 Web 资料，再通过 `submit_section_research_assessment` 提交结构化判断。判断覆盖招标要求与 Response Point、技术原理和实施路线、依据与推断边界、项目特有信息及质量风险约束，并记录中性关键发现、影响 Blueprint 设计的未解决缺口。Host 根据 finding 文本分配稳定 `finding_ref`，使重复提交中的同一发现保持同一引用。
 

@@ -20,11 +20,12 @@ try {
   filesystem.internals.inspectTemp = async ({ tempPath }) => {
     stateFiles.add(basename(tempPath).replace(/\.tmp$/, ''))
   }
-  const recovery = process.env.DSH_S4_RECOVERY_SCENARIO === 'backoff' || process.env.DSH_S4_RECOVERY_SCENARIO === 'fetch-backoff'
+  const urlFailure = process.env.DSH_S4_RECOVERY_SCENARIO === 'fetch-url'
+  const recovery = urlFailure || process.env.DSH_S4_RECOVERY_SCENARIO === 'backoff' || process.env.DSH_S4_RECOVERY_SCENARIO === 'fetch-backoff'
   const { outcome } = process.env.DSH_S4_RECOVERY_SCENARIO === 'structure' || process.env.DSH_S4_RECOVERY_SCENARIO === 'legacy'
     ? await runEvidenceMappingRecoveryLoop(ctx, process.cwd(), process.env.DSH_S4_RECOVERY_SCENARIO)
     : await runEvidenceMappingLoop(ctx, process.cwd(), !recovery, false,
-      recovery ? { code: 'WEB_PROVIDER_RATE_LIMITED', statusCode: 429, failures: 1,
+      urlFailure ? { code: 'WEB_FETCH_FAILED', failures: 1, tool: 'web_fetch' } : recovery ? { code: 'WEB_PROVIDER_RATE_LIMITED', statusCode: 429, failures: 1,
         ...(process.env.DSH_S4_RECOVERY_SCENARIO === 'fetch-backoff' ? { tool: 'web_fetch' as const } : {}) } : undefined,
       undefined, false, process.env.DSH_S4_RECOVERY_SCENARIO === 'review-partitioned' ? 'partitioned'
         : process.env.DSH_S4_RECOVERY_SCENARIO === 'review-budget')

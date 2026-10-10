@@ -18,11 +18,12 @@ export const researchObservationSchema = z.object({
 
 /** 程序观测与当前章节材料发布事实组成的研究诊断。 */
 export const researchDiagnosticsSchema = z.object({
-  status: z.enum(['not_started', 'not_required', 'local_sufficient', 'researching', 'search_empty', 'search_failed', 'fetch_failed',
+  status: z.enum(['history_unknown', 'not_started', 'not_required', 'local_sufficient', 'researching', 'search_empty', 'search_failed', 'fetch_failed',
     'read_excluded', 'saved_unbound', 'bound', 'display_omitted', 'insufficient']),
   requirement: researchRequirementSchema.nullable(),
   queries: z.array(z.string()), candidate_urls: z.array(z.string()),
-  searches: z.number().int().nonnegative(), fetched: z.number().int().nonnegative(), read: z.number().int().nonnegative(),
+  searches: z.number().int().nonnegative().nullable(), local_searches: z.number().int().nonnegative().nullable().optional(),
+  fetched: z.number().int().nonnegative().nullable(), read: z.number().int().nonnegative().nullable(),
   adopted: z.number().int().nonnegative(), bound: z.number().int().nonnegative(), displayed: z.number().int().nonnegative(),
   unresolved_gaps: z.array(z.string()), failure_reasons: z.array(z.string()),
   exclusions: z.array(z.object({ material_ref: z.string(), reason: z.string() }).strict()),

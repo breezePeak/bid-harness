@@ -5,6 +5,7 @@ import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Context } from '@deepseek-ai/cordis'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
+import AgentDefaultModel from '@deepseek-ai/dsh-agent-default-model'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import {
   assertNoLinkedPath,
@@ -29,7 +30,7 @@ import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import WebRuntime from '@deepseek-ai/dsh-web'
 import * as WebFetchHttp from '@deepseek-ai/dsh-web-fetch-http'
-import * as WebSearchTavily from '@deepseek-ai/dsh-web-search-tavily'
+import * as HostedSearch from '@deepseek-ai/dsh-web-search-deepseek'
 import * as ToolWeb from '@deepseek-ai/dsh-tool-web'
 
 export interface ReplayBidS4Options {
@@ -144,18 +145,26 @@ export async function prepareBidS4ReplayWorkspace(sourceWorkspace: BidWorkspace,
   return replay
 }
 
-async function configureReplayRuntime(ctx: Context, options: ReplayBidS4Options): Promise<void> {
+/**
+ * 挂载真实回放服务，联网沿用任务所选模型的 Provider 路由。
+ * @param ctx 回放使用的独立 Context。
+ * @param options 回放配置及持久化目录。
+ */
+export async function configureReplayRuntime(ctx: Context, options: ReplayBidS4Options): Promise<void> {
   await ctx.plugin(LlmRuntime)
   await ctx.plugin(FileSettingsProvider, { dshHome: options.dshHome, watch: false })
   await ctx.plugin(LocalCredentialProvider, { dshHome: options.dshHome, watch: false })
   if (options.provider === 'deepseek-official') await ctx.plugin(DeepSeek, {})
   else await ctx.plugin(PiAi, {})
+  await ctx.plugin(AgentDefaultModel, { provider: options.provider, model: options.model })
   await ctx.plugin(SessionStore)
   await ctx.plugin(JsonlSessionPersistence, { root: join(options.output, '.session-store'), compression: 'none' })
   await ctx.plugin(SystemPrompt, { persona: '仅依据当前 Bid Workspace 的已确认状态、可验证资料与通用 Web 工具执行 S4。' })
   await ctx.plugin(ToolRuntime)
-  await ctx.plugin(WebRuntime, { searchProvider: WebSearchTavily.TAVILY_PROVIDER_ID, fetchProvider: WebFetchHttp.LOCAL_FETCH_PROVIDER_ID })
-  await ctx.plugin(WebSearchTavily, {})
+  await ctx.plugin(WebRuntime, {
+    searchProvider: HostedSearch.LLM_HOSTED_SEARCH_PROVIDER_ID, fetchProvider: WebFetchHttp.LOCAL_FETCH_PROVIDER_ID,
+  })
+  await ctx.plugin(HostedSearch, {})
   await ctx.plugin(WebFetchHttp, {})
   await ctx.plugin(ToolWeb, { search: true, fetch: true })
   await ctx.plugin(LocalFileSystem)

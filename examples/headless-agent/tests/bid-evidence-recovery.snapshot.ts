@@ -8,15 +8,16 @@ import type { SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
 import { BidWorkspace, readEvidenceMappingProgress } from '@deepseek-ai/dsh-bid'
 import { expect, it } from 'vitest'
 
-it.each(['web_search', 'web_fetch'] as const)('S4 %s 内部退避通过源码 Loader 保留 aborted 根因并继续同一任务', async (tool) => {
-  const fixtureDir = fileURLToPath(new URL(tool === 'web_fetch'
+it.each(['web_search', 'web_fetch', 'url_failure'] as const)('S4 %s 通过源码 Loader 保留联网失败并继续同一任务', async (scenario) => {
+  const tool = scenario === 'url_failure' ? 'web_fetch' : scenario
+  const fixtureDir = fileURLToPath(new URL(scenario === 'url_failure' ? './bid-evidence-recovery-snapshots/url-failure/' : tool === 'web_fetch'
     ? './bid-evidence-recovery-snapshots/fetch/' : './bid-evidence-recovery-snapshots/', import.meta.url))
   const result = await runLoaderSmoke({
     label: 'S4 网络退避恢复', tempDirPrefix: 'dsh-s4-backoff-snapshot-',
     binScript: fileURLToPath(new URL('./fixtures/bid-evidence-mapping-driver.ts', import.meta.url)),
     configPath: fileURLToPath(new URL('../bid-evidence-mapping.cordis.snapshot.yml', import.meta.url)),
     mode: 'src', tsconfigPath: fileURLToPath(new URL('../../../tsconfig.json', import.meta.url)),
-    env: { DSH_S4_RECOVERY_SCENARIO: tool === 'web_fetch' ? 'fetch-backoff' : 'backoff' },
+    env: { DSH_S4_RECOVERY_SCENARIO: scenario === 'url_failure' ? 'fetch-url' : tool === 'web_fetch' ? 'fetch-backoff' : 'backoff' },
     inspect: async (cwd) => {
       const store = join(cwd, '.session-store')
       const paths = (await readdir(store, { recursive: true })).filter(path => path.endsWith('.jsonl'))
@@ -25,9 +26,16 @@ it.each(['web_search', 'web_fetch'] as const)('S4 %s 内部退避通过源码 Lo
       const failed = childLogs.find(log => log.includes(tool === 'web_fetch' ? 'fault-fetch-0' : 'fault-search-0'))
       const recovered = childLogs.find(log => log.includes('finish-initial-mapping'))
       if (failed === undefined || recovered === undefined) throw new Error('缺少网络失败及恢复的真实 Child 日志')
-      expect(failed).toContain('WEB_PROVIDER_RATE_LIMITED')
-      expect(failed).toContain('evidence-mapping-web-provider-backoff')
-      expect(failed).toContain('"kind":"aborted"')
+      if (scenario === 'url_failure') {
+        expect(failed).toBe(recovered)
+        expect(failed).toContain('WEB_FETCH_FAILED')
+        expect(failed).not.toContain('evidence-mapping-web-provider-backoff')
+        expect(failed).not.toContain('"kind":"aborted"')
+      } else {
+        expect(failed).toContain('WEB_PROVIDER_RATE_LIMITED')
+        expect(failed).toContain('evidence-mapping-web-provider-backoff')
+        expect(failed).toContain('"kind":"aborted"')
+      }
       const headers = [JSON.parse(failed.split('\n')[0]!) as SessionHeader, JSON.parse(recovered.split('\n')[0]!) as SessionHeader]
       const sessionIds = [...headers.map(header => header.parentSession).filter((id): id is NonNullable<typeof id> => id !== undefined),
         ...headers.map(header => header.id)]
@@ -36,14 +44,21 @@ it.each(['web_search', 'web_fetch'] as const)('S4 %s 内部退避通过源码 Lo
           research_observations: Array<{ error_info?: { code: string; statusCode?: number; retryAfter?: string } }>
           research_diagnostics: { searches: number; fetched: number; read: number; adopted: number; bound: number; displayed: number } }>
       }
-      expect(executionLog.tasks[0]?.attempts.map(attempt => attempt.accepted)).toEqual([false, true])
-      expect(executionLog.tasks[0]?.attempts[0]?.issues[0]?.code).toBe('WEB_PROVIDER_RATE_LIMITED')
-      expect(executionLog.tasks[0]?.attempts[0]?.infrastructure_provider).toBe(tool)
-      expect(executionLog.tasks[0]?.research_observations[0]?.error_info).toMatchObject({ code: 'WEB_PROVIDER_RATE_LIMITED', statusCode: 429, retryAfter: '0' })
+      if (scenario === 'url_failure') {
+        expect(executionLog.tasks[0]?.attempts.map(attempt => attempt.accepted)).toEqual([true])
+        expect(executionLog.tasks[0]?.research_observations[0]?.error_info).toMatchObject({ code: 'WEB_FETCH_FAILED' })
+      } else {
+        expect(executionLog.tasks[0]?.attempts.map(attempt => attempt.accepted)).toEqual([false, true])
+        expect(executionLog.tasks[0]?.attempts[0]?.issues[0]?.code).toBe('WEB_PROVIDER_RATE_LIMITED')
+        expect(executionLog.tasks[0]?.attempts[0]?.infrastructure_provider).toBe(tool)
+        expect(executionLog.tasks[0]?.research_observations[0]?.error_info).toMatchObject({ code: 'WEB_PROVIDER_RATE_LIMITED', statusCode: 429, retryAfter: '0' })
+      }
       expect(executionLog.tasks[0]?.research_diagnostics).toMatchObject({ searches: tool === 'web_search' ? 3 : 2, fetched: 2, adopted: 2, bound: 2, displayed: 0 })
       expect((await readEvidenceMappingProgress(new BidWorkspace(cwd)))?.tasks[0]?.research_diagnostics)
         .toMatchObject({ status: 'bound', bound: 2, displayed: 2 })
-      const expected = {
+      const expected = scenario === 'url_failure' ? {
+        'child.expected.jsonl': normalizeSessionSnapshot(recovered, { sessionIds, cwd, cwdAliases: [cwd.replaceAll('\\', '/')] }),
+      } : {
         'failed.expected.jsonl': normalizeSessionSnapshot(failed, { sessionIds, cwd, cwdAliases: [cwd.replaceAll('\\', '/')] }),
         'recovered.expected.jsonl': normalizeSessionSnapshot(recovered, { sessionIds, cwd, cwdAliases: [cwd.replaceAll('\\', '/')] }),
       }

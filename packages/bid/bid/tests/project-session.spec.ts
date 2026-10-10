@@ -1491,7 +1491,7 @@ describe('Workspace 项目与独立 Session', () => {
       evidence_requirement: { kind: 'not_required', reason: '本章说明项目实施职责，无需外部事实依据。' } })
     const log = { schema_version: 5, max_concurrency: 1, observed_max_concurrency: 1,
       tasks: [{ task_id: 'MAP-INIT-SEC-1', phase: 'initial', title: '本次职责研究', status: 'completed',
-        attempts: [], final_child_session_id: null, research_diagnostics: research }] }
+        attempts: [], final_child_session_id: null, research_observations: [], research_diagnostics: research }] }
     const unregister = ctx.bid.registerCapabilityTaskDispatcher({ verifyTask: executorTestVerifier,
       allowedWrites: async () => new Set(['analysis/evidence-mapping-log.json']),
       execute: async (_call, context) => {

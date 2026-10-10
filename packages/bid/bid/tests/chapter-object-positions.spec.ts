@@ -9,6 +9,17 @@ const positions = createChapterObjectPositions([
 ])
 
 describe('章节工具的模型对象位置', () => {
+  it('材料数组的 Schema 明确引用表，绑定仍由程序完成', () => {
+    const selected = createChapterObjectPositions([
+      { canonical: 'chunk_refs', model: 'chunk_positions', ids: ['WEB-CHUNK'], many: true, table: 'references' },
+    ])
+    const schema = selected.schema({ type: 'object', properties: { chunk_refs: { type: 'array', items: { type: 'string' } } } })
+    expect(JSON.stringify(schema)).toContain('选择objects.references中的位置数组')
+    expect(JSON.stringify(schema)).toContain('选择objects.references中的位置，')
+    expect(selected.bind({ chunk_positions: [0] })).toEqual({ chunk_refs: ['WEB-CHUNK'] })
+    expect(() => selected.bind({ chunk_positions: [1] })).toThrow(ToolArgsError)
+  })
+
   it('递归 Schema 使用模型字段及位置说明，不保留要求填写身份的描述', () => {
     const schema = positions.schema({ type: 'object', properties: {
       section_id: { anyOf: [{ type: 'string' }, { type: 'null' }] },

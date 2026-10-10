@@ -169,7 +169,7 @@ it('corrects S4 tool arguments in one Child turn through the headless Loader', a
         }
       }
       expect(finalEvents.filter(event => event.type === 'tool/call').map(event => event.data.name)).toEqual([
-        'finish_final_check', 'list_review_items', 'read_source', 'review_items', 'finish_final_check',
+        'finish_final_check', 'list_review_items', 'read_source', 'read_source', 'review_items', 'finish_final_check',
       ])
       expect(finalCheckLog).toContain('pending_review_items：')
       expect(finalCheckLog).toContain('pending_web_refs：')
