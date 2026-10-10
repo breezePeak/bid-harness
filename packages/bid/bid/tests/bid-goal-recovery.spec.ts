@@ -56,6 +56,41 @@ it('旧 S4 本地预算 blocked 重算资格但保留有限恢复历史和其他
   expect(bidRunRecoveryEligibility(session).eligible).toBe(false)
 })
 
+it('已接纳旧预算恢复后，新的输出超限沿用原 Work 剩余预算', async () => {
+  const ctx = new Context()
+  cleanup.push(() => ctx.fiber.dispose())
+  await ctx.plugin(SessionStore)
+  const session = ctx.sessions.create()
+  const s4 = { ...work, stage: 'evidence_mapping' as const }
+  const reason = '目录审查对象超过输入预算：位置 0，估算 15496 token，预算 12000 token。'
+  const target = { kind: 'run' as const, runId: 'old-s4', workId: s4.workId }
+  session.append('bid.recovery.round', { ownerSessionId: String(session.id), target,
+    fingerprint: 'old', round: 0, budget: 3, state: 'blocked', reason })
+  session.append('bid.recovery.requested', { ownerSessionId: String(session.id), target,
+    unit: s4.workId, instruction: '按模型窗口重组', progressFingerprint: 'old' })
+  const current = { ...run('resumed-s4'), work: s4, resumeOf: { runId: target.runId, cause: 'executor_error' as const } }
+  session.append('bid.run.started', { run: current })
+  session.append('bid.run.notice', { runId: current.runId, stage: s4.stage, kind: 'interrupted', severity: 'error',
+    noticeId: `run:${current.runId}:failed`, supersedesTurn: null, message: '输出超限' })
+  const failure = safeRecoverableBidFailure(s4, new BidStageExecutionError([{
+    code: 'OUTLINE_REFINEMENT_REVIEW_STOP_REASON_INVALID', artifact: 'outline/quality-report.json',
+    message: '目录复核 Subagent 未正常完成：max-tokens。',
+  }]))
+  session.append('bid.task.changed', { state: { stage: s4.stage, status: 'failed', run: null, failure } })
+  expect(bidRunRecoveryEligibility(session)).toMatchObject({ eligible: true, attempts: 1, target: { runId: current.runId } })
+  expect(await inspectBidStage(undefined, session, undefined, 'recovery'))
+    .toMatchObject({ eligible: true, available_actions: ['bid_recover_task'] })
+  for (const code of ['AUTH', 'EACCES', 'INPUT_CHANGED', 'FILE_CORRUPT']) {
+    session.append('bid.task.changed', { state: { stage: s4.stage, status: 'failed', run: null,
+      failure: safeRecoverableBidFailure(s4, new BidStageExecutionError([{ code, message: '真实阻断' }])) } })
+    expect(bidRunRecoveryEligibility(session).eligible).toBe(false)
+  }
+  session.append('bid.task.changed', { state: { stage: s4.stage, status: 'failed', run: null, failure } })
+  session.append('bid.recovery.round', { ownerSessionId: String(session.id), target,
+    fingerprint: 'old', round: 3, budget: 3, state: 'blocked', reason })
+  expect(bidRunRecoveryEligibility(session).eligible).toBe(false)
+})
+
 it.each(['TIMEOUT', 'TRANSPORT', 'SERVER', 'RATE_LIMIT'])('已保存写作要求的 %s 进入原计划恢复', async (code) => {
   const ctx = new Context()
   cleanup.push(() => ctx.fiber.dispose())

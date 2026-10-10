@@ -15,7 +15,7 @@ import { chapterLocation } from '../src/chapter-storage.ts'
 import { emitAgentEvent, type Agent } from '@deepseek-ai/dsh-agent'
 import SessionStore, { SessionId, snapshotJsonValue } from '@deepseek-ai/dsh-session'
 import { Context } from '@deepseek-ai/cordis'
-import type { ContinuableStartSpec, SubagentProvider } from '@deepseek-ai/dsh-subagent'
+import type { ContinuableStartSpec, SubagentProvider, SubagentResult } from '@deepseek-ai/dsh-subagent'
 import type { ToolDefinition, ToolExecution, ToolExecutionResult, ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { validateJsonSchemaValue } from '@deepseek-ai/dsh-tools'
 import { CONTEXT_WINDOW_EXCEEDED_CODE, createUserMessage, CallId, LlmAdapter, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
@@ -194,6 +194,7 @@ it.each([
     expect(originals[0]!.text).toContain(tenderText)
     expect(prompt).toContain('"project_scope":["调查面积约 12824.25 平方公里。"]')
     expect(prompt).toContain('摘要遗漏不等于原文不存在')
+    expect(prompt).toContain('S2 未单列条目不构成目录覆盖缺失')
     expect(prompt).toContain('摘要与原文冲突时记录冲突并按原文纠正')
     const evidenceSupports = originals[0]!.text.includes('12824.25') && originals[0]!.text.includes('“一张图”')
     return JSON.stringify({ ...JSON.parse(content) as object, blocking_issues: evidenceSupports ? [] : [
@@ -270,6 +271,59 @@ it.each([16_384, 32_768])('目录复核按模型容量 %i 完整或分段核对�
       expect(tokens).toBeLessThan(modelContextWindow - 2_048 - 1_024)
     }
   }
+})
+
+it.each([['configured', 12_288], ['default', 8_192]] as const)('目录复核沿用%s输出预算并从输入容量中预留', async (mode, outputTokens) => {
+  const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-outline-review-output-budget-')))
+  const material = await writeInputs(workspace)
+  const fixture = mappingFixture(workspace, material, false, {}, true, 32_768)
+  if (mode === 'configured') fixture.agent.options.maxTokens = outputTokens
+  else {
+    const llm = fixture.agent.ctx.get('llm')!
+    vi.spyOn(llm, 'resolveModelInfo').mockResolvedValue({ provider: 'fixture', id: 'fixture', name: 'fixture',
+      context: { contextWindow: 32_768 }, defaultMaxTokens: outputTokens })
+  }
+  const read = async (path: string) => JSON.parse(await readFile(join(workspace.projectRoot, path), 'utf8')) as unknown
+  const result = await reviewRefinedOutline(fixture.agent, workspace, {
+    project: parseTenderProjectArtifact(await read('analysis/project.json')),
+    requirements: parseTenderRequirementsArtifact(await read('analysis/requirements.json')),
+    scoring: parseTenderScoringArtifact(await read('analysis/scoring.json')),
+    responsePoints: parseScoringResponsePointCatalog(await read('analysis/scoring-response-points.json')),
+    compliance: parseTenderComplianceArtifact(await read('analysis/compliance.json')),
+    outline: parseOutlineArtifact(await read('outline/initial-confirmed-outline.json')), frameworks: [],
+  }, [], 0, new AbortController().signal, createTestBidRunContext().commits)
+  expect(result.blockingIssues).toEqual([])
+  for (const [, request] of fixture.subagents.start.mock.calls) {
+    expect(request).toMatchObject({ agentOptions: { maxTokens: outputTokens } })
+    const tokens = estimateMessage(createUserMessage({ content: request.prompt, source: { kind: 'user' } }))
+    expect(tokens).toBeLessThan(32_768 - outputTokens - 1_024)
+  }
+})
+
+it('目录复核输出超限立即保留失败，不在相同上限内反复修报告', async () => {
+  const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-outline-review-max-tokens-')))
+  const material = await writeInputs(workspace)
+  const fixture = mappingFixture(workspace, material)
+  const start = fixture.subagents.start.getMockImplementation()!
+  fixture.subagents.start.mockImplementation(async (provider, request) => {
+    const run = await start(provider, request)
+    return { ...run, result: Promise.resolve<SubagentResult>({ output: [], structured: undefined, stopReason: 'max-tokens' }) }
+  })
+  const read = async (path: string) => JSON.parse(await readFile(join(workspace.projectRoot, path), 'utf8')) as unknown
+  await expect(reviewRefinedOutline(fixture.agent, workspace, {
+    project: parseTenderProjectArtifact(await read('analysis/project.json')),
+    requirements: parseTenderRequirementsArtifact(await read('analysis/requirements.json')),
+    scoring: parseTenderScoringArtifact(await read('analysis/scoring.json')),
+    responsePoints: parseScoringResponsePointCatalog(await read('analysis/scoring-response-points.json')),
+    compliance: parseTenderComplianceArtifact(await read('analysis/compliance.json')),
+    outline: parseOutlineArtifact(await read('outline/initial-confirmed-outline.json')), frameworks: [],
+  }, [], 3, new AbortController().signal, createTestBidRunContext().commits)).rejects.toMatchObject({
+    issues: [{ code: 'OUTLINE_REVIEW_OUTPUT_BUDGET_EXCEEDED', artifact: 'outline/quality-report.json',
+      message: expect.stringContaining('2048 token') }],
+  })
+  expect(fixture.subagents.start).toHaveBeenCalledTimes(1)
+  expect(fixture.outlineReviewDisposals[0]).toHaveBeenCalledTimes(1)
+  await expect(readFile(join(workspace.projectRoot, 'analysis/evidence-mapping-quality.candidate.json'))).rejects.toMatchObject({ code: 'ENOENT' })
 })
 
 it('大原文按硬预算分段，任一分段缺少有效审核都不写入最终质量报告', async () => {
@@ -410,8 +464,8 @@ it('单章粒度意见整理保留详细卡片且不被无关章节索引阻断'
   const consolidation = fixture.outlineReviewPrompts.filter(prompt => prompt.includes('只整理 section_position='))
   expect(consolidation).toHaveLength(1)
   expect(consolidation[0]).toContain('"section_id":"SEC-1"')
-  const indexLine = consolidation[0]!.split('\n').find(line => line.startsWith('全书职责索引：'))!
-  expect(JSON.parse(indexLine.slice('全书职责索引：'.length))).toEqual([expect.objectContaining({ id: 'SEC-1' })])
+  const indexLine = consolidation[0]!.split('\n').find(line => line.startsWith('本片职责索引：'))!
+  expect(JSON.parse(indexLine.slice('本片职责索引：'.length))).toEqual([expect.objectContaining({ id: 'SEC-1' })])
   expect(fixture.outlineReviewPrompts.every(prompt => estimateMessage(createUserMessage({
     content: [{ type: 'text', text: prompt }], source: { kind: 'user' },
   })) <= 12_000)).toBe(true)
@@ -1167,7 +1221,7 @@ function mappingFixture(
   const childRequests = new Map<string, ContinuableStartSpec>()
   const subagents = {
     getProvider: vi.fn(() => spawnProvider),
-    start: vi.fn(async (_provider: string, request: { prompt: Array<{ type: string; text: string }> }) => {
+    start: vi.fn(async (_provider: string, request: { prompt: Array<{ type: 'text'; text: string }> }) => {
       outlineReviewRequests.push(request)
       const prompt = request.prompt.map(item => item.text).join('\n')
       outlineReviewPrompts.push(prompt)
@@ -1192,7 +1246,7 @@ function mappingFixture(
       return {
         id: SessionId(`outline-review-${outlineReviewPrompts.length}`),
         localAgent: undefined,
-        result: Promise.resolve({ output: [], structured, stopReason: 'completed' as const }),
+        result: Promise.resolve<SubagentResult>({ output: [], structured, stopReason: 'completed' }),
         dispose,
       }
     }),

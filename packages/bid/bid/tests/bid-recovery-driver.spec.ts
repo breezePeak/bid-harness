@@ -13,7 +13,8 @@ import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { BidRecoveryDriver, type BidRecoveryNotice } from '../src/bid-recovery-driver.ts'
-import { bidRecoverableRun, bidRunRecoveryEligibility } from '../src/bid-recovery.ts'
+import { bidRecoverableRun, bidRunRecoveryEligibility, safeRecoverableBidFailure } from '../src/bid-recovery.ts'
+import { BidStageExecutionError } from '../src/control-plane-contract.ts'
 import { BID_INITIAL_TASK_STATE, reduceBidTaskState } from '../src/runtime-state.ts'
 import { BidRunCoordinator, DirectBidRunScheduler } from '../src/run-coordinator.ts'
 import { checkpointBidProjectState, readBidProjectState } from '../src/project-state.ts'
@@ -104,6 +105,32 @@ async function fixture(options: { root?: string; budget?: number; resume?: boole
 }
 
 describe('BidRecoveryDriver 的持久化与运行时协议', () => {
+  it('已接受旧预算恢复后的新失败按剩余轮数派发，不重复旧 blocked 终止报告', async () => {
+    const f = await fixture()
+    const work = { ...f.work, stage: 'evidence_mapping' as const }
+    const reason = '目录审查对象超过输入预算：位置 0，估算 15496 token，预算 12000 token。'
+    const originalRuns = f.coordinator()
+    const original = await originalRuns.start(work)
+    await originalRuns.suspend('executor_error', safeRecoverableBidFailure(work,
+      new BidStageExecutionError([{ code: 'CONTEXT_WINDOW_EXCEEDED', message: reason }])))
+    const target = { kind: 'run' as const, runId: original.runId, workId: work.workId }
+    f.agent.session.append('bid.recovery.round', { ownerSessionId: String(f.agent.id), target,
+      fingerprint: 'old', round: 0, budget: 3, state: 'blocked', reason })
+    f.agent.session.append('bid.recovery.requested', { ownerSessionId: String(f.agent.id), target,
+      unit: work.workId, instruction: '按当前模型预算重新审核', progressFingerprint: 'old' })
+    const resumedRuns = f.coordinator()
+    const resumed = await resumedRuns.start(work, { runId: original.runId, cause: 'executor_error' })
+    await resumedRuns.suspend('executor_error', safeRecoverableBidFailure(work, new BidStageExecutionError([{
+      code: 'OUTLINE_REFINEMENT_REVIEW_STOP_REASON_INVALID', message: '目录复核 Subagent 未正常完成：max-tokens。',
+    }])))
+    expect(f.read(f.agent.session)).toMatchObject({ eligible: true })
+    await f.driver.request(f.agent)
+    await vi.waitFor(() => { expect(f.adapter.requests).toHaveLength(1) })
+    await f.agent.whenIdle()
+    expect(f.rounds().at(-1)).toMatchObject({ state: 'notified', round: 1, budget: 3, target: { runId: resumed.runId } })
+    expect(JSON.stringify(f.adapter.requests)).not.toContain('恢复已终止。报告原始失败')
+  })
+
   it('到期恢复通知已落盘但确认临时失败，无新 idle 仍重新确认并派发同轮一次', async () => {
     const f = await fixture({ budget: 2 })
     await f.fail()
@@ -533,13 +560,15 @@ describe('BidRecoveryDriver 的持久化与运行时协议', () => {
     await expect(failed.run.commits.writeText(f.bodyPath, '不得覆盖正式正文')).rejects.toThrow('BID_RUN_RETIRED')
     await f.driver.request(f.agent)
     await f.agent.whenIdle()
-    vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] })
+    // 持久化锁重试使用真实 timer，只推进恢复截止时间。
+    vi.useFakeTimers({ toFake: ['Date'] })
     await f.driver.request(f.agent)
     expect(f.rounds().at(-1)).toMatchObject({ round: 2, state: 'scheduled' })
     const runs = f.coordinator()
     const resumed = await runs.start(f.work, { runId: failed.run.runId, cause: 'executor_error' })
     await runs.suspend('user_stop')
-    await vi.advanceTimersByTimeAsync(2500)
+    vi.setSystemTime(Date.now() + 2500)
+    await vi.waitFor(() => { expect(f.rounds().at(-1)?.state).toBe('cancelled') })
     await f.driver.request(f.agent)
     expect(f.adapter.requests).toHaveLength(1)
     expect(f.state()).toMatchObject({ status: 'suspended', run: { runId: resumed.runId, cause: 'user_stop' } })

@@ -90,11 +90,13 @@ function renderOutlineReviewRequest(
   const prompt = [input.instructions,
     ...(kind === 'cross_sections' ? [] : [input.detailInstructions ?? '']),
     ...(kind === 'cross_sections' ? ['本轮复核共享职责索引的所有章节关系，特别核对不同分片之间的职责冲突、重复、断裂和覆盖关系。详细叶子审查由独立请求完成。'] : []),
+    ...(index.length < input.index.length || input.evidenceParts !== undefined
+      ? ['本片职责索引是局部视图；未出现的章节或覆盖项不能判为全书缺失，只核对本片实际提供的职责和依据。其他章节及全书关系由其他请求复核，全部分片完成后由程序汇总。'] : []),
     `本片详细卡片位置：${JSON.stringify(cardPositions)}；只有这些位置允许 issue_kind=detail。其他可见位置仅审查职责关系、覆盖和用户目标。`,
     `Structure Review Cards：${JSON.stringify(cards)}`,
     ...(input.sources === undefined ? [] : [`采购原文：${JSON.stringify(sources)}`]),
     `全书覆盖依据：${JSON.stringify(input.coverage)}`,
-    `全书职责索引：${JSON.stringify(index)}`,
+    `本片职责索引：${JSON.stringify(index)}`,
     `S3→S4 结构 diff：${JSON.stringify(input.differences)}`,
     `实际 Outline Operations：${JSON.stringify(input.operations)}`,
     ...(input.evidenceParts === undefined ? [] : [

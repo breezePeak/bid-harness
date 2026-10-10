@@ -195,7 +195,7 @@ export class BidRecoveryDriver {
       prior = { ...prior, budget }
       await this.append(session, prior)
     }
-    if (prior?.state === 'blocked') {
+    if (prior?.state === 'blocked' && !notice.eligible) {
       await this.notify(agent, prior, notice)
       return
     }

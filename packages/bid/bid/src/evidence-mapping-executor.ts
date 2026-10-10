@@ -4161,6 +4161,7 @@ type OutlineStructureIssue = { code: string; section_id: string; reason: string 
  * @param commits - 同一 Run 拥有的候选写入权限。
  * @param request - 本次用户修改目标；复核实际目录是否满足，而非只检查业务覆盖。
  * @returns 当前目录与需局部重开的结构问题。
+ * @throws 输出耗尽时保留独立预算错误，不使用相同上限反复修复报告。
  */
 export async function reviewRefinedOutline(
   agent: Agent,
@@ -4236,7 +4237,7 @@ export async function reviewRefinedOutline(
     '优先复核已报告问题及当前修改引入的问题；新发现的真实覆盖漏项、职责冲突和无依据事实仍须阻断。相同资料下的分章偏好不能反复改变完成标准。',
     '通过结构化输出返回语义复核结果；issues 只返回具体建议 message。blocking_issues 返回本片职责索引的 section_position、issue_kind 与具体业务理由 reason，Host 绑定章节并只重开所属子树。全书覆盖依据均须核对，核对记录由程序生成。不要生成问题代码、编号、scope 或 severity。不能把资料命中当作扩大章节任务的依据。',
     '在本章职责内，允许依据资料提出作业方法和组织建议；招标未逐字指定步骤不等于禁止设计方案。区分方案建议与已确认项目事实，不能把旧项目的具体流程、责任主体或承诺当成本项目既定条件。',
-    '项目摘要和规范化 Requirement/Scoring 仅用于导航，事实与采购任务以所属采购文件原文为准，同名系统或近似任务不能跨采购文件互换。摘要遗漏不等于原文不存在；摘要与原文冲突时记录冲突并按原文纠正。依据绑定不支持断言时修正绑定，保留原文支持的事实；未经原文确认的接口、账号权限、字段和实施参数保持不确定。',
+    '项目摘要和规范化 Requirement/Scoring 仅用于导航，事实与采购任务以所属采购文件原文为准，同名系统或近似任务不能跨采购文件互换。摘要遗漏不等于原文不存在；摘要与原文冲突时记录冲突并按原文纠正。原文支持的任务已由本节 must_answer 或 Writing Brief 承接时，S2 未单列条目不构成目录覆盖缺失，不要求补造 Requirement 或评分身份；现有关联仍须核对真实归属。依据绑定不支持断言时修正绑定，保留原文支持的事实；未经原文确认的接口、账号权限、字段和实施参数保持不确定。',
     '每片采购原文按文件身份和 Chunk 去重，只有列出的完整原文可支持“核对后确实无依据”的结论。所需原文未提供时说明缺证并补证复核，不得直接要求删除；跨片关系审查不能以只见索引或摘要为由否定其他详细片的采购事实。',
   ].join('\n')
   const detailInstructions = [
@@ -4275,7 +4276,7 @@ export async function reviewRefinedOutline(
   const llm = agent.ctx.get('llm')
   const metadata = llm === undefined || agent.options.provider === undefined || agent.options.model === undefined ? undefined
     : await llm.resolveModelInfo(agent.options.provider, agent.options.model, signal)
-  const outputTokens = Math.min(agent.options.maxTokens ?? metadata?.defaultMaxTokens ?? 2_048, 2_048)
+  const outputTokens = agent.options.maxTokens ?? metadata?.defaultMaxTokens ?? 2_048
   const envelopeTokens = estimateHeader({ config: { provider: agent.options.provider ?? 'unknown', model: agent.options.model ?? 'unknown' },
     system: persona, tools: [{ name: 'structured_output', description: '返回目录质量报告。', parameters: { ...outlineQualityOutputSchema() } }] })
   let inputBudgetTokens = (metadata?.context?.contextWindow ?? 16_384) - outputTokens - envelopeTokens - 1_024
@@ -4404,6 +4405,10 @@ export async function reviewRefinedOutline(
       const issues: StageValidationIssue[] = []
       try {
         const result = await run.result
+        if (result.stopReason === 'max-tokens') throw new BidStageExecutionError([{
+          code: 'OUTLINE_REVIEW_OUTPUT_BUDGET_EXCEEDED', artifact: QUALITY_PATH,
+          message: `目录复核达到输出上限 ${String(outputTokens)} token，未形成完整报告；请提高所选模型的 maxTokens 后恢复原 S4。`,
+        }])
         if (result.stopReason !== 'completed' && run.localAgent !== undefined) throwForFailedTurn(run.localAgent, 0)
         if (result.stopReason !== 'completed') issues.push({
           code: 'OUTLINE_REFINEMENT_REVIEW_STOP_REASON_INVALID',
@@ -4672,11 +4677,13 @@ async function executeEvidenceMappingRun(
   let checkpoint: EvidenceMappingCheckpoint = { tasks: [] }
   let executionLog: EvidenceMappingExecutionLog | undefined
   let resuming = false
-  const legacyBudgetRecovery = options.recovery !== undefined
-    && isLegacyOutlineReviewBudgetFailure(options.run.work, {
+  const reviewCandidateRecovery = options.recovery !== undefined
+    && (isLegacyOutlineReviewBudgetFailure(options.run.work, {
       message: options.recovery.issues[0]?.message ?? '', issues: [...options.recovery.issues],
-    })
-  const preserveAccepted = options.preserveAcceptedCandidate === true || legacyBudgetRecovery
+    }) || options.recovery.issues.some(issue => issue.code === 'OUTLINE_REVIEW_OUTPUT_BUDGET_EXCEEDED'
+      || issue.code === 'OUTLINE_REFINEMENT_REVIEW_STOP_REASON_INVALID'
+        && issue.message.startsWith('目录复核 Subagent 未正常完成：max-tokens。')))
+  const preserveAccepted = options.preserveAcceptedCandidate === true || reviewCandidateRecovery
   if (!localRun || options.resumeCandidate === true) {
     const rawLog = await readOptionalJson(workspace, LOG_PATH)
     if (rawLog !== undefined && (options.run.resumeOf !== undefined || options.resumeCandidate === true)) {
@@ -4710,11 +4717,11 @@ async function executeEvidenceMappingRun(
           })),
         }))
       }
-      if (legacyBudgetRecovery && rawCheckpoint === undefined) throw new BidStageExecutionError([{
+      if (reviewCandidateRecovery && rawCheckpoint === undefined) throw new BidStageExecutionError([{
         code: 'BID_S4_CHECKPOINT_FILE_MISSING', artifact: CHECKPOINT_PATH, message: '原 S4 研究检查点不存在，不能重新研究替代恢复。',
       }])
-      const rawRefined = legacyBudgetRecovery ? await readOptionalJson(workspace, REFINED_OUTLINE_CANDIDATE_PATH) : undefined
-      if (legacyBudgetRecovery && rawRefined === undefined) throw new BidStageExecutionError([{
+      const rawRefined = reviewCandidateRecovery ? await readOptionalJson(workspace, REFINED_OUTLINE_CANDIDATE_PATH) : undefined
+      if (reviewCandidateRecovery && rawRefined === undefined) throw new BidStageExecutionError([{
         code: 'BID_S4_CANDIDATE_FILE_MISSING', artifact: REFINED_OUTLINE_CANDIDATE_PATH,
         message: '原 S4 待审目录候选不存在，不能重新研究替代恢复。',
       }])

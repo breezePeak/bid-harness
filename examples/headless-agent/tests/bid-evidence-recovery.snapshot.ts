@@ -72,7 +72,7 @@ it.each(['web_search', 'web_fetch', 'url_failure'] as const)('S4 %s 通过源码
   expect(JSON.parse(result.stdout)).toMatchObject({ status: 'waiting_user' })
 }, LOADER_SMOKE_TEST_TIMEOUT_MS)
 
-it.each(['structure', 'legacy'])('S4 完整研究后 Main 恢复原 Work 再复核：%s', async (scenario) => {
+it.each(['structure', 'legacy', 'legacy-output'])('S4 完整研究后 Main 恢复原 Work 再复核：%s', async (scenario) => {
   const fixtureDir = fileURLToPath(new URL(`./bid-evidence-recovery-snapshots/${scenario}/`, import.meta.url))
   const result = await runLoaderSmoke({
     label: 'S4 结构失败定向恢复', tempDirPrefix: 'dsh-s4-structure-recovery-',
@@ -87,7 +87,9 @@ it.each(['structure', 'legacy'])('S4 完整研究后 Main 恢复原 Work 再复�
       const logs = await Promise.all(paths.map(async path => readFile(join(store, path), 'utf8')))
       const main = logs.find(log => (JSON.parse(log.split('\n')[0]!) as SessionHeader).id === 's3-real-loop')
       const repair = logs.find(log => log.includes('repair-2-task'))
-      const reviewer = logs.find(log => log.includes(scenario === 'structure' ? 'review-actual-repair' : 'review-large-original'))
+      const reviewer = logs.find(log => log.includes(scenario === 'structure' ? 'review-actual-repair' : 'review-large-original')
+        && (scenario === 'structure' || log.includes('本轮复核共享职责索引的所有章节关系')))
+      const outputFailure = scenario === 'legacy-output' ? logs.find(log => log.includes('"kind":"max-tokens"')) : undefined
       if (main === undefined || scenario === 'structure' && repair === undefined || reviewer === undefined) {
         throw new Error('缺少 Main 恢复及后续复核日志')
       }
@@ -97,9 +99,11 @@ it.each(['structure', 'legacy'])('S4 完整研究后 Main 恢复原 Work 再复�
       if (scenario === 'structure') expect(main).toContain('\\"continuation\\":null')
       const mainEvents = main.trimEnd().split('\n').slice(1).map(line => JSON.parse(line) as SessionEvent)
       const runs = mainEvents.filter(event => event.type === 'bid.run.started')
-      expect(runs).toHaveLength(2)
-      expect(runs[1]!.data.run.work.workId).toBe(runs[0]!.data.run.work.workId)
-      expect(runs[1]!.data.run.resumeOf?.runId).toBe(runs[0]!.data.run.runId)
+      expect(runs).toHaveLength(scenario === 'legacy-output' ? 3 : 2)
+      for (let index = 1; index < runs.length; index++) {
+        expect(runs[index]!.data.run.work.workId).toBe(runs[0]!.data.run.work.workId)
+        expect(runs[index]!.data.run.resumeOf?.runId).toBe(runs[index - 1]!.data.run.runId)
+      }
       if (scenario === 'structure') {
         const instruction = '保留已研究资料，明确授权岗位核验与审计岗位追溯责任，只补修失败章节后重新复核。'
         expect(repair).toContain(instruction)
@@ -123,6 +127,19 @@ it.each(['structure', 'legacy'])('S4 完整研究后 Main 恢复原 Work 再复�
         }
       }
       expect(reviewer).toContain('需要访问控制与安全审计方案。')
+      if (scenario === 'legacy-output') {
+        expect(outputFailure).toContain('"maxTokens":2048')
+        expect(main).toContain('OUTLINE_REVIEW_OUTPUT_BUDGET_EXCEEDED')
+        const outputInspect = mainEvents.find(event => event.type === 'tool/result'
+          && event.data.message.source.callId === 'inspect-output-recovery')
+        if (outputInspect?.type !== 'tool/result') throw new Error('缺少输出超限后的恢复诊断')
+        const text = outputInspect.data.message.content.flatMap(block => block.type === 'tool-result' ? block.content : [])
+          .find(block => block.type === 'text')!
+        if (text.type !== 'text') throw new Error('缺少输出超限后的恢复 JSON')
+        expect(JSON.parse(text.text)).toMatchObject({ eligible: true, attempts: 1 })
+        const reviewEvents = reviewer.trimEnd().split('\n').slice(1).map(line => JSON.parse(line) as SessionEvent)
+        expect(reviewEvents.find(event => event.type === 'request/header')?.data.header.config.maxTokens).toBe(8_192)
+      }
       const checkpoint = JSON.parse(await readFile(join(cwd, '.bid-harness/analysis/evidence-mapping-checkpoint.json'), 'utf8')) as {
         tasks: Array<{ task_id: string; completed: boolean }>
       }
@@ -147,6 +164,7 @@ it.each(['structure', 'legacy'])('S4 完整研究后 Main 恢复原 Work 再复�
       const expected = {
         'main.expected.jsonl': normalizeSessionSnapshot(main, { sessionIds, cwd, cwdAliases }),
         ...(repair === undefined ? {} : { 'repair.expected.jsonl': normalizeSessionSnapshot(repair, { sessionIds, cwd, cwdAliases }) }),
+        ...(outputFailure === undefined ? {} : { 'output-failure.expected.jsonl': normalizeSessionSnapshot(outputFailure, { sessionIds, cwd, cwdAliases }) }),
         'review.expected.jsonl': normalizeSessionSnapshot(reviewer, { sessionIds, cwd, cwdAliases }),
       }
       if (process.env.DSH_SNAPSHOT === 'refresh') {

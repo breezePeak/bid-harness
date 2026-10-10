@@ -175,7 +175,9 @@ Section Child 先明确技术问题、方法、输入输出和控制依据，再
 
 S4 全局目录审核同时接收 S2 项目事实、覆盖记录的规范化文本与原文引用，以及 Host 从这些引用装载的完整采购 Chunk。Host 核对文件角色、上传文件的 Corpus 归属、索引、真实路径及行范围，按当前卡片实际关联的 Chunk 去重。完整单章超出模型剩余输入容量时，程序按章节关联的业务字段、diff、operations 和原文无损分段，保留来源身份及字符范围；职责关系由共享索引单独复核。所有分段成功后才接纳审核；缺失、错挂来源或最小请求仍超限时明确拒绝。项目摘要和规范化文本用于导航，采购原文决定事实与任务；摘要遗漏须补充依据，绑定错误须修正关联，摘要与原文冲突须按原文纠正，缺证不能直接推导为要求删除。
 
-`bid_stage_inspect(view=summary)` 和 `view=recovery` 返回有界失败诊断、可用动作及完成数量，不展开完整章节、映射和对象表；详细对象通过 `bid_project_inspect` 分页读取。`mapping_progress.research_completed` 表示初始候选完成量，`final_check_completed` 表示最终检查完成量，`current_artifacts_summary.evidence_map` 表示正式产物是否存在。固定 12,000 token 本地上限造成的旧 S4 blocked 记录可在原 Work 有限预算内恢复；Host 重验原输入和已完成检查点，候选缺失或不匹配时明确失败，不能用重新研究替代续行。服务商真实上下文错误和权限、凭证阻断不适用该例外。
+`bid_stage_inspect(view=summary)` 和 `view=recovery` 返回有界失败诊断、可用动作及完成数量，不展开完整章节、映射和对象表；详细对象通过 `bid_project_inspect` 分页读取。`mapping_progress.research_completed` 表示初始候选完成量，`final_check_completed` 表示最终检查完成量，`current_artifacts_summary.evidence_map` 表示正式产物是否存在。固定 12,000 token 本地上限造成的旧 S4 blocked 记录可在原 Work 有限预算内恢复；该恢复已接纳后，新 Run 的可修故障继续使用剩余次数，旧 Run 的 blocked 不重复阻断。Host 重验原输入和已完成检查点，候选缺失或不匹配时明确失败，不能用重新研究替代续行。服务商真实上下文错误和权限、凭证阻断不适用该例外。
+
+目录复核达到输出上限时报告 `OUTLINE_REVIEW_OUTPUT_BUDGET_EXCEEDED`，不在相同上限内反复请求。提高所选模型的 `maxTokens` 后可恢复原 S4；Host 核对并保留待审目录与已完成研究，只继续审核及必要修复，正式发布仍须通过最终检查和用户确认。
 
 开发验收可运行 `pnpm run bid:s4-replay -- --workspace <S1-S3 Workspace> --output <隔离输出目录> [--sections SEC-A,SEC-B]`。入口复制源 Workspace 的 `.bid-harness`，仅在副本中清除旧 S4 及后续产物，再通过真实 Agent、Child 可见的 `web_search`/`web_fetch` 和当前 S4 执行器重跑并写出 `s4-acceptance-report.json`；联网沿用已配置的模型搜索策略，默认跟随回放 Agent 的 Provider 与模型。Section 参数只筛选逐节记录，不改变全书执行，也不内置项目 ID。报告复用执行日志和检查点，列出 S3/S4 叶节差异、研究判断、stale、结构操作、复核/Repair 及本地与 Web 工具成败，不设置拆分数量门槛。
 
@@ -226,7 +228,7 @@ Writer 在缺少真实项目数量、人员、设备或记录值时只保留正�
 
 #### Token effect
 
-文件清单按每份导入文档增加固定字段；S4 全局目录审查共享职责索引，详细资料不逐叶复制 siblings。完整输入按 token 估算，硬上限为模型上下文容量扣除 Header、工具、输出及安全余量；未知容量按 16,384 token 计算。常规分片目标为 12,000 token，超目标大章独立审核，超硬上限时无损分组；跨片职责按完整索引或片间配对复核。Provider 实际报上下文超限时，硬上限和分片目标同时缩减；相同失败输入不重复调用。Final Check 详细上下文随 pending 项增长；S5 上下文随确认目录、适用任务条件和章节身份增长。旧标标题按完整顺序提供，不重复每个标题的祖先路径；全局合规审核与整书验收均按需读取正文分块，不在任务提示中复制完整正文。
+文件清单按每份导入文档增加固定字段；S4 全局目录审查共享职责索引，详细资料不逐叶复制 siblings。目录复核输出沿用所选 Agent 的 `maxTokens`，未设置时使用模型元数据的默认值，两者未知才使用 2,048 token。完整输入按 token 估算，硬上限为模型上下文容量扣除 Header、工具、实际输出预算及安全余量；未知容量按 16,384 token 计算。常规分片目标为 12,000 token，超目标大章独立审核，超硬上限时无损分组；跨片职责按完整索引或片间配对复核。Provider 实际报上下文超限时，硬上限和分片目标同时缩减；相同失败输入不重复调用。Final Check 详细上下文随 pending 项增长；S5 上下文随确认目录、适用任务条件和章节身份增长。旧标标题按完整顺序提供，不重复每个标题的祖先路径；全局合规审核与整书验收均按需读取正文分块，不在任务提示中复制完整正文。
 
 #### KV Cache effect
 

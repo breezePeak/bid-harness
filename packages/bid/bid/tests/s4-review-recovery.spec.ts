@@ -18,7 +18,7 @@ const call = (name: string, args: object): StreamChunk[] => [
   { type: 'finish', reason: { kind: 'tool-calls' } },
 ]
 
-it.each(['valid', 'missing', 'fingerprint', 'input', 'checkpoint_missing', 'candidate_missing'] as const)(
+it.each(['valid', 'output_limit', 'missing', 'fingerprint', 'input', 'checkpoint_missing', 'candidate_missing'] as const)(
   '旧预算 blocked 重启后从真实 Host 恢复原候选：%s', async (fault) => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-s4-legacy-review-'))
     const base = fileURLToPath(new URL('../../../../examples/headless-agent/bid-stage-interaction.cordis.snapshot.yml', import.meta.url))
@@ -59,15 +59,15 @@ it.each(['valid', 'missing', 'fingerprint', 'input', 'checkpoint_missing', 'cand
     await first.sessions.flush(result.agent.session)
     await first.fiber.dispose()
 
-    const restored = await boot('s4-legacy-review-restored', path, undefined, undefined, configRoot)
+    let restored = await boot('s4-legacy-review-restored', path, undefined, undefined, configRoot)
     try {
       await restored.plugin(LocalFileSystem)
       registerIntegrationTools(restored, root, result.sourceUrl)
       restored.llm.registerAdapter(['mock'], result.adapter)
-      const { agent } = await restored.agentLoop.resume(restored, { resumeSessionId: result.agent.id,
+      let { agent } = await restored.agentLoop.resume(restored, { resumeSessionId: result.agent.id,
         agentOptions: { provider: 'mock', model: 'mock' } })
       await restored.plugin(BidHostRuntime)
-      const operations = (restored.bid as unknown as { inFlight: Map<string, { done: Promise<void> }> }).inFlight
+      let operations = (restored.bid as unknown as { inFlight: Map<string, { done: Promise<void> }> }).inFlight
       await vi.waitFor(() => { expect(operations.size).toBe(0) })
       expect(bidRunRecoveryEligibility(agent.session)).toMatchObject({ eligible: true, attempts: 0 })
       if (fault === 'valid') {
@@ -96,6 +96,7 @@ it.each(['valid', 'missing', 'fingerprint', 'input', 'checkpoint_missing', 'cand
         await rm(outlinePath)
       }
       const before = result.requests.length
+      if (fault === 'output_limit') result.adapter.reviewMaxTokens = true
       result.parentScript.push(call('bid_stage_inspect', { view: 'summary' }),
         call('bid_stage_inspect', { view: 'recovery' }), call('bid_recover_task', { target: 'run',
           instruction: '按当前模型实际预算重新组织目录审核，保留原研究和确认流程。' }))
@@ -117,11 +118,44 @@ it.each(['valid', 'missing', 'fingerprint', 'input', 'checkpoint_missing', 'cand
         expect(Buffer.byteLength(text.text)).toBeLessThan(50_000)
         expect(JSON.parse(text.text)).not.toHaveProperty('objects')
       }
-      const state = await readBidProjectState(new BidWorkspace(root))
-      if (fault === 'valid') {
+      let state = await readBidProjectState(new BidWorkspace(root))
+      let previousRunId = run.runId
+      if (fault === 'output_limit') {
+        expect(state).toMatchObject({ status: 'failed', failure: { issues: [{ code: 'OUTLINE_REVIEW_OUTPUT_BUDGET_EXCEEDED' }] } })
+        expect(bidRunRecoveryEligibility(agent.session)).toMatchObject({ eligible: true, attempts: 1 })
+        expect(result.requests.slice(before).filter(request => request.system?.includes('技术标目录轻量复核'))).toHaveLength(1)
+        previousRunId = agent.session.events.findLast(event => event.type === 'bid.run.started')!.data.run.runId
+        await restored.sessions.flush(agent.session)
+        await restored.fiber.dispose()
+        restored = await boot('s4-output-limit-restored', path, undefined, undefined, configRoot)
+        await restored.plugin(LocalFileSystem)
+        registerIntegrationTools(restored, root, result.sourceUrl)
+        restored.llm.registerAdapter(['mock'], result.adapter)
+        agent = (await restored.agentLoop.resume(restored, { resumeSessionId: result.agent.id,
+          agentOptions: { provider: 'mock', model: 'mock' } })).agent
+        await restored.plugin(BidHostRuntime)
+        operations = (restored.bid as unknown as { inFlight: Map<string, { done: Promise<void> }> }).inFlight
+        await vi.waitFor(() => { expect(operations.size).toBe(0) })
+        expect(bidRunRecoveryEligibility(agent.session)).toMatchObject({ eligible: true, attempts: 1 })
+        result.adapter.outlineReview!.defaultMaxTokens = 8_192
+        const retryBefore = result.requests.length
+        result.parentScript.push(call('bid_stage_inspect', { view: 'recovery' }), call('bid_recover_task', {
+          target: 'run', instruction: '使用所选模型的完整输出预算，保留已完成研究后重新复核。' }))
+        agent.followup(createUserMessage({ content: [{ type: 'text', text: '继续修复原 S4 的输出超限。' }], source: { kind: 'user' } }))
+        await agent.whenIdle()
+        await Promise.all([...operations.values()].map(operation => operation.done))
+        expect(result.requests[retryBefore]?.tools?.map(tool => tool.name))
+          .toEqual(['bid_project_inspect', 'bid_recover_task', 'bid_stage_inspect'])
+        const reviews = result.requests.slice(retryBefore).filter(request => request.system?.includes('技术标目录轻量复核'))
+        expect(reviews.length).toBeGreaterThan(0)
+        expect(reviews.every(request => request.maxTokens === 8_192)).toBe(true)
+        expect(agent.session.events.filter(event => event.type === 'bid.recovery.requested')).toHaveLength(2)
+        state = await readBidProjectState(new BidWorkspace(root))
+      }
+      if (fault === 'valid' || fault === 'output_limit') {
         expect(state).toMatchObject({ stage: 'evidence_mapping', status: 'waiting_user' })
         const restarted = agent.session.events.findLast(event => event.type === 'bid.run.started')!
-        expect(restarted.data.run).toMatchObject({ work: run.work, resumeOf: { runId: run.runId } })
+        expect(restarted.data.run).toMatchObject({ work: run.work, resumeOf: { runId: previousRunId } })
         const map = parseEvidenceMapArtifact(JSON.parse(await readFile(join(result.workspace.projectRoot, 'analysis/evidence-map.json'), 'utf8')))
         expect(map.section_mappings).toHaveLength(1)
         expect(result.requests.slice(before).some(request => JSON.stringify(request.messages).includes('Mapping Task：{\\"task_id\\":\\"MAP-INIT-'))).toBe(false)
@@ -138,7 +172,7 @@ it.each(['valid', 'missing', 'fingerprint', 'input', 'checkpoint_missing', 'cand
           .toContain(fault === 'input' ? 'BID_WORK_INPUT_FINGERPRINT_MISMATCH'
             : fault.endsWith('_missing') ? 'FILE_MISSING' : 'FINGERPRINT_MISMATCH')
       }
-      if (fault === 'valid') expect(await readFile(checkpointPath, 'utf8')).toContain('MAP-INIT-SEC-SECURITY')
+      if (fault === 'valid' || fault === 'output_limit') expect(await readFile(checkpointPath, 'utf8')).toContain('MAP-INIT-SEC-SECURITY')
       else if (fault !== 'missing' && fault !== 'checkpoint_missing') expect(await readFile(checkpointPath, 'utf8')).toBe(checkpoint)
     } finally { await restored.fiber.dispose() }
   }, 60_000)

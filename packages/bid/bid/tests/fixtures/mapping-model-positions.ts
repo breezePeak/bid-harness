@@ -13,8 +13,8 @@ export function mappingModelQuality(value: unknown, prompt: string): unknown {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return value
   const { scope: _scope, checked_requirement_ids: _requirements, checked_scoring_ids: _scoring,
     checked_scoring_response_point_ids: _points, ...report } = value as Record<string, unknown>
-  const line = prompt.split('\n').find(item => item.startsWith('全书职责索引：'))
-  const sections = line === undefined ? [] : JSON.parse(line.slice('全书职责索引：'.length)) as Array<{ id: string; position: number }>
+  const line = prompt.split('\n').find(item => item.startsWith('本片职责索引：'))
+  const sections = line === undefined ? [] : JSON.parse(line.slice('本片职责索引：'.length)) as Array<{ id: string; position: number }>
   return { ...report, ...(_scope === undefined || _scope === 'technical_bid' ? {} : { scope: _scope }),
     issues: Array.isArray(report.issues) ? report.issues.map((issue: unknown) => {
       if (issue === null || typeof issue !== 'object' || Array.isArray(issue)) return issue

@@ -71,8 +71,9 @@ function reviewPendingMappingItems(options: GenerateOptions): StreamChunk[] {
 class ScriptedAdapter extends LlmAdapter {
   interactive = false
   reviewOverflow = false
+  reviewMaxTokens = false
   structureRecovery = false
-  outlineReview?: { contextWindow: number; quality: object }
+  outlineReview?: { contextWindow: number; quality: object; defaultMaxTokens?: number }
   readonly requests: GenerateOptions[] = []
   readonly reviewScript: ScriptStep[] = []
   constructor(
@@ -85,11 +86,17 @@ class ScriptedAdapter extends LlmAdapter {
 
   override resolveModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
     return Promise.resolve({ provider, id: model, name: model,
-      ...(this.outlineReview === undefined ? {} : { context: { contextWindow: this.outlineReview.contextWindow } }) })
+      ...(this.outlineReview === undefined ? {} : { context: { contextWindow: this.outlineReview.contextWindow },
+        ...(this.outlineReview.defaultMaxTokens === undefined ? {} : { defaultMaxTokens: this.outlineReview.defaultMaxTokens }) }) })
   }
 
   async * stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
     this.requests.push(options)
+    if (this.reviewMaxTokens && options.system?.includes('技术标目录轻量复核 Subagent')) {
+      this.reviewMaxTokens = false
+      yield { type: 'finish', reason: { kind: 'max-tokens' } }
+      return
+    }
     if (this.outlineReview !== undefined && options.system?.includes('技术标目录轻量复核 Subagent')) {
       yield* mappingModelReply(toolCall('review-large-original', 'structured_output', this.outlineReview.quality), options)
       return
@@ -723,9 +730,10 @@ export async function runEvidenceMappingLoop(ctx: Context, root: string, repair:
  * @param scenario 原失败类型。
  * @returns 原失败结果、恢复后状态及真实请求；恢复未完成时抛错。
  */
-export async function runEvidenceMappingRecoveryLoop(ctx: Context, root: string, scenario: 'structure' | 'legacy' = 'structure') {
+export async function runEvidenceMappingRecoveryLoop(ctx: Context, root: string, scenario: 'structure' | 'legacy' | 'legacy-output' = 'structure') {
   const result = await runEvidenceMappingLoop(ctx, root, false, true, undefined, 'local', scenario === 'structure',
-    scenario === 'legacy' ? 'legacy' : false)
+    scenario === 'structure' ? false : 'legacy')
+  if (scenario === 'legacy-output') result.adapter.reviewMaxTokens = true
   if (result.outcome.status !== 'failed') throw new Error('结构恢复夹具未产生首代修复后的失败：' + JSON.stringify(result.outcome))
   const failedLog = JSON.parse(await readFile(join(result.workspace.projectRoot, 'analysis/evidence-mapping-log.json'), 'utf8')) as {
     tasks: Array<{ task_id: string; status: string }>
@@ -734,7 +742,7 @@ export async function runEvidenceMappingRecoveryLoop(ctx: Context, root: string,
   if (scenario === 'structure' && !failedLog.tasks.some(task => task.task_id.startsWith('MAP-REPAIR-') && task.status === 'completed')) {
     throw new Error('首代结构修复未完成：' + JSON.stringify(failedLog))
   }
-  if (scenario === 'legacy') {
+  if (scenario !== 'structure') {
     const run = bidRecoverableRun(result.agent.session, result.outcome)!
     result.agent.session.append('bid.recovery.round', { ownerSessionId: String(result.agent.id),
       target: { kind: 'run', runId: run.runId, workId: run.work.workId }, fingerprint: 'legacy', round: 0, budget: 3,
@@ -745,27 +753,34 @@ export async function runEvidenceMappingRecoveryLoop(ctx: Context, root: string,
   await result.agent.whenIdle()
   const instruction = scenario === 'structure' ? '保留已研究资料，明确授权岗位核验与审计岗位追溯责任，只补修失败章节后重新复核。'
     : '继续原 S4，按当前模型预算重新组织审核，保留已完成研究及正式确认。'
-  result.parentScript.push(toolCall('inspect-structure-recovery', 'bid_stage_inspect', { view: 'recovery' }),
-    toolCall('accept-structure-recovery', 'bid_recover_task', { target: 'run', instruction }), finalText('已接纳定向补修，等待实际修改及复核结果。'))
-  const done = Promise.withResolvers<undefined>()
-  const off = ctx.on('session/event', (session, event) => {
-    if (session === result.agent.session && event.type === 'bid.user_confirmation.required' && event.data.stage === 'evidence_mapping') done.resolve(undefined)
-    if (session === result.agent.session && event.type === 'bid.task.changed' && event.data.state.status === 'failed') {
-      done.reject(new Error('S4 定向补修失败：' + JSON.stringify(event.data.state.failure)))
-    }
-  }, { global: true })
-  let timer: ReturnType<typeof setTimeout> | undefined
-  try {
-    result.agent.followup(createUserMessage({ content: [{ type: 'text', text: instruction }], source: { kind: 'user' } }))
-    await Promise.race([done.promise, new Promise<never>((_, reject) => {
-      timer = setTimeout(() => { reject(new Error('S4 定向补修未完成：' + JSON.stringify(result.agent.session.events
-        .filter(event => event.type === 'tool/result' || event.type === 'bid.task.changed').slice(-5)))) }, 45_000)
-    })])
-    const operations = (ctx.bid as unknown as { inFlight: Map<string, { done: Promise<void> }> }).inFlight
-    await Promise.all([...operations.values()].map(operation => operation.done))
-    await result.agent.whenIdle()
-    await ctx.sessions.flush(result.agent.session)
-  } finally { clearTimeout(timer); off() }
+  for (let round = 0; round < (scenario === 'legacy-output' ? 2 : 1); round++) {
+    const recoveryInstruction = round === 0 ? instruction : '提高目录复核输出预算，保留原 S4 的目录和已完成研究，只继续审核与最终检查。'
+    if (round === 1) result.adapter.outlineReview!.defaultMaxTokens = 8_192
+    result.parentScript.push(toolCall(round === 0 ? 'inspect-structure-recovery' : 'inspect-output-recovery', 'bid_stage_inspect', { view: 'recovery' }),
+      toolCall(round === 0 ? 'accept-structure-recovery' : 'accept-output-recovery', 'bid_recover_task', { target: 'run', instruction: recoveryInstruction }),
+      finalText('已接纳定向补修，等待实际修改及复核结果。'))
+    const done = Promise.withResolvers<undefined>()
+    const off = ctx.on('session/event', (session, event) => {
+      if (session === result.agent.session && event.type === 'bid.user_confirmation.required' && event.data.stage === 'evidence_mapping') done.resolve(undefined)
+      if (session === result.agent.session && event.type === 'bid.task.changed' && event.data.state.status === 'failed') {
+        if (scenario === 'legacy-output' && round === 0
+          && event.data.state.failure.issues?.some(issue => issue.code === 'OUTLINE_REVIEW_OUTPUT_BUDGET_EXCEEDED')) done.resolve(undefined)
+        else done.reject(new Error('S4 定向补修失败：' + JSON.stringify(event.data.state.failure)))
+      }
+    }, { global: true })
+    let timer: ReturnType<typeof setTimeout> | undefined
+    try {
+      result.agent.followup(createUserMessage({ content: [{ type: 'text', text: recoveryInstruction }], source: { kind: 'user' } }))
+      await Promise.race([done.promise, new Promise<never>((_, reject) => {
+        timer = setTimeout(() => { reject(new Error('S4 定向补修未完成：' + JSON.stringify(result.agent.session.events
+          .filter(event => event.type === 'tool/result' || event.type === 'bid.task.changed').slice(-5)))) }, 45_000)
+      })])
+      const operations = (ctx.bid as unknown as { inFlight: Map<string, { done: Promise<void> }> }).inFlight
+      await Promise.all([...operations.values()].map(operation => operation.done))
+      await result.agent.whenIdle()
+      await ctx.sessions.flush(result.agent.session)
+    } finally { clearTimeout(timer); off() }
+  }
   return { ...result, instruction, outcome: await readBidProjectState(result.workspace), firstOutcome: result.outcome }
 }
 

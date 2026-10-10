@@ -34,7 +34,7 @@ import { loadOutlineReviewSources } from '../../../packages/bid/bid/src/outline-
 import { seedCapabilityProject } from '../../../packages/bid/bid/tests/capability-fixture.ts'
 
 const cases = [{
-  id: 'survey', name: '国土线索核查服务', structure: 'unscored',
+  id: 'survey', name: '国土调查与线索核查服务', structure: 'unscored',
   scope: '线索发现、核查判定、填报整改及成果验收',
   procedure: '内业判定依次比对影像、核对图斑、判定变化类型，疑似变化转外业核查，复核通过后填报整改结果。',
   unrelated: '图书馆编目系统通过 MARC 字段映射和书目去重迁移馆藏记录。',
@@ -376,17 +376,17 @@ describe.skipIf(!process.env.DEEPSEEK_API_KEY && !process.env.DSH_BID_EVAL_PROVI
   it.each([{
     id: 'supported', name: '摘要遗漏但原文支持的面积与纳管任务', supported: true,
     procurement: '本项目调查工作范围为玉林市，调查面积约 12824.25 平方公里。建设市级年度国土调查数据库，纳入本项目国土空间规划“一张图”实施监督信息系统进行管理。具体接口字段、账号权限和实施参数未提供。',
-    claim: '本项目调查面积约 12824.25 平方公里，调查数据库纳入本项目国土空间规划“一张图”实施监督信息系统管理。',
+    claim: '本项目调查面积约 12824.25 平方公里，建设市级年度国土调查数据库，并纳入本项目国土空间规划“一张图”实施监督信息系统管理。',
   }, {
     id: 'supported-large', name: '完整采购原文超过常规分片目标', supported: true,
     procurement: '本项目调查工作范围为玉林市，调查面积约 12824.25 平方公里。建设市级年度国土调查数据库，纳入本项目国土空间规划“一张图”实施监督信息系统进行管理。具体接口字段、账号权限和实施参数未提供。',
     appendix: '采购范围及验收条件以本文件为准。'.repeat(4_000),
-    claim: '本项目调查面积约 12824.25 平方公里，调查数据库纳入本项目国土空间规划“一张图”实施监督信息系统管理。',
+    claim: '本项目调查面积约 12824.25 平方公里，建设市级年度国土调查数据库，并纳入本项目国土空间规划“一张图”实施监督信息系统管理。',
   }, {
     id: 'unsupported', name: '摘要声称但原文不支持的面积与纳管任务', supported: false,
     procurement: '本项目按采购人移交的图斑清单开展线索核查，形成经审核的调查数据库。采购范围未规定固定调查面积或与其他系统集成的纳管任务。',
     claim: '本项目调查面积确定为 99999 平方公里，必须纳入区域综合平台管理。',
-  }])('采购原文复核：$name', { timeout: 180_000, retry: 0 }, async (scenario) => {
+  }])('采购原文复核：$name', { timeout: 600_000, retry: 0 }, async (scenario) => {
     const root = await mkdtemp(join(tmpdir(), `dsh-s4-source-review-${scenario.id}-`))
     vi.stubEnv('DSH_HOME', root)
     const ctx = new Context()
@@ -404,7 +404,12 @@ describe.skipIf(!process.env.DEEPSEEK_API_KEY && !process.env.DSH_BID_EVAL_PROVI
       }
       if (!scenario.supported) project.project_scope.push(scenario.claim)
       const implementation = outline.sections.find(section => section.id === 'IMPLEMENTATION')!
-      implementation.must_answer.push(scenario.claim)
+      if (scenario.supported) {
+        const background = outline.sections.find(section => section.id === 'BACKGROUND')!
+        background.must_answer.push(scenario.claim)
+        background.purpose = '概述采购业务范围、目标和成果需求，说明已明确的调查范围与数据库成果用途；实施方法由实施方案承担。'
+        implementation.must_answer.push('说明市级年度国土调查数据库建设及纳入“一张图”系统管理的实施方法、质量控制和成果交接，不新增未确认的接口字段、账号权限或实施参数。')
+      } else implementation.must_answer.push(scenario.claim)
       implementation.writing_notes.push('保留采购原文明确的范围与任务；未确认的接口、账号权限、字段和实施参数只写待核实边界。')
       const inputs: Parameters<typeof reviewRefinedOutline>[2] = {
         outline, frameworks: [], project,
@@ -413,10 +418,18 @@ describe.skipIf(!process.env.DEEPSEEK_API_KEY && !process.env.DSH_BID_EVAL_PROVI
         responsePoints: parseScoringResponsePointCatalog(await artifact('analysis/scoring-response-points.json')),
         compliance: parseTenderComplianceArtifact(await artifact('analysis/compliance.json')),
       }
+      const requests: SessionEvent[] = []
+      ctx.on('session/event', (_session, event) => {
+        if (event.type === 'request/header') requests.push(event)
+      }, { global: true })
       const agent = ctx.agentLoop.create(SessionId(`source-review-${scenario.id}`),
-        { provider, model: process.env.DSH_BID_EVAL_MODEL ?? 'deepseek-v4-flash' }, { cwd: root })
-      const run = createTestBidRunContext({ signal: AbortSignal.timeout(150_000) })
+        { provider, model: process.env.DSH_BID_EVAL_MODEL ?? 'deepseek-v4-flash', maxTokens: 32_768 }, { cwd: root })
+      const run = createTestBidRunContext({ signal: AbortSignal.timeout(540_000) })
       const review = await reviewRefinedOutline(agent, workspace, inputs, [], 0, run.signal, run.commits)
+      expect(requests.length).toBeGreaterThan(0)
+      for (const request of requests) {
+        if (request.type === 'request/header') expect(request.data.header.config.maxTokens).toBe(32_768)
+      }
       const path = join(root, 'procurement-source-review.json')
       await writeFile(path, `${JSON.stringify({ scenario, project, outline, review }, null, 2)}\n`)
       console.info('采购原文真实模型复核记录：' + path)

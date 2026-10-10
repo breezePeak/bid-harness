@@ -165,6 +165,10 @@ describe('目录审查上下文', () => {
     const original = buildOutlineReviewRequests(input, 1_000)
     const owner = original.find(request => request.cardPositions.includes(0))!
     expect(owner.sectionPositions).toEqual([0])
+    expect(owner.prompt).toContain('本片职责索引是局部视图')
+    expect(owner.prompt).not.toContain('全书职责索引：')
+    expect(original.find(request => request.sectionPositions.length === input.index.length)?.prompt)
+      .not.toContain('本片职责索引是局部视图')
     const consolidation = { ...input, cards: [input.cards[0]!], operations: { opinions: ['y'.repeat(700)] } }
     expect(() => buildOutlineReviewRequest(consolidation, 1_000)).toThrow(OutlineReviewContextTooLargeError)
     const focused = { ...consolidation, index: input.index.filter(item => owner.sectionPositions.includes(item.position)) }

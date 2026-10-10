@@ -14,7 +14,7 @@ Status: implemented
 
 状态摘要和恢复诊断只返回有界失败、可用动作、阶段及完成数量，不附加完整目录、映射或对象表。详细对象通过现有项目查询分页选择。公开工具和失败提示使用同一恢复资格，接纳不等于产物发布；初始研究、最终检查和 Evidence Map 分别报告。
 
-本决定替代[模型硬上限与分片目标](2026-10-09-s4-review-model-input-budget.md)中真实超限直接失败的选择；该记录仍拥有容量推导与完整对象优先的理由。[采购原文审核](2026-10-08-s4-authorized-repair-and-procurement-review.md)仍拥有来源核验和结构修复授权，[分片终审](../architecture/2026-09-14-s4-sharded-final-review-and-session-authority.md)仍拥有 Final Check 与检查点。[恢复结算](2026-10-06-bid-recovery-settlement.md)仍拥有有限预算与通知结算。以上记录部分职责延续，保留活跃。
+本决定替代[模型硬上限与分片目标](2026-10-09-s4-review-model-input-budget.md)中真实超限直接失败的选择；该记录仍拥有容量推导与完整对象优先的理由。[采购原文审核](2026-10-08-s4-authorized-repair-and-procurement-review.md)仍拥有来源核验和结构修复授权，[分片终审](../architecture/2026-09-14-s4-sharded-final-review-and-session-authority.md)仍拥有 Final Check 与检查点。[恢复结算](2026-10-06-bid-recovery-settlement.md)仍拥有有限预算与通知结算，[输出预算与后续恢复](2026-10-10-s4-review-output-budget-and-recovery-chain.md)约束复核输出超限及已接纳旧恢复后的新失败。以上记录部分职责延续，保留活跃。
 
 ## Alternatives considered
 

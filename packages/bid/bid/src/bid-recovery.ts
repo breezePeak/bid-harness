@@ -91,6 +91,7 @@ const BLOCKED_CODE = new RegExp(
   + 'CONTEXT_WINDOW_EXCEEDED|OUTLINE_REVIEW_INPUT_BUDGET_EXCEEDED|FATAL|CORRUPTION|FINGERPRINT|SEMANTIC_BLOCKED|CATALOG_MISMATCH|'
   + 'SCOPE_STALE|DEPENDENCY_STALE|STALE_BASE|PREVIOUS_TARGET_INVALID|INVARIANT|DOCX_FORMAT_CORRUPT|^EVIDENCE_MAPPING_GUARD_ERROR$', 'iu',
 )
+const LEGACY_OUTLINE_REVIEW_BUDGET = /^目录审查对象超过输入预算：位置 (?:\d+|undefined)，估算 \d+ token，预算 12000 token。$/u
 
 /**
  * 识别固定 12,000 token 上限产生的旧 S4 本地组包失败，其他 blocked 保持阻断。
@@ -100,7 +101,7 @@ const BLOCKED_CODE = new RegExp(
  */
 export function isLegacyOutlineReviewBudgetFailure(work: BidWorkDescriptor, failure: BidTaskFailure): boolean {
   const legacy = (code: string | undefined, message: string) => code === 'CONTEXT_WINDOW_EXCEEDED'
-    && /^目录审查对象超过输入预算：位置 (?:\d+|undefined)，估算 \d+ token，预算 12000 token。$/u.test(message)
+    && LEGACY_OUTLINE_REVIEW_BUDGET.test(message)
   if (work.kind !== 'stage_execution' || work.stage !== 'evidence_mapping'
     || !failure.issues?.some(issue => legacy(issue.code, issue.message))) return false
   return [failure, ...failure.issues, ...failure.cause === undefined ? [] : [failure.cause]]
@@ -237,8 +238,14 @@ export function bidRunRecoveryEligibility(session: Session, budget?: number): {
   const storedBudget = settled?.type === 'bid.recovery.round' ? settled.data.budget : undefined
   const limit = Math.min(budget ?? storedBudget ?? DEFAULT_MODEL_STAGE_REPAIR_ATTEMPTS, storedBudget ?? Infinity)
   if (attempts >= limit) return { eligible: false, reason: 'BID_RECOVERY_BUDGET_EXHAUSTED: 原 Work 的执行恢复预算已耗尽。', ...details }
+  const settledRunId = settled?.type === 'bid.recovery.round' && settled.data.target.kind === 'run'
+    ? settled.data.target.runId : undefined
+  const resumedLegacyBudget = settled?.type === 'bid.recovery.round' && settledRunId !== undefined
+    && run.work.kind === 'stage_execution' && run.work.stage === 'evidence_mapping'
+    && settledRunId !== run.runId && LEGACY_OUTLINE_REVIEW_BUDGET.test(settled.data.reason)
+    && history.some(event => event.target.kind === 'run' && event.target.runId === settledRunId)
   if (settled?.type === 'bid.recovery.round' && settled.data.state === 'blocked'
-    && !(legacyBudget && settled.data.round < limit && settled.data.reason === run.error.recovery.reason)) {
+    && !(settled.data.round < limit && (legacyBudget && settled.data.reason === run.error.recovery.reason || resumedLegacyBudget))) {
     return { eligible: false, reason: settled.data.reason, ...details }
   }
   return { eligible: true, reason: legacyBudget
