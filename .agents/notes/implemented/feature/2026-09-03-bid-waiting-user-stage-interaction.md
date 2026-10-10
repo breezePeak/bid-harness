@@ -2,6 +2,8 @@
 
 Status: implemented
 
+公开 Main Agent 的通用工具权限由[Main Agent 通用工具](../bug-fix/2026-10-10-bid-main-general-tools.md)更新；本记录保留 Host mutation、Draft CAS 和局部研究的依据。
+
 ## Problem
 
 用户在目录和资料映射完成后仍需咨询、调整局部结构及重新研究指定章节。仅开放聊天不能完成修改，而开放文件写工具会绕过 Draft CAS、目录覆盖校验和正式确认。调用中的 Main Agent 也不能再次等待自己空闲后执行模型阶段。
@@ -34,4 +36,4 @@ S2/S3/S4 的等待态开放 Composer 和受控 mutation；[全阶段 Main Agent 
 
 本记录部分扩展[资料映射减法](../simplification/2026-09-03-bid-evidence-mapping-reduction.md)：保留自动 reconcile 不强制补映射的决定，同时提供用户主动要求的局部研究。它也部分替代[Host 准入](../bug-fix/2026-08-29-bid-host-runtime-admission.md)中禁用全部普通消息的规则，保留 Host 决策和单一投影的依据；[全阶段 Main Agent 实时交错](2026-09-11-bid-all-stage-main-agent-steer.md)继续替代本记录的运行态拒绝范围，但保留这里的等待态 mutation 设计。这些记录仍有独立决策价值。
 
-真实 Main Agent 与源码 Loader 回放覆盖普通咨询、否认隐式确认、裸写拒绝、拆分、局部重生成、单节 remap、并发拒绝、失败恢复和工具释放；Host 测试覆盖 replace/supplement 与未选中证据保留，UI 测试覆盖自动刷新和最新 revision 确认。自然语言理解的质量仍取决于模型，脚本模型测试证明控制链路而不证明真实模型的目标理解准确率。
+真实 Main Agent 与源码 Loader 回放覆盖普通咨询、否认隐式确认、独立文件创建、拆分、局部重生成、单节 remap、并发拒绝、失败恢复和工具释放；Host 测试覆盖 replace/supplement 与未选中证据保留，UI 测试覆盖自动刷新和最新 revision 确认。自然语言理解的质量仍取决于模型，脚本模型测试证明控制链路而不证明真实模型的目标理解准确率。

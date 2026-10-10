@@ -263,7 +263,7 @@ describe('S4 Web evidence through a real Agent Tool loop', () => {
       expect(outcome.transitions).toContain('bid.run.completed')
     } finally { await ctx.fiber.dispose() }
   }, 30_000)
-  it('Main Agent 在等待态咨询、拆分和局部重生成，且不能裸写或隐式确认', async () => {
+  it('Main Agent 在等待态创建独立文件、咨询、拆分和局部重生成，保持正式确认', async () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-bid-interaction-loop-'))
     const ctx = new Context()
     await ctx.plugin(LlmRuntime)
@@ -279,11 +279,11 @@ describe('S4 Web evidence through a real Agent Tool loop', () => {
     try {
       expect(await runStageInteractionLoop(ctx, root, true)).toMatchObject({
         state: { stage: 'evidence_mapping', status: 'waiting_user' },
-        confirmations: 0, rawWriteBlocked: true, untouchedEvidencePreserved: true, revision: 3, disposed: true,
+        confirmations: 0, generalFileCreated: true, canonicalPreserved: true, untouchedEvidencePreserved: true, revision: 3, disposed: true,
         titles: ['访问控制与安全审计', '实施准备与资源核查', '实施过程', '验收移交'],
-        visibleTools: ['bid_stage_inspect', 'bid_outline_apply_operations', 'bid_outline_regenerate_scope', 'bid_evidence_remap',
+        visibleTools: ['read', 'grep', 'write', 'web_search', 'web_fetch', 'bid_stage_inspect', 'bid_outline_apply_operations', 'bid_outline_regenerate_scope', 'bid_evidence_remap',
           'bid_project_inspect', 'bid_run_task', 'bid_plan_task', 'bid_confirm_writing_plan'],
-        concurrent: Array(3).fill('BID_OPERATION_IN_PROGRESS'), failures: 2, incompletePlanRejected: true,
+        concurrent: Array(3).fill('BID_OPERATION_IN_PROGRESS'), failures: 1, incompletePlanRejected: true,
         readOnlyNoWork: true, planOnlyNoWork: true, capabilityUpdates: 1, updatedRequirement: '明确实施边界',
       })
     } finally { await ctx.fiber.dispose() }

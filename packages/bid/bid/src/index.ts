@@ -3348,7 +3348,6 @@ export class BidHostRuntime extends TypertRemoteService {
     }, { global: true })
     installStageInteractionTools(ctx,
       (agent, request, signal, authorization) => this.executeStageInteraction(agent, request, signal, authorization),
-      session => isBidMainSession(session) && this.inFlight.get(projectKey(session))?.interaction === true,
       session => new BidWorkspace(projectKey(session), workspaceConfig(this.config)))
     ctx.on('agent/session-start', ({ agent }) => {
       if (!this.isContextActive() || !isBidMainSession(agent.session)) return
@@ -3429,7 +3428,8 @@ export class BidHostRuntime extends TypertRemoteService {
           return 'BID_WEB_ACCESS_DISABLED'
         }
         const operation = this.inFlight.get(projectKey(session))
-        if (operation !== undefined && operation.session !== session) return 'BID_OPERATION_IN_PROGRESS'
+        // shortcut: 通用文件权限包含正式产物目录；需要强制隔离时扩展沙箱策略。
+        if (operation !== undefined && operation.session !== session && execution.name.startsWith('bid_')) return 'BID_OPERATION_IN_PROGRESS'
       }))
     })
     ctx.on('agent/session-start', ({ agent }) => {

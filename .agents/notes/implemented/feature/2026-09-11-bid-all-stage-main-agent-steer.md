@@ -2,6 +2,8 @@
 
 Status: implemented
 
+公开 Main Agent 保留通用工具的规则见[Main Agent 通用工具](../bug-fix/2026-10-10-bid-main-general-tools.md)；本记录的阶段 inspect、交互与执行所有权及私有协议规则保持有效。
+
 本记录中的旧 `pending`、`waiting_start` 与 `attention_required` 状态词由[单一任务状态机](../architecture/2026-09-22-bid-single-task-state.md)归一；交互通道、inspect、steer 和停止所有权保持有效。
 
 ## Problem

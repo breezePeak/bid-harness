@@ -658,8 +658,11 @@ describe('S5 原生提问专项测试 (H01-H24)', () => {
     expect(() => stageInteractionSchema.parse(invalidPatchPlan)).toThrow()
   })
 
-  it('F1 & F8: S5 waiting_user 下暴露阶段工具 (bid_stage_inspect, bid_confirm_writing_plan)，严格屏蔽全局工具', async () => {
+  it('F1 & F8: S5 waiting_user 保留阶段工具和继承工具', async () => {
     const { ctx, createMainAgent } = await setupS5Fixture()
+    const release = ctx.tools.register({ name: 'general_question', description: '独立任务问题',
+      parameters: { type: 'object' }, output: { schema: {}, render: () => [] }, execute: async () => ({ ok: true }) })
+    disposals.push(async () => { release() })
     const agent = await createMainAgent('f1-agent')
 
     // 检查 agent 视角的可用工具
@@ -668,9 +671,9 @@ describe('S5 原生提问专项测试 (H01-H24)', () => {
     expect(inspectTool).toBeDefined()
     expect(confirmTool).toBeDefined()
 
-    // 检查全局工具（如 ask_user_question）已被 tools.restrict 屏蔽
-    const askTool = ctx.tools.get('ask_user_question', agent)
-    expect(askTool).toBeUndefined()
+    expect(ctx.tools.get('general_question', agent)).toBeDefined()
+    expect((await ctx.tools.execute({ agent, name: 'general_question', arguments: {},
+      callId: CallId('f1-general'), signal: new AbortController().signal })).value).toEqual({ ok: true })
 
     // 执行 bid_stage_inspect 并验证返回当前的 task_contract_context
     const inspectResult = await ctx.tools.execute({

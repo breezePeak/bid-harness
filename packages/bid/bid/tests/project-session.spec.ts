@@ -2883,8 +2883,10 @@ describe('Workspace 项目与独立 Session', () => {
     expect(executeStage).not.toHaveBeenCalled()
   })
 
-  it('S5 运行中主 Agent 回答普通消息且不取消当前写作', async () => {
+  it('S5 运行中主 Agent 回答并生成独立脚本，不取消当前写作', async () => {
     const { ctx, workspace, fresh, host, executor, adapter } = await fixture()
+    await ctx.plugin(LocalFileSystem, { cwd: workspace.root })
+    await ctx.plugin(ToolFs)
     await seedProjectArtifacts(workspace)
     await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'failed' })
     const agent = await fresh('writing-plan-pause')
@@ -2892,6 +2894,7 @@ describe('Workspace 项目与独立 Session', () => {
     executor.canExecute = stage => stage === 'chapter_writing'
     vi.mocked(executor.execute).mockImplementationOnce(() => gate.promise)
     const retry = resumeRun(ctx, agent.session)
+    disposals.push(async () => { gate.resolve([]); await retry })
     await vi.waitFor(() => {
       expect(runtime(agent.session)).toMatchObject({ stage: 'chapter_writing', status: 'running' })
       expect(host.inFlight.size).toBe(1)
@@ -2913,6 +2916,12 @@ describe('Workspace 项目与独立 Session', () => {
       expect(agent.session.deriveMessages().at(-1)?.content).toContainEqual({ type: 'text', text: response })
     }
 
+    const independentScript = join(workspace.root, '独立脚本.js')
+    adapter.script.push(toolCall('write', { file_path: independentScript, content: 'console.log("独立任务")\n' }), answer('已创建独立脚本。'))
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: '创建独立脚本，不改变当前写作。' }], source: { kind: 'user' } }))
+    await agent.whenIdle()
+    expect(await readFile(independentScript, 'utf8')).toBe('console.log("独立任务")\n')
+    expect(adapter.requests.filter(request => String(request.sessionId) === String(agent.id)).at(-1)?.tools?.map(tool => tool.name)).toContain('write')
     expect(adapter.script).toEqual([])
     expect(agent.session.events.some(event => event.type === 'tool/call' && event.data.name === 'bid_stage_inspect')).toBe(true)
     expect(runtime(agent.session)).toMatchObject({ stage: 'chapter_writing', status: 'running' })
@@ -3008,6 +3017,8 @@ describe('Workspace 项目与独立 Session', () => {
     '%s 运行任务未完成时任一项目聊天 Session 都能立即回答',
     async (stage: BidStage) => {
       const { ctx, workspace, fresh, host, executor, executeStage, adapter } = await fixture()
+      await ctx.plugin(LocalFileSystem, { cwd: workspace.root })
+      await ctx.plugin(ToolFs)
       await seedProjectArtifacts(workspace)
       await checkpointBidProjectState(workspace, { stage, status: 'failed' })
       const agent = await fresh(`live-${stage}`)
@@ -3021,6 +3032,7 @@ describe('Workspace 项目与独立 Session', () => {
         return gate.promise
       })
       const retry = resumeRun(ctx, agent.session)
+      disposals.push(async () => { gate.resolve([]); await retry })
       await vi.waitFor(() => { expect(runtime(agent.session)).toMatchObject({ stage, status: 'running' }) })
       await vi.waitFor(() => { expect(executeStage).toHaveBeenCalledOnce() })
       const artifactBefore = await readFile(join(workspace.projectRoot, 'outline/confirmed-outline.json'), 'utf8')
@@ -3060,6 +3072,17 @@ describe('Workspace 项目与独立 Session', () => {
         .toContainEqual({ type: 'text', text: '当前阶段仍在执行，后台任务未停止。' })
       expect(other.session.deriveMessages().at(-1)?.content)
         .toContainEqual({ type: 'text', text: '另一个聊天也能读取同一项目进度。' })
+      const independentPath = join(workspace.root, `other-${stage}.md`)
+      adapter.script.push(toolCall('write', { file_path: independentPath, content: '独立文件' }), answer('已保存独立文件。'))
+      other.steer(createUserMessage({ content: [{ type: 'text', text: '创建独立文件，不改当前阶段。' }], source: { kind: 'user' } }))
+      await other.whenIdle()
+      expect(await readFile(independentPath, 'utf8')).toBe('独立文件')
+      const businessMutation = await ctx.tools.execute({
+        agent: other, name: 'bid_pause_stage', arguments: {}, callId: CallId(`other-${stage}-pause`),
+        signal: new AbortController().signal,
+      })
+      expect(businessMutation.isError).toBe(true)
+      expect(JSON.stringify(businessMutation)).toContain('BID_OPERATION_IN_PROGRESS')
       const request = adapter.requests.findLast(candidate => String(candidate.sessionId) === String(agent.id))
       const requestText = request?.messages.flatMap(message => message.content)
         .filter(block => block.type === 'text').map(block => block.text).join('\n')

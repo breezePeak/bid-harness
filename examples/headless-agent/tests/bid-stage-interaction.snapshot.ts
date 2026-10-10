@@ -419,6 +419,7 @@ it('S4 waiting_user 通过源码 Loader 执行受控对话修改', async () => {
         "bid_run_task",
         "bid_run_task",
       ],
+      "canonicalPreserved": true,
       "capabilitySplit": [
         {
           "responsePoints": [
@@ -439,10 +440,10 @@ it('S4 waiting_user 通过源码 Loader 执行受控对话修改', async () => {
       ],
       "confirmations": 0,
       "disposed": null,
-      "failures": 2,
+      "failures": 1,
+      "generalFileCreated": true,
       "incompletePlanRejected": true,
       "planOnlyNoWork": true,
-      "rawWriteBlocked": true,
       "readOnlyNoWork": true,
       "revision": 3,
       "state": {
@@ -475,7 +476,7 @@ it('S4 waiting_user 通过源码 Loader 执行受控对话修改', async () => {
         },
         {
           "admitted": true,
-          "input": "更新目录",
+          "input": "将讨论整理到独立 Markdown 文件，不修改目录",
         },
         {
           "admitted": true,
@@ -505,6 +506,11 @@ it('S4 waiting_user 通过源码 Loader 执行受控对话修改', async () => {
       "untouchedEvidencePreserved": true,
       "updatedRequirement": "明确实施边界",
       "visibleTools": [
+        "read",
+        "grep",
+        "write",
+        "web_search",
+        "web_fetch",
         "bid_stage_inspect",
         "bid_outline_apply_operations",
         "bid_outline_regenerate_scope",

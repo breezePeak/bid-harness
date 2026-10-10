@@ -115,7 +115,9 @@ Main Agent 按用户目标、当前产物和能力范围规划步骤：`outline.
 
 ### 全阶段 Main Agent 交互
 
-S1–S5 与 `docx_export` 的 `running` 和 `completed` 均开放普通消息，S2–S5 的 `waiting_user` 继续开放交互。公开消息通过正式 `Agent.steer()` 和 inbox 留在发起消息的 Interaction Session；Host 为每个 Long Run 创建独立 Execution Session，阶段执行、Child、Writer 与 Reviewer 不占用聊天 Agent。同项目的其他顶层 Session 也能读取项目快照并聊天，但不能取得第二个项目写入所有者。运行态和完成态公开回合挂载当前阶段工具及项目级只读检查，私有 finish 工具及继承的通用工具不进入用户请求 Schema。
+S1–S5 与 `docx_export` 的 `running` 和 `completed` 均开放普通消息，S2–S5 的 `waiting_user` 继续开放交互。公开消息通过正式 `Agent.steer()` 和 inbox 留在发起消息的 Interaction Session；Host 为每个 Long Run 创建独立 Execution Session，阶段执行、Child、Writer 与 Reviewer 不占用聊天 Agent。同项目的其他顶层 Session 也能读取项目快照并聊天，但不能取得第二个业务 operation 所有者。公开回合保留 preset 配置的通用工具，并挂载当前阶段工具及项目级只读检查；私有 finish 工具仅属于 Execution Session。
+
+Main Agent 可在失败、等待确认、运行和挂起期间使用已配置的 Skill、Shell 和文件工具完成独立文件处理、数据整理和编程任务。普通 DOCX/XLSX/PDF 输出放在工作区的独立路径，不恢复 Run、不触发 S6，也不结算正式阶段。正式目录、资料映射、正文、确认和发布仍使用 Host 业务入口；跨 Session 业务冲突、显式 Goal 命令、真实用户恢复授权及 Web 开关继续生效。决定依据见[Main Agent 通用工具](../../../.agents/notes/implemented/bug-fix/2026-10-10-bid-main-general-tools.md)。
 
 S2、S3 和 S5 的私有协议只在 Execution Session 中运行；Execution Agent 消费直属 Child 的 report 和 settled 消息，Interaction Session 始终过滤这些原始消息。Run 挂起、attention_required 或最终完成时，Host 只把阶段、状态、原因、错误码、摘要和最多三条问题作为 `@deepseek-ai/dsh-bid` instruction 注入 Interaction Agent；内部错误挂起在 Run 结算后唤醒空闲主 Agent，让其分析并处理；完成和普通进度通知留到下一次对话。连续用户消息由各自聊天 Agent 保持原顺序，单次回复的结束或失败不结算阶段 operation，也不等待执行 Agent idle。
 
@@ -133,7 +135,7 @@ S5 运行中或完成后的消息先进入主 Agent。进度询问、安排说�
 
 S1→S2、S2→S3、S3→S4、S4→S5 正式完成时，Host 在最终校验和确认成功后、下一阶段首次执行前替换 Main Agent 的模型可见阶段上下文。交接消息只列出 `getBidStagePolicy(nextStage).requiredInputs` 决定的正式 Artifact 路径及 SHA-256；旧阶段消息继续保留在追加式 Session 日志中，但不再由 `deriveMessages()` 投影给模型。普通同阶段修复、重试和审核交互不触发替换；S5 最近一次失败任务为 `CONTEXT_WINDOW_EXCEEDED` 时，重试从当前 Artifact 检查点移除旧私有轮次并原样保留用户消息，不调用模型摘要。阶段重置复用同一替换原语，使目标阶段及后续上下文失效。决定依据见[阶段上下文边界记录](../../../.agents/notes/implemented/architecture/2026-09-09-bid-stage-context-boundary.md)。
 
-所有修改使用 Host 的项目锁、Draft revision/hash CAS 和目录 Validator。局部重生成使用无文件工具的独立 Child 返回编辑操作，经 `mutateOutlineDraft` 保存 Draft；范围外节点及选中根位置不得改变。目录编辑不启动资料复核，也不覆盖最近完成研究的目录。Main Agent 没有裸写、shell 或任意其他工具权限，不能绕过领域动作修改正式产物。
+正式业务修改使用 Host 的项目锁、Draft revision/hash CAS 和目录 Validator。局部重生成使用无文件工具的独立 Child 返回编辑操作，经 `mutateOutlineDraft` 保存 Draft；范围外节点及选中根位置不得改变。目录编辑不启动资料复核，也不覆盖最近完成研究的目录。
 
 S4 交互重映射与初始研究共用执行器、Corpus Guard、Child 调度、有限修复及 Web Research Pool。指定可写叶子只研究该叶子，指定结构节点展开其可写后代；Final Check 复核最终合并的材料、任务和必要的祖先总述。`replace` 替换目标材料，`supplement` 去重合并材料；写作维度与缺口由独立任务操作确定，不从旧材料合并中恢复。Writing Brief 保存到 Draft，最近完成整体验证的目录基线保留。其他尚未研究的新叶节留待确认前复核，不能算作已审；最终确认运行整体验证并按 Chunk 引用清理快照与索引。
 
@@ -283,6 +285,7 @@ paragraph-only task 只把合并后的授权段落、前后各一个只读顶层
 
 ## Known Limitations and Deferred Work
 
+- `workspace-write` 允许通用 Shell/FS 写整个会话工作区，包含 `.bid-harness/`；当前没有正式产物目录的独立拒写策略。提示要求独立任务避免覆盖正式状态和产物，但不能强制隔离；直接文件写入可绕过 Host 的业务 mutation 校验。
 - PDF extraction does not perform OCR or full table reconstruction; positioned rows remain separate when columns cannot be recovered safely.
 - DOC extraction preserves text, paragraph breaks, list markers, and tab-separated table cells but not all binary Word styling.
 - DOCX and DOC page fields remain `null` because their source structures do not provide dependable pagination.

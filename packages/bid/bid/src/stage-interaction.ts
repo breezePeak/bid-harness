@@ -579,7 +579,7 @@ export function inspectBidStage(
 export function renderStageInteractionPrompt(stage: string): string {
   if (stage === 'chapter_writing') return [
     '当前 Bid 阶段：chapter_writing；当前状态：waiting_user。',
-    '正式写作尚未开始。先调用 bid_stage_inspect(view=task_contract_context)，结合已确认目录、招标要求和资料映射理解用户的自然语言要求。',
+    '正式写作尚未开始。处理正式写作要求时，先调用 bid_stage_inspect(view=task_contract_context)，结合已确认目录、招标要求和资料映射理解用户的自然语言要求。',
     '只追问影响执行的关键歧义或冲突。资料不足、能力限制或招标要求冲突必须指出并提出处理建议；用户明确要求改变目录时，可调用 bid_run_task 组合目录、资料与写作能力。',
     '保留用户原话。没有特殊要求时，仍应按招标要求、目录和现有资料形成默认计划。未提供的指标不得变成用户硬性要求。',
     '初始整体写作要求由 Host 原生提问；先读取 task_contract_context.writing_request 中已保存的真实回答，不要再次询问这个初始问题。请求身份由程序绑定，Host 会在首次计划提交时把原生自定义回答原文加入 user_requirements。',
@@ -589,13 +589,13 @@ export function renderStageInteractionPrompt(stage: string): string {
     '获得确认或直接开始授权后调用 bid_confirm_writing_plan。只选择 objects.messages 中确实构成写作要求或确认语境的位置；Host 从 Session Log 回查并持久化准确原文，进度询问等普通消息不得引用。',
     '首次提交 update_kind=initial 的完整计划，sections 覆盖每个可写叶节且只出现一次。没有额外动态验收条件时 document_acceptance 和章节 acceptance_criteria 可以为空，固定 Reviewer 仍会执行。',
     '修改既有计划时提交 update_kind=patch，只列真实变化的全局指令、document acceptance、section task/instructions/acceptance 以及明确删除的 criterion_position。affected_section_positions 表示语义影响范围；Host 绑定当前版本和实际章节。',
-    '工具成功即完成确认；随后 Host 会在本轮结束后启动既有章节写作与审核链路。不要直接 write Artifact 或调用其他工具启动章节任务。',
+    '工具成功即完成确认；随后 Host 会在本轮结束后启动既有章节写作与审核链路。正式 Artifact 的修改与章节任务启动必须通过 Host 业务入口。',
   ].join('\n')
   return [
     `当前 Bid 阶段：${stage}；当前状态：waiting_user。`,
-    '你正在与用户进行当前阶段的交互修改。先调用 bid_stage_inspect 读取最新目录、评分点、资料和缺口。',
+    '用户要求修改当前阶段时，先调用 bid_stage_inspect 读取最新目录、评分点、资料和缺口。',
     '按 inspect 返回的编号、标题和父子关系，把“第三章”“3.2”“服务方案下面第二个”对应到 objects.sections 或 objects.draft_sections 的位置。只有存在歧义时才询问用户；身份与草稿版本由程序绑定。',
-    '明确修改可调用 bid_run_task 组合所需能力，不得直接 write Artifact 或绕过 Host 校验；首次整本确认仍由原生确认入口处理。',
+    '正式产物修改可调用 bid_run_task 组合所需能力，不得用通用工具覆盖正式 Artifact 或绕过 Host 校验；首次整本确认仍由原生确认入口处理。',
     '目录拆分用 split_section，合并同级可写叶子用 merge_sections；局部重生成用 bid_outline_regenerate_scope。修改后重新 inspect 获取最新对象位置表，新增身份、顺序与草稿版本由程序生成。',
     '资料不对、重新匹配用 bid_evidence_remap(mode=replace)；资料不足、再补充用 supplement。传具体章节只处理该章节，传结构分支处理其可写后代。标题微调不强制 remap；用户要求修改并重新找资料时，修改后 remap 新范围。',
     '普通聊天中的“可以”“没问题”“这样可以吗”不是正式确认。修改完成后告知“已更新，请重新确认”，只有用户点击正式确认按钮才能进入下一阶段。',
@@ -632,13 +632,13 @@ export function renderChapterWritingInteractionPrompt(status: 'running' | 'compl
  * 渲染非写作阶段运行中或完成后的公开用户回合规则。
  * @param stage 当前 Bid 阶段。
  * @param status 当前运行或完成状态。
- * @returns 只允许有界检查和语义回答的模型规则。
+ * @returns 保留后台任务与正式业务校验的模型规则。
  */
 export function renderLiveStageInteractionPrompt(stage: string, status: 'running' | 'completed'): string {
   return [
     `当前 Bid 阶段：${stage}；当前状态：${status}。`,
     '你正在处理公开用户消息，后台阶段任务与 Child/Subagent 继续运行。先判断用户是在询问、解释现状，还是明确要求改变任务；不得按关键词、引用或发送方式判断意图。',
-    '进度、资料范围和设计原因只调用 bid_stage_inspect 读取有界 Host 快照并回答；不得直接读写 Artifact、停止阶段、重启阶段或创建新的阶段请求。',
+    '阶段进度、资料范围和设计原因通过 bid_stage_inspect 读取有界 Host 快照并回答；这类提问不修改正式 Artifact、停止或重启阶段。',
     status === 'completed'
       ? '普通问答不修改产物；用户明确要求变更时可调用 bid_run_task，按实际资料和范围安排步骤，保留默认路线的首次确认。'
       : '普通消息不取消当前模型任务或已启动的 Child。用户明确要求变更时可调用 bid_run_task；若已有操作持有项目，Host 返回占用状态。用户明确要求暂停新任务调度或继续时，分别调用 bid_pause_stage 或 bid_resume_stage；已运行任务自然收敛。停止任务只使用聊天界面的原生停止。',
@@ -654,8 +654,8 @@ function renderIdleStageInteractionPrompt(
 ): string {
   return [
     `当前 Bid 阶段：${stage}；当前状态：${status}。`,
-    '先调用 bid_stage_inspect(view=summary) 获取权威状态。普通聊天只负责查询、解释和理解用户意图，不得直接 read/write Artifact。',
-    status === 'ready' ? '普通问答不启动写操作；用户明确授权的局部修改可调用 bid_run_task，不能把该任务当作原生阶段确认。'
+    '用户询问阶段或要求处理正式业务时，先调用 bid_stage_inspect(view=summary) 获取权威状态。正式 Artifact 修改必须通过 Host 业务工具。',
+    status === 'ready' ? '普通问答不启动业务写操作；用户明确授权的局部修改可调用 bid_run_task，不能把该任务当作原生阶段确认。'
       : recoveryAvailable
         ? '先用 bid_stage_inspect(view=recovery) 核对失败、原目标和检查点。同一目标的继续或修复使用 bid_recover_task；Host 重验原 Work、输入、候选与有限恢复预算，保留已完成研究和正式确认。'
         : takeoverAvailable
@@ -677,7 +677,7 @@ function renderSuspendedRunPrompt(
   return [
     `当前 Bid 阶段：${stage}；Run 已挂起；suspended_run_id=${runId}；expected_project_revision=${String(revision)}。`,
     reason === undefined ? undefined : `中断原因：${reason}`,
-    '先按用户完整语义判断：继续未完成任务、带新约束继续、修改当前阶段，或只进行问答。不得通过“继续”等关键词硬编码意图。',
+    '先按用户完整语义判断：继续未完成任务、带新约束继续、修改当前阶段、独立通用任务，或只进行问答。不得通过“继续”等关键词硬编码意图；独立任务不授权恢复当前 Run。',
     cause === 'awaiting_input'
       ? '等待输入须通过原生用户问题回答；普通聊天消息不能接管或放弃该问题。'
       : workKind === 'capability_task'
@@ -735,17 +735,15 @@ const CAPABILITY_TASK_GUIDANCE = [
 ].join('\n')
 
 /**
- * 按实时阶段安装 scoped tools；全局 guard 拒绝交互期间的其他 Main Agent 工具调用。
+ * 按实时阶段安装业务工具，保留继承的通用工具与显式 Goal、恢复授权检查。
  * @param ctx Host 插件上下文，负责全部注册释放。
  * @param execute 共享 Host 操作入口。
- * @param interacting 当前会话是否仍被阶段交互操作占用。
  * @param workspaceFor 当前会话对应的正式项目。
  */
 export function installStageInteractionTools(
   ctx: Context,
   execute: (agent: Agent, request: unknown, signal: AbortSignal,
     authorization?: ReturnType<typeof resolveBidToolAuthorization> | null) => Promise<unknown>,
-  interacting: (session: Session) => boolean,
   workspaceFor: (session: Session) => BidWorkspace,
 ): void {
   ctx.inject(['tools'], (toolCtx) => {
@@ -1057,55 +1055,19 @@ export function installStageInteractionTools(
           }
           disposers.push(tools.register(definition))
         }
-        if (task.status === 'waiting_user') {
-          disposers.push(tools.restrict({ allow: hasGoal
-            ? ['get_goal', 'update_goal'].filter(name => toolCtx.tools.get(name, agent) !== undefined) : [] }))
-        }
       } catch (error) {
         for (const dispose of disposers.reverse()) dispose()
         throw error
       }
       mounted.set(agent, { scope: actualScope, dispose: () => { for (const dispose of disposers.reverse()) dispose() } })
     }
-    const publicRestrictions = new Map<Agent, () => void>()
-    const claimState = new Map<Agent, { turn: number; boundary: string; hasUser: boolean }>()
-    const releasePublic = (agent: Agent): void => {
-      publicRestrictions.get(agent)?.()
-      publicRestrictions.delete(agent)
-    }
     toolCtx.effect(() => toolCtx.tools.guard((exec) => {
       const subject = exec.agent
       const session = subject?.session
       if (subject === undefined || session === undefined || !isBidMainSession(session)) return
-      const task = session.events.reduce(reduceBidTaskState, BID_INITIAL_TASK_STATE)
       if (exec.name === 'create_goal') return 'BID_EXPLICIT_GOAL_COMMAND_REQUIRED'
       if (exec.name === 'bid_resume_current_run' && resolveBidToolAuthorization(subject) === undefined) return 'BID_USER_CONTINUATION_REQUIRED'
-      if ((task.status === 'waiting_user' || task.status === 'suspended' || interacting(session) || publicRestrictions.has(subject))
-        && !BID_INTERACTION_TOOL_NAMES.includes(exec.name as typeof BID_INTERACTION_TOOL_NAMES[number])
-        && exec.name !== recoveryTool && exec.name !== 'get_goal' && exec.name !== 'update_goal') return 'BID_STAGE_TOOL_REQUIRED'
     }))
-    toolCtx.on('agent/inbox/claimed', ({ agent, message, turn }) => {
-      if (!isBidMainSession(agent.session)) return
-      const task = agent.session.events.reduce(reduceBidTaskState, BID_INITIAL_TASK_STATE)
-      if (task.status !== 'ready' && task.status !== 'failed' && task.status !== 'running'
-        && task.status !== 'completed' && task.status !== 'suspended') return
-      const previous = claimState.get(agent)
-      const prior = agent.session.events.findLast(event => event.type === 'step/end' && event.data.turn === turn)
-      const priorStep = prior?.type === 'step/end' ? prior.data.step : 0
-      const boundary = `${String(turn)}:${String(priorStep)}`
-      const state = previous?.boundary === boundary ? previous
-        : { turn, boundary, hasUser: false }
-      if (message.source.kind === 'user') {
-        state.hasUser = true
-        const tools = agent.ctx.get('tools')
-        if (tools === undefined) throw new Error('Bid stage interaction requires tools')
-        if (!publicRestrictions.has(agent)) publicRestrictions.set(agent, tools.restrict({
-          allow: toolCtx.get('goals')?.get(agent) === undefined ? []
-            : ['get_goal', 'update_goal'].filter(name => toolCtx.tools.get(name, agent) !== undefined),
-        }))
-      } else if (!state.hasUser) releasePublic(agent)
-      claimState.set(agent, state)
-    }, { global: true })
     toolCtx.on('agent/session-start', ({ agent }) => { sync(agent) }, { global: true })
     toolCtx.on('session/event', (session, event) => {
       if (!event.type.startsWith('bid.')) return
@@ -1113,10 +1075,7 @@ export function installStageInteractionTools(
       if (agent !== undefined) sync(agent)
     }, { global: true })
     toolCtx.on('goal/changed', ({ agent }) => { sync(agent) }, { global: true })
-    toolCtx.on('agent/status', ({ agent, status }) => { if (status === 'idle') { releasePublic(agent); claimState.delete(agent) } }, { global: true })
     toolCtx.on('agent/disposed', ({ agent }) => {
-      releasePublic(agent)
-      claimState.delete(agent)
       mounted.get(agent)?.dispose()
       mounted.delete(agent)
     }, { global: true })
@@ -1160,6 +1119,7 @@ export function installStageInteractionTools(
         || (bidCapabilityTakeoverRun(agent.session, task) ?? bidEvidenceMappingTakeoverRun(agent.session, task)) !== undefined
         || bidRecoverableRun(agent.session, task)?.work.kind === 'capability_task' && bidRunRecoveryEligibility(agent.session).eligible
       const context = [prompt,
+        '阶段规则只约束正式 Bid 业务。用户要求独立文件处理、数据整理、编程或临时 DOCX/XLSX/PDF 时，使用已配置的 Skill、Shell 和文件工具，必要时编写并运行脚本；检查真实输出并自行修复错误。阶段失败、等待确认、运行或挂起不阻止独立任务，不为独立任务恢复 Run 或触发 S6。普通文件使用工作区的独立路径，不覆盖正式 Bid 状态及产物；正式目录、映射、正文修改和发布仍通过 Host 业务工具校验。',
         'Bid 模式不通过模型创建 Goal。Goal 只能由用户显式 /goal 创建；已有 Goal 可正常读取和更新。后台失败交由你分析并通过当前公开能力处理；Host 只校验和执行。',
         ...(taskToolsAvailable ? [CAPABILITY_TASK_GUIDANCE] : []), ...(progress === undefined ? [] : [progress]),
       ].join('\n')
@@ -1167,8 +1127,6 @@ export function installStageInteractionTools(
     }, { global: true })
     for (const agent of ctx.agents.list()) sync(agent)
     toolCtx.effect(() => () => {
-      for (const agent of publicRestrictions.keys()) releasePublic(agent)
-      claimState.clear()
       for (const value of mounted.values()) value.dispose()
       mounted.clear()
     })

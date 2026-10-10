@@ -352,8 +352,12 @@ export async function runStageInteractionLoop(ctx: Context, root: string, checkR
   }
   const outlinePath = join(workspace.projectRoot, 'outline/outline.json')
   const original = await readFile(outlinePath, 'utf8')
-  await send('更新目录', [call('write', { file_path: outlinePath, content: '{}' }), answer('请使用阶段工具修改。')])
-  const rawWriteBlocked = await readFile(outlinePath, 'utf8') === original
+  const independentPath = join(root, '阶段讨论.md')
+  await send('将讨论整理到独立 Markdown 文件，不修改目录', [
+    call('write', { file_path: independentPath, content: '仍需正式确认目录。' }), answer('已保存独立文件。'),
+  ])
+  const generalFileCreated = await readFile(independentPath, 'utf8') === '仍需正式确认目录。'
+  const canonicalPreserved = await readFile(outlinePath, 'utf8') === original
   const initial = await getOrCreateOutlineDraft(workspace)
   const sectionId = initial.outline.sections[0]!.id
   const businessObjects = (await collectBidModelTaskCatalog(workspace)).objects
@@ -484,7 +488,8 @@ export async function runStageInteractionLoop(ctx: Context, root: string, checkR
   await ctx.sessions.flush(agent.session)
   releaseObserver()
   await hostFiber?.dispose()
-  return { turns, calls, failures: failures.length, rawWriteBlocked, untouchedEvidencePreserved, confirmations, state,
+  return { turns, calls, failures: failures.length, generalFileCreated, canonicalPreserved,
+    untouchedEvidencePreserved, confirmations, state,
     readOnlyNoWork, planOnlyNoWork, capabilityUpdates, capabilitySplit, incompletePlanRejected,
     updatedRequirement: updatedRequirements.requirements.find(item => item.id === 'REQ-1')?.normalized_requirement,
     revision: finalDraft.revision, titles: finalDraft.outline.sections.map(section => section.title),
