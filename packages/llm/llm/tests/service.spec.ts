@@ -7,6 +7,7 @@ import LlmRuntime, {
   HarnessError,
   isContextWindowExceededError,
   isQuotaExceededError,
+  isRetryableServerError,
   LlmAdapter,
   LlmError,
   ProviderRequestId,
@@ -101,6 +102,11 @@ async function collect(stream: AsyncIterable<StreamChunk>): Promise<StreamChunk[
 }
 
 describe('LlmRuntime', () => {
+  it('服务端可重试诊断须同时包含处理失败及重试指示', () => {
+    expect(isRetryableServerError('An error occurred while processing your request. You can retry your request, or contact us.')).toBe(true)
+    expect(isRetryableServerError('An error occurred while processing your request.')).toBe(false)
+    expect(isRetryableServerError('Invalid request. You can retry your request.')).toBe(false)
+  })
   it('recognizes structured and model-capacity context-window overflow details', () => {
     expect(isContextWindowExceededError('context_length_exceeded maximum context length')).toBe(true)
     expect(isContextWindowExceededError('context-window-overflowed')).toBe(true)

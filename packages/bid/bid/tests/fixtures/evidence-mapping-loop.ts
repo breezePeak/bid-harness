@@ -478,7 +478,7 @@ export async function runEvidenceMappingLoop(ctx: Context, root: string, repair:
     resume?: true
     production?: true
   }, researchMode?: 'zero' | 'local' | 'external_unbound', structureRecovery = false,
-  largeReview: boolean | 'partitioned' | 'legacy' = false) {
+  largeReview: boolean | 'partitioned' | 'legacy' | 'server' = false) {
   const sessionId = SessionId('s3-real-loop')
   const workspace = new BidWorkspace(root)
   const s2 = fault?.resume === true ? { requirementId: 'REQ-1', scoringId: 'SCORE-1', responsePointId: 'RP-000001' }
@@ -624,6 +624,8 @@ export async function runEvidenceMappingLoop(ctx: Context, root: string, repair:
     ...(researchMode === 'external_unbound' ? [finalText('所需外部标准正文尚未绑定到章节材料，保留当前缺口。')] : []),
     ...(repair && !largeReview ? [toolCall('submit-refinement-incomplete', 'structured_output', {
       ...parsedQuality, scope: 'commercial_bid',
+    }), toolCall('submit-refinement-outside-scope', 'structured_output', {
+      ...parsedQuality, blocking_issues: [{ section_position: 999_999, issue_kind: 'relationship', reason: '非法章节位置。' }],
     })] : []),
     ...(largeReview ? [] : [toolCall('submit-refinement-quality', 'structured_output', parsedQuality)]),
     toolCall('reject-incomplete-final-check', 'finish_final_check', {}),
@@ -655,13 +657,19 @@ export async function runEvidenceMappingLoop(ctx: Context, root: string, repair:
   const parentScript: ScriptStep[] = []
   const adapter = new ScriptedAdapter(sessionId, parentScript, childScript)
   if (largeReview) adapter.outlineReview = { contextWindow: largeReview === 'partitioned' ? 16_384 : 32_768, quality: parsedQuality }
-  if (largeReview === 'legacy') {
+  if (largeReview === 'legacy' || largeReview === 'server') {
     const start = ctx.subagents.start.bind(ctx.subagents)
     let failed = false
     ctx.effect(() => {
       ctx.subagents.start = async (provider, request) => {
         if (!failed && request.persona?.includes('技术标目录轻量复核')) {
           failed = true
+          if (largeReview === 'server') {
+            const message = 'An error occurred while processing your request. You can retry your request, or contact us through our help center at help.openai.com if the error persists.'
+            const error = new BidStageExecutionError([{ code: 'EVIDENCE_MAPPING_INFRASTRUCTURE_ERROR', message }])
+            error.cause = Object.assign(new Error(message), { code: 'PI_AI_ERROR' })
+            throw error
+          }
           throw new BidStageExecutionError([{ code: 'CONTEXT_WINDOW_EXCEEDED',
             message: '目录审查对象超过输入预算：位置 0，估算 15496 token，预算 12000 token。' }])
         }
@@ -705,7 +713,7 @@ export async function runEvidenceMappingLoop(ctx: Context, root: string, repair:
     }) },
     { validate: (stage, artifacts) => validateEvidenceMapping(workspace, stage, artifacts) },
     undefined, undefined, undefined,
-    structureRecovery || largeReview === 'legacy' ? async (stage) => {
+    structureRecovery || largeReview === 'legacy' || largeReview === 'server' ? async (stage) => {
       const payload = { stage }
       const inputs = await Promise.all(buildBidStageTask(stage).inputs.map(async path => ({ path,
         sha256: createHash('sha256').update(await readFile(join(workspace.projectRoot, path))).digest('hex'),
@@ -730,35 +738,57 @@ export async function runEvidenceMappingLoop(ctx: Context, root: string, repair:
  * @param scenario 原失败类型。
  * @returns 原失败结果、恢复后状态及真实请求；恢复未完成时抛错。
  */
-export async function runEvidenceMappingRecoveryLoop(ctx: Context, root: string, scenario: 'structure' | 'legacy' | 'legacy-output' = 'structure') {
-  const result = await runEvidenceMappingLoop(ctx, root, false, true, undefined, 'local', scenario === 'structure',
-    scenario === 'structure' ? false : 'legacy')
+export async function runEvidenceMappingRecoveryLoop(ctx: Context, root: string,
+  scenario: 'structure' | 'legacy' | 'legacy-output' | 'server' | 'server-takeover' | 'transport-takeover' = 'structure') {
+  const takeover = scenario === 'server-takeover' || scenario === 'transport-takeover'
+  const structure = scenario === 'structure' || takeover
+  const result = await runEvidenceMappingLoop(ctx, root, false, true, undefined, 'local', structure,
+    structure ? false : scenario === 'server' ? 'server' : 'legacy')
   if (scenario === 'legacy-output') result.adapter.reviewMaxTokens = true
   if (result.outcome.status !== 'failed') throw new Error('结构恢复夹具未产生首代修复后的失败：' + JSON.stringify(result.outcome))
+  if (scenario === 'server' || takeover) {
+    // 固定已保存的服务端或连接失败，验证真实恢复和新授权接管入口。
+    const transport = scenario === 'transport-takeover'
+    const message = transport ? 'Connection error.'
+      : 'An error occurred while processing your request. You can retry your request, or contact us through our help center at help.openai.com if the error persists.'
+    result.outcome = { ...result.outcome, failure: { code: 'BID_EXECUTOR_ERROR', message: '阶段执行结果未通过校验，共 1 条关键问题。',
+      cause: { code: transport ? 'TRANSPORT' : 'PI_AI_ERROR', message }, issues: [{ code: 'EVIDENCE_MAPPING_INFRASTRUCTURE_ERROR', message }],
+      recovery: { kind: transport ? 'retry' : 'blocked', unit: result.outcome.failure.recovery!.unit, reason: message } } }
+    result.agent.session.append('bid.task.changed', { state: result.outcome })
+  }
   const failedLog = JSON.parse(await readFile(join(result.workspace.projectRoot, 'analysis/evidence-mapping-log.json'), 'utf8')) as {
     tasks: Array<{ task_id: string; status: string }>
     failure?: unknown
   }
-  if (scenario === 'structure' && !failedLog.tasks.some(task => task.task_id.startsWith('MAP-REPAIR-') && task.status === 'completed')) {
+  if (structure && !failedLog.tasks.some(task => task.task_id.startsWith('MAP-REPAIR-') && task.status === 'completed')) {
     throw new Error('首代结构修复未完成：' + JSON.stringify(failedLog))
   }
-  if (scenario !== 'structure') {
+  if (!structure || takeover) {
     const run = bidRecoverableRun(result.agent.session, result.outcome)!
+    if (takeover) for (let attempt = 0; attempt < 3; attempt++) result.agent.session.append('bid.recovery.requested', {
+      ownerSessionId: String(result.agent.id), target: { kind: 'run', runId: run.runId, workId: run.work.workId },
+      unit: run.error!.recovery!.unit, instruction: `历史恢复 ${attempt + 1}`, progressFingerprint: 'old-server',
+    })
     result.agent.session.append('bid.recovery.round', { ownerSessionId: String(result.agent.id),
-      target: { kind: 'run', runId: run.runId, workId: run.work.workId }, fingerprint: 'legacy', round: 0, budget: 3,
+      target: { kind: 'run', runId: run.runId, workId: run.work.workId }, fingerprint: 'legacy', round: takeover ? 3 : 0, budget: 3,
       state: 'blocked', reason: run.error!.recovery!.reason })
   }
   const saved = await checkpointBidProjectState(result.workspace, result.outcome)
   result.agent.session.append('bid.project.resumed', { state: result.outcome, revision: saved.revision })
   await result.agent.whenIdle()
-  const instruction = scenario === 'structure' ? '保留已研究资料，明确授权岗位核验与审计岗位追溯责任，只补修失败章节后重新复核。'
-    : '继续原 S4，按当前模型预算重新组织审核，保留已完成研究及正式确认。'
+  const instruction = structure ? '保留已研究资料，明确授权岗位核验与审计岗位追溯责任，只补修失败章节后重新复核。'
+    : scenario === 'server' ? '继续原 S4，有限重试服务端处理失败，保留已完成研究及正式确认。'
+      : '继续原 S4，按当前模型预算重新组织审核，保留已完成研究及正式确认。'
   for (let round = 0; round < (scenario === 'legacy-output' ? 2 : 1); round++) {
     const recoveryInstruction = round === 0 ? instruction : '提高目录复核输出预算，保留原 S4 的目录和已完成研究，只继续审核与最终检查。'
     if (round === 1) result.adapter.outlineReview!.defaultMaxTokens = 8_192
-    result.parentScript.push(toolCall(round === 0 ? 'inspect-structure-recovery' : 'inspect-output-recovery', 'bid_stage_inspect', { view: 'recovery' }),
-      toolCall(round === 0 ? 'accept-structure-recovery' : 'accept-output-recovery', 'bid_recover_task', { target: 'run', instruction: recoveryInstruction }),
-      finalText('已接纳定向补修，等待实际修改及复核结果。'))
+    result.parentScript.push(...takeover ? [
+      toolCall('inspect-new-goal', 'bid_project_inspect', { query: { object: 'outline' } }),
+      toolCall('accept-new-goal', 'bid_run_task', { supersede: true, task: { goal: instruction, scope: { kind: 'project' },
+        steps: [{ description: '补修目录并重新复核', scope: { source: 'task' }, call: { capability: 'outline.refine', input: { feedback: instruction } } }] } }),
+    ] : [toolCall(round === 0 ? 'inspect-structure-recovery' : 'inspect-output-recovery', 'bid_stage_inspect', { view: 'recovery' }),
+      toolCall(round === 0 ? 'accept-structure-recovery' : 'accept-output-recovery', 'bid_recover_task', { target: 'run', instruction: recoveryInstruction })],
+    finalText('已接纳定向补修，等待实际修改及复核结果。'))
     const done = Promise.withResolvers<undefined>()
     const off = ctx.on('session/event', (session, event) => {
       if (session === result.agent.session && event.type === 'bid.user_confirmation.required' && event.data.stage === 'evidence_mapping') done.resolve(undefined)

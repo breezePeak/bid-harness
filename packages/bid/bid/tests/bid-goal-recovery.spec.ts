@@ -7,7 +7,7 @@ import { Context } from '@deepseek-ai/cordis'
 import SessionStore from '@deepseek-ai/dsh-session'
 import { BidWorkspace } from '../src/index.ts'
 import { safeRecoverableBidFailure, bidRunRecoveryEligibility, bidRecoveryInstructionRepeated, bidWritingPlanRecoveryEligibility,
-  isLegacyOutlineReviewBudgetFailure } from '../src/bid-recovery.ts'
+  isLegacyOutlineReviewBudgetFailure, bidEvidenceMappingTakeoverRun } from '../src/bid-recovery.ts'
 import { inspectBidStage } from '../src/stage-interaction.ts'
 import type { BidRunData, BidWorkDescriptor } from '../src/control-plane-contract.ts'
 import { BidStageExecutionError } from '../src/control-plane-contract.ts'
@@ -20,6 +20,45 @@ const work: BidWorkDescriptor = {
   kind: 'stage_execution', stage: 'outline_generation', workId: 's3-work',
   requestRef: 'requests/s3-work.json', requestSha256: '0'.repeat(64), inputFingerprint: '1'.repeat(64),
 }
+
+it.each(['PI_AI_ERROR', 'TRANSPORT', 'SERVER', 'TIMEOUT'])('S4 的 %s 开放新目标接管，但保留其他阻断和原预算', async (code) => {
+  const ctx = new Context()
+  cleanup.push(() => ctx.fiber.dispose())
+  await ctx.plugin(SessionStore)
+  const session = ctx.sessions.create()
+  const s4 = { ...work, stage: 'evidence_mapping' as const }
+  const message = 'An error occurred while processing your request. You can retry your request, or contact us through our help center at help.openai.com if the error persists.'
+  const error = new BidStageExecutionError([{ code: 'EVIDENCE_MAPPING_INFRASTRUCTURE_ERROR', message }])
+  error.cause = Object.assign(new Error(message), { code })
+  const current = safeRecoverableBidFailure(s4, error)
+  expect(current.recovery?.kind).toBe('retry')
+  const failure = code === 'PI_AI_ERROR' ? { ...current, recovery: { ...current.recovery!, kind: 'blocked' as const } } : current
+  const original = { ...run('old-server'), work: s4 }
+  const target = { kind: 'run' as const, runId: original.runId, workId: s4.workId }
+  session.append('bid.run.started', { run: original })
+  session.append('bid.run.notice', { runId: original.runId, stage: s4.stage, kind: 'interrupted', severity: 'error',
+    noticeId: `run:${original.runId}:failed`, supersedesTurn: null, message })
+  session.append('bid.task.changed', { state: { stage: s4.stage, status: 'failed', run: null, failure } })
+  if (code === 'PI_AI_ERROR') session.append('bid.recovery.round', { ownerSessionId: String(session.id), target,
+    fingerprint: 'old-server', round: 0, budget: 3, state: 'blocked', reason: message })
+  expect(bidRunRecoveryEligibility(session)).toMatchObject({ eligible: true, attempts: 0, target })
+  expect(await inspectBidStage(undefined, session, undefined, 'recovery'))
+    .toMatchObject({ eligible: true, available_actions: ['bid_recover_task', 'bid_run_task(supersede=true)'], failure: { cause: { code } } })
+  for (const code of ['AUTH', 'QUOTA', 'INVALID_REQUEST', 'INPUT_CHANGED', 'EACCES', 'PI_AI_ERROR']) {
+    session.append('bid.task.changed', { state: { stage: s4.stage, status: 'failed', run: null,
+      failure: safeRecoverableBidFailure(s4, error, [...failure.issues!, { code, message: '真实阻断' }]) } })
+    expect(bidRunRecoveryEligibility(session).eligible).toBe(false)
+    expect(bidEvidenceMappingTakeoverRun(session, session.events.findLast(event => event.type === 'bid.task.changed')!.data.state)).toBeUndefined()
+  }
+  session.append('bid.task.changed', { state: { stage: s4.stage, status: 'failed', run: null, failure } })
+  session.append('bid.recovery.round', { ownerSessionId: String(session.id), target,
+    fingerprint: 'old-server', round: 0, budget: 3, state: 'blocked', reason: 'BID_RECOVERY_DISPATCH_BUDGET_EXHAUSTED' })
+  expect(bidRunRecoveryEligibility(session).eligible).toBe(false)
+  session.append('bid.recovery.round', { ownerSessionId: String(session.id), target,
+    fingerprint: 'old-server', round: 3, budget: 3, state: 'blocked', reason: message })
+  expect(bidRunRecoveryEligibility(session).eligible).toBe(false)
+  expect(bidEvidenceMappingTakeoverRun(session, { stage: s4.stage, status: 'failed', run: null, failure })).toMatchObject({ work: s4 })
+})
 
 it('旧 S4 本地预算 blocked 重算资格但保留有限恢复历史和其他故障边界', async () => {
   const ctx = new Context()
@@ -56,13 +95,14 @@ it('旧 S4 本地预算 blocked 重算资格但保留有限恢复历史和其他
   expect(bidRunRecoveryEligibility(session).eligible).toBe(false)
 })
 
-it('已接纳旧预算恢复后，新的输出超限沿用原 Work 剩余预算', async () => {
+it.each(['budget', 'server'])('已接纳旧 blocked 恢复后，新的输出超限沿用原 Work 剩余预算：%s', async (kind) => {
   const ctx = new Context()
   cleanup.push(() => ctx.fiber.dispose())
   await ctx.plugin(SessionStore)
   const session = ctx.sessions.create()
   const s4 = { ...work, stage: 'evidence_mapping' as const }
-  const reason = '目录审查对象超过输入预算：位置 0，估算 15496 token，预算 12000 token。'
+  const reason = kind === 'budget' ? '目录审查对象超过输入预算：位置 0，估算 15496 token，预算 12000 token。'
+    : 'An error occurred while processing your request. You can retry your request, or contact us through our help center at help.openai.com if the error persists.'
   const target = { kind: 'run' as const, runId: 'old-s4', workId: s4.workId }
   session.append('bid.recovery.round', { ownerSessionId: String(session.id), target,
     fingerprint: 'old', round: 0, budget: 3, state: 'blocked', reason })
@@ -79,7 +119,7 @@ it('已接纳旧预算恢复后，新的输出超限沿用原 Work 剩余预算'
   session.append('bid.task.changed', { state: { stage: s4.stage, status: 'failed', run: null, failure } })
   expect(bidRunRecoveryEligibility(session)).toMatchObject({ eligible: true, attempts: 1, target: { runId: current.runId } })
   expect(await inspectBidStage(undefined, session, undefined, 'recovery'))
-    .toMatchObject({ eligible: true, available_actions: ['bid_recover_task'] })
+    .toMatchObject({ eligible: true, available_actions: ['bid_recover_task', 'bid_run_task(supersede=true)'] })
   for (const code of ['AUTH', 'EACCES', 'INPUT_CHANGED', 'FILE_CORRUPT']) {
     session.append('bid.task.changed', { state: { stage: s4.stage, status: 'failed', run: null,
       failure: safeRecoverableBidFailure(s4, new BidStageExecutionError([{ code, message: '真实阻断' }])) } })

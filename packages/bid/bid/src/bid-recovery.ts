@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto'
 import type { BidRunData, BidRunProgress, BidTaskFailure, BidTaskState, BidWorkDescriptor, StageValidationIssue } from './control-plane-contract.ts'
 import { BidStageExecutionError } from './control-plane-contract.ts'
 import type { Session } from '@deepseek-ai/dsh-session'
+import { isRetryableServerError } from '@deepseek-ai/dsh-llm'
 import { BID_INITIAL_TASK_STATE, reduceBidTaskState } from './runtime-state.ts'
 import { DEFAULT_MODEL_STAGE_REPAIR_ATTEMPTS, type ModelStageExecutionOptions } from './model-stage-repair.ts'
 import { safeBidRunError, sanitizeBidErrorText } from './safe-error.ts'
@@ -74,13 +75,14 @@ export function bidCapabilityTakeoverRun(session: Session, task: BidTaskState): 
  * 选择可由新的直接用户授权补修的失败 S4 阶段；不重置原 Work 的恢复预算。
  * @param session 保存原 Run 及失败通知的公开会话。
  * @param task 当前项目状态。
- * @returns 与当前结构失败对应的阶段 Run；其他失败和用户停止不授予接管。
+ * @returns 与当前可修复或可重试故障对应的阶段 Run；其他阻断不授予接管。
  */
 export function bidEvidenceMappingTakeoverRun(session: Session, task: BidTaskState): BidRunData | undefined {
-  if (task.status !== 'failed' || task.stage !== 'evidence_mapping'
-    || !task.failure.issues?.some(issue => issue.code === 'OUTLINE_REFINEMENT_STRUCTURE_UNRESOLVED')) return
+  if (task.status !== 'failed' || task.stage !== 'evidence_mapping') return
   const run = bidRecoverableRun(session, task)
-  return run?.work.kind === 'stage_execution' ? run : undefined
+  if (run?.work.kind !== 'stage_execution') return
+  const recovery = classifyBidRecovery(run.work, task.failure)
+  return recovery?.kind === 'repair' || recovery?.kind === 'retry' ? run : undefined
 }
 
 const STAGES = new Set(['tender_analysis', 'outline_generation', 'evidence_mapping', 'chapter_writing'])
@@ -137,11 +139,16 @@ export function classifyBidRecovery(
     && (failure.cause.status === undefined || failure.cause.status === 429 || failure.cause.status >= 500)
   const retryCode = (code: string) => RETRY_CODE.test(code) || transientWebCause && code === 'WEB_PROVIDER_ERROR'
   const blockedCode = (code: string) => BLOCKED_CODE.test(code) && !retryCode(code)
-  const blockedIssue = failure.issues?.find(issue => blockedCode(issue.code))
+  const effectiveCode = (item: { code?: string | undefined; message: string }) => item.code === 'PI_AI_ERROR'
+    && isRetryableServerError(item.message) ? 'SERVER' : item.code
+  const blockedIssue = failure.issues?.find((issue) => {
+    const code = effectiveCode(issue)
+    return code !== undefined && blockedCode(code)
+  })
   const issue = blockedIssue ?? failure.issues?.[0]
   const unit = sanitizeBidErrorText(issue?.artifact ?? issue?.path ?? work.workId)
   const reason = sanitizeBidErrorText(issue?.message ?? failure.message)
-  const codes = [failure.code, failure.cause?.code, ...failure.issues?.map(item => item.code) ?? []]
+  const codes = [failure, ...failure.cause === undefined ? [] : [failure.cause], ...failure.issues ?? []].map(effectiveCode)
     .filter((value): value is string => value !== undefined)
   const kind = codes.some(blockedCode)
     || (codes.every(value => value === 'BID_EXECUTOR_ERROR') && PROVIDER_FAILURE.test(failure.message))
@@ -230,7 +237,12 @@ export function bidRunRecoveryEligibility(session: Session, budget?: number): {
     return { eligible: false, reason: '用户停止、Host 重启或等待输入由各自边界处理。', ...details }
   }
   const legacyBudget = run.error !== undefined && isLegacyOutlineReviewBudgetFailure(run.work, run.error)
-  if (run.error?.recovery === undefined || run.error.recovery.kind === 'blocked' && !legacyBudget) {
+  const legacyServer = run.error?.recovery?.kind === 'blocked'
+    && [run.error, ...run.error.cause === undefined ? [] : [run.error.cause], ...run.error.issues ?? []]
+      .some(item => item.code === 'PI_AI_ERROR' && isRetryableServerError(item.message))
+    && classifyBidRecovery(run.work, run.error)?.kind === 'retry'
+  const reclassified = legacyBudget || legacyServer
+  if (run.error?.recovery === undefined || run.error.recovery.kind === 'blocked' && !reclassified) {
     return { eligible: false, reason: run.error?.recovery?.reason ?? run.error?.message ?? '故障未被认定可自动恢复。', ...details }
   }
   const settled = session.events.findLast(event => event.type === 'bid.recovery.round' && event.data.target.kind === 'run'
@@ -240,16 +252,17 @@ export function bidRunRecoveryEligibility(session: Session, budget?: number): {
   if (attempts >= limit) return { eligible: false, reason: 'BID_RECOVERY_BUDGET_EXHAUSTED: 原 Work 的执行恢复预算已耗尽。', ...details }
   const settledRunId = settled?.type === 'bid.recovery.round' && settled.data.target.kind === 'run'
     ? settled.data.target.runId : undefined
-  const resumedLegacyBudget = settled?.type === 'bid.recovery.round' && settledRunId !== undefined
-    && run.work.kind === 'stage_execution' && run.work.stage === 'evidence_mapping'
-    && settledRunId !== run.runId && LEGACY_OUTLINE_REVIEW_BUDGET.test(settled.data.reason)
+  const resumedReclassified = settled?.type === 'bid.recovery.round' && settledRunId !== undefined
+    && settledRunId !== run.runId && (run.work.kind === 'stage_execution' && run.work.stage === 'evidence_mapping'
+      && LEGACY_OUTLINE_REVIEW_BUDGET.test(settled.data.reason) || isRetryableServerError(settled.data.reason))
     && history.some(event => event.target.kind === 'run' && event.target.runId === settledRunId)
   if (settled?.type === 'bid.recovery.round' && settled.data.state === 'blocked'
-    && !(settled.data.round < limit && (legacyBudget && settled.data.reason === run.error.recovery.reason || resumedLegacyBudget))) {
+    && !(settled.data.round < limit && (reclassified && settled.data.reason === run.error.recovery.reason || resumedReclassified))) {
     return { eligible: false, reason: settled.data.reason, ...details }
   }
   return { eligible: true, reason: legacyBudget
-    ? '原 S4 审查包可按当前模型预算重组；恢复时核对原输入和已完成检查点。' : run.error.recovery.reason, ...details }
+    ? '原 S4 审查包可按当前模型预算重组；恢复时核对原输入和已完成检查点。'
+    : legacyServer ? '原模型服务端处理失败可有限重试；恢复时核对原输入和已完成检查点。' : run.error.recovery.reason, ...details }
 }
 
 /**

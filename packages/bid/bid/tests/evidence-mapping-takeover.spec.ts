@@ -23,7 +23,7 @@ function call(name: string, args: object): StreamChunk[] {
     { type: 'finish', reason: { kind: 'tool-calls' } }]
 }
 
-async function failedCandidate() {
+async function failedCandidate(failureCode?: 'PI_AI_ERROR' | 'TRANSPORT') {
   const root = await mkdtemp(join(tmpdir(), 'dsh-s4-new-authorization-'))
   const baseConfig = fileURLToPath(new URL('../../../../examples/headless-agent/bid-stage-interaction.cordis.snapshot.yml', import.meta.url))
   const config = (await readFile(baseConfig, 'utf8')).replace("root: './.session-store'",
@@ -41,6 +41,14 @@ async function failedCandidate() {
     }) })
     const result = await runEvidenceMappingLoop(ctx, root, false, true, undefined, 'local', true)
     if (result.outcome.status !== 'failed') throw new Error(JSON.stringify(result.outcome))
+    if (failureCode !== undefined) {
+      const message = failureCode === 'TRANSPORT' ? 'Connection error.'
+        : 'An error occurred while processing your request. You can retry your request, or contact us through our help center at help.openai.com if the error persists.'
+      result.outcome = { ...result.outcome, failure: { code: 'BID_EXECUTOR_ERROR', message: '阶段执行结果未通过校验',
+        cause: { code: failureCode, message }, issues: [{ code: 'EVIDENCE_MAPPING_INFRASTRUCTURE_ERROR', message }],
+        recovery: { kind: failureCode === 'PI_AI_ERROR' ? 'blocked' : 'retry', unit: 'outline/quality-report.json', reason: message } } }
+      result.agent.session.append('bid.task.changed', { state: result.outcome })
+    }
     const saved = await checkpointBidProjectState(result.workspace, result.outcome)
     result.agent.session.append('bid.project.resumed', { state: result.outcome, revision: saved.revision })
     const run = bidRecoverableRun(result.agent.session, result.outcome)
@@ -63,8 +71,9 @@ const structureStep = { description: '补修核验和追溯责任', scope: { sou
   call: { capability: 'outline.refine', input: { feedback: instruction } } }
 
 describe('S4 新明确授权接管', () => {
-  it.each([false, true])('预算耗尽后真实工具另建 Work，取消后续跑=%s，只运行定向 Child', async (cancel) => {
-    const result = await failedCandidate()
+  it.each([{ cancel: false, failureCode: undefined }, { cancel: true, failureCode: undefined },
+    { cancel: false, failureCode: 'PI_AI_ERROR' }, { cancel: false, failureCode: 'TRANSPORT' }] as const)('预算耗尽后真实工具另建 Work：%j，只运行定向 Child', async ({ cancel, failureCode }) => {
+    const result = await failedCandidate(failureCode)
     const { ctx, agent, workspace, run } = result
     try {
       const before = await readFile(join(workspace.projectRoot, 'analysis/evidence-mapping-checkpoint.json'), 'utf8')

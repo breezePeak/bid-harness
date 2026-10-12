@@ -72,7 +72,9 @@ it.each(['web_search', 'web_fetch', 'url_failure'] as const)('S4 %s 通过源码
   expect(JSON.parse(result.stdout)).toMatchObject({ status: 'waiting_user' })
 }, LOADER_SMOKE_TEST_TIMEOUT_MS)
 
-it.each(['structure', 'legacy', 'legacy-output'])('S4 完整研究后 Main 恢复原 Work 再复核：%s', async (scenario) => {
+it.each(['structure', 'legacy', 'legacy-output', 'server', 'server-takeover', 'transport-takeover'])('S4 完整研究后 Main 恢复原 Work 再复核：%s', async (scenario) => {
+  const takeover = scenario === 'server-takeover' || scenario === 'transport-takeover'
+  const structure = scenario === 'structure' || takeover
   const fixtureDir = fileURLToPath(new URL(`./bid-evidence-recovery-snapshots/${scenario}/`, import.meta.url))
   const result = await runLoaderSmoke({
     label: 'S4 结构失败定向恢复', tempDirPrefix: 'dsh-s4-structure-recovery-',
@@ -87,13 +89,13 @@ it.each(['structure', 'legacy', 'legacy-output'])('S4 完整研究后 Main 恢�
       const logs = await Promise.all(paths.map(async path => readFile(join(store, path), 'utf8')))
       const main = logs.find(log => (JSON.parse(log.split('\n')[0]!) as SessionHeader).id === 's3-real-loop')
       const repair = logs.find(log => log.includes('repair-2-task'))
-      const reviewer = logs.find(log => log.includes(scenario === 'structure' ? 'review-actual-repair' : 'review-large-original')
-        && (scenario === 'structure' || log.includes('本轮复核共享职责索引的所有章节关系')))
+      const reviewer = logs.find(log => log.includes(structure ? 'review-actual-repair' : 'review-large-original')
+        && (structure || log.includes('本轮复核共享职责索引的所有章节关系')))
       const outputFailure = scenario === 'legacy-output' ? logs.find(log => log.includes('"kind":"max-tokens"')) : undefined
-      if (main === undefined || scenario === 'structure' && repair === undefined || reviewer === undefined) {
+      if (main === undefined || structure && repair === undefined || reviewer === undefined) {
         throw new Error('缺少 Main 恢复及后续复核日志')
       }
-      expect(main).toContain('bid_recover_task')
+      expect(main).toContain(takeover ? 'bid_run_task' : 'bid_recover_task')
       expect(main).toContain('bid.recovery.requested')
       expect(main).not.toContain('INVALID_TOOL_OUTPUT')
       if (scenario === 'structure') expect(main).toContain('\\"continuation\\":null')
@@ -101,16 +103,21 @@ it.each(['structure', 'legacy', 'legacy-output'])('S4 完整研究后 Main 恢�
       const runs = mainEvents.filter(event => event.type === 'bid.run.started')
       expect(runs).toHaveLength(scenario === 'legacy-output' ? 3 : 2)
       for (let index = 1; index < runs.length; index++) {
-        expect(runs[index]!.data.run.work.workId).toBe(runs[0]!.data.run.work.workId)
-        expect(runs[index]!.data.run.resumeOf?.runId).toBe(runs[index - 1]!.data.run.runId)
+        if (takeover) {
+          expect(runs[index]!.data.run.work.workId).not.toBe(runs[0]!.data.run.work.workId)
+          expect(runs[index]!.data.run.resumeOf).toBeUndefined()
+        } else {
+          expect(runs[index]!.data.run.work.workId).toBe(runs[0]!.data.run.work.workId)
+          expect(runs[index]!.data.run.resumeOf?.runId).toBe(runs[index - 1]!.data.run.runId)
+        }
       }
-      if (scenario === 'structure') {
+      if (structure) {
         const instruction = '保留已研究资料，明确授权岗位核验与审计岗位追溯责任，只补修失败章节后重新复核。'
         expect(repair).toContain(instruction)
         expect(reviewer).toContain(instruction)
         expect(reviewer).toContain('由授权岗位核验权限生效，审计岗位对照操作记录完成追溯并保存核验结果。')
       } else {
-        expect(main).toContain('CONTEXT_WINDOW_EXCEEDED')
+        expect(main).toContain(scenario === 'server' ? 'PI_AI_ERROR' : 'CONTEXT_WINDOW_EXCEEDED')
         expect(main).toContain('\\"research_completed\\":1')
         expect(main).toContain('bid.user_confirmation.required')
         expect(logs.filter(log => log.includes('Mapping Task：{\\"task_id\\":\\"MAP-INIT-'))).toHaveLength(1)
@@ -145,7 +152,7 @@ it.each(['structure', 'legacy', 'legacy-output'])('S4 完整研究后 Main 恢�
       }
       expect(checkpoint.tasks.filter(task => task.task_id.startsWith('MAP-INIT-'))).toHaveLength(1)
       const repairs = checkpoint.tasks.filter(task => task.task_id.startsWith('MAP-REPAIR-'))
-      expect(repairs).toHaveLength(scenario === 'structure' ? 2 : 0)
+      expect(repairs).toHaveLength(structure ? 2 : 0)
       expect(new Set(repairs.map(task => task.task_id)).size).toBe(repairs.length)
       expect(repairs.every(task => task.completed)).toBe(true)
       const headers = logs.map(log => JSON.parse(log.split('\n')[0]!) as SessionHeader)

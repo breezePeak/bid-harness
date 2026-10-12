@@ -426,6 +426,19 @@ describe.skipIf(!process.env.DEEPSEEK_API_KEY && !process.env.DSH_BID_EVAL_PROVI
         { provider, model: process.env.DSH_BID_EVAL_MODEL ?? 'deepseek-v4-flash', maxTokens: 32_768 }, { cwd: root })
       const run = createTestBidRunContext({ signal: AbortSignal.timeout(540_000) })
       const review = await reviewRefinedOutline(agent, workspace, inputs, [], 0, run.signal, run.commits)
+      const logs = (await readdir(join(root, '.session-store'), { recursive: true })).filter(path => path.endsWith('.jsonl'))
+      const prompts = (await Promise.all(logs.map(path => readFile(join(root, '.session-store', path), 'utf8'))))
+        .flatMap(log => log.trimEnd().split('\n').slice(1).map(line => JSON.parse(line) as SessionEvent))
+        .filter(event => event.type === 'user/message').flatMap(event => event.data.content)
+        .flatMap(block => block.type === 'text' && block.text.includes('当前阶段：evidence_mapping / Outline Review') ? [block.text] : [])
+      expect(prompts.length).toBeGreaterThan(0)
+      for (const prompt of prompts) {
+        const line = prompt.split('\n').find(text => text.startsWith('当前完整目录树：'))!
+        expect(JSON.parse(line.slice('当前完整目录树：'.length))).toEqual(outline.sections.map((section, position) => ({
+          position, parent_position: outline.sections.findIndex(item => item.id === section.parent_id),
+          order: section.order, title: section.title, writable: section.writable,
+        })))
+      }
       expect(requests.length).toBeGreaterThan(0)
       for (const request of requests) {
         if (request.type === 'request/header') expect(request.data.header.config.maxTokens).toBe(32_768)

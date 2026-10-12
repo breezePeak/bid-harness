@@ -28,11 +28,19 @@ interface OutlineReviewEvidencePart {
 export interface OutlineReviewContext {
   instructions: string
   detailInstructions?: string
+  /** 全局用户目标仅交完整或跨章审核，局部详细片不承担其他章节的目标核验。 */
+  userRequest?: string | undefined
+  /** 完整目录的节点位置、父子关系与同级顺序；局部审核和意见整理均保留。 */
+  structure: Array<{ position: number; parent_position: number; order: number; title: string; writable: boolean }>
   cards: Array<{ section_id: string; [key: string]: unknown }>
   index: Array<{ position: number; id: string; [key: string]: unknown }>
   coverage: unknown
   differences: unknown
   operations: unknown
+  /** 同章待整理意见，与其他依据一起计入预算并允许分段。 */
+  opinions?: readonly string[]
+  /** 历史意见随章节范围投影，不作为用户目标。 */
+  previousIssues?: readonly { section_id: string; reason: string; code?: string }[]
   sources?: readonly OutlineReviewSource[]
   projectSourceKeys?: readonly string[]
   evidenceParts?: OutlineReviewEvidencePart[]
@@ -67,6 +75,9 @@ export function bindOutlineReviewIssue(issue: { section_position: number; issue_
   if (issue.issue_kind === 'detail' && !request.cardPositions.includes(issue.section_position)) {
     throw new ToolArgsError([`section_position: 本片没有该章详细卡片，不可阻断其展开粒度；详细位置：${JSON.stringify(request.cardPositions)}。`])
   }
+  if (issue.issue_kind === 'user_request' && request.kind === 'sections') {
+    throw new ToolArgsError(['issue_kind: 全局用户目标由完整或跨章审核核验，局部详细片不能报告 user_request。'])
+  }
   return { section_id: section.id, reason: issue.reason }
 }
 
@@ -75,6 +86,36 @@ export class OutlineReviewContextTooLargeError extends Error {
   constructor(readonly position: number | undefined, readonly inputTokens: number, readonly budgetTokens: number) {
     super(`目录审查对象超过输入预算：位置 ${String(position)}，估算 ${String(inputTokens)} token，预算 ${String(budgetTokens)} token。`)
   }
+}
+
+function scopedReviewEvidence(input: OutlineReviewContext, cards: OutlineReviewContext['cards'],
+  index: OutlineReviewContext['index'], details = true) {
+  const record = (value: unknown): Record<string, unknown> | undefined =>
+    value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined
+  const ids = new Set(index.map(item => item.id))
+  const businessIds = new Set(cards.flatMap(card => ['requirements', 'scoring', 'response_points', 'compliance']
+    .flatMap(key => (card[key] as Array<{ id: string }> | undefined ?? []).map(item => item.id)))
+    .concat(index.flatMap(item => [...item.coverage_ids as string[] | undefined ?? [],
+      ...item.descendant_coverage_ids as string[] | undefined ?? [],
+      ...item.read_only_context_ids as string[] | undefined ?? []])))
+  const coverage = record(input.coverage)
+  const selectedCoverage = coverage === undefined ? input.coverage : Object.fromEntries(Object.entries(coverage)
+    .map(([key, value]) => [key, Array.isArray(value) ? value.filter((item) => {
+      const business = record(item)
+      return business === undefined || businessIds.has(String(business.id))
+    }).map((item: unknown) => {
+      const business = record(item)
+      return !details && business !== undefined ? { id: business.id } : item
+    }) : !details ? undefined : value]))
+  const related = (value: unknown) => {
+    const item = record(value)
+    return item === undefined || (typeof item.section_id === 'string' ? ids.has(item.section_id)
+      : Array.isArray(item.section_ids) ? item.section_ids.some(id => ids.has(String(id))) : true)
+  }
+  return { coverage: selectedCoverage,
+    differences: Array.isArray(input.differences) ? input.differences.filter(related) : input.differences,
+    operations: Array.isArray(input.operations) ? input.operations.filter(related) : input.operations,
+    previousIssues: input.previousIssues?.filter(issue => ids.has(issue.section_id)) ?? [], opinions: input.opinions ?? [] }
 }
 
 function renderOutlineReviewRequest(
@@ -87,18 +128,27 @@ function renderOutlineReviewRequest(
   const sourceKeys = new Set([...(input.projectSourceKeys ?? []), ...(kind === 'complete' ? [...cards, ...index] : cards.length === 0 ? index : cards)
     .flatMap(item => item.source_keys as string[] | undefined ?? [])])
   const sources = (input.sources ?? []).filter(source => sourceKeys.has(source.key))
+  const evidence = scopedReviewEvidence(input, cards, index)
   const prompt = [input.instructions,
+    ...(kind === 'sections' || input.userRequest === undefined ? [] : [
+      ...(input.evidenceParts === undefined ? [`本次用户修改目标：${input.userRequest}`] : []),
+      '用户明确要求增删、改名、拆并或调整目录层级时，核对实际节点及关系；业务内容要求按当前职责和覆盖核对。尚未实现的目录目标必须列为 blocking_issues。只核验本次提供依据的目标部分，其他部分由对应审核负责，不因本片没有详情而阻断。',
+    ]),
     ...(kind === 'cross_sections' ? [] : [input.detailInstructions ?? '']),
     ...(kind === 'cross_sections' ? ['本轮复核共享职责索引的所有章节关系，特别核对不同分片之间的职责冲突、重复、断裂和覆盖关系。详细叶子审查由独立请求完成。'] : []),
     ...(index.length < input.index.length || input.evidenceParts !== undefined
       ? ['本片职责索引是局部视图；未出现的章节或覆盖项不能判为全书缺失，只核对本片实际提供的职责和依据。其他章节及全书关系由其他请求复核，全部分片完成后由程序汇总。'] : []),
+    '当前完整目录树提供实际标题、父子关系和同级顺序，position 与本片职责索引一致，parent_position=-1 表示顶层。目录树只用于核对结构和定位，不授予其他章节的详细审核权限；本片未提供的职责、业务依据或原文由其他分片核对，不能作为本片的缺项。',
+    `当前完整目录树：${JSON.stringify(input.structure)}`,
     `本片详细卡片位置：${JSON.stringify(cardPositions)}；只有这些位置允许 issue_kind=detail。其他可见位置仅审查职责关系、覆盖和用户目标。`,
     `Structure Review Cards：${JSON.stringify(cards)}`,
     ...(input.sources === undefined ? [] : [`采购原文：${JSON.stringify(sources)}`]),
-    `全书覆盖依据：${JSON.stringify(input.coverage)}`,
+    `本片覆盖依据：${JSON.stringify(evidence.coverage)}`,
     `本片职责索引：${JSON.stringify(index)}`,
-    `S3→S4 结构 diff：${JSON.stringify(input.differences)}`,
-    `实际 Outline Operations：${JSON.stringify(input.operations)}`,
+    `S3→S4 结构 diff：${JSON.stringify(evidence.differences)}`,
+    `实际 Outline Operations：${JSON.stringify(evidence.operations)}`,
+    ...(evidence.opinions.length === 0 ? [] : [`待整理意见：${JSON.stringify(evidence.opinions)}`]),
+    ...(evidence.previousIssues.length === 0 ? [] : [`历史审核意见：${JSON.stringify(evidence.previousIssues)}`]),
     ...(input.evidenceParts === undefined ? [] : [
       '本片只核对以下字段和原文分段。path、来源和 start/end 由程序绑定；未在本片出现不能判为缺证。全部分段成功后程序才接纳完整审核，不宣称已读未提供的原文。',
       `本片依据分段：${JSON.stringify(input.evidenceParts)}`,
@@ -154,10 +204,9 @@ function buildWholeOutlineReviewRequests(
   }
   assertFits(render([], [], 'sections'))
   const requests: OutlineReviewRequest[] = []
-  const sharedIndexFits = render([], input.index, 'sections').estimatedInputTokens <= Math.floor(target / 2)
   let cardBatch: OutlineReviewContext['cards'] = []
   const sectionRequest = (cards: OutlineReviewContext['cards']) => render(cards,
-    sharedIndexFits ? input.index : input.index.filter(item => cards.some(card => card.section_id === item.id)), 'sections')
+    input.index.filter(item => cards.some(card => card.section_id === item.id)), 'sections')
   for (const card of input.cards) {
     const candidate = sectionRequest([...cardBatch, card])
     if (candidate.estimatedInputTokens > target && cardBatch.length > 0) {
@@ -171,7 +220,7 @@ function buildWholeOutlineReviewRequests(
   const fixed = render([], [], 'cross_sections').estimatedInputTokens
   const relationBudget = Math.min(budgetTokens, Math.max(target, fixed + Math.floor(target / 2)))
   const crossSections = render([], input.index, 'cross_sections')
-  if (crossSections.estimatedInputTokens <= relationBudget) {
+  if (crossSections.estimatedInputTokens <= budgetTokens) {
     requests.push(crossSections)
     return requests
   }
@@ -206,35 +255,15 @@ function buildPartitionedOutlineReviewRequests(input: OutlineReviewContext, budg
     value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined
   const scope = (cards: OutlineReviewContext['cards'], index: OutlineReviewContext['index'], kind: OutlineReviewRequest['kind'],
     details = kind !== 'cross_sections') => {
-    const ids = new Set(index.map(item => item.id))
     const sourceKeys = new Set(!details ? [] : [...(input.projectSourceKeys ?? []), ...(cards.length === 0 ? index : cards)
       .flatMap(item => item.source_keys as string[] | undefined ?? [])])
-    const businessIds = new Set(cards.flatMap(card => ['requirements', 'scoring', 'response_points', 'compliance']
-      .flatMap(key => (card[key] as Array<{ id: string }> | undefined ?? []).map(item => item.id)))
-      .concat(details ? index.flatMap(item => item.coverage_ids as string[] | undefined ?? []) : []))
-    const coverage = record(input.coverage)
-    const selectedCoverage = coverage === undefined ? input.coverage : Object.fromEntries(Object.entries(coverage)
-      .map(([key, value]) => [key, Array.isArray(value) ? value.filter((item) => {
-        const business = record(item)
-        return business === undefined || businessIds.has(String(business.id)) || !details
-      }).map((item: unknown) => {
-        const business = record(item)
-        return !details && business !== undefined ? { id: business.id } : item
-      })
-        : !details ? undefined : value]))
-    const related = (value: unknown) => {
-      const item = record(value)
-      return item === undefined || (typeof item.section_id === 'string' ? ids.has(item.section_id)
-        : Array.isArray(item.section_ids) ? item.section_ids.some(id => ids.has(String(id))) : true)
-    }
-    const payload = { cards, index, coverage: selectedCoverage,
-      differences: Array.isArray(input.differences) ? input.differences.filter(related) : input.differences,
-      operations: Array.isArray(input.operations) ? input.operations.filter(related) : input.operations }
+    const payload = { cards, index, ...scopedReviewEvidence(input, cards, index, details),
+      ...(kind === 'sections' || input.userRequest === undefined ? {} : { userRequest: input.userRequest }) }
     const compactIndex = index.map(({ position, id, parent_id, title, writable }) => ({ position, id, parent_id, title, writable }))
     const compactCards = cards.map(({ section_id, title }) => ({ section_id, title }))
     const render = (parts: OutlineReviewEvidencePart[]) => renderOutlineReviewRequest({ ...input,
       sources: [], coverage: { requirements: [], scoring: [], response_points: [], compliance: [] },
-      differences: [], operations: [], evidenceParts: parts,
+      differences: [], operations: [], previousIssues: [], opinions: [], evidenceParts: parts,
     }, compactCards, compactIndex, kind)
     const empty = render([])
     if (empty.estimatedInputTokens >= budget) {

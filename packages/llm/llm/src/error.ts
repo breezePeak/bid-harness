@@ -100,6 +100,15 @@ export function isQuotaExceededError(detail: string): boolean {
 }
 
 /**
+ * 识别丢失状态码但明确允许重试的服务端请求处理失败。
+ * @param detail 服务商或适配器保留的原始错误文本。
+ * @returns 是否包含服务端处理失败及允许重试的完整诊断。
+ */
+export function isRetryableServerError(detail: string): boolean {
+  return /\bAn error occurred while processing your request\.\s+You can retry your request\b/i.test(detail)
+}
+
+/**
  * Render a thrown value with its full `cause` chain and AggregateError
  * members, so transport wrappers like undici's `TypeError: fetch failed`
  * surface the underlying failure instead of masking it. Plain structured

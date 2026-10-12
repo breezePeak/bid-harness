@@ -182,6 +182,11 @@ it('corrects S4 tool arguments in one Child turn through the headless Loader', a
       if (rejectedRefinementLog === undefined || acceptedRefinementLog === undefined) throw new Error('缺少隔离目录复核及修复日志')
       expect(rejectedRefinementLog).toBe(acceptedRefinementLog)
       expect(rejectedRefinementLog).toContain('submit-refinement-incomplete')
+      expect(rejectedRefinementLog).toContain('submit-refinement-outside-scope')
+      const refinementEvents = rejectedRefinementLog.trimEnd().split('\n').slice(1).map(line => JSON.parse(line) as SessionEvent)
+      expect(refinementEvents.find(event => event.type === 'tool/result'
+        && event.data.message.source.callId === 'submit-refinement-outside-scope'))
+        .toMatchObject({ data: { error: { code: 'INVALID_ARGS' } } })
       expect(acceptedRefinementLog).toContain('submit-refinement-quality')
       expect(refinementLogs.every(log => !log.includes('tool/call') || log.includes('structured_output'))).toBe(true)
 
@@ -297,6 +302,16 @@ it.each(['review-budget', 'review-partitioned'])('S4 大章通过真实 Loader �
         }
         const line = review.prompt.split('\n').find(text => text.startsWith('Structure Review Cards：'))!
         const cards = JSON.parse(line.slice('Structure Review Cards：'.length)) as Array<{ section_id: string }>
+        const structureLine = review.prompt.split('\n').find(text => text.startsWith('当前完整目录树：'))!
+        const structure = JSON.parse(structureLine.slice('当前完整目录树：'.length)) as Array<{
+          position: number
+          parent_position: number
+          order: number
+          title: string
+          writable: boolean
+        }>
+        expect(structure).toEqual([{ position: 0, parent_position: -1, order: 1,
+          title: '访问控制与安全审计', writable: true }])
         cardIds.push(...cards.map(card => card.section_id))
         expect(review.events.some(event => event.type === 'turn/end' && event.data.reason.kind === 'completed')).toBe(true)
       }

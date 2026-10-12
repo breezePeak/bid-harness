@@ -14,6 +14,8 @@
 
 ### 公开 API
 
+`isRetryableServerError(detail)` 识别丢失状态码但明确允许重试的服务端处理失败文本，供适配器及旧失败诊断的恢复判断共用；它不执行请求或改变已保存的错误记录。
+
 - `ctx.llm.registerAdapter(providers: string[], adapter: LlmAdapter): AdapterRegistrationHandle` 为给定提供方路由注册一个适配器实例。注册要么全部成功，要么全部不生效，并且会随调用 fiber 一起 dispose（资源释放）。返回的句柄还提供 `replace(providers)`：候选路由集合会在注册状态发生任何变化前完成整体验证，因此与另一适配器发生冲突时，当前路由仍保持注册并继续提供服务。替换会在一次同步操作中完成，不会出现可观察的空档。`replace([])` 合法，表示保留注册但不持有任何路由；初始注册则不得为空。
 - `ctx.llm.listProviders(): LlmProviderInfo[]` 按注册顺序描述已注册提供方路由。
 - `ctx.llm.registerConfigurableProviders(entries: readonly LlmConfigurableProvider[]): DirectoryRegistrationHandle` 声明适配器插件可通过配置激活的提供方路由——无论已注册还是休眠——每个条目指明其所属 settings namespace，以及 profile 在该分节内的路径。要么全部成功，要么全部不生效（`INVALID_DIRECTORY`/`DUPLICATE_DIRECTORY`），并随调用 fiber dispose。该句柄还带 `replace(entries)`：候选集合会先被整体校验，因此其中若有条目已被另一个注册声明，当前集合原封不动；此处允许传空数组。声明集合随配置变化的插件必须使用 `replace`，而不是先 dispose 再重新注册——后者会在新集合被拒时让目录整个落空。

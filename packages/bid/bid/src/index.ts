@@ -1340,7 +1340,7 @@ function evidenceMappingTakeoverInstruction(task: BidCapabilityTask, message: st
 async function prepareEvidenceMappingTakeover(
   canonical: BidWorkspace, previous: BidRunData, task: BidCapabilityTask,
   authorization: CapabilityTaskRequest['authorization'], failedState: BidTaskState, instruction: string,
-): Promise<BidWorkDescriptor> {
+): Promise<{ work: BidWorkDescriptor; issues: StageValidationIssue[] }> {
   await readHostWork(canonical, previous.work)
   const existing = await readExistingBidWorkingTree(canonical, previous.work)
   const source = existing === null ? canonical : new BidWorkspace(canonical.root, {
@@ -1370,7 +1370,8 @@ async function prepareEvidenceMappingTakeover(
     task, authorization, failed_state: failedState, instruction,
   }))
   await prepareBidWorkingTree(canonical, work, { source: original })
-  return work
+  return { work, issues: blocking.map(issue => ({ code: 'OUTLINE_REFINEMENT_STRUCTURE_UNRESOLVED',
+    message: `${issue.section_id}：${issue.reason}` })) }
 }
 
 async function executeEvidenceMappingTakeoverCandidate(
@@ -5661,7 +5662,9 @@ export class BidHostRuntime extends TypertRemoteService {
       if (text === '') throw new Error('BID_CAPABILITY_USER_MESSAGE_REQUIRED')
       const selected = bidCapabilityTaskSchema.parse(task)
       const instruction = evidenceMappingTakeoverInstruction(selected, text)
-      const work = await prepareEvidenceMappingTakeover(operation.workspace, previous, selected, authorization, current, instruction)
+      const { work, issues } = await prepareEvidenceMappingTakeover(
+        operation.workspace, previous, selected, authorization, current, instruction,
+      )
       const execution = await this.executionAgent(operation, 'evidence_mapping')
       let run: BidRunContext
       try { run = await operation.runs.start(work) } catch (error) {
@@ -5679,7 +5682,7 @@ export class BidHostRuntime extends TypertRemoteService {
           unit, instruction, progressFingerprint: bidRecoveryFingerprint(work, current.failure, previous.progress),
         })
         operation.recovery = { workId: work.workId, ownerSessionId: String(session.id), requestSeq: acceptedRecovery.seq,
-          unit, instruction, issues: current.failure.issues ?? [] }
+          unit, instruction, issues }
         this.cancelRunDecisions(session)
         session.append('bid.run.notice', { noticeId: `run:${previous.runId}:superseded`, supersedesTurn: null,
           runId: previous.runId, stage: 'evidence_mapping', kind: 'stopped', severity: 'info',

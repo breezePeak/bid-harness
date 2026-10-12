@@ -387,6 +387,45 @@ it('全局目录复核按预算审完尾节与跨章职责，共享索引不在�
   expect(cards.map(card => card.section_id).sort()).toEqual(outline.sections.map(section => section.id).sort())
 })
 
+it('完整输入未变时复用已通过审核，章节或模型配置变化时重新核验', async () => {
+  const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-outline-review-reuse-')))
+  const material = await writeInputs(workspace, Array.from({ length: 64 }, (_, index) => `SEC-${String(index + 1)}`))
+  const read = async (path: string) => JSON.parse(await readFile(join(workspace.projectRoot, path), 'utf8')) as unknown
+  const inputs = {
+    project: parseTenderProjectArtifact(await read('analysis/project.json')),
+    requirements: parseTenderRequirementsArtifact(await read('analysis/requirements.json')),
+    scoring: parseTenderScoringArtifact(await read('analysis/scoring.json')),
+    responsePoints: parseScoringResponsePointCatalog(await read('analysis/scoring-response-points.json')),
+    compliance: parseTenderComplianceArtifact(await read('analysis/compliance.json')),
+    outline: parseOutlineArtifact(await read('outline/initial-confirmed-outline.json')), frameworks: [],
+  }
+  inputs.outline.sections.forEach((section) => { section.purpose += '方法和成果责任。'.repeat(80) })
+  const fixture = mappingFixture(workspace, material)
+  const run = (passes: Awaited<ReturnType<typeof reviewRefinedOutline>>['passes'] = []) => reviewRefinedOutline(
+    fixture.agent, workspace, inputs, [], 0, new AbortController().signal, createTestBidRunContext().commits,
+    undefined, undefined, passes)
+  const first = await run()
+  const originalCount = fixture.outlineReviewPrompts.length
+  expect(originalCount).toBeGreaterThan(2)
+  const restoredPasses = JSON.parse(JSON.stringify(first.passes)) as typeof first.passes
+  await run(restoredPasses)
+  expect(fixture.outlineReviewPrompts).toHaveLength(originalCount)
+  const resumed = mappingFixture(workspace, material)
+  await reviewRefinedOutline(resumed.agent, workspace, inputs, [], 0, new AbortController().signal,
+    createTestBidRunContext().commits, undefined, undefined, restoredPasses)
+  expect(resumed.outlineReviewPrompts).toHaveLength(0)
+  inputs.outline.sections[0]!.purpose += '补齐验收责任。'
+  const changed = await run(restoredPasses)
+  const fresh = fixture.outlineReviewPrompts.slice(originalCount)
+  expect(fresh.length).toBeGreaterThan(0)
+  expect(fresh.length).toBeLessThan(originalCount)
+  expect(fresh.every(prompt => prompt.includes('补齐验收责任。'))).toBe(true)
+  const afterChange = fixture.outlineReviewPrompts.length
+  fixture.agent.options.maxTokens = 2_049
+  await run(changed.passes)
+  expect(fixture.outlineReviewPrompts.length).toBeGreaterThan(afterChange)
+})
+
 it('目录复核把同章相反与重复意见交语义环节整理，并保留独立问题', async () => {
   const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-outline-opinions-')))
   const material = await writeInputs(workspace)
@@ -417,6 +456,9 @@ it('目录复核把同章相反与重复意见交语义环节整理，并保留�
   expect(fixture.outlineReviewPrompts[1]).toContain('相同成果应合并表达。')
   expect(fixture.outlineReviewPrompts[1]).toContain('独立问题分别保留')
   expect(fixture.outlineReviewPrompts[1]).toContain('"id":"SEC-2"')
+  expect(fixture.subagents.start.mock.calls[1]?.[1].outputSchema).toMatchObject({
+    properties: { blocking_issues: { items: { properties: { section_position: { enum: [0] } } } } },
+  })
   expect(result.blockingIssues.map(issue => issue.reason)).toEqual([
     '两个方法保持独立论证，共同成果统一交接。', '补充验收依据。',
   ])
@@ -464,8 +506,19 @@ it('单章粒度意见整理保留详细卡片且不被无关章节索引阻断'
   const consolidation = fixture.outlineReviewPrompts.filter(prompt => prompt.includes('只整理 section_position='))
   expect(consolidation).toHaveLength(1)
   expect(consolidation[0]).toContain('"section_id":"SEC-1"')
+  expect(fixture.outlineReviewPrompts.every(prompt => !prompt.includes('s3_responsibility'))).toBe(true)
+  expect(consolidation[0]).toContain('待整理意见：["应拆分两个独立方法。","相同成果应合并表达。"]')
+  const operationsLine = consolidation[0]!.split('\n').find(line => line.startsWith('实际 Outline Operations：'))!
+  expect(JSON.parse(operationsLine.slice('实际 Outline Operations：'.length))).toEqual([])
   const indexLine = consolidation[0]!.split('\n').find(line => line.startsWith('本片职责索引：'))!
   expect(JSON.parse(indexLine.slice('本片职责索引：'.length))).toEqual([expect.objectContaining({ id: 'SEC-1' })])
+  for (const prompt of fixture.outlineReviewPrompts) {
+    const structureLine = prompt.split('\n').find(line => line.startsWith('当前完整目录树：'))!
+    expect(JSON.parse(structureLine.slice('当前完整目录树：'.length))).toEqual(outline.sections.map((section, position) => ({
+      position, parent_position: outline.sections.findIndex(item => item.id === section.parent_id),
+      order: section.order, title: section.title, writable: section.writable,
+    })))
+  }
   expect(fixture.outlineReviewPrompts.every(prompt => estimateMessage(createUserMessage({
     content: [{ type: 'text', text: prompt }], source: { kind: 'user' },
   })) <= 12_000)).toBe(true)
@@ -1221,11 +1274,11 @@ function mappingFixture(
   const childRequests = new Map<string, ContinuableStartSpec>()
   const subagents = {
     getProvider: vi.fn(() => spawnProvider),
-    start: vi.fn(async (_provider: string, request: { prompt: Array<{ type: 'text'; text: string }> }) => {
+    start: vi.fn(async (_provider: string, request: { prompt: Array<{ type: 'text'; text: string }>; outputSchema?: unknown }) => {
       outlineReviewRequests.push(request)
       const prompt = request.prompt.map(item => item.text).join('\n')
       outlineReviewPrompts.push(prompt)
-      const marker = '全书覆盖依据：'
+      const marker = '本片覆盖依据：'
       const candidate = JSON.parse(prompt.slice(prompt.indexOf(marker) + marker.length).split('\n')[0]!) as {
         requirements: Array<{ id: string }>
         scoring: Array<{ id: string }>
@@ -1513,7 +1566,15 @@ it('已完成研究和一代结构修复后，已接纳恢复先修改问题章�
   })
   resumed.serializeQuality.mockImplementation((text) => {
     expect(resumed.outlineReviewPrompts.at(-1)).toContain('按本次恢复补齐成果验证责任。')
-    expect(resumed.outlineReviewPrompts.at(-1)).toContain(instruction)
+    const reviewPrompt = resumed.outlineReviewPrompts.at(-1)!
+    expect(reviewPrompt.split('\n').find(line => line.startsWith('本次用户修改目标：')))
+      .toBe(`本次用户修改目标：${instruction}`)
+    const history = reviewPrompt.split('\n').find(line => line.startsWith('历史审核意见：'))!
+    expect(JSON.parse(history.slice('历史审核意见：'.length))).toEqual([
+      { code: 'OUTLINE_STRUCTURE_REVIEW', section_id: 'SEC-1', reason: '需要明确成果验证责任。' },
+    ])
+    expect(reviewPrompt).toContain('不是用户要求')
+    expect(reviewPrompt).not.toContain('待关闭目录问题：')
     return JSON.stringify({ ...JSON.parse(text) as object,
       blocking_issues: [{ section_id: 'SEC-1', reason: '还需要核对验证成果的接收责任。' }],
     })
@@ -1888,6 +1949,17 @@ describe('evidence-mapping Agent executor', () => {
     fixture.starts.filter(item => item !== start).forEach((item) => { item.resolve() })
     await execution
     expect(fixture.subagents.followup).not.toHaveBeenCalled()
+    const reviewPrompt = fixture.outlineReviewPrompts[0]!
+    expect(reviewPrompt).toContain('技术偏离表的 coverage_ids 可为空')
+    const cards = JSON.parse(reviewPrompt.split('\n').find(line => line.startsWith('Structure Review Cards：'))!
+      .slice('Structure Review Cards：'.length)) as Array<{ section_id: string; requirements: Array<{ id: string }> }>
+    expect(cards.find(card => card.section_id === TECHNICAL_DEVIATION_SECTION_ID)?.requirements.map(item => item.id))
+      .toEqual(['R-1', 'R-2'])
+    const index = JSON.parse(reviewPrompt.split('\n').find(line => line.startsWith('本片职责索引：'))!
+      .slice('本片职责索引：'.length)) as Array<Record<string, unknown>>
+    expect(index.find(item => item.id === TECHNICAL_DEVIATION_SECTION_ID)).toMatchObject({
+      coverage_ids: [], read_only_context_ids: ['R-1', 'R-2'],
+    })
   })
 
   it('真实接受入口隔离材料与任务，并按当前版本复核任务、每条用途及受影响祖先总述', async () => {
@@ -3463,7 +3535,8 @@ describe('evidence-mapping Agent executor', () => {
     expect(result.result.target_section_ids).toHaveLength(3)
     expect(fixture.starts[1]!.request.label).toContain('新增核验')
     expect(fixture.outlineReviewPrompts[0]).toContain(`本次用户修改目标：${call.input.reason}`)
-    expect(fixture.outlineReviewPrompts[0]).toContain('子任务无权修改不代表目标已经满足')
+    expect(fixture.outlineReviewPrompts[0]).toContain('尚未实现的目录目标必须列为 blocking_issues')
+    expect(fixture.outlineReviewPrompts[0]).toContain('目录父子关系表达层级，不表达业务流转')
   })
 
   it('局部补资料保持当前目录不变，只返回受影响章节及真实文件', async () => {
@@ -3812,6 +3885,10 @@ describe('evidence-mapping Agent executor', () => {
   it('Host 为每个可写叶子生成独立任务，并完整注入当前 Section 与全局目录索引', async () => {
     const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-evidence-executor-')))
     const material = await writeInputs(workspace)
+    const outlinePath = join(workspace.projectRoot, 'outline/initial-confirmed-outline.json')
+    const outline = parseOutlineArtifact(JSON.parse(await readFile(outlinePath, 'utf8')))
+    outline.sections[1]!.scoring_ids.push(...outline.sections[0]!.scoring_ids)
+    await writeFile(outlinePath, JSON.stringify(outline))
     const fixture = mappingFixture(workspace, material)
     const recoveryRun = createTestBidRunContext()
     const execution = executeEvidenceMapping(fixture.agent, workspace, buildBidStageTask('evidence_mapping'), {
@@ -3842,6 +3919,7 @@ describe('evidence-mapping Agent executor', () => {
     expect(initialPrompt).toContain('current_section_scope：[{"id":"SEC-1"')
     expect(initialPrompt).toContain('current_section_baseline：[{"id":"SEC-1"')
     expect(initialPrompt).toContain('scoped_diffs：')
+    expect(initialPrompt).not.toContain('"task_operations":')
     expect(initialPrompt).toContain('scoped_candidate_refs：')
     expect(initialPrompt).not.toContain('S3 已确认任务：')
     expect(initialPrompt).not.toContain('当前完整目录与全书章节职责：')
@@ -4662,6 +4740,54 @@ describe('evidence-mapping Agent executor', () => {
     expect(result.evidence).toEqual(JSON.parse(evidence))
   })
 
+  it('目录补修可补齐所属评分项的响应点，真实工具仍拒绝其他评分项', async () => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-repair-scoring-scope-')))
+    const material = await writeInputs(workspace)
+    const read = async (path: string) => JSON.parse(await readFile(join(workspace.projectRoot, path), 'utf8')) as unknown
+    const scoring = parseTenderScoringArtifact(await read('analysis/scoring.json'))
+    const catalog = createScoringResponsePointCatalog(scoring, { schema_version: 1, points: [
+      { scoring_id: 'S-1', order: 1, text: '响应点1' }, { scoring_id: 'S-2', order: 1, text: '响应点2' },
+      { scoring_id: 'S-1', order: 2, text: '补齐同一评分项的实施边界' },
+    ] })
+    await writeFile(join(workspace.projectRoot, 'analysis/scoring-response-points.json'), JSON.stringify(catalog))
+    const outline = parseOutlineArtifact(await read('outline/initial-confirmed-outline.json'))
+    const extra = catalog.points[2]!
+    outline.sections[1]!.scoring_ids.push(extra.scoring_id)
+    outline.sections[1]!.scoring_response_point_ids!.push(extra.id)
+    outline.sections[1]!.scoring_response_points.push({ scoring_id: extra.scoring_id, response_point: extra.text })
+    await writeFile(join(workspace.projectRoot, 'outline/initial-confirmed-outline.json'), JSON.stringify(outline))
+    const fixture = mappingFixture(workspace, material)
+    fixture.serializeQuality.mockImplementationOnce(text => JSON.stringify({ ...JSON.parse(text) as object,
+      blocking_issues: [{ section_id: 'SEC-1', reason: '本章需要承接同一评分项的实施边界。' }] }))
+    const running = executeEvidenceMapping(fixture.agent, workspace, buildBidStageTask('evidence_mapping'))
+    await vi.waitFor(() => { expect(fixture.starts).toHaveLength(2) })
+    fixture.starts.forEach((start) => { start.resolve() })
+    await vi.waitFor(() => { expect(fixture.starts).toHaveLength(3) })
+    const repair = fixture.starts[2]!
+    expect(promptText(repair.request.request)).toContain('"response_point_positions":[0,2]')
+    const research = await fixture.invokeSubmissionTool(repair.request.childId!, 'submit_section_research_assessment', branchResearchAssessment())
+    expect(research.isError, JSON.stringify(research)).toBe(false)
+    const update = { section_id: 'SEC-1', basis: { kind: 'section_responsibility', explanation: '补齐当前评分职责。', requirement_ids: [] },
+      coverage_override: { requirement_ids: ['R-1'], scoring_ids: ['S-1'], scoring_response_point_ids: [catalog.points[0]!.id, extra.id] } }
+    const accepted = await fixture.invokeSubmissionTool(repair.request.childId!, 'update_section_task', update)
+    expect(accepted.isError, JSON.stringify(accepted)).toBe(false)
+    const child = fixture.children.get(String(repair.request.childId))!
+    await expect(fixture.submissionTool(repair.request.childId!, 'update_section_task').execute({
+      section_position: 0, basis: { kind: 'section_responsibility', explanation: '补齐当前评分职责。', requirement_positions: [] },
+      coverage_override: { requirement_positions: [0], scoring_positions: [0], response_point_positions: [1] },
+    }, { agent: child, signal: new AbortController().signal } as ToolRunContext)).rejects.toThrow('Coverage Ownership')
+    fixture.serializeReply.mockImplementation((result) => {
+      const mapping = result.section_mappings.find(item => item.section_id === 'SEC-1')
+      if (mapping !== undefined) mapping.writing_brief.scoring_response_point_ids = [catalog.points[0]!.id, extra.id]
+      return JSON.stringify(result)
+    })
+    repair.resolve()
+    await running
+    const published = parseOutlineArtifact(await read('outline/outline.json'))
+    expect(published.sections.find(section => section.id === 'SEC-1')?.scoring_response_point_ids)
+      .toEqual([catalog.points[0]!.id, extra.id])
+  })
+
   it('目录复核的重叠问题合并到同一 Section 子树，新子叶入队且不重跑兄弟', async () => {
     const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-outline-review-findings-')))
     const material = await writeInputs(workspace)
@@ -4693,6 +4819,13 @@ describe('evidence-mapping Agent executor', () => {
     await vi.waitFor(() => { expect(fixture.starts).toHaveLength(3) })
     fixture.starts[2]!.resolve()
     await vi.waitFor(() => { expect(fixture.starts).toHaveLength(5) })
+    for (const start of fixture.starts.slice(3)) {
+      const prompt = promptText(start.request.request)
+      expect(prompt).not.toContain('"task_operations":')
+      const baseline = JSON.parse(prompt.split('\n').find(line => line.startsWith('current_section_baseline：'))!
+        .slice('current_section_baseline：'.length)) as Array<{ id: string }>
+      expect(baseline.map(section => section.id)).toEqual(['ROOT', 'SEC-1'])
+    }
     fixture.starts.slice(3).forEach((start) => { start.resolve() })
     await running
     expect(fixture.starts.map(start => promptText(start.request.request)).filter(prompt => prompt.includes('Mapping Task：{"task_id":"MAP-REPAIR-1-ROOT"'))).toHaveLength(1)
@@ -4701,6 +4834,13 @@ describe('evidence-mapping Agent executor', () => {
     expect(fixture.outlineReviewPrompts[0]).toContain('"research_findings":')
     expect(fixture.outlineReviewPrompts[0]).not.toContain('"material_usages":')
     expect(fixture.outlineReviewPrompts[0]).toContain('Structure Review Cards：')
+    const reviewIndex = JSON.parse(fixture.outlineReviewPrompts[0]!.split('\n')
+      .find(line => line.startsWith('本片职责索引：'))!.slice('本片职责索引：'.length)) as Array<Record<string, unknown>>
+    expect(reviewIndex.find(item => item.id === 'ROOT')).toMatchObject({
+      descendant_coverage_ids: ['R-1', 'S-1', 'RP-000001', 'R-2', 'S-2', 'RP-000002'],
+    })
+    expect(reviewIndex.find(item => item.id === 'ROOT')).not.toHaveProperty('coverage_ids')
+    expect(reviewIndex.find(item => item.id === 'ROOT')).not.toHaveProperty('must_answer')
     expect(fixture.outlineReviewPrompts[0]).toContain('S3→S4 结构 diff：')
     expect(fixture.outlineReviewPrompts[0]).toContain('实际 Outline Operations：')
     expect(fixture.starts.map(start => promptText(start.request.request)).find(prompt => prompt.includes('MAP-REPAIR-1-ROOT')))
@@ -4733,6 +4873,9 @@ describe('evidence-mapping Agent executor', () => {
     ['字符串建议', { issues: ['请确认章节边界。'] }],
     ['建议的问题代码', { issues: [{ code: 'MODEL_CODE', severity: 'advisory', message: '请确认章节边界。' }] }],
     ['阻断问题的问题代码', { blocking_issues: [{ code: 'MODEL_CODE', section_id: 'SEC-1', reason: '章节职责冲突。' }] }],
+    ['重复阻断问题', { blocking_issues: [
+      { section_id: 'SEC-1', reason: '章节职责冲突。' }, { section_id: 'SEC-1', reason: '章节职责冲突。' },
+    ] }],
   ])('目录复核拒绝%s，由程序填写问题类别', async (_name, invalid) => {
     const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-outline-advisory-')))
     const fixture = mappingFixture(workspace, await writeInputs(workspace))

@@ -824,6 +824,12 @@ describe('mapStopReason / mapUsage', () => {
     }))).toMatchObject({ kind: 'error', failure: { code: 'PI_AI_ERROR' } })
   })
 
+  it('将未附 HTTP 状态码的可重试服务端处理失败归为 SERVER', () => {
+    const errorMessage = 'An error occurred while processing your request. You can retry your request, or contact us through our help center at help.openai.com if the error persists.'
+    expect(mapStopReason(assistant({ stopReason: 'error', errorMessage })))
+      .toEqual({ kind: 'error', failure: { code: 'SERVER', message: errorMessage } })
+  })
+
   it.each([
     'other side closed',
     'HTTP2 request did not get a response',
