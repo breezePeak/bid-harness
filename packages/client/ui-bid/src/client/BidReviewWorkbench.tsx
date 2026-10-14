@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type {
   BidAddRevisionIssueRequest,
   BidDeleteRevisionIssueRequest,
+  BidImageId,
   BidRevisionComparisonView,
   BidRevisionQueueView,
   BidRevisionTaskStatus,
@@ -72,7 +73,7 @@ export interface BidReviewWorkbenchInjected {
   getWorkbench: () => Promise<BidReviewWorkbenchView>
   getChapter: (sectionId: string) => Promise<BidReviewChapterView>
   /** 读取当前项目正式图片；只能传 Host 发放的图片身份。 */
-  getImage?: (imageId: string) => Promise<{ base64: string; mimeType: 'image/png' }>
+  getImage?: (imageId: BidImageId) => Promise<{ base64: string; mimeType: 'image/png' }>
   getRevisionComparison?: (issueId: string) => Promise<BidRevisionComparisonView>
   openWordExport?: () => Promise<void>
   /** Read the current revision issue queue from the Host. */

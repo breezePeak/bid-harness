@@ -232,6 +232,7 @@ import type {
   BidTenderAnalysisConfirmationResult,
   BidReviewWorkbenchView,
   BidReviewChapterView,
+  BidImageId,
   BidReviewIssueView,
   BidReviewMaterialView,
   BidRevisionTaskStatus,
@@ -7475,7 +7476,7 @@ export class BidHostRuntime extends TypertRemoteService {
    * @returns 经过身份与摘要核验的 PNG 字节编码。
    */
   @Remote('getReviewImage')
-  async getReviewImage(session: Session, imageId: string): Promise<{ base64: string; mimeType: 'image/png' }> {
+  async getReviewImage(session: Session, imageId: BidImageId): Promise<{ base64: string; mimeType: 'image/png' }> {
     const workspace = this.requireReviewWorkspace(session)
     const { outline } = await confirmedOutline(workspace)
     const locations = await readChapterLocations(workspace)

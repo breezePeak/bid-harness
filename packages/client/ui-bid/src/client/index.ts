@@ -7,7 +7,7 @@
  */
 import type { ClientContext, SessionId } from '@deepseek-ai/dsh-client-runtime/client'
 import type { ConnectionHandle } from '@deepseek-ai/dsh-api-remotes/client'
-import type { BidCapabilityPlanView } from '@deepseek-ai/dsh-bid/control-plane'
+import type { BidCapabilityPlanView, BidImageId } from '@deepseek-ai/dsh-bid/control-plane'
 import { BID_BINARY_UPLOAD_PATH, BID_UPLOAD_FILES_HEADER, BID_UPLOAD_SESSION_HEADER, DOCX_TEMPLATE_NAME_HEADER, DOCX_TEMPLATE_REVISION_HEADER, DOCX_TEMPLATE_SIZE_HEADER, DOCX_TEMPLATE_UPLOAD_PATH, OUTLINE_CONFIRMATION_ISSUES, parseBidReviewWorkbenchView, type BidClientProjection, type BidDocumentRole, type BidEvidenceMappingProgress, type BidFileIntakeFileResult, type BidFileIntakeResult, type BidPageEstimate, type DocxFormatView, type DocxTemplateLibraryView, type DocxTemplateUploadResult, type OutlineConfirmationIssueCode, type OutlineConfirmationRepairAction, type OutlineDraftMutationRequest, type OutlineDraftView, type OutlineReviewContext, type StageValidationIssue, type TenderAnalysisConfirmationView, type TenderAnalysisEditOperation, type WritingEntryIntent } from '@deepseek-ai/dsh-bid/control-plane'
 // Type-only: pulls the generated Bid Remote API and ctx.remote merge through the Client assembly boundary.
 import type {} from '@deepseek-ai/dsh-api-remotes/client'
@@ -613,7 +613,7 @@ export function apply(ctx: ClientContext): void {
           if (!result.ok) throw actionFailure(result.error)
           return result.value as BidReviewChapterView
         },
-        getImage: async (imageId: string) => {
+        getImage: async (imageId: BidImageId) => {
           const result = await ctx.remote.bid.getReviewImage(sessionId, imageId)
           if (!result.ok) throw actionFailure(result.error)
           return result.value

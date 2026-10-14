@@ -207,7 +207,7 @@ async resumeCurrentRun( session: Session, suspendedRunId: string, expectedProjec
  * @param imageId Host 发放的正式图片身份。
  * @returns 经过身份与摘要核验的 PNG 字节编码。
  */
-@Remote('getReviewImage') async getReviewImage(session: Session, imageId: string): Promise<{ base64: string; mimeType: 'image/png' }>
+@Remote('getReviewImage') async getReviewImage(session: Session, imageId: BidImageId): Promise<{ base64: string; mimeType: 'image/png' }>
 
 /**
  * 读取当前审批意见队列；不持有项目锁，仅读取持久化文件。

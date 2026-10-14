@@ -662,7 +662,7 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         returns: '去重后的模型 ID。',
       },
       {
-        signature: '@Remote(\'getReviewImage\') async getReviewImage(session: Session, imageId: string): Promise<{ base64: string; mimeType: \'image/png\' }>',
+        signature: '@Remote(\'getReviewImage\') async getReviewImage(session: Session, imageId: BidImageId): Promise<{ base64: string; mimeType: \'image/png\' }>',
         description: '读取当前项目正式章节引用的图片；拒绝候选、其他项目及摘要不符的文件。',
         parameters: [{ name: 'session', description: '已授权的 Bid 项目会话。' }, { name: 'imageId', description: 'Host 发放的正式图片身份。' }],
         returns: '经过身份与摘要核验的 PNG 字节编码。',
@@ -3518,6 +3518,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export interface BidImageGenerationView {\n    baseURL: string;\n    effectiveBaseURL: string;\n    model: string;\n    credentialConfigured: boolean;\n    enabled: boolean;\n    error?: string;\n}',
   },
   {
+    name: 'BidImageId',
+    declaration: 'export type BidImageId = Branded<\'BidImageId\'>;',
+  },
+  {
     name: 'BidImageProvider',
     declaration: 'export interface BidImageProvider {\n    resolve(): BidImageConnectionSpec | undefined;\n    view(): Promise<BidImageGenerationView>;\n    discoverModels(signal: AbortSignal): Promise<string[]>;\n    generate(request: BidImageGenerationRequest, signal: AbortSignal): Promise<BidGeneratedImage>;\n}',
   },
@@ -3563,7 +3567,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'BidReviewImageView',
-    declaration: 'export interface BidReviewImageView {\n    readonly id: string;\n    readonly title: string;\n    readonly path: string;\n    readonly sha256: string;\n    readonly width: number;\n    readonly height: number;\n}',
+    declaration: 'export interface BidReviewImageView {\n    readonly id: BidImageId;\n    readonly title: string;\n    readonly path: string;\n    readonly sha256: string;\n    readonly width: number;\n    readonly height: number;\n}',
   },
   {
     name: 'BidReviewIssueView',

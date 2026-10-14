@@ -14,6 +14,7 @@ export type { DocxFormatSuggestion, DocxFormatRequest, DocxFormatView, DocxForma
 
 /** Browser-safe Bid control-plane constants and types. */
 export {
+  BidImageId,
   BID_CLIENT_ACTIONS,
   BID_BINARY_UPLOAD_PATH,
   BID_RUNTIME_PROJECTION_KEY,

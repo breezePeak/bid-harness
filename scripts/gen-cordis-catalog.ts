@@ -625,6 +625,7 @@ export const TYPE_LINK_EXEMPTIONS: Readonly<Record<string, string>> = {
   BidOutlineRegenerationResult: 'Bid control-plane contract is owned by packages/bid/bid/README.md',
   BidReviewChapterView: 'Bid control-plane contract is owned by packages/bid/bid/README.md',
   BidImageGenerationView: '作图配置投影归属 packages/bid/bid/README.zh.md 的 S5 按需配图说明。',
+  BidImageId: '图片身份契约归属 packages/bid/bid/README.zh.md 的 S5 按需配图说明。',
   BidReviewWorkbenchView: 'Bid control-plane contract is owned by packages/bid/bid/README.md',
   BidRevisionComparisonResult: 'Bid control-plane contract is owned by packages/bid/bid/README.md',
   BidRevisionQueueResult: 'Bid control-plane contract is owned by packages/bid/bid/README.md',

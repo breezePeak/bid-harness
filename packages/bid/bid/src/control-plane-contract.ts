@@ -1,8 +1,18 @@
 import { z } from 'zod'
+import type { Branded } from '@deepseek-ai/dsh-brand'
 import { recordOnlySchemaVersion } from './schema-version.ts'
 import type { DocxTemplateId } from './docx-format-contract.ts'
 import type { FlowchartSpec } from './flowchart.ts'
 import type { BidResearchDiagnostics } from './research-diagnostics-contract.ts'
+
+/** 图片请求与内容摘要形成的跨边界不透明身份。 */
+export type BidImageId = Branded<'BidImageId'>
+/**
+ * 把程序已校验或生成的图片身份标记为图片引用。
+ * @param value IMG- 前缀及 SHA-256 十六进制摘要。
+ * @returns 保持原值的图片身份。
+ */
+export function BidImageId(value: string): BidImageId { return value as BidImageId }
 
 /** 作图设置的非敏感前端投影。 */
 export interface BidImageGenerationView {
@@ -730,7 +740,7 @@ export interface BidReviewMaterialView {
 
 /** 当前章节已发布图片的展示身份；路径仅用于匹配正文，不授予文件读取权限。 */
 export interface BidReviewImageView {
-  readonly id: string
+  readonly id: BidImageId
   readonly title: string
   readonly path: string
   readonly sha256: string

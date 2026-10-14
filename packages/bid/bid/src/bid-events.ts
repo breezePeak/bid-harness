@@ -21,6 +21,7 @@ import { createHash } from 'node:crypto'
 import { AttachmentId, type ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import { z } from 'zod'
 import { bidImageConnectionSpecSchema } from './bid-image-config.ts'
+import { BidImageId } from './control-plane-contract.ts'
 
 const imageHash = z.string().regex(/^[a-f0-9]{64}$/u)
 const requestAttachmentSchema = z.object({
@@ -42,7 +43,7 @@ export const bidImageRequestedSchema = z.object({
   size: z.enum(['1024x1024', '1536x1024', '1024x1536']),
   model: z.string().min(1).max(200), base_url: bidImageConnectionSpecSchema.shape.baseURL,
   reference: z.object({
-    id: z.string().regex(/^IMG-[a-f0-9]{64}$/u),
+    id: z.string().regex(/^IMG-[a-f0-9]{64}$/u).transform(BidImageId),
     path: z.string().regex(/^chapters\/images\/[a-f0-9]{64}\.png$/u),
     content_sha256: imageHash, request_sha256: imageHash,
     width: z.number().int().positive(), height: z.number().int().positive(),

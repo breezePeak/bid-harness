@@ -15,12 +15,13 @@ import { bidImageConnectionSpecSchema, type BidImageConnectionSpec, type BidImag
 import { DOCX_MAX_BODY_IMAGE_BYTES, docxImageDimensions } from './docx-image.ts'
 import { assertNoLinkedPath, within } from './workspace-path.ts'
 import { bidImageRequestedSchema } from './bid-events.ts'
+import { BidImageId } from './control-plane-contract.ts'
 
 const text = z.string().trim().min(1).max(8000)
 const sha256 = z.string().regex(/^[a-f0-9]{64}$/u)
 /** 项目内生成图片的完整身份；模型只选择位置。 */
 export const bidChapterImageSchema = z.object({
-  id: z.string().regex(/^IMG-[a-f0-9]{64}$/u), section_id: text,
+  id: z.string().regex(/^IMG-[a-f0-9]{64}$/u).transform(BidImageId), section_id: text,
   path: z.string().regex(/^chapters\/images\/[a-f0-9]{64}\.png$/u),
   content_sha256: sha256, request_sha256: sha256,
   width: z.number().int().positive(), height: z.number().int().positive(),
@@ -264,7 +265,7 @@ export async function readBidImageReference(workspace: BidWorkspace, image: z.in
  * @param imageId Host 发放的图片身份，不能传文件路径。
  * @returns Hash 与尺寸复验通过的 PNG。
  */
-export async function readBidImageBytes(workspace: BidWorkspace, imageId: string): Promise<Buffer> {
+export async function readBidImageBytes(workspace: BidWorkspace, imageId: BidImageId): Promise<Buffer> {
   const image = (await readBidImages(workspace)).find(image => image.id === imageId)
   if (image?.visual_status !== 'accepted') throw new Error('BID_IMAGE_NOT_ACCEPTED')
   return readBidImageReference(workspace, image)
@@ -354,7 +355,7 @@ async function waitForReference(promise: Promise<void>, signal: AbortSignal): Pr
  */
 export function createBidProjectImageSession(workspace: BidWorkspace, provider: BidImageProvider,
   style: BidImageStyle, commits: BidCommitScope): BidProjectImageSession {
-  let first: { sectionId: string; imageId?: string; done: PromiseWithResolvers<void> } | undefined
+  let first: { sectionId: string; imageId?: BidImageId; done: PromiseWithResolvers<void> } | undefined
   let publications = Promise.resolve()
   const retained = new Map<string, Map<string, number>>()
   const writeLedger = (sectionId: string, images: readonly BidChapterImage[], lease: Pick<BidCommitScope, 'writeJson'>) =>
@@ -508,7 +509,7 @@ type ImageToolValue = { image_position: number; title: string; visual_status: Bi
 export function attachChapterImageTools(agent: Agent, runtime: ChapterProtocol<unknown>, workspace: BidWorkspace,
   sectionId: string, images: BidChapterImage[], project: BidProjectImageSession,
   assertImageInput: () => Promise<void>): () => void {
-  const seen = new Map<string, number>()
+  const seen = new Map<BidImageId, number>()
   const requestSeq = (): number => agent.session.events.findLast(event => event.type === 'step/start')?.seq ?? 0
   const dispose = agent.ctx.on('tools/result', (exec, result) => {
     if (exec.agent !== agent || result.isError || !['generate_bid_image', 'view_bid_image'].includes(exec.name)) return

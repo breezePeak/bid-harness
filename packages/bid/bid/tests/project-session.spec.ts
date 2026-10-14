@@ -53,7 +53,7 @@ import type { BidRunContext } from '../src/run-coordinator.ts'
 import { writeRevisionQueue, type RevisionQueueArtifact } from '../src/chapter-revision-queue.ts'
 import { writeRevisionBatch, type RevisionBatchArtifact } from '../src/chapter-revision-batch.ts'
 import { buildRevisionComparisonPath, createRevisionComparisonArtifact } from '../src/chapter-revision-comparison.ts'
-import { BID_UPLOAD_FILES_HEADER, BID_UPLOAD_SESSION_HEADER, BidStageExecutionError } from '../src/control-plane-contract.ts'
+import { BID_UPLOAD_FILES_HEADER, BID_UPLOAD_SESSION_HEADER, BidStageExecutionError, BidImageId } from '../src/control-plane-contract.ts'
 import {
   DOCX_TEMPLATE_NAME_HEADER,
   DOCX_TEMPLATE_PARSER_VERSION,
@@ -400,10 +400,10 @@ describe('Workspace 项目与独立 Session', () => {
     const { image, png } = await seedReviewImage(workspace, agent)
     expect((await ctx.bid.getReviewChapter(agent.session, 'SEC-1')).images).toMatchObject([{ id: image.id, path: image.path }])
     expect(await ctx.bid.getReviewImage(agent.session, image.id)).toEqual({ base64: png.toString('base64'), mimeType: 'image/png' })
-    await expect(ctx.bid.getReviewImage(agent.session, '../manifest.json')).rejects.toThrow('BID_REVIEW_IMAGE_UNKNOWN')
+    await expect(ctx.bid.getReviewImage(agent.session, BidImageId('../manifest.json'))).rejects.toThrow('BID_REVIEW_IMAGE_UNKNOWN')
     const metadataPath = join(workspace.projectRoot, 'chapters/meta/0001.json')
     const metadata = parseChapterMetadata(JSON.parse(await readFile(metadataPath, 'utf8')))
-    const forgedId = `IMG-${'b'.repeat(64)}`
+    const forgedId = BidImageId(`IMG-${'b'.repeat(64)}`)
     await writeFile(metadataPath, JSON.stringify({ ...metadata, images: [{ ...image, id: forgedId }] }))
     await expect(ctx.bid.getReviewImage(agent.session, forgedId)).rejects.toThrow('BID_IMAGE_LEDGER_MISMATCH')
     await writeFile(metadataPath, JSON.stringify(metadata))
