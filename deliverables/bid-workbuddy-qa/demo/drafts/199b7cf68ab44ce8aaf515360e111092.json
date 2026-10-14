@@ -1,0 +1,16 @@
+{
+  "readiness": "needs_input",
+  "reason": "填写研究判断",
+  "searches": [],
+  "answers": [
+    {
+      "item_position": 1,
+      "mode": "gap",
+      "claim_type": "technical_fact",
+      "content": "填写具体缺口",
+      "boundary": "填写可支持的范围",
+      "citations": [],
+      "required_input": "填写所需输入"
+    }
+  ]
+}

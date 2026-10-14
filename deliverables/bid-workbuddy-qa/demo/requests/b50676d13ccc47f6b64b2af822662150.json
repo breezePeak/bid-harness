@@ -1,0 +1,330 @@
+{
+  "project_id": "8149a01d59914de68668ddca9c5851f7",
+  "revision": 7,
+  "operation": "review",
+  "section_id": "9c492cab88054dcf9335532bcaa9b51d",
+  "source_count": 1,
+  "objects": {
+    "sources": [
+      {
+        "position": 1,
+        "source_id": "e0d4ece0-b675-44d1-b01c-5603207b9e71",
+        "role": "tender",
+        "title": "tender.txt",
+        "locator": "tender.txt",
+        "original_path": "sources/e0d4ece0-b675-44d1-b01c-5603207b9e71/original.txt",
+        "original_sha256": "2fc15e8c4c051d78b744e829da0ebf7e8d4e0e1927fb37ad23443d661dcf0acb",
+        "text_path": "sources/e0d4ece0-b675-44d1-b01c-5603207b9e71/text.txt",
+        "text_sha256": "2fc15e8c4c051d78b744e829da0ebf7e8d4e0e1927fb37ad23443d661dcf0acb",
+        "line_count": 5,
+        "created_at": "2026-10-13T01:43:21.217796+00:00",
+        "extraction": "UTF-8 原文"
+      }
+    ],
+    "sections": [
+      {
+        "position": 1,
+        "id": "9dfdbbd1cdc049deb13e77a3c6a47a40",
+        "title": "故障处理",
+        "parent_id": null,
+        "level": 1,
+        "number": "1",
+        "purpose": "说明工单处理和关闭方法。",
+        "summary": "",
+        "must_answer": [
+          "如何处理故障并留痕？"
+        ],
+        "requirements": [
+          "9fb1cd6069f045358303caa86697e67c"
+        ],
+        "response_points": [
+          "679bc11bf6134238902ea69383d6ec1f"
+        ],
+        "compliance": [],
+        "writable": true,
+        "dependencies": []
+      },
+      {
+        "position": 2,
+        "id": "9c492cab88054dcf9335532bcaa9b51d",
+        "title": "交付检查",
+        "parent_id": null,
+        "level": 1,
+        "number": "2",
+        "purpose": "说明验收依据和成果。",
+        "summary": "",
+        "must_answer": [
+          "怎样检查交付成果？"
+        ],
+        "requirements": [
+          "c19499a5ef0e4117af94a710431ecf21"
+        ],
+        "response_points": [
+          "fc7a0a341cb24b849c7b9380b8e95662"
+        ],
+        "compliance": [],
+        "writable": true,
+        "dependencies": [
+          "9dfdbbd1cdc049deb13e77a3c6a47a40"
+        ]
+      }
+    ],
+    "requirements": [
+      {
+        "position": 1,
+        "id": "9fb1cd6069f045358303caa86697e67c",
+        "text": "建立故障分级、派单和关闭记录，说明岗位职责。",
+        "citations": [
+          {
+            "source_id": "e0d4ece0-b675-44d1-b01c-5603207b9e71",
+            "text_sha256": "2fc15e8c4c051d78b744e829da0ebf7e8d4e0e1927fb37ad23443d661dcf0acb",
+            "start_line": 2,
+            "end_line": 2,
+            "quote": "技术要求一：建立故障分级、派单和关闭记录，写明各岗位职责。",
+            "role": "tender",
+            "title": "tender.txt",
+            "locator": "tender.txt"
+          }
+        ],
+        "mandatory": true
+      },
+      {
+        "position": 2,
+        "id": "c19499a5ef0e4117af94a710431ecf21",
+        "text": "提供交付检查方法和记录表。",
+        "citations": [
+          {
+            "source_id": "e0d4ece0-b675-44d1-b01c-5603207b9e71",
+            "text_sha256": "2fc15e8c4c051d78b744e829da0ebf7e8d4e0e1927fb37ad23443d661dcf0acb",
+            "start_line": 3,
+            "end_line": 3,
+            "quote": "技术要求二：提供交付检查方法和记录表，不得以口头说明替代记录。",
+            "role": "tender",
+            "title": "tender.txt",
+            "locator": "tender.txt"
+          }
+        ],
+        "mandatory": true
+      }
+    ],
+    "scoring": [
+      {
+        "position": 1,
+        "id": "f65fdd281e294b9ebe1517494c4c9f32",
+        "text": "故障处理方案与验收安排共20分，根据方法、职责和记录的完整性评分。",
+        "citations": [
+          {
+            "source_id": "e0d4ece0-b675-44d1-b01c-5603207b9e71",
+            "text_sha256": "2fc15e8c4c051d78b744e829da0ebf7e8d4e0e1927fb37ad23443d661dcf0acb",
+            "start_line": 4,
+            "end_line": 4,
+            "quote": "技术评分：故障处理方案与验收安排共20分，根据方法、职责和记录的完整性评分。",
+            "role": "tender",
+            "title": "tender.txt",
+            "locator": "tender.txt"
+          }
+        ],
+        "points": 20,
+        "category": "technical"
+      }
+    ],
+    "compliance": [
+      {
+        "position": 1,
+        "id": "0229f77f3f9b418d849e25f8b1273eb1",
+        "text": "完成签章并按公告渠道递交。",
+        "citations": [
+          {
+            "source_id": "e0d4ece0-b675-44d1-b01c-5603207b9e71",
+            "text_sha256": "2fc15e8c4c051d78b744e829da0ebf7e8d4e0e1927fb37ad23443d661dcf0acb",
+            "start_line": 5,
+            "end_line": 5,
+            "quote": "形式要求：投标文件须由投标人完成签章后，按采购公告渠道递交。",
+            "role": "tender",
+            "title": "tender.txt",
+            "locator": "tender.txt"
+          }
+        ]
+      }
+    ],
+    "response_points": [
+      {
+        "position": 1,
+        "id": "679bc11bf6134238902ea69383d6ec1f",
+        "scoring_id": "f65fdd281e294b9ebe1517494c4c9f32",
+        "text": "故障处理方法与职责明确。"
+      },
+      {
+        "position": 2,
+        "id": "fc7a0a341cb24b849c7b9380b8e95662",
+        "scoring_id": "f65fdd281e294b9ebe1517494c4c9f32",
+        "text": "验收方法及记录完整。"
+      }
+    ],
+    "document_items": [
+      {
+        "position": 1,
+        "kind": "compliance",
+        "target_id": "0229f77f3f9b418d849e25f8b1273eb1",
+        "text": "完成签章并按公告渠道递交。",
+        "handling": "submission",
+        "plan": "交项目负责人完成签章并按公告递交。"
+      }
+    ],
+    "checklist": [
+      {
+        "position": 1,
+        "key": "task:19b9c0d5be69f1507d1748040f2ac0e31892ac8ae88fd4f07f163fb173448bbd",
+        "kind": "must_answer",
+        "text": "怎样检查交付成果？"
+      },
+      {
+        "position": 2,
+        "key": "c19499a5ef0e4117af94a710431ecf21",
+        "kind": "requirement",
+        "text": "提供交付检查方法和记录表。"
+      },
+      {
+        "position": 3,
+        "key": "fc7a0a341cb24b849c7b9380b8e95662",
+        "kind": "response_point",
+        "text": "验收方法及记录完整。"
+      }
+    ],
+    "research": {
+      "context": "e57818dd1d427ed83d68b1b2601bcfb717be425729c136ce3111e672bf48b898",
+      "readiness": "ready",
+      "reason": "演示采购仅要求方案设计，所提方法不声称企业已有能力；未开展联网研究。",
+      "searches": [],
+      "answers": [
+        {
+          "target_key": "task:19b9c0d5be69f1507d1748040f2ac0e31892ac8ae88fd4f07f163fb173448bbd",
+          "mode": "proposal",
+          "claim_type": "proposal",
+          "content": "拟以角色、处理步骤和记录要求形成实施办法。",
+          "boundary": "属于拟议方案，不证明企业现有能力。",
+          "citations": [
+            {
+              "source_id": "e0d4ece0-b675-44d1-b01c-5603207b9e71",
+              "text_sha256": "2fc15e8c4c051d78b744e829da0ebf7e8d4e0e1927fb37ad23443d661dcf0acb",
+              "start_line": 3,
+              "end_line": 3,
+              "quote": "技术要求二：提供交付检查方法和记录表，不得以口头说明替代记录。",
+              "role": "tender",
+              "title": "tender.txt",
+              "locator": "tender.txt"
+            }
+          ],
+          "required_input": null
+        },
+        {
+          "target_key": "c19499a5ef0e4117af94a710431ecf21",
+          "mode": "proposal",
+          "claim_type": "proposal",
+          "content": "拟以角色、处理步骤和记录要求形成实施办法。",
+          "boundary": "属于拟议方案，不证明企业现有能力。",
+          "citations": [
+            {
+              "source_id": "e0d4ece0-b675-44d1-b01c-5603207b9e71",
+              "text_sha256": "2fc15e8c4c051d78b744e829da0ebf7e8d4e0e1927fb37ad23443d661dcf0acb",
+              "start_line": 3,
+              "end_line": 3,
+              "quote": "技术要求二：提供交付检查方法和记录表，不得以口头说明替代记录。",
+              "role": "tender",
+              "title": "tender.txt",
+              "locator": "tender.txt"
+            }
+          ],
+          "required_input": null
+        },
+        {
+          "target_key": "fc7a0a341cb24b849c7b9380b8e95662",
+          "mode": "proposal",
+          "claim_type": "proposal",
+          "content": "拟以角色、处理步骤和记录要求形成实施办法。",
+          "boundary": "属于拟议方案，不证明企业现有能力。",
+          "citations": [
+            {
+              "source_id": "e0d4ece0-b675-44d1-b01c-5603207b9e71",
+              "text_sha256": "2fc15e8c4c051d78b744e829da0ebf7e8d4e0e1927fb37ad23443d661dcf0acb",
+              "start_line": 3,
+              "end_line": 3,
+              "quote": "技术要求二：提供交付检查方法和记录表，不得以口头说明替代记录。",
+              "role": "tender",
+              "title": "tender.txt",
+              "locator": "tender.txt"
+            }
+          ],
+          "required_input": null
+        }
+      ]
+    },
+    "body_file": "chapters/9c492cab88054dcf9335532bcaa9b51d/3d55412911f7b306c834e578931779f2bc91167c292df3605f2f24e155d43b9c.md",
+    "body_lines": [
+      {
+        "line": 1,
+        "text": "本方案拟在交付前逐项检查工单资料和处理记录，并由交付岗位整理成果清单供项目负责人核对。"
+      },
+      {
+        "line": 2,
+        "text": ""
+      },
+      {
+        "line": 3,
+        "text": "检查时核对记录是否包含故障现象、实际措施及关闭依据；缺失项登记责任岗位和补齐事项，复查通过后归档。"
+      },
+      {
+        "line": 4,
+        "text": ""
+      },
+      {
+        "line": 5,
+        "text": "表 交付检查记录字段"
+      },
+      {
+        "line": 6,
+        "text": ""
+      },
+      {
+        "line": 7,
+        "text": "| 检查对象 | 检查方法 | 留存成果 |"
+      },
+      {
+        "line": 8,
+        "text": "| --- | --- | --- |"
+      },
+      {
+        "line": 9,
+        "text": "| 故障工单 | 对照处理及关闭记录逐项核对 | 检查记录 |"
+      },
+      {
+        "line": 10,
+        "text": "| 缺失事项 | 核对补齐材料及复查结果 | 问题关闭清单 |"
+      }
+    ],
+    "claims": [
+      {
+        "position": 1,
+        "body_range": {
+          "start_line": 1,
+          "end_line": 1,
+          "quote": "本方案拟在交付前逐项检查工单资料和处理记录，并由交付岗位整理成果清单供项目负责人核对。"
+        },
+        "claim_type": "proposal",
+        "citations": [
+          {
+            "source_id": "e0d4ece0-b675-44d1-b01c-5603207b9e71",
+            "text_sha256": "2fc15e8c4c051d78b744e829da0ebf7e8d4e0e1927fb37ad23443d661dcf0acb",
+            "start_line": 3,
+            "end_line": 3,
+            "quote": "技术要求二：提供交付检查方法和记录表，不得以口头说明替代记录。",
+            "role": "tender",
+            "title": "tender.txt",
+            "locator": "tender.txt"
+          }
+        ]
+      }
+    ],
+    "previous_review": null
+  }
+}

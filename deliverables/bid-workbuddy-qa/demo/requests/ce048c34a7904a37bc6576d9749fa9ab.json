@@ -1,0 +1,104 @@
+{
+  "project_id": "8149a01d59914de68668ddca9c5851f7",
+  "revision": 1,
+  "operation": "outline",
+  "section_id": null,
+  "source_count": 1,
+  "objects": {
+    "sources": [
+      {
+        "position": 1,
+        "source_id": "e0d4ece0-b675-44d1-b01c-5603207b9e71",
+        "role": "tender",
+        "title": "tender.txt",
+        "locator": "tender.txt",
+        "original_path": "sources/e0d4ece0-b675-44d1-b01c-5603207b9e71/original.txt",
+        "original_sha256": "2fc15e8c4c051d78b744e829da0ebf7e8d4e0e1927fb37ad23443d661dcf0acb",
+        "text_path": "sources/e0d4ece0-b675-44d1-b01c-5603207b9e71/text.txt",
+        "text_sha256": "2fc15e8c4c051d78b744e829da0ebf7e8d4e0e1927fb37ad23443d661dcf0acb",
+        "line_count": 5,
+        "created_at": "2026-10-13T01:43:21.217796+00:00",
+        "extraction": "UTF-8 原文"
+      }
+    ],
+    "sections": [],
+    "requirements": [
+      {
+        "position": 1,
+        "id": "9fb1cd6069f045358303caa86697e67c",
+        "text": "建立故障分级、派单和关闭记录，说明岗位职责。",
+        "citations": [
+          {
+            "source_id": "e0d4ece0-b675-44d1-b01c-5603207b9e71",
+            "text_sha256": "2fc15e8c4c051d78b744e829da0ebf7e8d4e0e1927fb37ad23443d661dcf0acb",
+            "start_line": 2,
+            "end_line": 2,
+            "quote": "技术要求一：建立故障分级、派单和关闭记录，写明各岗位职责。",
+            "role": "tender",
+            "title": "tender.txt",
+            "locator": "tender.txt"
+          }
+        ],
+        "mandatory": true
+      },
+      {
+        "position": 2,
+        "id": "c19499a5ef0e4117af94a710431ecf21",
+        "text": "提供交付检查方法和记录表。",
+        "citations": [
+          {
+            "source_id": "e0d4ece0-b675-44d1-b01c-5603207b9e71",
+            "text_sha256": "2fc15e8c4c051d78b744e829da0ebf7e8d4e0e1927fb37ad23443d661dcf0acb",
+            "start_line": 3,
+            "end_line": 3,
+            "quote": "技术要求二：提供交付检查方法和记录表，不得以口头说明替代记录。",
+            "role": "tender",
+            "title": "tender.txt",
+            "locator": "tender.txt"
+          }
+        ],
+        "mandatory": true
+      }
+    ],
+    "scoring": [
+      {
+        "position": 1,
+        "id": "f65fdd281e294b9ebe1517494c4c9f32",
+        "text": "故障处理方案与验收安排共20分，根据方法、职责和记录的完整性评分。",
+        "citations": [
+          {
+            "source_id": "e0d4ece0-b675-44d1-b01c-5603207b9e71",
+            "text_sha256": "2fc15e8c4c051d78b744e829da0ebf7e8d4e0e1927fb37ad23443d661dcf0acb",
+            "start_line": 4,
+            "end_line": 4,
+            "quote": "技术评分：故障处理方案与验收安排共20分，根据方法、职责和记录的完整性评分。",
+            "role": "tender",
+            "title": "tender.txt",
+            "locator": "tender.txt"
+          }
+        ],
+        "points": 20,
+        "category": "technical"
+      }
+    ],
+    "compliance": [
+      {
+        "position": 1,
+        "id": "0229f77f3f9b418d849e25f8b1273eb1",
+        "text": "完成签章并按公告渠道递交。",
+        "citations": [
+          {
+            "source_id": "e0d4ece0-b675-44d1-b01c-5603207b9e71",
+            "text_sha256": "2fc15e8c4c051d78b744e829da0ebf7e8d4e0e1927fb37ad23443d661dcf0acb",
+            "start_line": 5,
+            "end_line": 5,
+            "quote": "形式要求：投标文件须由投标人完成签章后，按采购公告渠道递交。",
+            "role": "tender",
+            "title": "tender.txt",
+            "locator": "tender.txt"
+          }
+        ]
+      }
+    ]
+  }
+}

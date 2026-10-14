@@ -1,0 +1,26 @@
+{
+  "project_id": "8149a01d59914de68668ddca9c5851f7",
+  "revision": 0,
+  "operation": "analysis",
+  "section_id": null,
+  "source_count": 1,
+  "objects": {
+    "sources": [
+      {
+        "position": 1,
+        "source_id": "e0d4ece0-b675-44d1-b01c-5603207b9e71",
+        "role": "tender",
+        "title": "tender.txt",
+        "locator": "tender.txt",
+        "original_path": "sources/e0d4ece0-b675-44d1-b01c-5603207b9e71/original.txt",
+        "original_sha256": "2fc15e8c4c051d78b744e829da0ebf7e8d4e0e1927fb37ad23443d661dcf0acb",
+        "text_path": "sources/e0d4ece0-b675-44d1-b01c-5603207b9e71/text.txt",
+        "text_sha256": "2fc15e8c4c051d78b744e829da0ebf7e8d4e0e1927fb37ad23443d661dcf0acb",
+        "line_count": 5,
+        "created_at": "2026-10-13T01:43:21.217796+00:00",
+        "extraction": "UTF-8 原文"
+      }
+    ],
+    "sections": []
+  }
+}
