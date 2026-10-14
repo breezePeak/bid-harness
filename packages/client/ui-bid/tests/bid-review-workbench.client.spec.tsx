@@ -49,6 +49,52 @@ function props(patch: Partial<BidReviewWorkbenchProps> = {}): BidReviewWorkbench
 }
 
 describe('BidReviewWorkbench', () => {
+  it('仅按 Host 资产身份读取图片，保留行内图文和原文段落位置', async () => {
+    const source = '# 1.1 实施方案\n\n前文 ![部署示意](./chapters/images/%61pproved.png) 后文。\n\n![未知图片](chapters/images/unknown.png)\n\n![引用图][approved]\n\n![点段](chapters/tmp/../images/approved.png)\n\n[approved]: ./CHAPTERS%2FIMAGES/%61PPROVED.PNG'
+    const getImage = vi.fn<NonNullable<BidReviewWorkbenchProps['getImage']>>(async () => ({ base64: 'verified', mimeType: 'image/png' }))
+    const { container } = render(<BidReviewWorkbench {...props({ getImage,
+      getChapter: async () => ({ ...chapter, markdown: source, images: [{ id: 'IMG-one', title: '部署示意', path: 'chapters/images/approved.png', sha256: 'b'.repeat(64), width: 800, height: 600 }] }) })} />)
+    await waitFor(() => { expect(screen.getAllByRole('img', { name: '部署示意' })).toHaveLength(3) })
+    expect(getImage).toHaveBeenCalledTimes(3)
+    expect(getImage.mock.calls.every(args => args[0] === 'IMG-one')).toBe(true)
+    expect(screen.queryByRole('img', { name: '未知图片' })).toBeNull()
+    const paragraph = [...container.querySelectorAll('p[data-markdown-paragraph]')].find(node => node.textContent?.includes('前文'))
+    expect(paragraph?.textContent).toBe('前文  后文。')
+    expect(paragraph?.getAttribute('data-source-start')).toBe(String(source.indexOf('前文')))
+    expect(paragraph?.getAttribute('data-source-end')).toBe(String(source.indexOf('\n\n![未知图片]')))
+    expect(screen.getAllByRole('img')[0]?.getAttribute('src')).toBe('data:image/png;base64,verified')
+  })
+
+  it('远程同路径和项目外路径不获得本地图授权', async () => {
+    const path = 'chapters/images/approved.png'
+    const remote = `https://example.com/${path}`
+    const source = `![本地图](${path})\n\n![外部图片](${remote})\n\n![外部权威](//example.com/${path})\n\n![编码协议](https%3A%2F%2Fexample.com%2F${path})\n\n![项目外](../${path})\n\n![绝对路径](%2F${path})\n\n![无效编码](chapters/images/%zz.png)`
+    const getImage = vi.fn<NonNullable<BidReviewWorkbenchProps['getImage']>>(async () => ({ base64: 'verified', mimeType: 'image/png' }))
+    render(<BidReviewWorkbench {...props({ getImage,
+      getChapter: async () => ({ ...chapter, markdown: source, images: [{ id: 'IMG-one', title: '部署示意', path, sha256: 'b'.repeat(64), width: 800, height: 600 }] }) })} />)
+    await screen.findByRole('img', { name: '部署示意' })
+    expect(getImage).toHaveBeenCalledExactlyOnceWith('IMG-one')
+    expect(screen.getByRole('img', { name: '外部图片' }).getAttribute('src')).toBe(remote)
+    expect(screen.getAllByRole('img')).toHaveLength(2)
+  })
+
+  it('图片读取失败可重试，切换章节后迟到图片不会出现', async () => {
+    const late = Promise.withResolvers<{ base64: string; mimeType: 'image/png' }>()
+    const getImage = vi.fn<NonNullable<BidReviewWorkbenchProps['getImage']>>()
+      .mockRejectedValueOnce(new Error('资源读取失败'))
+      .mockReturnValueOnce(late.promise)
+    const imageChapter = { ...chapter, markdown: '![部署示意](images/approved.png)', images: [{ id: 'IMG-one', title: '部署示意', path: 'images/approved.png', sha256: 'b'.repeat(64), width: 800, height: 600 }] }
+    const { unmount } = render(<BidReviewWorkbench {...props({ getImage, getChapter: async () => imageChapter })} />)
+    await screen.findByText(/资源读取失败/u)
+    fireEvent.click(screen.getByRole('button', { name: '重新加载图片：部署示意' }))
+    await waitFor(() => { expect(getImage).toHaveBeenCalledTimes(2) })
+    unmount()
+    render(<BidReviewWorkbench {...props()} />)
+    await screen.findByText('章节正文')
+    await act(async () => { late.resolve({ base64: 'late', mimeType: 'image/png' }); await late.promise })
+    expect(screen.queryByRole('img')).toBeNull()
+  })
+
   it('历史旧号名称与连续同章根标题净显示，段落 offset 仍指向原文', async () => {
     const source = '# 1.1 实施方案\n\n## 第二章 1.1 实施方案\n\n正文完整保留。'
     render(<BidReviewWorkbench {...props({

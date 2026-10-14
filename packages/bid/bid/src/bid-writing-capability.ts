@@ -23,6 +23,7 @@ import { assertChapterRevisionScope, renderChapterRevisionTask,
 import { BidStageAttentionRequiredError, BidStageExecutionError } from './control-plane-contract.ts'
 import { readPendingChapterReorganization } from './outline-capability-update.ts'
 import { outlineSectionScope } from './section-evidence-context.ts'
+import { BID_IMAGE_STYLE_PATH, chapterImageLedgerPath, readBidImages, readBidImageStyle, validateChapterImages } from './chapter-images.ts'
 
 type WritingCall = Extract<BidCapabilityCall, { capability: 'chapter.write' | 'chapter.revise' | 'chapter.review' }>
 
@@ -40,9 +41,15 @@ async function readJson(workspace: BidWorkspace, path: string): Promise<unknown>
 }
 
 async function sourcePaths(workspace: BidWorkspace): Promise<Set<string>> {
-  if (await capabilityFileHash(workspace, 'analysis/web-evidence-sources.json') === undefined) return new Set()
-  const ledger = parseWebEvidenceSourcesArtifact(await readJson(workspace, 'analysis/web-evidence-sources.json'))
-  return new Set(ledger.sources.flatMap(source => [source.snapshot_path, webEvidenceChunkIndexPath(source.source_id)]))
+  const paths = new Set<string>()
+  if (await capabilityFileHash(workspace, 'analysis/web-evidence-sources.json') !== undefined) {
+    const ledger = parseWebEvidenceSourcesArtifact(await readJson(workspace, 'analysis/web-evidence-sources.json'))
+    for (const source of ledger.sources) { paths.add(source.snapshot_path); paths.add(webEvidenceChunkIndexPath(source.source_id)) }
+  }
+  for (const image of await readBidImages(workspace)) { paths.add(image.path); paths.add(chapterImageLedgerPath(image.section_id)) }
+  const style = await readBidImageStyle(workspace)
+  if (style !== null) { paths.add(BID_IMAGE_STYLE_PATH); if (style.reference_image !== undefined) paths.add(style.reference_image.path) }
+  return paths
 }
 
 async function selectedLocations(
@@ -210,7 +217,8 @@ export async function executeWritingCapability(
       await readFile(within(workspace.projectRoot, contentPath), 'utf8'))
   }
   for (const path of await sourcePaths(workspace)) {
-    if (before.get(path) !== undefined && before.get(path) !== await capabilityFileHash(workspace, path)) {
+    const imageRecord = path === BID_IMAGE_STYLE_PATH || /^chapters\/images\/[a-f0-9]{64}\.json$/u.test(path)
+    if (!imageRecord && before.get(path) !== undefined && before.get(path) !== await capabilityFileHash(workspace, path)) {
       throw new Error(`BID_CHAPTER_WRITING_SOURCE_CHANGED: ${path}`)
     }
   }
@@ -333,6 +341,8 @@ export async function validateWritingCapability(
     }
     const body = await readFile(within(workspace.projectRoot, entry.content_path), 'utf8')
     const metadata = parseChapterMetadata(await readJson(workspace, location.metadataPath))
+    const imageIssues = await validateChapterImages(workspace, metadata.images ?? [], body, entry.content_path)
+    if (imageIssues.length > 0) throw new Error(`BID_CHAPTER_WRITING_IMAGE_INVALID: ${imageIssues.join('；')}`)
     const review = parseChapterReviewArtifact(await readJson(workspace, entry.review_path))
     const bodySha256 = chapterCandidateSha256(body)
     const reviewed = await resolveSemanticRevisionPath(workspace,
@@ -346,6 +356,7 @@ export async function validateWritingCapability(
         covered_scoring_response_points: entry.covered_scoring_response_points,
         local_materials_used: entry.local_materials_used, web_materials_used: entry.web_materials_used,
         unresolved_topics: entry.unresolved_topics, handoff: entry.handoff, flowcharts: entry.flowcharts,
+        ...(entry.images === undefined ? {} : { images: entry.images }),
       })) {
       throw new Error(`BID_CHAPTER_WRITING_TARGET_INVALID: ${id}`)
     }

@@ -8,6 +8,8 @@ import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import type { SubagentResult } from '@deepseek-ai/dsh-subagent'
 import { createChapterProtocol, type ChapterProtocol } from './chapter-writing-protocol.ts'
 import { chapterWriterOutputSchema } from './chapter-writing-writer.ts'
+import { attachChapterImageTools, type BidChapterImage, type BidProjectImageSession } from './chapter-images.ts'
+import type { BidWorkspace } from './index.ts'
 import { safeBidRunError } from './safe-error.ts'
 import type { BidTaskFailure } from './control-plane-contract.ts'
 
@@ -158,6 +160,7 @@ async function waitForWriterTurn(parent: Agent, child: Agent, eventStart: number
  * @param existingId 已完成章节的原 Writer 身份；只恢复原会话，不能创建替代会话。
  * @param chapterTitle Writer 协议中展示的章节标题。
  * @param webSearchEnabled 是否允许此 Writer 使用 Web 工具。
+ * @param imageWriting 当前章图片位置与全书共享的生成执行器。
  * @param modelSource 当前执行 Agent；续写保留原父子身份，但采用当前执行模型。
  * @returns 由调用方 finally 释放的章节 Writer。
  */
@@ -166,6 +169,7 @@ export function createChapterWriterChild(
   validate: (child: Agent, value: unknown) => Promise<void>, signal: AbortSignal, existingId?: SessionId,
   chapterTitle?: string, webSearchEnabled = true,
   modelSource: Agent = parent,
+  imageWriting?: { workspace: BidWorkspace; sectionId: string; images: BidChapterImage[]; project: BidProjectImageSession },
 ): ChapterWriterChild {
   const subagents = parent.ctx.get('subagents')
   if (subagents === undefined) throw new Error('S5 requires subagents service')
@@ -178,6 +182,7 @@ export function createChapterWriterChild(
   let toolRestriction = () => {}
   let toolGuard = () => {}
   let modelGuard = () => {}
+  let imageObserver = () => {}
   const route = modelSource.session.requestHeader()?.config
   const provider = route?.provider ?? modelSource.options.provider
   const model = route?.model ?? modelSource.options.model
@@ -189,11 +194,13 @@ export function createChapterWriterChild(
     toolRestriction()
     toolGuard()
     modelGuard()
+    imageObserver()
     modelGuard = installModelSelection(agent.ctx, { current: selection, assembled: undefined })
     const tools = agent.ctx.get('tools')
     if (tools === undefined) throw new Error('S5 Writer requires tools service')
-    const allowedTools = !webSearchEnabled ? ['grep', 'read'] : ['grep', 'read', 'web_search', 'web_fetch']
-    toolRestriction = tools.restrict({ allow: allowedTools })
+    const allowedTools = [...!webSearchEnabled ? ['grep', 'read'] : ['grep', 'read', 'web_search', 'web_fetch'],
+      ...imageWriting === undefined ? [] : ['generate_bid_image', 'review_bid_image', 'view_bid_image']]
+    toolRestriction = tools.restrict({ allow: !webSearchEnabled ? ['grep', 'read'] : ['grep', 'read', 'web_search', 'web_fetch'] })
     toolGuard = tools.guard(exec => exec.name === 'submit_chapter' || allowedTools.includes(exec.name)
       ? undefined : 'BID_CHAPTER_WRITER_TOOL_DISABLED')
     webGuard = !webSearchEnabled
@@ -217,6 +224,8 @@ export function createChapterWriterChild(
     }
     const round = createChapterProtocol<unknown>(agent, 'submit_chapter', maxContinuations)
     runtime = round
+    if (imageWriting !== undefined) imageObserver = attachChapterImageTools(agent, round, imageWriting.workspace, imageWriting.sectionId,
+      imageWriting.images, imageWriting.project, () => assertImageInput(agent, signal, selection))
     round.register({
       name: 'submit_chapter', description: '提交当前章节完整正文和资料使用记录。引用错误可在本轮修正；成功后等待审查意见。',
       parameters: { ...chapterWriterOutputSchema },
@@ -286,6 +295,8 @@ export function createChapterWriterChild(
     },
     async dispose() {
       try { await subagents.drainContinuableChildren(parent, [id]) } finally {
+        imageWriting?.project.release(imageWriting.sectionId)
+        imageObserver()
         webGuard()
         toolRestriction()
         toolGuard()

@@ -20,6 +20,10 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { AgentHandle } from '@deepseek-ai/dsh-agent'
 import { resolveSessionPreset } from '@deepseek-ai/dsh-agent-presets'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import { installSettingsSection } from '@deepseek-ai/dsh-settings'
+import { BID_IMAGE_SETTINGS_NAMESPACE, BidImageGenerationConfig, resolveBidImageConfig } from './bid-image-config.ts'
+import { createBidImageProvider, type BidImageGenerationView, type BidImageProvider } from './bid-image-provider.ts'
+import { BID_IMAGE_STYLE_PATH, chapterImagePaths, readChapterImages, readBidImageReference, readBidImageStyle } from './chapter-images.ts'
 import type {} from '@deepseek-ai/dsh-host-apiproxy'
 import type {} from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-user-questions'
@@ -525,6 +529,8 @@ export const DEFAULT_BID_CONFIG: BidConfig = {
 
 /** Validated file limits, model-stage recovery budget, and Subagent concurrency limits. */
 export interface Config {
+  /** S5 按需生图配置；空模型不启用，凭据复用 pp。 */
+  imageGeneration?: BidImageGenerationConfig
   /** File extensions accepted by the Bid upload Remote. */
   allowedExtensions: string[]
   /** Maximum files admitted in one upload batch. */
@@ -556,6 +562,7 @@ export interface Config {
 }
 
 const DEFAULT_HOST_RUNTIME_CONFIG: Config = {
+  imageGeneration: BidImageGenerationConfig({}),
   allowedExtensions: [...DEFAULT_BID_CONFIG.allowedExtensions],
   maxFiles: DEFAULT_BID_CONFIG.maxFiles,
   maxFileBytes: DEFAULT_BID_CONFIG.maxFileBytes,
@@ -574,6 +581,7 @@ const DEFAULT_HOST_RUNTIME_CONFIG: Config = {
 
 /** Validated Bid Host runtime configuration. */
 export const Config: z<Config> = z.object({
+  imageGeneration: BidImageGenerationConfig.default(BidImageGenerationConfig({})),
   allowedExtensions: z.array(z.string()).default(DEFAULT_HOST_RUNTIME_CONFIG.allowedExtensions),
   maxFiles: z.natural().min(1).default(DEFAULT_HOST_RUNTIME_CONFIG.maxFiles),
   maxFileBytes: z.natural().min(1).default(DEFAULT_HOST_RUNTIME_CONFIG.maxFileBytes),
@@ -1750,6 +1758,9 @@ async function readFileIntakeWork(
 export class BidHostRuntime extends TypertRemoteService {
   static inject = ['agents', 'sessionProjections', 'sessions', 'subagents', 'userQuestions']
   static Config = Config
+
+  /** S5 与配置界面共享的生图能力；连接由项目风格记录冻结，密钥仅在请求时解析。 */
+  readonly imageGeneration: BidImageProvider
 
   private readonly config: Config
   private disposing = false
@@ -3316,6 +3327,16 @@ export class BidHostRuntime extends TypertRemoteService {
   constructor(ctx: Context, config: Config = DEFAULT_HOST_RUNTIME_CONFIG) {
     super(ctx, 'bid')
     this.config = config
+    const composedImages = resolveBidImageConfig(config.imageGeneration ?? {})
+    let imageSource = () => composedImages
+    installSettingsSection(ctx, BID_IMAGE_SETTINGS_NAMESPACE, BidImageGenerationConfig,
+      composedImages, {
+        // 每次调用从已解析命名空间读取；没有缓存或需要重注册的派生状态。
+        setSource(source) { imageSource = () => resolveBidImageConfig(source()) },
+        onChange() {},
+        validate(value) { resolveBidImageConfig(value) },
+      })
+    this.imageGeneration = createBidImageProvider(ctx, () => imageSource())
     this.recoveryDriver = new BidRecoveryDriver(ctx, config.modelStageRepairAttempts,
       session => this.readRecoveryNotice(session), session => this.isContextActive() && isBidMainSession(session)
         && this.ctx.agents.get(session.id)?.session === session && !this.inFlight.has(projectKey(session))
@@ -4627,6 +4648,9 @@ export class BidHostRuntime extends TypertRemoteService {
         ...(await bidResetWorkPaths(workspace, stage)),
       ])]
       for (const path of paths) await assertNoLinkedPath(workspace.root, path)
+      const imageStyle = stage === 'file_intake' || stage === 'docx_export' ? null : await readBidImageStyle(workspace)
+      const referenceImage = imageStyle?.reference_image === undefined ? undefined
+        : await readBidImageReference(workspace, imageStyle.reference_image)
       const resetState: BidTaskState = stage === 'file_intake' || stage === 'chapter_writing'
         ? { stage, status: 'waiting_user', run: null }
         : { stage, status: 'ready', run: null }
@@ -4643,6 +4667,12 @@ export class BidHostRuntime extends TypertRemoteService {
           ...paths.map(path => lease.remove(path, true)),
           ...outputPaths.map(path => lease.remove(path, path === workspace.outputRoot)),
         ])
+        if (imageStyle !== null && stage !== 'docx_export') {
+          await lease.writeJson(within(workspace.projectRoot, BID_IMAGE_STYLE_PATH), imageStyle)
+          if (referenceImage !== undefined && imageStyle.reference_image !== undefined) {
+            await lease.writeBytes(within(workspace.projectRoot, imageStyle.reference_image.path), referenceImage)
+          }
+        }
       }, resetState)
       resetBidStageContext(session, stage)
       session.append('bid.task.changed', { state: resetState })
@@ -7366,9 +7396,15 @@ export class BidHostRuntime extends TypertRemoteService {
       try { markdown = await readFile(within(workspace.projectRoot, assigned.contentPath), 'utf8') } catch { markdown = null }
     }
     let flowcharts: import('./flowchart.ts').FlowchartSpec[] = []
+    let images: NonNullable<BidReviewChapterView['images']> = []
     if (assigned !== null) try {
       const metadata = parseChapterMetadata(JSON.parse(await readFile(within(workspace.projectRoot, assigned.metadataPath), 'utf8')))
       flowcharts = metadata.flowcharts.filter(flowchart => validateFlowchartSpec(flowchart).length === 0)
+      const imagePaths = new Set(chapterImagePaths(markdown ?? ''))
+      images = (metadata.images ?? []).filter(image => imagePaths.has(image.path)).map(image => ({
+        id: image.id, title: image.title, path: image.path, sha256: image.content_sha256,
+        width: image.width, height: image.height,
+      }))
     } catch { /* 旧章节没有流程图 metadata，或章节仍在写作。 */ }
     const logPath = within(workspace.projectRoot, 'chapters/execution-log.json')
     await assertNoLinkedPath(workspace.root, logPath)
@@ -7410,7 +7446,60 @@ export class BidHostRuntime extends TypertRemoteService {
         ]
       }
     } catch { evidenceStatus = 'missing' }
-    return { section_id: section.id, title: normalizeOutlineSectionTitle(section.title) || section.title, number: chain.numbers.join('.'), heading_path: chain.titles, writable: true, markdown, flowcharts, content_sha256: markdown === null ? null : chapterContentSha256(markdown), requirement_ids: section.requirement_ids, scoring_response_point_ids: section.scoring_response_point_ids ?? [], evidence_status: evidenceStatus, materials, review }
+    return { section_id: section.id, title: normalizeOutlineSectionTitle(section.title) || section.title, number: chain.numbers.join('.'), heading_path: chain.titles, writable: true, markdown, flowcharts, ...(images.length === 0 ? {} : { images }), content_sha256: markdown === null ? null : chapterContentSha256(markdown), requirement_ids: section.requirement_ids, scoring_response_point_ids: section.scoring_response_point_ids ?? [], evidence_status: evidenceStatus, materials, review }
+  }
+
+  /**
+   * 读取不含密钥的作图配置与 pp 凭据就绪状态。
+   * @returns 当前独立作图设置及继承地址。
+   */
+  @Remote('getImageGenerationConfig')
+  getImageGenerationConfig(): Promise<BidImageGenerationView> {
+    return this.imageGeneration.view()
+  }
+
+  /**
+   * 查询已保存 CPA 地址公布的模型，不发起生图。
+   * @param signal 浏览器请求的取消信号。
+   * @returns 去重后的模型 ID。
+   */
+  @Remote('getImageGenerationModels')
+  getImageGenerationModels(signal: AbortSignal): Promise<string[]> {
+    return this.imageGeneration.discoverModels(signal)
+  }
+
+  /**
+   * 读取当前项目正式章节引用的图片；拒绝候选、其他项目及摘要不符的文件。
+   * @param session 已授权的 Bid 项目会话。
+   * @param imageId Host 发放的正式图片身份。
+   * @returns 经过身份与摘要核验的 PNG 字节编码。
+   */
+  @Remote('getReviewImage')
+  async getReviewImage(session: Session, imageId: string): Promise<{ base64: string; mimeType: 'image/png' }> {
+    const workspace = this.requireReviewWorkspace(session)
+    const { outline } = await confirmedOutline(workspace)
+    const locations = await readChapterLocations(workspace)
+    for (const section of outline.sections.filter(section => section.writable)) {
+      const location = locations.get(section.id)
+      if (location === undefined) continue
+      const metadataPath = within(workspace.projectRoot, location.metadataPath)
+      await assertNoLinkedPath(workspace.root, metadataPath)
+      let metadata: ReturnType<typeof parseChapterMetadata>
+      try { metadata = parseChapterMetadata(JSON.parse(await readFile(metadataPath, 'utf8'))) } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue
+        throw error
+      }
+      const image = metadata.images?.find(value => value.id === imageId && value.visual_status === 'accepted')
+      if (image === undefined) continue
+      const recorded = (await readChapterImages(workspace, image.section_id)).find(value => value.id === imageId)
+      if (metadata.section_id !== section.id || !isDeepStrictEqual(recorded, image)) throw new Error('BID_IMAGE_LEDGER_MISMATCH')
+      const contentPath = within(workspace.projectRoot, location.contentPath)
+      await assertNoLinkedPath(workspace.root, contentPath)
+      if (!chapterImagePaths(await readFile(contentPath, 'utf8')).includes(image.path)) throw new Error('BID_REVIEW_IMAGE_UNKNOWN')
+      const bytes = await readBidImageReference(workspace, image)
+      return { base64: bytes.toString('base64'), mimeType: 'image/png' }
+    }
+    throw new Error('BID_REVIEW_IMAGE_UNKNOWN')
   }
 
   /** Admit the S5 workbench while writing is running or after its last result. */

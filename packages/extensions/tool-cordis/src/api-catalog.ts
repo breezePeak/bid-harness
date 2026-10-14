@@ -519,6 +519,11 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
     description: 'Host-owned Bid RPC runtime that serializes stage mutations and publishes durable stage state.',
     methods: [
       {
+        signature: 'readonly imageGeneration: BidImageProvider',
+        description: 'S5 与配置界面共享的生图能力；连接由项目风格记录冻结，密钥仅在请求时解析。',
+        parameters: [],
+      },
+      {
         signature: 'registerCapabilityTaskDispatcher(dispatcher: CapabilityTaskDispatcher): () => void',
         description: '安装能力步骤执行器；后续能力适配器共用此单一 Run 入口。',
         parameters: [{ name: 'dispatcher', description: '负责授权文件、执行和业务校验的适配器。' }],
@@ -643,6 +648,24 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         description: '读取 S5 叶节正文及审查结果，或父节点在确认目录中保存的概述。',
         parameters: [{ name: 'session', description: '持有章节产物的 Bid 会话。' }, { name: 'sectionId', description: '确认目录中的章节 ID。' }],
         returns: '浏览器可展示的章节正文、证据和审查状态。',
+      },
+      {
+        signature: '@Remote(\'getImageGenerationConfig\') getImageGenerationConfig(): Promise<BidImageGenerationView>',
+        description: '读取不含密钥的作图配置与 pp 凭据就绪状态。',
+        parameters: [],
+        returns: '当前独立作图设置及继承地址。',
+      },
+      {
+        signature: '@Remote(\'getImageGenerationModels\') getImageGenerationModels(signal: AbortSignal): Promise<string[]>',
+        description: '查询已保存 CPA 地址公布的模型，不发起生图。',
+        parameters: [{ name: 'signal', description: '浏览器请求的取消信号。' }],
+        returns: '去重后的模型 ID。',
+      },
+      {
+        signature: '@Remote(\'getReviewImage\') async getReviewImage(session: Session, imageId: string): Promise<{ base64: string; mimeType: \'image/png\' }>',
+        description: '读取当前项目正式章节引用的图片；拒绝候选、其他项目及摘要不符的文件。',
+        parameters: [{ name: 'session', description: '已授权的 Bid 项目会话。' }, { name: 'imageId', description: 'Host 发放的正式图片身份。' }],
+        returns: '经过身份与摘要核验的 PNG 字节编码。',
       },
       {
         signature: '@Remote(\'getRevisionQueue\') async getRevisionQueue(session: Session): Promise<BidRevisionQueueView>',
@@ -3479,6 +3502,30 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export type BidFileIntakeResult = {\n    readonly ok: true;\n    readonly value: BidTaskState;\n    readonly files?: readonly BidFileIntakeFileResult[] | undefined;\n} | {\n    readonly ok: false;\n    readonly error: BidFileIntakeFailure;\n};',
   },
   {
+    name: 'BidGeneratedImage',
+    declaration: 'export interface BidGeneratedImage {\n    png: Buffer;\n    width: number;\n    height: number;\n    model: string;\n}',
+  },
+  {
+    name: 'BidImageConnectionSpec',
+    declaration: 'export type BidImageConnectionSpec = zod.output<typeof bidImageConnectionSpecSchema>;',
+  },
+  {
+    name: 'BidImageGenerationRequest',
+    declaration: 'export interface BidImageGenerationRequest {\n    prompt: string;\n    size: BidImageSize;\n    reference?: Buffer;\n    connection?: BidImageConnectionSpec;\n}',
+  },
+  {
+    name: 'BidImageGenerationView',
+    declaration: 'export interface BidImageGenerationView {\n    baseURL: string;\n    effectiveBaseURL: string;\n    model: string;\n    credentialConfigured: boolean;\n    enabled: boolean;\n    error?: string;\n}',
+  },
+  {
+    name: 'BidImageProvider',
+    declaration: 'export interface BidImageProvider {\n    resolve(): BidImageConnectionSpec | undefined;\n    view(): Promise<BidImageGenerationView>;\n    discoverModels(signal: AbortSignal): Promise<string[]>;\n    generate(request: BidImageGenerationRequest, signal: AbortSignal): Promise<BidGeneratedImage>;\n}',
+  },
+  {
+    name: 'BidImageSize',
+    declaration: 'export type BidImageSize = \'1024x1024\' | \'1536x1024\' | \'1024x1536\';',
+  },
+  {
     name: 'BidMainAgentScope',
     declaration: 'export interface BidMainAgentScope {\n    cancel(): void;\n    whenIdle(): Promise<void>;\n    discardOwnedInbox(): void;\n}',
   },
@@ -3512,7 +3559,11 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'BidReviewChapterView',
-    declaration: 'export interface BidReviewChapterView {\n    readonly section_id: string;\n    readonly title: string;\n    readonly number: string;\n    readonly heading_path: readonly string[];\n    readonly writable: boolean;\n    readonly markdown: string | null;\n    readonly flowcharts?: readonly FlowchartSpec[];\n    readonly content_sha256: string | null;\n    readonly requirement_ids: readonly string[];\n    readonly scoring_response_point_ids: readonly string[];\n    readonly evidence_status: \'available\' | \'missing\' | \'not_applicable\';\n    readonly materials?: readonly BidReviewMaterialView[];\n    readonly review: {\n        readonly status: BidChapterReviewStatus;\n        readonly issues: readonly BidReviewIssueView[];\n    };\n}',
+    declaration: 'export interface BidReviewChapterView {\n    readonly section_id: string;\n    readonly title: string;\n    readonly number: string;\n    readonly heading_path: readonly string[];\n    readonly writable: boolean;\n    readonly markdown: string | null;\n    readonly flowcharts?: readonly FlowchartSpec[];\n    readonly images?: readonly BidReviewImageView[];\n    readonly content_sha256: string | null;\n    readonly requirement_ids: readonly string[];\n    readonly scoring_response_point_ids: readonly string[];\n    readonly evidence_status: \'available\' | \'missing\' | \'not_applicable\';\n    readonly materials?: readonly BidReviewMaterialView[];\n    readonly review: {\n        readonly status: BidChapterReviewStatus;\n        readonly issues: readonly BidReviewIssueView[];\n    };\n}',
+  },
+  {
+    name: 'BidReviewImageView',
+    declaration: 'export interface BidReviewImageView {\n    readonly id: string;\n    readonly title: string;\n    readonly path: string;\n    readonly sha256: string;\n    readonly width: number;\n    readonly height: number;\n}',
   },
   {
     name: 'BidReviewIssueView',

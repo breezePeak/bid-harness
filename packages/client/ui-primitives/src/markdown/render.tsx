@@ -4,12 +4,8 @@
  * cache frozen blocks as React elements; the rendered DOM is pinned
  * byte-for-byte by `tests/fixtures/markdown-dom` and must not drift.
  *
- * Untrusted-output policy (unchanged from the replaced pipeline): link and
- * image destinations pass a protocol allowlist, images additionally require
- * absolute HTTP(S), raw HTML renders as literal text (no HTML enters the
- * DOM), and KaTeX runs without trusted commands. Fragment-anchor URLs fail
- * the allowlist, so footnote references and back-references render as plain
- * text rather than in-page links.
+ * 默认链接与图片经过协议白名单，图片只允许绝对 HTTP(S) 地址。调用方可为非流式文档的已授权图片提供呈现回调；
+ * 未命中的图片仍经过默认过滤。原始 HTML 保持字面文字，KaTeX 不执行可信命令，片段链接不生成页内链接。
  *
  * Merge-extensible node unions fall through the documented default (render
  * nothing) rather than ending in assertNever: grammars registered elsewhere
@@ -120,6 +116,8 @@ export interface MarkdownFileMentions {
  * numbering accumulated in document order while references render.
  */
 export interface MarkdownRenderContext {
+  /** 已由调用方授权的图片呈现；未命中时沿用默认 URL 过滤。 */
+  readonly imageRenderer?: ((url: string, alt: string) => ReactNode | undefined) | undefined
   /** UTF-16 prefix added to selectable top-level paragraph positions in settled documents. */
   readonly paragraphSourceOffset?: number | undefined
   /** Streaming arm: fences render plain and TeX stays literal. */
@@ -298,7 +296,7 @@ function renderNode(node: Md.RootContent, key: Key, context: MarkdownRenderConte
     case 'linkReference':
       return renderLinkReference(node, key, context)
     case 'image':
-      return renderImage(node.url, node.alt ?? '', key)
+      return renderImage(node.url, node.alt ?? '', key, context)
     case 'imageReference':
       return renderImageReference(node, key, context)
     case 'footnoteReference':
@@ -502,7 +500,9 @@ function inlineCodeHttpUrl(value: string): string | undefined {
   }
 }
 
-function renderImage(url: string, alt: string, key: Key): ReactNode {
+function renderImage(url: string, alt: string, key: Key, context: MarkdownRenderContext): ReactNode {
+  const resolved = context.streaming ? undefined : context.imageRenderer?.(url, alt)
+  if (resolved !== undefined) return <Fragment key={key}>{resolved}</Fragment>
   const imageSrc = remoteImageUrl(sanitizeUrl(normalizeUri(url)))
   if (imageSrc === undefined) {
     return <span key={key} className={css.imageAlt}>{alt}</span>
@@ -550,7 +550,7 @@ function renderImageReference(
 ): ReactNode {
   const definition = context.targets.definitions.get(node.identifier.toUpperCase())
   if (definition === undefined) return `![${node.alt ?? ''}${referenceSuffix(node)}`
-  return renderImage(definition.url, node.alt ?? '', key)
+  return renderImage(definition.url, node.alt ?? '', key, context)
 }
 
 function renderFootnoteReference(

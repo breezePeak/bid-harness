@@ -155,6 +155,17 @@
   color: var(--dsw-alias-state-error-primary);
 }
 
+.chapterImage {
+  display: block;
+  margin: 12px 0;
+  text-align: center;
+}
+
+.chapterImage img {
+  max-width: 100%;
+  height: auto;
+}
+
 /* 三栏主体容器 */
 .columns {
   position: relative;

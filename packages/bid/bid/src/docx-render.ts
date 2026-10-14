@@ -1,6 +1,7 @@
 /** 同一 Markdown 遍历生成 DOCX 与样式预览；遇到不支持的节点拒绝输出。 */
 import { readFile, stat } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
+import { relative } from 'node:path'
 import { fromMarkdown } from 'mdast-util-from-markdown'
 import { gfmFromMarkdown } from 'mdast-util-gfm'
 import { gfm } from 'micromark-extension-gfm'
@@ -28,7 +29,7 @@ import { within, assertNoLinkedPath } from './workspace-path.ts'
 import { applyHeadingRestartRules, captionMarker, captionRole, createCaptionNumberer, createHeadingNumberer, parseTableCaption, resolveCaptionNumbering, resolveHeadingNumbering } from './docx-numbering.ts'
 import { flowchartPlaceholder, type FlowchartSpec } from './flowchart.ts'
 import { renderFlowchartImage } from './flowchart-image.ts'
-import { docxImageDimensions } from './docx-image.ts'
+import { DOCX_MAX_BODY_IMAGE_BYTES, docxImageDimensions } from './docx-image.ts'
 import { identifyVisualBlocks, type VisualReviewAdjustments } from './docx-visual-review.ts'
 type Node = {
   type: string
@@ -160,11 +161,18 @@ async function readAssets(workspace: BidWorkspace, root: Node): Promise<Map<stri
         throw new Error(`正文第 ${node.position?.start.line ?? '?'} 行图片不存在或无法读取：${url}`)
       })
       total += info.size
-      if (!info.isFile() || total > 20 * 1024 * 1024)
+      if (!info.isFile() || total > DOCX_MAX_BODY_IMAGE_BYTES)
         throw new Error('正文图片必须为普通文件，总大小不能超过 20 MiB。')
-      assets.set(url, await readFile(path).catch(() => {
+      const bytes = await readFile(path).catch(() => {
         throw new Error(`正文图片读取失败，请检查文件是否可用：${url}`)
-      }))
+      })
+      total += bytes.length - info.size
+      if (total > DOCX_MAX_BODY_IMAGE_BYTES) throw new Error('正文图片必须为普通文件，总大小不能超过 20 MiB。')
+      const imageHash = /^chapters\/images\/([a-f0-9]{64})\.png$/iu.exec(relative(workspace.projectRoot, path).replaceAll('\\', '/'))?.[1]
+      if (imageHash !== undefined && createHash('sha256').update(bytes).digest('hex') !== imageHash.toLowerCase()) {
+        throw new Error('BID_IMAGE_CONTENT_CHANGED: 生成图片内容与资产摘要不一致。')
+      }
+      assets.set(url, bytes)
     }
     for (const child of node.children ?? [])
       await visit(child)

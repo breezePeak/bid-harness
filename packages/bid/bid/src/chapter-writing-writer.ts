@@ -16,6 +16,7 @@ import { buildWebEvidenceChunkIndex } from './web-evidence-chunks.ts'
 import { bindFlowchartModelAnchors, bindFlowchartModelInputs, flowchartModelDraftSchema, normalizeFlowchartInputs, projectFlowchartModelAnchors, type FlowchartSpec } from './flowchart.ts'
 import { indexChapterContentBlocks } from './chapter-content-reuse.ts'
 import { parseDocumentChunkIndex } from './document-chunk.ts'
+import { chapterImagePaths, projectChapterImageAnchors, readBidImages, validateChapterImages, type BidChapterImage } from './chapter-images.ts'
 
 const text = z.string().trim().min(1)
 const position = z.number().int().nonnegative()
@@ -38,6 +39,7 @@ const writerInput = z.object({
     unresolved_topics: strings,
     handoff: z.object(handoffFields).strict().optional(),
     flowcharts: z.array(flowchartModelDraftSchema).max(100).optional(),
+    images: z.array(z.object({ image_position: position }).strict()).max(100).optional(),
   }).strict(),
 }).strict()
 
@@ -70,6 +72,8 @@ export const chapterWriterOutputSchema: ObjectJsonSchema = {
             from_position: positionParameter, to_position: positionParameter, label: stringParameter,
           }, required: ['from_position', 'to_position'], additionalProperties: false } },
         }, required: ['title', 'nodes', 'edges'], additionalProperties: false } },
+        images: { type: 'array', items: { type: 'object', properties: { image_position: positionParameter },
+          required: ['image_position'], additionalProperties: false } },
       }, additionalProperties: false,
     },
   }, required: ['markdown', 'metadata'], additionalProperties: false,
@@ -88,16 +92,19 @@ export interface ChapterWriterReferences {
   readonly unavailable: Map<string, string>
   readonly chunks: Map<string, readonly { id: string; path: string; heading_path: string[] }[]>
   readonly dependencyFlowcharts: readonly { readonly chart: FlowchartSpec; readonly chapterTitle: string }[]
+  /** 同一 Writer 各轮共享的图片位置，生成后只追加。 */
+  readonly images: BidChapterImage[]
 }
 
 /**
  * 为当前章节分配稳定的已映射材料和补搜文件编号。
  * @param context 当前章节输入。
  * @param dependencyFlowcharts 已完成强依赖章节的可引用图表，按冻结顺序排列。
+ * @param images 当前章节已发放的图片位置表。
  * @returns 章节内文件、分块与精确网页材料位置表，不包含框架 Evidence。
  */
 export function createChapterWriterReferences(context: ChapterContext,
-  dependencyFlowcharts: ChapterWriterReferences['dependencyFlowcharts'] = []): ChapterWriterReferences {
+  dependencyFlowcharts: ChapterWriterReferences['dependencyFlowcharts'] = [], images: BidChapterImage[] = []): ChapterWriterReferences {
   return {
     sectionId: context.section.id,
     materials: new Map([...context.relatedMaterials, ...context.referenceBidMaterials].map((value, index) => [`M${index + 1}`, value])),
@@ -107,6 +114,7 @@ export function createChapterWriterReferences(context: ChapterContext,
     unavailable: new Map(),
     chunks: new Map(),
     dependencyFlowcharts,
+    images,
   }
 }
 
@@ -230,6 +238,9 @@ export function renderChapterWriterReferences(context: ChapterContext, refs: Cha
     `Dependency Flowcharts：${JSON.stringify(refs.dependencyFlowcharts.map(({ chart, chapterTitle }, reference_position) => ({
       reference_position, title: chart.title, chapter_title: chapterTitle,
     })))}`,
+    ...(refs.images.length === 0 ? [] : [`本章图片位置：${JSON.stringify(refs.images.map((image, image_position) => ({
+      image_position, title: image.title, purpose: image.purpose, visual_status: image.visual_status,
+    })))}`]),
     `Mapped Materials：${JSON.stringify([...refs.materials.values()].map((material, material_position) => ({
       material_position, name: [...refs.files.values()].find(file => file.file_id === material.file_id)?.name,
       role: material.source_kind, allowed_usage: usage(material.source_kind), summary: material.summary,
@@ -305,11 +316,29 @@ export async function bindChapterWriterInput(
   preservedMarkdown?: string,
 ): Promise<BoundChapterCandidate> {
   const input = chapterToolArgs(writerInput, value)
+  if (chapterImagePaths(input.markdown).length > 0) throw new ToolArgsError([
+    'markdown: 生成图片只使用 {{image:图片位置}}，不得填写图片文件路径。',
+  ])
+  const images = (input.metadata.images ?? []).map(({ image_position }) => {
+    const image = refs.images[image_position]
+    if (image === undefined || image.visual_status !== 'accepted') throw new ToolArgsError([
+      `metadata.images: 图片位置 ${image_position} 不存在或尚未通过 review_bid_image 的视觉确认。`,
+    ])
+    return image
+  })
+  if (new Set(images.map(image => image.id)).size !== images.length) throw new ToolArgsError(['metadata.images: 图片位置不得重复。'])
+  const imageMarkdown = input.markdown.replace(/\{\{image:(\d+)\}\}/gu, (_marker, imagePosition: string) => {
+    const image = refs.images[Number(imagePosition)]
+    if (image === undefined || !images.some(selected => selected.id === image.id)) {
+      throw new ToolArgsError([`markdown: 未选择的图片位置 ${imagePosition}。`])
+    }
+    return `![${image.title.replace(/[\\[\]]/gu, '\\$&')}](${image.path})\n\n图 ${image.title}`
+  })
   const flowcharts = normalizeFlowchartInputs(context.section.id, [
     ...preservedFlowcharts, ...bindFlowchartModelInputs(context.section.id, input.metadata.flowcharts ?? [], preservedFlowcharts.length,
       [...preservedFlowcharts, ...refs.dependencyFlowcharts.map(value => value.chart)].map(chart => chart.key ?? chart.id)),
   ])
-  const boundMarkdown = bindFlowchartModelAnchors(input.markdown, flowcharts, refs.dependencyFlowcharts.map(value => value.chart))
+  const boundMarkdown = bindFlowchartModelAnchors(imageMarkdown, flowcharts, refs.dependencyFlowcharts.map(value => value.chart))
   const originalBlocks = preservedMarkdown === undefined ? [] : indexChapterContentBlocks(context.section.id, preservedMarkdown)
     .filter(block => block.type !== 'heading' && block.markdown.trim() !== '')
   const markdown = preservedMarkdown === undefined ? boundMarkdown : boundMarkdown.replace(/\{\{reuse:(\d+)\}\}/gu,
@@ -321,6 +350,17 @@ export async function bindChapterWriterInput(
   const missingBlocks = originalBlocks.flatMap((block, position) => markdown.includes(block.markdown.trim()) ? []
     : ['markdown: 缺少须原样保留的原文块位置 ' + String(position) + '；使用 {{reuse:' + String(position) + '}} 放置原块，再在其周围补充。'])
   if (missingBlocks.length > 0) throw new ToolArgsError(missingBlocks)
+  const preservedImagePaths = preservedMarkdown === undefined ? [] : chapterImagePaths(preservedMarkdown)
+  if (preservedImagePaths.length > 0) {
+    const records = await readBidImages(workspace)
+    for (const path of preservedImagePaths) {
+      const image = records.find(record => record.path === path && record.visual_status === 'accepted')
+      if (image === undefined) throw new ToolArgsError(['markdown: 原文保留图片缺少已确认的项目记录。'])
+      if (!images.some(selected => selected.id === image.id)) images.push(image)
+    }
+  }
+  const imageIssues = await validateChapterImages(workspace, images, markdown, context.contentPath)
+  if (imageIssues.length > 0) throw new ToolArgsError(imageIssues.map(issue => `metadata.images: ${issue}`))
   const headingIssues = validateChapterHeadings(markdown, context.section.title, context.section.id)
   if (headingIssues.length > 0) throw new ToolArgsError(headingIssues.map(issue => `markdown: ${issue}`))
   const local: LocalEvidenceMaterial[] = []
@@ -407,6 +447,7 @@ export async function bindChapterWriterInput(
         ])),
       },
       flowcharts,
+      ...(images.length === 0 ? {} : { images }),
     },
   })
   return { ...parsed, metadata: { ...parsed.metadata, flowcharts } }
@@ -417,14 +458,27 @@ export async function bindChapterWriterInput(
  * @param candidate 上次完整候选。
  * @param refs 本章稳定资料位置表。
  * @param preservedFlowcharts 程序保留的只读原图，不交回模型重写。
+ * @param preservedMarkdown 程序保留的原文块；其中图片仍绑定原记录。
  * @returns 修复提示中不含内部身份或 Blueprint 索引的候选；不可定位的本地资料保留语义与不可用原因，须重选合法位置后提交。
  */
 export function projectChapterWriterCandidate(candidate: AcceptedChapterCandidate, refs: ChapterWriterReferences,
-  preservedFlowcharts: readonly FlowchartSpec[] = []): unknown {
+  preservedFlowcharts: readonly FlowchartSpec[] = [], preservedMarkdown?: string): unknown {
   const { section_id: _sectionId, ...handoff } = candidate.metadata.handoff
+  const preservedImagePaths = preservedMarkdown === undefined ? [] : chapterImagePaths(preservedMarkdown)
+  let markdown = candidate.markdown
+  if (preservedImagePaths.length > 0) {
+    const blocks = indexChapterContentBlocks(candidate.section_id, preservedMarkdown ?? '')
+      .filter(block => block.type !== 'heading' && block.markdown.trim() !== '')
+    for (const [position, block] of blocks.entries()) markdown = markdown.replaceAll(block.markdown.trim(), `{{reuse:${position}}}`)
+  }
+  const selectedImages = (candidate.metadata.images ?? []).filter(image => !preservedImagePaths.includes(image.path))
   return {
-    markdown: projectFlowchartModelAnchors(candidate.markdown, candidate.metadata.flowcharts,
-      refs.dependencyFlowcharts.map(value => value.chart)),
+    markdown: projectChapterImageAnchors(projectFlowchartModelAnchors(markdown, candidate.metadata.flowcharts,
+      refs.dependencyFlowcharts.map(value => value.chart)), selectedImages.map((image) => {
+      const position = refs.images.findIndex(item => item.id === image.id)
+      if (position < 0) throw new Error('CHAPTER_WRITER_IMAGE_UNREGISTERED')
+      return { image, position }
+    })),
     metadata: {
       local_materials_used: candidate.metadata.local_materials_used.map((material) => {
         const semantics = { usage: material.usage, summary: material.summary }
@@ -444,6 +498,9 @@ export function projectChapterWriterCandidate(candidate: AcceptedChapterCandidat
         return { web_position, usage: material.usage, summary: material.summary, supports: material.supports }
       }),
       unresolved_topics: candidate.metadata.unresolved_topics, handoff,
+      ...(candidate.metadata.images === undefined ? {} : { images: selectedImages.map(image => ({
+        image_position: refs.images.findIndex(item => item.id === image.id),
+      })) }),
       flowcharts: candidate.metadata.flowcharts
         .filter(flowchart => !preservedFlowcharts.some(original => original.key === flowchart.key)).map(flowchart => ({
           title: flowchart.title,

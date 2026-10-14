@@ -8,6 +8,7 @@
  *
  * Script vocabulary (all optional):
  * - `FAKE_BID_RECOVERY`: 发出不含 Goal 的 Bid 恢复审计事件。
+ * - `FAKE_BID_IMAGE_REQUEST`: 发出不含凭据的完整作图请求事件。
  * - `FAKE_TEXT`: assistant text for each turn (default `hello from fake runtime`).
  * - `FAKE_STATUS`: the `session.finished` status (default `ok`).
  * - `FAKE_REASON_KIND`: the `session.finished` reason kind (default `completed`; `none` omits the reason).
@@ -96,6 +97,13 @@ function runTurn(sessionId: string): void {
     return
   }
   event(sessionId, 'turn/start', { turn: 0 })
+  if (env.FAKE_BID_IMAGE_REQUEST !== undefined) {
+    event(sessionId, 'bid.image.requested', {
+      section_id: 'SEC-1', request_sha256: 'a'.repeat(64), style_sha256: 'b'.repeat(64),
+      prompt: '统一蓝灰色等距插画。\n\n本图用途：表达方案\n本图内容：机房维护场景',
+      size: '1536x1024', model: 'gpt-image-2', base_url: 'https://cpa.example/v1',
+    })
+  }
   if (env.FAKE_BID_RECOVERY !== undefined) {
     event(sessionId, 'bid.task.changed', { state: { stage: 'chapter_writing', status: 'failed', run: null,
       failure: { code: 'BID_TASK_RESULT_UNMET', message: '当前章节尚需修复。' } } })

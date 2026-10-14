@@ -285,6 +285,20 @@ describe('MarkdownText', () => {
     expect(screen.getByText('mail diagram')).toBeTruthy()
   })
 
+  it('已授权图片回调支持行内和引用式图片，并保留原始段落位置及默认过滤', () => {
+    const text = '前文 ![示意图](assets/approved.png) 后文。\n\n![引用图][approved]\n\n![未知图](assets/unknown.png)\n\n[approved]: assets/approved.png'
+    const imageRenderer = (url: string, alt: string) => url === 'assets/approved.png'
+      ? <img src="data:image/png;base64,verified" alt={alt} /> : undefined
+    const { container, rerender } = render(<MarkdownText text={text} imageRenderer={imageRenderer} paragraphSourceOffset={12} />)
+    expect(screen.getByRole('img', { name: '示意图' })).toBeTruthy()
+    expect(screen.getByRole('img', { name: '引用图' })).toBeTruthy()
+    expect(screen.queryByRole('img', { name: '未知图' })).toBeNull()
+    expect(container.querySelector('p')?.dataset.sourceStart).toBe('12')
+    expect(container.querySelector('p')?.dataset.sourceEnd).toBe(String(text.indexOf('\n') + 12))
+    rerender(<MarkdownText text={text} imageRenderer={imageRenderer} streaming />)
+    expect(container.querySelector('img')).toBeNull()
+  })
+
   it('keeps incomplete streaming Markdown renderable', () => {
     const { container } = render(<MarkdownText text={'## Streaming\n\n- first\n- **unfinished'} />)
     expect(screen.getByRole('heading', { level: 2, name: 'Streaming' })).toBeTruthy()

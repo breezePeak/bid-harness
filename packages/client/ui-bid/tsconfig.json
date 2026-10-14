@@ -21,6 +21,12 @@
       "path": "../locale"
     },
     {
+      "path": "../connection/tsconfig.client.json"
+    },
+    {
+      "path": "../ui-settings"
+    },
+    {
       "path": "../runtime"
     },
     {

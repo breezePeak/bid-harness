@@ -17,10 +17,48 @@ import type {
 import type { LegacyBidControlState, LegacyBidRuntimeState } from './runtime-state.ts'
 import type { WritingEntryView } from './writing-entry-contract.ts'
 import type { DocxExportOperation } from './docx-export-operation.ts'
+import { createHash } from 'node:crypto'
+import { AttachmentId, type ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
+import { z } from 'zod'
+import { bidImageConnectionSpecSchema } from './bid-image-config.ts'
+
+const imageHash = z.string().regex(/^[a-f0-9]{64}$/u)
+const requestAttachmentSchema = z.object({
+  attachmentId: z.string().min(1).transform(AttachmentId),
+  mediaType: z.enum(['image/png', 'image/jpeg', 'image/webp', 'image/gif']),
+  bytes: z.number().int().positive(), width: z.number().int().positive(), height: z.number().int().positive(),
+  name: z.string().optional(),
+  originalDimensions: z.object({ width: z.number().int().positive(), height: z.number().int().positive() }).strict().optional(),
+}).strict().transform(({ name, originalDimensions, ...attachment }) => ({
+  ...attachment,
+  ...(name === undefined ? {} : { name }),
+  ...(originalDimensions === undefined ? {} : { originalDimensions }),
+} satisfies ImageAttachmentRef))
+
+/** 作图模型的完整非敏感输入；参考图由不可变附件重建。 */
+export const bidImageRequestedSchema = z.object({
+  section_id: z.string().min(1).max(8000), request_sha256: imageHash, style_sha256: imageHash,
+  prompt: z.string().min(1).max(25_000),
+  size: z.enum(['1024x1024', '1536x1024', '1024x1536']),
+  model: z.string().min(1).max(200), base_url: bidImageConnectionSpecSchema.shape.baseURL,
+  reference: z.object({
+    id: z.string().regex(/^IMG-[a-f0-9]{64}$/u),
+    path: z.string().regex(/^chapters\/images\/[a-f0-9]{64}\.png$/u),
+    content_sha256: imageHash, request_sha256: imageHash,
+    width: z.number().int().positive(), height: z.number().int().positive(),
+    attachment: requestAttachmentSchema,
+  }).strict().refine(reference => reference.path === `chapters/images/${reference.content_sha256}.png`
+    && reference.id === `IMG-${createHash('sha256').update(reference.request_sha256 + reference.content_sha256).digest('hex')}`,
+  '参考图身份与来源摘要不一致。').optional(),
+}).strict()
+
+/** 一次已记录的作图请求；密钥及凭据引用不进入模型请求事件。 */
+export type BidImageRequestedData = z.output<typeof bidImageRequestedSchema>
 
 /** Bid events persisted in the shared DSH session log. */
 export const BID_SESSION_EVENT_TYPES = [
   'bid.project.resumed',
+  'bid.image.requested',
   'bid.task.changed',
   'bid.run.started',
   'bid.run.progress',
@@ -119,6 +157,19 @@ export function appendBidSchemaWarning(
 
 declare module '@deepseek-ai/dsh-session/types' {
   interface SessionEventMap {
+    /**
+     * 付费作图调用前记录的完整输入；失败与取消仍保留，不进入聊天模型历史。
+     * @param section_id 当前 Writer 允许写入的完整章节身份。
+     * @param request_sha256 程序绑定的图片请求摘要。
+     * @param style_sha256 项目冻结的风格描述摘要。
+     * @param prompt 实际发送的完整作图提示。
+     * @param size 实际请求的图幅。
+     * @param model 实际调用的作图模型。
+     * @param base_url 不含认证信息的实际 API 根地址。
+     * @param reference 已确认参考图的完整身份和实际输入附件。
+     * @dshScopeScan unsupported
+     */
+    'bid.image.requested': BidImageRequestedData
     /**
      * 将 Workspace 的项目进度应用到当前聊天的 Bid 投影，不附带聊天历史。
      * @param state 已持久化的项目任务状态。

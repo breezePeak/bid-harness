@@ -547,3 +547,14 @@ it('保留 Bid 内部失败、原 Run 通知及 Main Agent 恢复指令，不产
     messageId: 'recovery-message-1', nextAt: 100, reason: '原失败已保存，等待 Main 实际恢复。',
   })
 })
+
+it('完整保留作图模型实际输入，不混入聊天回复或凭据', async () => {
+  const result = await harnessWith({ FAKE_BID_IMAGE_REQUEST: '1' }).run('生成方案配图')
+  const request = result.events.find(event => event.type === 'bid.image.requested')
+  expect(request?.data).toEqual({
+    section_id: 'SEC-1', request_sha256: 'a'.repeat(64), style_sha256: 'b'.repeat(64),
+    prompt: '统一蓝灰色等距插画。\n\n本图用途：表达方案\n本图内容：机房维护场景',
+    size: '1536x1024', model: 'gpt-image-2', base_url: 'https://cpa.example/v1',
+  })
+  expect(result.finalResponse).toBe('hello from fake runtime')
+})

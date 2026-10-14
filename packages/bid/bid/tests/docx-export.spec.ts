@@ -20,6 +20,9 @@ import type { ChapterWritingManifest } from '../src/chapter-writing-artifacts.ts
 import { detectFlowchartExportEnvironment, type NativeVisioExport } from '../src/native-visio.ts'
 import { renderFlowchartImage } from '../src/flowchart-image.ts'
 import { bindFlowchartModelAnchors, bindFlowchartModelInputs } from '../src/flowchart.ts'
+import { bidChapterImageSchema, chapterImageLedgerPath } from '../src/chapter-images.ts'
+import { bidImageConnectionSpecSchema } from '../src/bid-image-provider.ts'
+import { chapterImageFixturePng } from './fixtures/chapter-image-png.ts'
 
 const reads = vi.hoisted(() => ({ afterRead: undefined as ((path: string) => Promise<void>) | undefined }))
 vi.mock('node:fs/promises', async (importOriginal) => {
@@ -227,6 +230,71 @@ describe('Bid DOCX export', () => {
       }
     } finally { await rm(workspace.root, { recursive: true, force: true }) }
   })
+  it('Word嵌入已确认源章图片，篡改字节、未确认记录或缺失metadata拒绝覆盖成功导出', async () => {
+    const { workspace } = await exportFixture()
+    const png = await chapterImageFixturePng()
+    const hash = (value: string | Buffer) => createHash('sha256').update(value).digest('hex')
+    const prompt = '蓝灰写实工业插图，统一浅色背景。'
+    const contentHash = hash(png)
+    const requestHash = hash('实际图片请求')
+    const image = bidChapterImageSchema.parse({
+      id: `IMG-${hash(requestHash + contentHash)}`, section_id: 'source-image-section',
+      path: `chapters/images/${contentHash}.png`, content_sha256: contentHash, request_sha256: requestHash,
+      width: 24, height: 16, title: '设备布局示意', purpose: '说明方案，非现场事实证据', prompt: '设备布局鸟瞰',
+      style_sha256: hash(prompt), model: 'test-image-model', visual_status: 'accepted', visual_reason: '布局与项目配色符合方案。',
+    })
+    const metadataPath = join(workspace.projectRoot, 'chapters/meta/0001.json')
+    const sourceMetadata = JSON.parse(await readFile(metadataPath, 'utf8')) as Record<string, unknown>
+    const metadata = JSON.stringify({ ...sourceMetadata, images: [image] })
+    const ledgerPath = join(workspace.projectRoot, chapterImageLedgerPath(image.section_id))
+    const ledger = JSON.stringify({ schema_version: 1, section_id: image.section_id, images: [image] })
+    try {
+      await mkdir(join(workspace.projectRoot, 'chapters/images'), { recursive: true })
+      await writeFile(join(workspace.projectRoot, image.path), png)
+      await writeFile(join(workspace.projectRoot, 'chapters/image-style.json'), JSON.stringify({
+        schema_version: 1, prompt, sha256: hash(prompt), connection: bidImageConnectionSpecSchema.parse({
+          baseURL: 'https://cpa.example/v1', model: image.model, apiKeyEnv: 'TEST_PP_KEY', timeoutMs: 1000, maxImageBytes: 1024 * 1024,
+        }),
+      }))
+      await writeFile(ledgerPath, ledger)
+      await writeFile(metadataPath, metadata)
+      await writeFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), `# 资源配置\n\n![设备][layout]\n\n[layout]: ${image.path}\n\n图 设备布局示意\n`)
+      await executeDocxExport(workspace)
+      const successful = await readFile(join(workspace.outputRoot, 'bid.docx'))
+      const zip = await JSZip.loadAsync(successful)
+      const media = Object.values(zip.files).filter(file => file.name.startsWith('word/media/') && !file.dir)
+      expect(await Promise.all(media.map(file => file.async('nodebuffer')))).toContainEqual(png)
+      const exportRecord = (await readDocxFormat(workspace)).state.lastExport
+      await writeFile(join(workspace.projectRoot, image.path), Buffer.concat([png, Buffer.from('changed')]))
+      await expect(executeDocxExport(workspace)).rejects.toMatchObject({
+        issues: [expect.objectContaining({ code: 'DOCX_EXPORT_IMAGE_INVALID' })],
+      })
+      await writeFile(join(workspace.projectRoot, image.path), png)
+      await writeFile(ledgerPath, JSON.stringify({ schema_version: 1, section_id: image.section_id,
+        images: [{ ...image, visual_status: 'pending' }] }))
+      await expect(executeDocxExport(workspace)).rejects.toMatchObject({
+        issues: [expect.objectContaining({ code: 'DOCX_EXPORT_IMAGE_INVALID' })],
+      })
+      await writeFile(ledgerPath, ledger)
+      await rm(metadataPath)
+      await expect(executeDocxExport(workspace)).rejects.toMatchObject({
+        issues: [expect.objectContaining({ code: 'DOCX_EXPORT_IMAGE_INVALID' })],
+      })
+      await writeFile(join(workspace.projectRoot, 'chapters/sections/0001.md'),
+        `# 资源配置\n\n![设备](${image.path.replace('chapters/images/', 'chapters/%69mages/')})\n`)
+      await expect(executeDocxExport(workspace)).rejects.toMatchObject({
+        issues: [expect.objectContaining({ code: 'DOCX_EXPORT_IMAGE_INVALID' })],
+      })
+      await writeFile(join(workspace.projectRoot, 'chapters/sections/0001.md'),
+        `# 资源配置\n\n![设备](${image.path.toUpperCase()})\n`)
+      await expect(executeDocxExport(workspace)).rejects.toMatchObject({
+        issues: [expect.objectContaining({ code: 'DOCX_EXPORT_IMAGE_INVALID' })],
+      })
+      expect(await readFile(join(workspace.outputRoot, 'bid.docx'))).toEqual(successful)
+      expect((await readDocxFormat(workspace)).state.lastExport).toEqual(exportRecord)
+    } finally { await rm(workspace.root, { recursive: true, force: true }) }
+  })
+
   it('正文图片缺失时保留上一次成功文件及下载记录', async () => {
     const { workspace } = await exportFixture()
     await executeDocxExport(workspace)

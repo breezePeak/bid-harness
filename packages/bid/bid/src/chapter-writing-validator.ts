@@ -275,6 +275,7 @@ export async function validateChapterWriting(
             unresolved_topics: chapter.unresolved_topics,
             handoff: chapter.handoff,
             flowcharts: chapter.flowcharts,
+            ...(chapter.images === undefined ? {} : { images: chapter.images }),
           }
           if (JSON.stringify(metadata) !== JSON.stringify(fromManifest)) throw new Error('metadata-mismatch')
         } catch {
@@ -286,6 +287,9 @@ export async function validateChapterWriting(
       const body = within(workspace.projectRoot, chapter.content_path)
       await assertNoLinkedPath(workspace.root, body)
       const markdown = await readFile(body, 'utf8')
+      for (const message of await validateChapterImages(workspace, chapter.images ?? [], markdown, chapter.content_path)) {
+        reject(issues, 'CHAPTER_WRITING_IMAGE_INVALID', message, chapter.content_path)
+      }
       if (mode === 'delivery' && section.id === TECHNICAL_DEVIATION_SECTION_ID) {
         try {
           const table = parseTechnicalDeviationTable(markdown)
@@ -530,3 +534,4 @@ export async function validateChapterWriting(
   }
   return issues.length === 0 ? { ok: true } : { ok: false, issues }
 }
+import { validateChapterImages } from './chapter-images.ts'

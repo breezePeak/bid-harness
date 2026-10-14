@@ -71,6 +71,8 @@ function pageTargetInfo(
 export interface BidReviewWorkbenchInjected {
   getWorkbench: () => Promise<BidReviewWorkbenchView>
   getChapter: (sectionId: string) => Promise<BidReviewChapterView>
+  /** 读取当前项目正式图片；只能传 Host 发放的图片身份。 */
+  getImage?: (imageId: string) => Promise<{ base64: string; mimeType: 'image/png' }>
   getRevisionComparison?: (issueId: string) => Promise<BidRevisionComparisonView>
   openWordExport?: () => Promise<void>
   /** Read the current revision issue queue from the Host. */
@@ -127,7 +129,7 @@ const EVIDENCE_STATUS_LABEL: Record<string, string> = {
 
 /** Live S5 chapter and Reviewer workbench with Host-owned on-demand export. */
 export function BidReviewWorkbench({
-  sessionId, useSessions, useProjection, getWorkbench, getChapter, openWordExport,
+  sessionId, useSessions, useProjection, getWorkbench, getChapter, getImage, openWordExport,
   getRevisionComparison, addRevisionIssue, onLocateChapter, onCompareRevision, notifyWorkbenchMount, actions, useStore,
 }: BidReviewWorkbenchProps) {
   const isBid = useSessions(state => isBidMainSessionSummary(state.byId[sessionId]))
@@ -764,7 +766,7 @@ export function BidReviewWorkbench({
                   })
                 }}
               >
-                <AnchoredFlowcharts chapter={chapter} />
+                <AnchoredFlowcharts chapter={chapter} getImage={getImage} />
               </div>
             </article>
           )}
@@ -976,7 +978,30 @@ export function BidReviewWorkbench({
 
 
 
-function AnchoredFlowcharts({ chapter }: { chapter: BidReviewChapterView }): JSX.Element {
+/** 正文图片授权前解码及规范路径，生成图片目录的大小写别名与 Host 一致。 */
+function markdownImageAssetPath(url: string): string | undefined {
+  let decoded: string
+  try { decoded = decodeURIComponent(url) } catch { return undefined }
+  const path = decoded.replaceAll('\\', '/').replace(/\/+/gu, '/')
+  if (/^[a-z][a-z\d+.-]*:|^\//iu.test(path)) return undefined
+  let depth = 0
+  for (const segment of path.split('/')) {
+    if (segment === '' || segment === '.') continue
+    if (segment === '..') {
+      if (--depth < 0) return undefined
+    } else depth++
+  }
+  let normalized: string
+  try {
+    normalized = decodeURIComponent(new URL(path.split('/').map(encodeURIComponent).join('/'), 'https://bid-assets.invalid/').pathname.slice(1))
+  } catch { return undefined }
+  return /^chapters\/images\//iu.test(normalized) ? normalized.toLowerCase() : normalized
+}
+
+function AnchoredFlowcharts({ chapter, getImage }: {
+  chapter: BidReviewChapterView
+  getImage: BidReviewWorkbenchInjected['getImage']
+}): JSX.Element {
   const source = chapter.markdown ?? ''
   let headingEnd = 0
   for (const node of fromMarkdown(source).children) {
@@ -993,26 +1018,56 @@ function AnchoredFlowcharts({ chapter }: { chapter: BidReviewChapterView }): JSX
   const heading = source.slice(0, headingEnd)
   const markdown = source.slice(heading.length)
   const flowcharts = chapter.flowcharts ?? []
+  const imageRenderer = (url: string): JSX.Element | undefined => {
+    const path = markdownImageAssetPath(url)
+    const image = chapter.images?.find(asset => asset.path === path)
+    return image === undefined || getImage === undefined ? undefined
+      : <ChapterImage key={`${image.id}:${image.sha256}`} image={image} getImage={getImage} />
+  }
   const byKey = new Map(flowcharts.map(flowchart => [flowchart.key ?? flowchart.id, flowchart]))
   const parts: JSX.Element[] = []
   let cursor = 0
   let index = 0
   for (const match of markdown.matchAll(/\{\{flowchart:([A-Za-z0-9_-]{1,64})\}\}/gu)) {
     const start = match.index
-    if (start > cursor) parts.push(<MarkdownText key={`text-${index++}`} text={markdown.slice(cursor, start)} paragraphSourceOffset={heading.length + cursor} />)
+    if (start > cursor) parts.push(<MarkdownText key={`text-${index++}`} text={markdown.slice(cursor, start)} paragraphSourceOffset={heading.length + cursor} imageRenderer={imageRenderer} />)
     const flowchart = byKey.get(match[1] ?? '')
-    if (flowchart === undefined) parts.push(<MarkdownText key={`unknown-${index++}`} text={match[0]} paragraphSourceOffset={heading.length + start} />)
+    if (flowchart === undefined) parts.push(<MarkdownText key={`unknown-${index++}`} text={match[0]} paragraphSourceOffset={heading.length + start} imageRenderer={imageRenderer} />)
     else parts.push(<FlowchartPreview key={flowchart.id} spec={flowchart} />)
     cursor = start + match[0].length
   }
-  if (cursor < markdown.length) parts.push(<MarkdownText key={`text-${index}`} text={markdown.slice(cursor)} paragraphSourceOffset={heading.length + cursor} />)
+  if (cursor < markdown.length) parts.push(<MarkdownText key={`text-${index}`} text={markdown.slice(cursor)} paragraphSourceOffset={heading.length + cursor} imageRenderer={imageRenderer} />)
   if (parts.length === 0) {
     return <Fragment>
-      <MarkdownText text={markdown} paragraphSourceOffset={heading.length} />
+      <MarkdownText text={markdown} paragraphSourceOffset={heading.length} imageRenderer={imageRenderer} />
       {flowcharts.map(flowchart => <FlowchartPreview key={flowchart.id} spec={flowchart} />)}
     </Fragment>
   }
   return <Fragment>{parts}</Fragment>
+}
+
+function ChapterImage({ image, getImage }: {
+  image: NonNullable<BidReviewChapterView['images']>[number]
+  getImage: NonNullable<BidReviewWorkbenchInjected['getImage']>
+}): JSX.Element {
+  const [src, setSrc] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [attempt, setAttempt] = useState(0)
+  useEffect(() => {
+    let live = true
+    setSrc(null)
+    setError(null)
+    void getImage(image.id).then((value) => {
+      if (live) setSrc(`data:${value.mimeType};base64,${value.base64}`)
+    }).catch((reason: unknown) => { if (live) setError(reason instanceof Error ? reason.message : String(reason)) })
+    return () => { live = false }
+  }, [image.id, image.sha256, getImage, attempt])
+  return <span className={css.chapterImage}>
+    {src !== null ? <img src={src} alt={image.title} width={image.width} height={image.height} />
+      : error !== null ? <span role="alert">图片读取失败：{error} <button type="button"
+        aria-label={`重新加载图片：${image.title}`} onClick={() => { setAttempt(value => value + 1) }}>重新加载</button></span>
+        : <span>正在读取图片…</span>}
+  </span>
 }
 
 function FlowchartPreview({ spec }: { spec: FlowchartSpec }): JSX.Element {

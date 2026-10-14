@@ -69,6 +69,7 @@ function reviewPendingMappingItems(options: GenerateOptions): StreamChunk[] {
 }
 
 class ScriptedAdapter extends LlmAdapter {
+  imageInput = false
   interactive = false
   reviewOverflow = false
   reviewMaxTokens = false
@@ -86,6 +87,7 @@ class ScriptedAdapter extends LlmAdapter {
 
   override resolveModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
     return Promise.resolve({ provider, id: model, name: model,
+      ...(this.imageInput ? { inputModalities: ['text' as const, 'image' as const] } : {}),
       ...(this.outlineReview === undefined ? {} : { context: { contextWindow: this.outlineReview.contextWindow },
         ...(this.outlineReview.defaultMaxTokens === undefined ? {} : { defaultMaxTokens: this.outlineReview.defaultMaxTokens }) }) })
   }
@@ -819,8 +821,9 @@ export async function runEvidenceMappingRecoveryLoop(ctx: Context, root: string,
  * @param ctx - Loader 组装的 Agent、工具、持久化和 Subagent 服务。
  * @param root - 本用例的隔离工作区。
  * @returns 章节阶段产物及工作区；S4 map 变更时抛错。
+ * @param images 是否启用真实插图工具与固定外部图片返回的回放。
  */
-export async function runChapterWritingLoop(ctx: Context, root: string) {
+export async function runChapterWritingLoop(ctx: Context, root: string, images: boolean | 'frozen' = false) {
   const sessionId = SessionId('s5-real-loop')
   const workspace = new BidWorkspace(root)
   await prepareS2(workspace)
@@ -895,6 +898,10 @@ export async function runChapterWritingLoop(ctx: Context, root: string) {
       additional_web_materials: [{ url: webUrl, usage: 'reference', summary: '要求访问控制与审计。', supports: '支持安全方案。' }],
     },
   }
+  if (images) {
+    candidate.markdown += '\n\n{{image:0}}'
+    Object.assign(candidate.metadata, { images: [{ image_position: 0 }] })
+  }
   const coverage = { status: 'covered', evidence_quote_refs: ['Q2'], issue: null }
   const summary = {
     quality_checks: {
@@ -923,6 +930,9 @@ export async function runChapterWritingLoop(ctx: Context, root: string) {
       ],
     }),
   ]
+  if (images === true) parentScript.unshift(toolCall('project-image-style', 'set_image_style', {
+    prompt: '蓝灰色写实工业插图，浅色背景，统一透视和光照，不在画面内写文字。',
+  }))
   const childScript = [
     toolCall('read-forbidden-tender', 'read', { file_path: `${workspacePath}/${tender.chunksPath}/chunk_0001.md` }),
     toolCall('grep-supplement', 'grep', { pattern: '实施流程', path: corpus.chunks_path }),
@@ -972,6 +982,12 @@ export async function runChapterWritingLoop(ctx: Context, root: string) {
       return toolCall('resubmit-web-candidate', 'submit_chapter', { ...projected, markdown: projected.markdown + '\n\n质量检查由实施负责人组织，审计结果由复核人员确认。' })
     },
   ]
+  if (images) childScript.splice(4, 0,
+    toolCall('generate-scene', 'generate_bid_image', { title: '访问控制实施场景', purpose: '解释方案布置，非真实现场证据',
+      prompt: '设备与服务区域的鸟瞰方案效果，清楚区分访问控制区域', size: '1536x1024' }),
+    toolCall('reject-unconfirmed-image', 'submit_chapter', candidate),
+    toolCall('accept-scene', 'review_bid_image', { image_position: 0, decision: 'accept', reason: '实际图片区域清楚，风格符合全书，未展示未经证实的项目事实。' }),
+  )
   const reviewRound = (blocking_issues: string[]): ScriptStep[] => [
     toolCall('review-incomplete', 'finish_chapter_review', {}),
     toolCall('submit-coverage', 'review_coverage_items', { items: Array.from({ length: section.must_answer.length + section.requirement_ids.length + (section.scoring_response_point_ids ?? []).length + 1 }, (_, index) => ({ item_ref: `R${index + 1}`, ...coverage })) }),
@@ -986,6 +1002,7 @@ export async function runChapterWritingLoop(ctx: Context, root: string) {
   ]
   const reviewScript = [...reviewRound(['补充质量检查责任。']), ...reviewRound([])]
   const adapter = new ScriptedAdapter(sessionId, parentScript, childScript)
+  adapter.imageInput = Boolean(images)
   adapter.reviewScript.push(...reviewScript)
   ctx.effect(() => ctx.llm.registerAdapter(['mock'], adapter))
   registerIntegrationTools(ctx, root, 'https://official.example/standard')

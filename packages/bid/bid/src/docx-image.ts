@@ -1,5 +1,8 @@
 /** DOCX 正文图片的确定性尺寸读取。 */
 
+/** 正文全部不同图片 URL 的总字节上限。 */
+export const DOCX_MAX_BODY_IMAGE_BYTES = 20 * 1024 * 1024
+
 /**
  * 读取导出支持的 PNG/JPEG 像素尺寸。
  * @param data 已验证的图片字节。

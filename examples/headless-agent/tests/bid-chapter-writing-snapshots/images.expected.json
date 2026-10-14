@@ -1,0 +1,41 @@
+{
+  "style": {
+    "schema_version": 1,
+    "prompt": "蓝灰色写实工业插图，浅色背景，统一透视和光照，不在画面内写文字。",
+    "sha256": "e3c47cd37d6b9935d965674884a00e7c740d76fec135291ef1362e74342dad3b",
+    "connection": {
+      "baseURL": "https://cpa.example/v1",
+      "model": "snapshot-image-model",
+      "timeoutMs": 300000,
+      "maxImageBytes": 20971520,
+      "apiKeyEnv": "BID_IMAGE_SNAPSHOT_KEY"
+    },
+    "reference_image": {
+      "id": "IMG-ebd8063de40164f6264a43b6feb914d564363b901a180096ac0c14e4b5e02187",
+      "path": "chapters/images/61642d638e475948433624c1f962ef6f24d69247aed51c8046ca902dc55a673b.png",
+      "content_sha256": "61642d638e475948433624c1f962ef6f24d69247aed51c8046ca902dc55a673b",
+      "request_sha256": "50c293e493d33c546232e5162ff8fb89d77eb626db434deffef41ff15e47134c",
+      "width": 24,
+      "height": 16
+    }
+  },
+  "images": [
+    {
+      "id": "IMG-ebd8063de40164f6264a43b6feb914d564363b901a180096ac0c14e4b5e02187",
+      "section_id": "SEC-SECURITY",
+      "path": "chapters/images/61642d638e475948433624c1f962ef6f24d69247aed51c8046ca902dc55a673b.png",
+      "content_sha256": "61642d638e475948433624c1f962ef6f24d69247aed51c8046ca902dc55a673b",
+      "request_sha256": "50c293e493d33c546232e5162ff8fb89d77eb626db434deffef41ff15e47134c",
+      "width": 24,
+      "height": 16,
+      "title": "访问控制实施场景",
+      "purpose": "解释方案布置，非真实现场证据",
+      "prompt": "设备与服务区域的鸟瞰方案效果，清楚区分访问控制区域",
+      "style_sha256": "e3c47cd37d6b9935d965674884a00e7c740d76fec135291ef1362e74342dad3b",
+      "model": "snapshot-image-model",
+      "visual_status": "accepted",
+      "visual_reason": "实际图片区域清楚，风格符合全书，未展示未经证实的项目事实。"
+    }
+  ],
+  "markdown": "# 技术标\n\n# 1 访问控制与安全审计\n\n本项目先核查角色与访问权限，再组织安全审计和结果复核。实施流程以本地资料为编排参考，按权限授予、执行检查、记录留存三个步骤说明责任与交付结果。\n\n表 访问控制与安全审计管理台账\n| 管理事项 | 台账记录内容 |\n| --- | --- |\n| 权限授予 | 访问权限 |\n| 执行检查 | 安全审计 |\n| 记录留存 | 复核结果 |\n\n![访问控制实施场景](chapters/images/61642d638e475948433624c1f962ef6f24d69247aed51c8046ca902dc55a673b.png)\n\n图 访问控制实施场景\n\n质量检查由实施负责人组织，审计结果由复核人员确认。\n"
+}

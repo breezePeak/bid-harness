@@ -179,6 +179,7 @@ describe('connection node half', () => {
       'settings.describe', 'settings.openDocument', 'settings.update', 'settings.replace', 'settings.mutate',
       'credentials.describe', 'credentials.set', 'credentials.unset',
       'llm.discoverModels',
+      'bid/getImageGenerationConfig', 'bid/getImageGenerationModels',
       // A composition names the plugins a session runs: reading one is
       // reconnaissance, and copy/remove/openDocument manage the roster and
       // drive the host desktop.
@@ -423,6 +424,30 @@ describe('connection node half', () => {
     await remove()
     await fiber.dispose()
   })
+
+  it('作图配置在 Remote 拦截器接管后仍只允许回环浏览器读取', async () => {
+    const ctx = new Context()
+    const routes: WebRoute[] = []
+    ctx.provide('webServer', fakeHttpServer(routes, []) as WebServer)
+    const fiber = ctx.plugin({ inject: [...inject], apply }, { trustedHosts: ['harness.example'] })
+    await fiber.await()
+    const calls: string[] = []
+    const remove = (ctx.get('connection') as HostConnectionHandle).rpc.intercept('/api', () => true,
+      async (endpoint) => { calls.push(endpoint); return { ok: true, value: [] } }, { authority: 'trusted-host' })
+    try {
+      for (const method of ['bid/getImageGenerationConfig', 'bid/getImageGenerationModels']) {
+        const payload = { type: 'client-request', rpcId: 'image-config', method, payload: {} }
+        const denied = fakeResponse()
+        await routes[0]!.handler(fakePost({ host: 'harness.example' }, `/api/${method}`, payload), denied.response)
+        expect(denied.state.status).toBe(403)
+        expect(calls).not.toContain(method)
+        const accepted = fakeResponse()
+        await routes[0]!.handler(fakePost({ host: 'localhost:3080' }, `/api/${method}`, payload), accepted.response)
+        expect(accepted.state.status).toBe(200)
+        expect(calls).toContain(method)
+      }
+    } finally { await remove(); await fiber.dispose() }
+  })
 })
 
 describe('connection node half over a real HTTP server', () => {
@@ -476,6 +501,7 @@ describe('connection node half over a real HTTP server', () => {
         // Carries a draft credential and turns the host into a fetcher for a
         // URL the caller picked: an anonymous LAN caller must not reach it.
         'llm.discoverModels',
+        'bid/getImageGenerationConfig', 'bid/getImageGenerationModels',
         'agentPreset.read', 'agentPreset.copy', 'agentPreset.openDocument', 'agentPreset.remove',
       ]) {
         expect([method, await call(port, method, 'harness.example')]).toEqual([method, 403])

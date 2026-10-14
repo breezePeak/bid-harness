@@ -116,6 +116,8 @@ const PRIVILEGED_METHODS = new Set([
   'credentials.set',
   'credentials.unset',
   'llm.discoverModels',
+  'bid/getImageGenerationConfig',
+  'bid/getImageGenerationModels',
 ])
 
 /**
@@ -136,17 +138,9 @@ export function apply(ctx: Context, config?: ConnectionConfig): void {
   for (const entry of trustedHosts) assertTrustedAuthority(entry)
   if (ctx.get('apiProxy') !== undefined) assertImageBodyCapacity(ctx, maxRequestBodyBytes)
   const connection = new HostConnectionService(ctx, trustedHosts)
-  const fetchHandler = connection.createSharedFetchHandler(API_PATH, {
+  const sharedFetchHandler = connection.createSharedFetchHandler(API_PATH, {
     async fetch(request) {
       const pathname = new URL(request.url).pathname
-      const method = pathname.startsWith(`${API_PATH}/`)
-        ? pathname.slice(API_PATH.length + 1)
-        : undefined
-      if (method !== undefined
-        && PRIVILEGED_METHODS.has(method)
-        && !isTrustedApiRequest(request, [])) {
-        return new Response('forbidden', { status: 403 })
-      }
       if (request.method === 'GET' && (pathname === MUX_EVENTS_PATH || pathname === HOST_EVENTS_PATH)) {
         return new Response('upgrade required', {
           status: 426,
@@ -158,6 +152,16 @@ export function apply(ctx: Context, config?: ConnectionConfig): void {
       return toFetchHandler(apiProxy).fetch(request)
     },
   })
+  const fetchHandler = {
+    fetch(request: Request): Promise<Response> {
+      const pathname = new URL(request.url).pathname
+      const method = pathname.startsWith(`${API_PATH}/`) ? pathname.slice(API_PATH.length + 1) : undefined
+      if (method !== undefined && PRIVILEGED_METHODS.has(method) && !isTrustedApiRequest(request, [])) {
+        return Promise.resolve(new Response('forbidden', { status: 403 }))
+      }
+      return sharedFetchHandler.fetch(request)
+    },
+  }
   const route: WebRoute = {
     kind: 'prefix',
     path: API_PATH,

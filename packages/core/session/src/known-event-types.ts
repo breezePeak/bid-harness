@@ -29,6 +29,7 @@ export const KNOWN_SESSION_EVENT_TYPES: ReadonlySet<string> = new Set([
   'bid.docx_export.changed',
   'bid.goal.bound',
   'bid.goal.recovery.requested',
+  'bid.image.requested',
   'bid.project.resumed',
   'bid.recovery.requested',
   'bid.recovery.round',

@@ -134,3 +134,59 @@ it('S5 通过真实 Loader 在 Writer 补搜后重研 Evidence 并审核最终�
     ],
   })
 }, LOADER_SMOKE_TEST_TIMEOUT_MS + 15_000)
+
+it('S5 真实 Loader 按需生图、拒绝未确认图片并保存统一风格及 Word 图片', async () => {
+  const imageConfig = fileURLToPath(new URL('../bid-images.cordis.snapshot.yml', import.meta.url))
+  const imageDriver = fileURLToPath(new URL('./fixtures/bid-images-driver.ts', import.meta.url))
+  const result = await runLoaderSmoke({
+    label: 'S5 按需真实插图', tempDirPrefix: 'dsh-s5-images-snapshot-', binScript: imageDriver,
+    configPath: imageConfig, mode: 'src', processTimeoutMs: 60_000,
+    tsconfigPath: fileURLToPath(new URL('../../../tsconfig.json', import.meta.url)),
+    inspect: async (cwd) => {
+      const store = join(cwd, '.session-store')
+      const logs = await Promise.all((await readdir(store, { recursive: true })).filter(path => path.endsWith('.jsonl'))
+        .map(path => readFile(join(store, path), 'utf8')))
+      const writerLog = logs.find(log => log.includes('"name":"generate_bid_image"'))
+      if (writerLog === undefined) throw new Error('缺少生图 Writer 实际会话')
+      expect(writerLog).toContain('视觉确认')
+      expect(writerLog).toContain('"type":"image"')
+      const ids = logs.map(log => (JSON.parse(log.split('\n')[0]!) as SessionHeader).id)
+      const [header, ...lines] = writerLog.trimEnd().split('\n')
+      const events = lines.map(line => JSON.parse(line) as SessionEvent)
+      const callIds = new Set(['generate-scene', 'reject-unconfirmed-image', 'accept-scene'])
+      const selected = events.filter(event => event.type === 'bid.image.requested' || event.type === 'tool/call' && callIds.has(String(event.data.callId))
+        || event.type === 'tool/result' && callIds.has(String(event.data.message.source.callId)))
+      expect(selected).toHaveLength(7)
+      const transcript = normalizeSessionSnapshot([header, ...selected.map(event => JSON.stringify(event)), ''].join('\n'),
+        { sessionIds: ids, cwd, cwdAliases: [cwd.replaceAll('\\', '/')] })
+      const projectRoot = join(cwd, '.bid-harness')
+      const metadata = parseChapterMetadata(JSON.parse(await readFile(join(projectRoot, 'chapters/meta/0001.json'), 'utf8')))
+      expect(metadata.images).toHaveLength(1)
+      expect(metadata.images![0]!.visual_status).toBe('accepted')
+      const document = await readDocxXml(await readFile(join(projectRoot, 'output/bid.docx')))
+      expect(JSON.stringify(document['word/document.xml'])).toContain('w:drawing')
+      const payload = { style: JSON.parse(await readFile(join(projectRoot, 'chapters/image-style.json'), 'utf8')) as unknown,
+        images: metadata.images, markdown: await readFile(join(projectRoot, 'output/bid.md'), 'utf8') }
+      const expected = { 'images-writer.expected.jsonl': transcript, 'images.expected.json': JSON.stringify(payload, null, 2) + '\n' }
+      if (process.env.DSH_SNAPSHOT === 'refresh') {
+        for (const [name, content] of Object.entries(expected)) await writeFile(join(fixtureDir, name), content)
+      }
+      for (const [name, content] of Object.entries(expected)) expect(content).toBe(await readFile(join(fixtureDir, name), 'utf8'))
+    },
+  })
+  expect(JSON.parse(result.stdout)).toMatchObject({ generated: 1, images: [{ visual_status: 'accepted' }] })
+}, LOADER_SMOKE_TEST_TIMEOUT_MS + 20_000)
+
+it('S5 已冻结项目风格继续使用原模型与连接，全局关闭和改地址只影响新项目', async () => {
+  const result = await runLoaderSmoke({
+    label: 'S5 已冻结作图设置', tempDirPrefix: 'dsh-s5-frozen-images-',
+    binScript: fileURLToPath(new URL('./fixtures/bid-images-driver.ts', import.meta.url)),
+    configPath: fileURLToPath(new URL('../bid-images.cordis.snapshot.yml', import.meta.url)), mode: 'src',
+    env: { DSH_BID_FROZEN_IMAGE_STYLE: '1' }, processTimeoutMs: 60_000,
+    tsconfigPath: fileURLToPath(new URL('../../../tsconfig.json', import.meta.url)),
+  })
+  expect(JSON.parse(result.stdout)).toMatchObject({ generated: 1,
+    style: { connection: { baseURL: 'https://cpa.example/v1', model: 'snapshot-image-model' } },
+    images: [{ visual_status: 'accepted', model: 'snapshot-image-model' }],
+  })
+}, LOADER_SMOKE_TEST_TIMEOUT_MS + 20_000)

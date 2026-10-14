@@ -24,6 +24,7 @@ import { resolveFlowchartAnchors, validateFlowchartAnchors, validateFlowchartSpe
 import type { NativeVisioExport } from './native-visio.ts'
 import { parseTechnicalDeviationTable, type TechnicalDeviationTable } from './technical-deviation-table.ts'
 import type { VisualReviewModel } from './docx-visual-review.ts'
+import { chapterImagePaths, validateChapterImages } from './chapter-images.ts'
 
 /** 同一次正文读取产生的 DOCX Markdown 与固定技术偏离表数据。 */
 export interface DocxExportSnapshot {
@@ -47,19 +48,21 @@ async function readSavedChapter(workspace: BidWorkspace, path: string): Promise<
   }
 }
 
-async function readSavedFlowcharts(workspace: BidWorkspace, metadataPath: string | undefined): Promise<readonly FlowchartSpec[]> {
-  if (metadataPath === undefined) return []
-  try {
-    const metadata = parseChapterMetadata(JSON.parse(await readProjectFile(workspace, metadataPath)))
-    for (const flowchart of metadata.flowcharts) {
-      const issues = validateFlowchartSpec(flowchart)
-      if (issues.length > 0) throw new Error(`流程图无法导出：${issues.join('；')}`)
-    }
-    return metadata.flowcharts
-  } catch (error: unknown) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []
+async function readSavedChapterMetadata(
+  workspace: BidWorkspace, metadataPath: string | undefined,
+): Promise<ReturnType<typeof parseChapterMetadata> | null> {
+  if (metadataPath === undefined) return null
+  let source: string
+  try { source = await readProjectFile(workspace, metadataPath) } catch (error: unknown) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null
     throw error
   }
+  const metadata = parseChapterMetadata(JSON.parse(source))
+  for (const flowchart of metadata.flowcharts) {
+    const issues = validateFlowchartSpec(flowchart)
+    if (issues.length > 0) throw new Error(`流程图无法导出：${issues.join('；')}`)
+  }
+  return metadata
 }
 
 export { collectDocxChapterBody } from './docx-content.ts'
@@ -176,7 +179,13 @@ export async function collectDocxExportSnapshot(
   let figureNumber = 0
   const format = await readDocxFormat(workspace, templateId)
   for (const [sectionId, chapter] of chapters) {
-    const flowcharts = await readSavedFlowcharts(workspace, chapter.metadata_path)
+    const metadata = await readSavedChapterMetadata(workspace, chapter.metadata_path)
+    const imageIssues = await validateChapterImages(workspace, metadata?.images ?? [], chapter.markdown, chapter.content_path)
+    if (imageIssues.length > 0) throw new BidStageExecutionError(imageIssues.map(message => ({
+      code: 'DOCX_EXPORT_IMAGE_INVALID', message: `章节插图无法导出：${message}`,
+      ...(chapter.content_path === undefined ? {} : { artifact: chapter.content_path }),
+    })))
+    const flowcharts = metadata?.flowcharts ?? []
     flowchartsBySection.set(sectionId, flowcharts)
     const localNumbers = new Map<string, number>()
     figureNumbersBySection.set(sectionId, localNumbers)
@@ -217,6 +226,9 @@ export async function collectDocxExportSnapshot(
     const headingDepth = Math.min(6, depth)
     parts.push(`${'#'.repeat(headingDepth)} ${number} ${normalizeOutlineSectionTitle(section.title) || section.title}`)
     if (!section.writable && section.summary !== undefined) {
+      if (chapterImagePaths(section.summary).length > 0) throw new BidStageExecutionError([{
+        code: 'DOCX_EXPORT_IMAGE_INVALID', message: '目录概述中的生成插图缺少已确认的章节图片记录。', artifact: outlinePath,
+      }])
       const summaryIssues = validateFlowchartAnchors(section.summary, [])
       if (summaryIssues.length > 0) throw new Error(`目录概述不能提交绘图数据：${summaryIssues.join('；')}`)
       parts.push(section.summary)

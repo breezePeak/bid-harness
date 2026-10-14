@@ -399,11 +399,13 @@ Source: [`packages/shell/bash-sandbox/src/index.ts:35`](../packages/shell/bash-s
 
 ## `@deepseek-ai/dsh-bid`
 
-Requires: `agents` · `sessionProjections` · `sessions`
+Requires: `agents` · `sessionProjections` · `sessions` · `subagents` · `userQuestions`
 
 ```ts config-catalog
-/** Validated file limits and model-stage recovery budget for the Bid Host runtime. */
+/** Validated file limits, model-stage recovery budget, and Subagent concurrency limits. */
 export interface Config {
+  /** S5 按需生图配置；空模型不启用，凭据复用 pp。 */
+  imageGeneration?: BidImageGenerationConfig
   /** File extensions accepted by the Bid upload Remote. */
   allowedExtensions: string[]
   /** Maximum files admitted in one upload batch. */
@@ -412,12 +414,42 @@ export interface Config {
   maxFileBytes: number
   /** Maximum decoded bytes admitted across one upload batch. */
   maxTotalBytes: number
+  /** Maximum original bytes admitted for one DOCX format template. */
+  docxTemplateMaxBytes: number
   /** Validator-guided repair turns available to each model-authored stage execution. */
   modelStageRepairAttempts: number
+  /** Maximum Mapping Subagents running at the same time during S4. */
+  evidenceMappingMaxConcurrency: number
+  /** Maximum Chapter Subagents running at the same time during S5. */
+  chapterWritingMaxConcurrency: number
+  /** Maximum Main-Agent whole-document repair rounds after chapter review. */
+  chapterWritingCompletionRepairRounds: number
+  /** Non-loopback browser authorities admitted to the direct binary S1 endpoint. */
+  trustedHosts: string[]
+  /** Whether Bid stages may use the registered Web search and fetch tools. */
+  webSearchEnabled: boolean
+  /** Word 自然语言格式建议的输出 token 上限。 */
+  wordFormatMaxTokens: number
+  /** Word 格式建议超时毫秒数。 */
+  wordFormatTimeoutMs: number
+  /** 默认技术标封面的投标人名称。 */
+  bidderName: string
+}
+
+/** 用户配置；空地址继承 pp，空模型关闭作图。 */
+export interface BidImageGenerationConfig {
+  /** 作图 API 根地址，路径后追加 images/generations 或 images/edits。 */
+  baseURL?: string
+  /** 用户从服务模型列表选择的作图模型。 */
+  model?: string
+  /** 单次请求及响应读取的截止时间。 */
+  timeoutMs?: number
+  /** 单张输入、解码后图片及最终 PNG 的字节上限。 */
+  maxImageBytes?: number
 }
 ```
 
-Source: [`packages/bid/bid/src/index.ts:196`](../packages/bid/bid/src/index.ts)
+Source: [`packages/bid/bid/src/index.ts:531`](../packages/bid/bid/src/index.ts)
 
 <a id="deepseek-aidsh-client-connection"></a>
 
@@ -946,6 +978,21 @@ Requires: `llm`
  * reasoning effort resolves to `high`.
  */
 export interface Config {
+  /** Anthropic-compatible hosted-search connection overrides, owned by this Provider. */
+  search?: {
+    /** Optional Messages base; omission derives /anthropic/v1 from the chat base. */
+    baseURL?: string
+    /** Legacy search model override; omission follows the task's selected model. */
+    model?: string
+    /** Legacy literal search key retained during migration; never returned by settings.describe. */
+    apiKey?: string
+    /** Optional legacy credential reference when search used a different account. */
+    apiKeyEnv?: string
+    /** Anthropic-compatible protocol version. */
+    apiVersion?: string
+    /** Hosted-search output token limit. */
+    maxTokens?: number
+  }
   /** Credential reference (environment-variable name) resolved per request; defaults to `DEEPSEEK_API_KEY`. */
   apiKeyEnv?: string
   /** Endpoint base; falls back to $DEEPSEEK_BASE_URL from a trusted environment layer, then the public API. */
@@ -1011,7 +1058,7 @@ export interface DeepSeekCatalogModel {
 
 Depends on: [`ModelModality`](../packages/llm/llm/src/index.ts) · [`RetryPolicyConfig`](../packages/llm/llm/src/index.ts)
 
-Source: [`packages/llm/llm-deepseek/src/index.ts:106`](../packages/llm/llm-deepseek/src/index.ts)
+Source: [`packages/llm/llm-deepseek/src/index.ts:109`](../packages/llm/llm-deepseek/src/index.ts)
 
 <a id="deepseek-aidsh-llm-pi-ai"></a>
 
@@ -2330,10 +2377,10 @@ export interface Config {
    * fails.
    */
   cwd?: string
-  /** Provider route the child runtime initializes with (default `deepseek-official`). */
-  provider: string
-  /** Model the child runtime initializes with (default `deepseek-v4-flash`). */
-  model: string
+  /** Explicit child Provider override; set together with model, otherwise inherit the parent request. */
+  provider?: string
+  /** Explicit child model override; set together with provider. */
+  model?: string
   /** Optional per-request output-token cap for the child runtime. */
   maxTokens?: number
   /**
@@ -2931,7 +2978,7 @@ export interface Config {
 }
 ```
 
-Source: [`packages/todo/tool-todo/src/index.ts:29`](../packages/todo/tool-todo/src/index.ts)
+Source: [`packages/todo/tool-todo/src/index.ts:33`](../packages/todo/tool-todo/src/index.ts)
 
 <a id="deepseek-aidsh-tool-web"></a>
 
@@ -3013,7 +3060,7 @@ export interface Config {
 export type ToolPresentationMode = 'native' | 'code' | 'both'
 ```
 
-Source: [`packages/core/tools/src/index.ts:654`](../packages/core/tools/src/index.ts)
+Source: [`packages/core/tools/src/index.ts:667`](../packages/core/tools/src/index.ts)
 
 <a id="deepseek-aidsh-typert-loader"></a>
 
@@ -3081,7 +3128,7 @@ export interface WebRuntimeConfig {
 }
 ```
 
-Source: [`packages/web/web/src/index.ts:55`](../packages/web/web/src/index.ts)
+Source: [`packages/web/web/src/index.ts:58`](../packages/web/web/src/index.ts)
 
 <a id="deepseek-aidsh-web-app"></a>
 
@@ -3140,29 +3187,43 @@ Source: [`packages/web/web-fetch-http/src/index.ts:34`](../packages/web/web-fetc
 
 ## `@deepseek-ai/dsh-web-search-deepseek`
 
-Requires: `web`
+Requires: `web` · `llm` · `agentDefaultModel`
 
 ```ts config-catalog
-/** Plugin config (all optional — `apply` fills env-var and constant defaults). */
+/** Search routing and cost policy. Legacy connection fields are migration inputs only. */
 export interface Config {
-  /** Literal DeepSeek API key; prefer {@link apiKeyEnv} so no secret enters configuration files. */
-  apiKey?: string
-  /** Credential reference resolved for each search; defaults to `DEEPSEEK_API_KEY`. */
-  apiKeyEnv?: string
-  /** Anthropic-compatible endpoint base; `/messages` is appended. */
-  baseURL?: string
-  /** Anthropic-format model name. Defaults to `deepseek-v4-flash`. */
-  model?: string
-  /** `anthropic-version` header value. Defaults to `2023-06-01`. */
-  apiVersion?: string
-  /** Upper bound on generated tokens for the Messages request. Defaults to 4096. */
-  maxTokens?: number
-  /** Maximum `web_search` server-tool uses per request. Defaults to 5. */
+  /** Omission follows the initiating Agent's provider, or the global default outside an Agent. */
+  provider?: string
+  /** Maximum hosted searches in one auxiliary request. */
   maxUses?: number
+  /** 旧版搜索密钥；首次搜索前迁入 DeepSeek Provider 的 search 设置。
+   * @deprecated 使用 DeepSeek Provider 的 search.apiKey。
+   */
+  apiKey?: string
+  /** 旧版搜索凭据引用；首次搜索前迁入 DeepSeek Provider 的 search 设置。
+   * @deprecated 使用 DeepSeek Provider 的 search.apiKeyEnv。
+   */
+  apiKeyEnv?: string
+  /** 旧版搜索接口地址；首次搜索前迁入 DeepSeek Provider 的 search 设置。
+   * @deprecated 使用 DeepSeek Provider 的 search.baseURL。
+   */
+  baseURL?: string
+  /** 旧版搜索模型；首次搜索前迁入 DeepSeek Provider 的 search 设置。
+   * @deprecated 使用 DeepSeek Provider 的 search.model。
+   */
+  model?: string
+  /** 旧版搜索 API 版本；首次搜索前迁入 DeepSeek Provider 的 search 设置。
+   * @deprecated 使用 DeepSeek Provider 的 search.apiVersion。
+   */
+  apiVersion?: string
+  /** 旧版搜索输出上限；首次搜索前迁入 DeepSeek Provider 的 search 设置。
+   * @deprecated 使用 DeepSeek Provider 的 search.maxTokens。
+   */
+  maxTokens?: number
 }
 ```
 
-Source: [`packages/web/web-search-deepseek/src/index.ts:46`](../packages/web/web-search-deepseek/src/index.ts)
+Source: [`packages/web/web-search-deepseek/src/index.ts:27`](../packages/web/web-search-deepseek/src/index.ts)
 
 <a id="deepseek-aidsh-web-search-exa"></a>
 
@@ -3211,6 +3272,36 @@ export interface Config {
 ```
 
 Source: [`packages/web/web-search-perplexity/src/index.ts:32`](../packages/web/web-search-perplexity/src/index.ts)
+
+<a id="deepseek-aidsh-web-search-tavily"></a>
+
+## `@deepseek-ai/dsh-web-search-tavily`
+
+Requires: `web`
+
+```ts config-catalog
+/** Tavily connection and search policy. Secrets are referenced through `apiKeyEnv`. */
+export interface Config {
+  /** Credentials reference resolved for each search. */
+  apiKeyEnv?: string
+  /** HTTP(S) API root; `/search` is appended. */
+  baseURL?: string
+  /** Provider-owned request deadline in milliseconds. */
+  timeoutMs?: number
+  /** Tavily latency and relevance mode. */
+  searchDepth?: 'basic' | 'advanced' | 'fast' | 'ultra-fast'
+  /** Tavily result category. */
+  topic?: 'general' | 'news' | 'finance'
+  /** Optional generated-answer mode. */
+  includeAnswer?: boolean | 'basic' | 'advanced'
+  /** Default result bound when the caller omits one. */
+  maxResults?: number
+  /** Advanced-search chunks retained per source. */
+  chunksPerSource?: number
+}
+```
+
+Source: [`packages/web/web-search-tavily/src/index.ts:32`](../packages/web/web-search-tavily/src/index.ts)
 
 <a id="deepseek-aidsh-workflow-worker-thread"></a>
 

@@ -6,6 +6,7 @@
  * chat and owns no Bid business state.
  */
 import type { ClientContext, SessionId } from '@deepseek-ai/dsh-client-runtime/client'
+import type { ConnectionHandle } from '@deepseek-ai/dsh-api-remotes/client'
 import type { BidCapabilityPlanView } from '@deepseek-ai/dsh-bid/control-plane'
 import { BID_BINARY_UPLOAD_PATH, BID_UPLOAD_FILES_HEADER, BID_UPLOAD_SESSION_HEADER, DOCX_TEMPLATE_NAME_HEADER, DOCX_TEMPLATE_REVISION_HEADER, DOCX_TEMPLATE_SIZE_HEADER, DOCX_TEMPLATE_UPLOAD_PATH, OUTLINE_CONFIRMATION_ISSUES, parseBidReviewWorkbenchView, type BidClientProjection, type BidDocumentRole, type BidEvidenceMappingProgress, type BidFileIntakeFileResult, type BidFileIntakeResult, type BidPageEstimate, type DocxFormatView, type DocxTemplateLibraryView, type DocxTemplateUploadResult, type OutlineConfirmationIssueCode, type OutlineConfirmationRepairAction, type OutlineDraftMutationRequest, type OutlineDraftView, type OutlineReviewContext, type StageValidationIssue, type TenderAnalysisConfirmationView, type TenderAnalysisEditOperation, type WritingEntryIntent } from '@deepseek-ai/dsh-bid/control-plane'
 // Type-only: pulls the generated Bid Remote API and ctx.remote merge through the Client assembly boundary.
@@ -20,6 +21,8 @@ import { BidConfirmationModeControl, BidStagePanel } from './BidStagePanel.tsx'
 import { BidDetails } from './BidDetails.tsx'
 import type { BidDetailsView } from '@deepseek-ai/dsh-bid/control-plane'
 import { BidReviewWorkbench, type BidReviewChapterView } from './BidReviewWorkbench.tsx'
+import { BidImageSettings, type BidImageSettingsInjected, type BidImageSettingsView } from './BidImageSettings.tsx'
+import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import { BidComposerContext } from './BidComposerContext.tsx'
 import { BidRunNotice } from './BidRunNotice.tsx'
 import { bidRunNoticeDefinition } from './bid-run-notice-definition.ts'
@@ -116,7 +119,7 @@ export class BidActionError extends Error {
 }
 
 /** Required services for the dock registration, copy, composer block, and Bid Host action. */
-export const inject = ['conversationEvents', 'slots', 'locale', 'conversation', 'sessions', 'remote', 'remote.bid']
+export const inject = ['conversationEvents', 'slots', 'locale', 'conversation', 'sessions', 'remote', 'remote.bid', 'connection']
 
 /** Browser material paired with its selected business role. */
 export interface BidSelectedFile { readonly file: File; readonly role: BidDocumentRole }
@@ -263,6 +266,54 @@ export function apply(ctx: ClientContext): void {
     return result.value
   }
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'ui-bid: dictionaries')
+  ctx.slots.inject('settings.section', () => ctx.slots.register({
+    name: 'settings.section',
+    id: 'bid-images',
+    order: 15,
+    label: () => '标书作图',
+    inject: (): BidImageSettingsInjected => {
+      const api = (ctx.get('connection') as ConnectionHandle).api
+      const configuration = async () => {
+        const result = await ctx.remote.bid.getImageGenerationConfig()
+        if (!result.ok) throw actionFailure(result.error)
+        return result.value
+      }
+      const settingsView = (
+        config: Omit<BidImageSettingsView, 'revision' | 'writable'>,
+        section: { value: unknown; revision: number },
+        writable: boolean,
+      ): BidImageSettingsView => {
+        if (section.value === null || typeof section.value !== 'object'
+          || !('baseURL' in section.value) || typeof section.value.baseURL !== 'string'
+          || !('model' in section.value) || typeof section.value.model !== 'string') {
+          throw new Error('当前服务返回的标书作图设置无效，请重新读取。')
+        }
+        return { ...config, baseURL: section.value.baseURL, model: section.value.model, revision: section.revision, writable }
+      }
+      return {
+        load: async (): Promise<BidImageSettingsView> => {
+          const [config, described] = await Promise.all([configuration(), api.settings.describe({})])
+          if (!described.result.ok) throw new Error(described.result.error.message)
+          const section = described.result.value.namespaces.find(namespace => namespace.ns === 'bid-images')
+          if (section === undefined) throw new Error('当前服务未提供标书作图配置。')
+          return settingsView(config, section, described.result.value.writable)
+        },
+        getModels: async () => {
+          const result = await ctx.remote.bid.getImageGenerationModels()
+          if (!result.ok) throw actionFailure(result.error)
+          return result.value
+        },
+        save: async (config, revision) => {
+          const response = await api.settings.mutate({ ns: 'bid-images', expectedRevision: revision, ops: [
+            { op: 'set', path: ['baseURL'], value: config.baseURL },
+            { op: 'set', path: ['model'], value: config.model },
+          ] })
+          if (!response.result.ok) throw new Error(response.result.error.message)
+          return settingsView(await configuration(), response.result.value, true)
+        },
+      }
+    },
+  }, BidImageSettings))
   ctx.slots.inject('conversation.chat.node', () => ctx.slots.register({
     name: 'conversation.chat.node',
     key: 'bid-run-notice',
@@ -561,6 +612,11 @@ export function apply(ctx: ClientContext): void {
           const result = await remote.getReviewChapter(sessionId, sectionId)
           if (!result.ok) throw actionFailure(result.error)
           return result.value as BidReviewChapterView
+        },
+        getImage: async (imageId: string) => {
+          const result = await ctx.remote.bid.getReviewImage(sessionId, imageId)
+          if (!result.ok) throw actionFailure(result.error)
+          return result.value
         },
         getRevisionComparison: async (issueId: string): Promise<BidRevisionComparisonView> => {
           const result = await remote.getRevisionComparison(sessionId, issueId)

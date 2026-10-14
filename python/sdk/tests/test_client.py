@@ -43,6 +43,12 @@ for line in sys.stdin:
         print(json.dumps({"jsonrpc": "2.0", "method": "session.status", "params": {"sessionId": params["sessionId"], "status": "running"}}), flush=True)
         print(json.dumps({"jsonrpc": "2.0", "id": msg["id"], "result": {"messageId": "message-1"}}), flush=True)
         print(json.dumps({"jsonrpc": "2.0", "method": "session.event", "params": {
+            "sessionId": params["sessionId"], "event": {"type": "bid.image.requested", "data": {
+                "section_id": "SEC-1", "request_sha256": "a" * 64, "style_sha256": "b" * 64,
+                "prompt": "统一蓝灰色等距插画。\\n\\n本图用途：表达方案\\n本图内容：机房维护场景",
+                "size": "1536x1024", "model": "gpt-image-2", "base_url": "https://cpa.example/v1",
+            }}}}), flush=True)
+        print(json.dumps({"jsonrpc": "2.0", "method": "session.event", "params": {
             "sessionId": params["sessionId"], "event": {"type": "bid.task.changed", "data": {
                 "state": {"stage": "chapter_writing", "status": "failed", "run": None,
                     "failure": {"code": "BID_TASK_RESULT_UNMET", "message": "当前章节尚需修复。"}},
@@ -132,6 +138,11 @@ for line in sys.stdin:
     assert result.final_response == "hello from runtime"
     assert result.finish_reason == "max-tokens"
     assert result.events[-1]["type"] == "turn/end"
+    assert next(event["data"] for event in result.events if event["type"] == "bid.image.requested") == {
+        "section_id": "SEC-1", "request_sha256": "a" * 64, "style_sha256": "b" * 64,
+        "prompt": "统一蓝灰色等距插画。\n\n本图用途：表达方案\n本图内容：机房维护场景",
+        "size": "1536x1024", "model": "gpt-image-2", "base_url": "https://cpa.example/v1",
+    }
     assert not any(event["type"] == "bid.run.suspended" for event in result.events)
     assert next(event["data"] for event in result.events if event["type"] == "bid.task.changed") == {
         "state": {"stage": "chapter_writing", "status": "failed", "run": None,

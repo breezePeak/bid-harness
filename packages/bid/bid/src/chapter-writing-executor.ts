@@ -42,7 +42,6 @@ import {
   type AcceptedChapterCandidate,
   type BoundChapterCandidate,
   type ChapterCandidate,
-  type ChapterMetadata,
   type ChapterManifestEntry,
 } from './chapter-writing-artifacts.ts'
 import {
@@ -137,6 +136,9 @@ import {
 import { estimateChapterCandidatePages, estimateChapterWritingPages } from './page-estimate.ts'
 import { evaluateHostAcceptanceCriteria, type HostAcceptanceResult } from './acceptance-criteria.ts'
 import { findBidInternalIdentifiers } from './customer-facing-prose.ts'
+import { createBidImageProvider } from './bid-image-provider.ts'
+import { attachBidImageStyle, createBidProjectImageSession, readBidImageStyle, readChapterImages,
+  readBidImageBytes, validateChapterImages } from './chapter-images.ts'
 import type { BidCommitLease, BidCommitScope, BidRunContext } from './run-coordinator.ts'
 import { buildWebEvidenceChunkIndex, parseWebEvidenceChunkIndex, webEvidenceChunkIndexMatches, webEvidenceChunkIndexPath } from './web-evidence-chunks.ts'
 import { buildBidStageTask } from './runtime-state.ts'
@@ -964,6 +966,9 @@ async function validateAndBindChapterCandidate(
     }
   }
   const metadata = candidate.metadata
+  issues.push(...(await validateChapterImages(workspace, metadata.images ?? [], candidate.markdown, context.contentPath)).map(message => ({
+    code: 'CHAPTER_WRITING_IMAGE_INVALID', message, path: 'metadata.images',
+  })))
   const flowcharts = Array.isArray(metadata.flowcharts) ? metadata.flowcharts : []
   issues.push(...validateFlowchartAnchors(candidate.markdown, flowcharts).map(message => ({
     code: 'CHAPTER_WRITING_FLOWCHART_ANCHOR_INVALID', message, path: 'markdown',
@@ -1028,16 +1033,19 @@ export async function validateChapterCandidate(
 }
 
 /**
- * 段落修订忽略 Writer 重新提交的 metadata，并保留原章节的完整持久化记录。
+ * 段落修订保留原章节的证据与评分记录，图片选择按 Host 已绑定的当前正文更新。
  * @param candidate 已绑定的 Writer 候选。
  * @param metadata 修订前 metadata；非段落修订不提供。
  * @returns 使用原 metadata 的段落修订候选，或未改变的其他候选。
  */
 export function preserveParagraphRevisionMetadata(
   candidate: BoundChapterCandidate,
-  metadata: ChapterMetadata | undefined,
+  metadata: AcceptedChapterCandidate['metadata'] | undefined,
 ): BoundChapterCandidate {
-  return metadata === undefined ? candidate : { ...candidate, metadata: { ...metadata, additional_web_materials: [] } }
+  return metadata === undefined ? candidate : { ...candidate, metadata: {
+    ...metadata, additional_web_materials: [],
+    ...(metadata.images === undefined && candidate.metadata.images === undefined ? {} : { images: candidate.metadata.images }),
+  } }
 }
 
 function renderChapterReviewerTask(
@@ -1078,6 +1086,7 @@ function renderChapterReviewerTask(
     '全局要求不属于 R 覆盖项，不要求本章复述。逐项判断 conforms、violates 或 not_applicable：conforms/violates 引用适用正文，not_applicable 说明本章为何不适用且不代表整份文档已经满足。只有当前正文真实违反全局约束时才形成可执行修复意见。',
     '逐项审查 Review Checklist 的 item_position；covered 必须至少选择一个当前 evidence_quote_position 且 issue=null，missing 不得选择原文且必须说明具体 issue。Semantic Acceptance 逐项提交 criterion_position、met/unmet、reason 和 evidence_quote_positions；evidence_quote_positions 字段必填，无需引句时填 []；全局约束使用 compliance_position，任务冲突使用 related_section_positions；程序绑定实际身份。负向条件未满足时可引用违规句，全文性条件不因缺少单句引文而失效。',
     '正文包含 metadata.flowcharts 时，将其作为正文的一部分审核：核对流程图与正文步骤、角色、分支和整改闭环是否一致，检查关键评分响应流程是否遗漏、连线是否断裂、判断节点是否缺少分支或与招标要求矛盾。只报告业务问题，不操作布局坐标或生成 Visio/OOXML。',
+    ...(candidate.metadata.images?.length ? ['正文插图的真实图片随本任务提供，请实际查看内容，核对它与正文方案、招标要求和全书风格是否一致；生成图只表达方案，不能证明真实业绩、资质或现场事实。误导或内容错误属于 blocking_issues。'] : []),
     '所有 evidence_quote_positions 与 claim_quote_position 只选择当前 Quote Options 的位置；不得手抄或自造引用身份。',
     '只对实质影响方案、事实或承诺的声明登记 claim，source_position 选择 Evidence Pack 的位置或 null。supported 必须实际看到适用原文，来源存在本身不表示语义支持；unsupported 说明具体问题。',
     'Evidence Pack 中 tender 只证明 S2 已确认的招标事实和要求，reference 只证明原文适用的企业或技术事实，旧标书及 Web 只可作适用的技术参考。旧项目事实不能迁入本项目；handoff 仅传递决策，不能把无依据事实变成证据。未看到原文或截断部分不能宣称核验通过。',
@@ -1355,6 +1364,7 @@ async function loadChapterCheckpoint(
           throw new Error('checkpoint-identity-invalid')
         }
         const candidate: AcceptedChapterCandidate = { section_id: section.id, markdown: markdown.trim(), metadata }
+        if ((await validateChapterImages(workspace, metadata.images ?? [], markdown, context.contentPath)).length > 0) throw new Error('checkpoint-image-invalid')
         if (validateChapterHeadings(markdown, section.title, section.id).length > 0
         || metadata.handoff.section_id !== section.id
         || JSON.stringify(metadata.covered_must_answer) !== JSON.stringify(section.must_answer)
@@ -2156,6 +2166,21 @@ async function runChapterWriting(
 
   const chaptersRoot = join(workspace.projectRoot, 'chapters')
   await assertNoLinkedPath(workspace.root, chaptersRoot)
+  const imageProvider = createBidImageProvider(agent.ctx)
+  let imageStyle = await readBidImageStyle(workspace)
+  const imageConnection = scoped?.mode === 'review' || imageStyle !== null ? undefined : imageProvider.resolve()
+  if (imageConnection !== undefined && imageStyle === null) {
+    const styleRuntime = attachBidImageStyle(agent, workspace, imageConnection, options.run.commits, options.maxRepairAttempts)
+    try {
+      imageStyle = await runMainAgentProtocol(agent, [
+        '请为当前技术标确定全项目统一的插图视觉风格。依据项目、用户要求和主题选择媒介、配色、背景、构图与视觉限制，通过 set_image_style 提交一份具体语义描述；不生成图片、不抄写连接、模型、身份或路径。该描述供所有章节共同使用。',
+        `项目：${JSON.stringify(project)}`,
+        `已确认写作要求：${JSON.stringify(writingPlan)}`,
+      ].join('\n'), ['set_image_style'], styleRuntime, options.run, 'Bid 图片风格规划')
+    } finally { styleRuntime.dispose() }
+  }
+  const imageProject = imageStyle === null || scoped?.mode === 'review' ? undefined
+    : createBidProjectImageSession(workspace, imageProvider, imageStyle, options.run.commits)
   const worklist = buildChapterWorklist(outline)
   const scopedIds = scoped === undefined ? undefined : new Set(scoped.targetSectionIds)
   if (scopedIds !== undefined && [...scopedIds].some(id => !worklist.some(section => section.id === id))) {
@@ -2780,11 +2805,15 @@ async function runChapterWriting(
         (completed.get(dependency.section_id)?.candidate.metadata.flowcharts ?? []).map(chart => ({
           chart, chapterTitle: contexts.get(dependency.section_id)?.section.title ?? '',
         })))
-      let references = createChapterWriterReferences(context, dependencyFlowcharts)
+      const chapterImages = await readChapterImages(workspace, sectionId)
+      let references = createChapterWriterReferences(context, dependencyFlowcharts, chapterImages)
       await loadChapterWriterChunkReferences(workspace, references)
       const preservedWriterFlowcharts = preservation?.preserveSeedFlowcharts === true
         ? preservation.preservedContentBySectionId?.get(sectionId)?.flowcharts
           ?? preservation.seedFlowchartsBySectionId?.get(sectionId) ?? [] : []
+      const preservedWriterMarkdown = preservation?.preserveSeedFlowcharts === true
+        ? preservation.preservedContentBySectionId?.get(sectionId)?.markdown
+          ?? preservation.seedBySectionId?.get(sectionId) : undefined
       const chapterWebSources = () => [...durableWebSources.values()].filter(source =>
         context.webMaterials.some(material => material.source_id === source.source_id)
         || source.chapter_context?.section_id === context.section.id)
@@ -2847,6 +2876,10 @@ async function runChapterWriting(
         }
         logWrites = logWrites.then(async () => {
           assertCurrentInput(reviewerInputIdentity)
+          const imageIssues = await validateChapterImages(workspace, candidate.metadata.images ?? [], afterMarkdown, context.contentPath)
+          if (imageIssues.length > 0) throw new BidStageExecutionError(imageIssues.map(message => ({
+            code: 'CHAPTER_WRITING_IMAGE_INVALID', message, artifact: sectionId,
+          })))
           const committed = {
             ...log, status: 'completed' as const, phase: null, failure_phase: null,
             final_writer_child_session_id: writerChildSessionId,
@@ -2935,7 +2968,7 @@ async function runChapterWriting(
             responsePointCatalog: responsePointCatalog.points, outline, writingPlan })
           await resolveChapterReadLocations(workspace, manifest, webSources.sources, context)
           contexts.set(sectionId, context)
-          const updatedReferences = createChapterWriterReferences(context, dependencyFlowcharts)
+          const updatedReferences = createChapterWriterReferences(context, dependencyFlowcharts, chapterImages)
           references = { ...updatedReferences,
             webMaterials: new Map([...references.webMaterials, ...updatedReferences.webMaterials]) }
           await loadChapterWriterChunkReferences(workspace, references)
@@ -2979,6 +3012,17 @@ async function runChapterWriting(
         const evidencePack = await buildChapterReviewEvidence(
           workspace, manifest, context, candidate, [...durableWebSources.values()], dependencies,
         )
+        const imageReviewContent: ContentBlock[] = []
+        if (candidate.metadata.images?.length) {
+          const attachments = agent.ctx.get('attachments')
+          if (attachments === undefined) throw new Error('BID_IMAGE_ATTACHMENTS_UNAVAILABLE')
+          if (candidate.metadata.images.length > attachments.imageLimits.maxImagesPerMessage) throw new Error('BID_IMAGE_REVIEW_LIMIT')
+          for (const image of candidate.metadata.images) {
+            const attachment = await attachments.saveImage({ data: new Uint8Array(await readBidImageBytes(workspace, image.id)),
+              mediaType: 'image/png', name: `${image.title}.png` })
+            imageReviewContent.push({ type: 'text', text: `正文插图：${image.title}；用途：${image.purpose}` }, { type: 'image', attachment })
+          }
+        }
         let estimatedPages: number | undefined
         if (context.sectionWritingPlan.acceptance_criteria.some(item => item.evaluator.kind === 'deterministic' && item.evaluator.metric === 'estimated_pages')) {
           try {
@@ -3052,7 +3096,7 @@ async function runChapterWriting(
               options.recovery !== undefined && (options.recovery.unit === sectionId
                 || options.recovery.unit === options.run.work.workId || options.recovery.unit.includes(serial))
                 ? renderBidRecoveryContext(options.recovery) : '',
-            ].filter(Boolean).join('\n') }],
+            ].filter(Boolean).join('\n') }, ...imageReviewContent],
             signal,
             toolFilter: { allow: [...REVIEWER_AGENT_TOOLS] },
             maxDepth: 1,
@@ -3143,7 +3187,9 @@ async function runChapterWriting(
             preserved.writerChildSessionId, reviewed.reviewerChildSessionId, false,
           )
         }
-        rejectedCandidate = projectChapterWriterCandidate(preserved.candidate, references, preservedWriterFlowcharts)
+        rejectedCandidate = projectChapterWriterCandidate(
+          preserved.candidate, references, preservedWriterFlowcharts, preservedWriterMarkdown,
+        )
         latestIssues = reviewed.issues
         firstAttempt = 1
       }
@@ -3158,9 +3204,13 @@ async function runChapterWriting(
         const retryLabel = infrastructureRetries === 0 ? '' : ` · 运行重试 ${infrastructureRetries}`
         const label = `S5 · ${serial} · ${number} - 编写${semanticLabel}${retryLabel} · ${context.section.title}`
         await appendChapterWebReferences(workspace, references, chapterWebSources())
-        const contextPrompt = renderChapterSubagentTask(
+        const contextPrompt = [renderChapterSubagentTask(
           context, plan.global_consistency_notes, planned.planning_notes, dependencies, references,
-        )
+        ), ...(imageProject === undefined ? [] : [
+          `项目统一插图风格：${imageProject.style.prompt}`,
+          '在插图确有助于解释方案、现场布置、设备外观或实施场景时，按需调用 generate_bid_image 生成真正图片，不为每章机械配图。恢复已有图片时先用 view_bid_image 看图，不重复付费生成。真实图片展示后必须在下一次模型请求调用 review_bid_image 明确接受或拒绝，检查图片内容是否准确、是否存在多余文字或误导事实、是否保持项目风格；拒绝后修改 prompt 再生成。',
+          '正文独立段落使用 {{image:图片位置}} 放置已接受图片，并在 metadata.images 中选择 {image_position:图片位置}。图片身份、文件路径和图题编号由程序绑定，不抄写；生成图只表达方案，不作为企业资质、真实业绩或现场事实的证据。',
+        ])].join('\n')
         const seed = preservation?.seedBySectionId?.get(sectionId)
         const seedFlowcharts = preservation?.seedFlowchartsBySectionId?.get(sectionId)
         const preservedContent = preservation?.preservedContentBySectionId?.get(sectionId)
@@ -3262,7 +3312,8 @@ async function runChapterWriting(
             )
           }
         }, signal, reusableWriterId === undefined ? undefined : SessionId(reusableWriterId), context.section.title,
-        webSearchEnabled, agent)
+        webSearchEnabled, agent, imageProject === undefined ? undefined
+          : { workspace, sectionId, images: chapterImages, project: imageProject })
         const run = writer
         if (!readableWebPathsByChild.has(String(run.id))) {
           readableWebPathsByChild.set(String(run.id), mappedWebPaths(context))
@@ -3336,7 +3387,9 @@ async function runChapterWriting(
                   })
                   stopAfterVisualIssue = true
                 } else {
-                  rejectedCandidate = projectChapterWriterCandidate(candidate, references, preservedWriterFlowcharts)
+                  rejectedCandidate = projectChapterWriterCandidate(
+                    candidate, references, preservedWriterFlowcharts, preservedWriterMarkdown,
+                  )
                   await run.assertImageInput()
                   pendingVisualPrompt = await renderChapterFlowchartVisualFollowup(agent, candidate, rejectedCandidate, rendered)
                   presentedRenderedHash = renderedHash
@@ -3383,7 +3436,7 @@ async function runChapterWriting(
               await updateBatchTask(sectionId, { status: 'reviewing' })
             }
             const reviewed = await reviewCandidate(candidate)
-            rejectedCandidate = projectChapterWriterCandidate(candidate, references, preservedWriterFlowcharts)
+            rejectedCandidate = projectChapterWriterCandidate(candidate, references, preservedWriterFlowcharts, preservedWriterMarkdown)
             if (reviewed.review !== undefined && reviewed.reviewerChildSessionId !== undefined) {
               reviewedFallback = {
                 candidate,

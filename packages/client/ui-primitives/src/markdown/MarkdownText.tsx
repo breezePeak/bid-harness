@@ -31,6 +31,7 @@ function renderSettled(
   codeLabels: MarkdownCodeLabels | undefined,
   fileMentions: MarkdownFileMentions | undefined,
   paragraphSourceOffset: number | undefined,
+  imageRenderer: MarkdownRenderContext['imageRenderer'],
 ): ReactNode[] {
   const root = parseGfmWithMath(text)
   const targets = createReferenceTargets()
@@ -43,6 +44,7 @@ function renderSettled(
     footnoteOrder: [],
     footnoteCounts: new Map(),
     paragraphSourceOffset,
+    imageRenderer,
   }
   const blocks = wrapBlockChildren(
     renderBlocks(root.children.map((node, index) => ({ node, key: index })), context),
@@ -140,41 +142,36 @@ class StreamingRenderer {
 }
 
 /**
- * Render untrusted assistant-authored Markdown as semantic React elements.
- * @param props - Markdown source text preserved by the session projection;
- * `streaming` renders fences and TeX plain (highlighting and KaTeX land on
- * the finalize swap) and parses incrementally across chunks; `codeLabels`
- * forwards localized copy-button labels to fence CodeBlocks — pass a
- * reference-stable object (memoized per locale revision), because a new
- * identity discards the streaming render cache mid-message. `fileMentions`
- * links inline-code tokens its resolver recognizes as real files; this is
- * the single streaming gate — it applies to settled renders only, because a
- * streaming message's vocabulary is not final and frozen cached elements
- * must not bake in handlers that could go stale.
- * @returns A GFM document with TeX math rendered through KaTeX; raw HTML,
- * relative links, and unsafe protocols are disabled, while absolute HTTP(S)
- * images render directly.
+ * 将不可信 Markdown 渲染为语义 React 元素。
+ * @param props 原始 Markdown 及呈现选项。streaming 增量解析并保持代码和 TeX 为文字，完成后应用高亮和 KaTeX。
+ * codeLabels 的对象身份须在同一语言版本内稳定，否则会重建流式缓存。fileMentions 与 imageRenderer 只在非流式文档中
+ * 呈现调用方确认的文件或图片，避免冻结尚未确定的处理器。paragraphSourceOffset 保留原始正文的段落位置。
+ * @returns 支持 GFM 与数学公式的文档；默认禁用原始 HTML、相对链接及不安全协议，未命中的图片只允许绝对 HTTP(S)。
  */
-export const MarkdownText = memo(function MarkdownText({ text, streaming = false, codeLabels, fileMentions, paragraphSourceOffset }: {
+export const MarkdownText = memo(function MarkdownText({
+  text, streaming = false, codeLabels, fileMentions, paragraphSourceOffset, imageRenderer,
+}: {
   text: string
   streaming?: boolean
   codeLabels?: MarkdownCodeLabels | undefined
   fileMentions?: MarkdownFileMentions | undefined
   /** Annotate settled top-level paragraphs with UTF-16 source offsets, including this omitted source prefix. */
   paragraphSourceOffset?: number | undefined
+  /** 非流式文档中已授权图片的呈现；不匹配时保持默认 URL 过滤。 */
+  imageRenderer?: MarkdownRenderContext['imageRenderer']
 }) {
   const streamRef = useRef<StreamingRenderer | null>(null)
   const streamLabelsRef = useRef<MarkdownCodeLabels | undefined>(codeLabels)
   const children = useMemo(() => {
     if (!streaming) {
       streamRef.current = null
-      return renderSettled(text, codeLabels, fileMentions, paragraphSourceOffset)
+      return renderSettled(text, codeLabels, fileMentions, paragraphSourceOffset, imageRenderer)
     }
     if (streamRef.current === null || streamLabelsRef.current !== codeLabels) {
       streamRef.current = new StreamingRenderer(codeLabels)
       streamLabelsRef.current = codeLabels
     }
     return streamRef.current.render(text)
-  }, [text, streaming, codeLabels, fileMentions, paragraphSourceOffset])
+  }, [text, streaming, codeLabels, fileMentions, paragraphSourceOffset, imageRenderer])
   return <div className={css.markdown}>{children}</div>
 })

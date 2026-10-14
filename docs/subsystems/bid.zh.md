@@ -189,6 +189,27 @@ async resumeCurrentRun( session: Session, suspendedRunId: string, expectedProjec
 @Remote('getReviewChapter') async getReviewChapter(session: Session, sectionId: string): Promise<BidReviewChapterView>
 
 /**
+ * 读取不含密钥的作图配置与 pp 凭据就绪状态。
+ * @returns 当前独立作图设置及继承地址。
+ */
+@Remote('getImageGenerationConfig') getImageGenerationConfig(): Promise<BidImageGenerationView>
+
+/**
+ * 查询已保存 CPA 地址公布的模型，不发起生图。
+ * @param signal 浏览器请求的取消信号。
+ * @returns 去重后的模型 ID。
+ */
+@Remote('getImageGenerationModels') getImageGenerationModels(signal: AbortSignal): Promise<string[]>
+
+/**
+ * 读取当前项目正式章节引用的图片；拒绝候选、其他项目及摘要不符的文件。
+ * @param session 已授权的 Bid 项目会话。
+ * @param imageId Host 发放的正式图片身份。
+ * @returns 经过身份与摘要核验的 PNG 字节编码。
+ */
+@Remote('getReviewImage') async getReviewImage(session: Session, imageId: string): Promise<{ base64: string; mimeType: 'image/png' }>
+
+/**
  * 读取当前审批意见队列；不持有项目锁，仅读取持久化文件。
  * @param session Bid 会话。
  * @returns 浏览器安全的审批意见队列视图。

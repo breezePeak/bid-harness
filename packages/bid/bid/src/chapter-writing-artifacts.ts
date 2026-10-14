@@ -10,6 +10,7 @@ import {
 } from './evidence-mapping-artifacts.ts'
 import { normalizeWebEvidenceUrl } from './web-evidence-source-artifacts.ts'
 import { FLOWCHART_SCHEMA_VERSION, FLOWCHART_MAX_EDGES, FLOWCHART_MAX_NODES, type FlowchartDraft, type FlowchartSpec } from './flowchart.ts'
+import { bidChapterImageSchema } from './chapter-images.ts'
 
 /** Version of the durable S6 chapter manifest and chapter metadata records. */
 export const CHAPTER_WRITING_SCHEMA_VERSION = 6 as const
@@ -79,6 +80,7 @@ const chapterMetadataFields = {
   unresolved_topics: z.array(z.string().min(1)),
   handoff: chapterHandoffSchema,
   flowcharts: z.array(flowchartSpecSchema).default([]),
+  images: z.array(bidChapterImageSchema).max(100).optional(),
 } as const
 
 function addDurableEvidenceIssues(

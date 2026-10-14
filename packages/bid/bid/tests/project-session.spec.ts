@@ -67,6 +67,10 @@ import { capabilityPlanPatchRepeated, capabilityTaskCheckpointSchema, capability
 import { executeTestCapabilityTask as executeCapabilityTask } from './fixtures/task-verifier.ts'
 import { bidCapabilityTaskSchema } from '../src/bid-capability-contract.ts'
 import { createTestBidRunContext } from '../src/run-coordinator.ts'
+import { chapterImageFixturePng } from './fixtures/chapter-image-png.ts'
+import { createBidProjectImageSession, readBidImageStyle, BID_IMAGE_STYLE_PATH } from '../src/chapter-images.ts'
+import { bidImageConnectionSpecSchema, type BidImageProvider } from '../src/bid-image-provider.ts'
+import { parseChapterMetadata } from '../src/chapter-writing-artifacts.ts'
 import { validateOutlineDraftForConfirmation } from '../src/outline-confirmation-validator.ts'
 import { validateOutlineSharedCoverage, validateOutlineSharedStructure } from '../src/outline-shared-validator.ts'
 import { seedConversation, seedProjectArtifacts } from './fixtures/project-session.ts'
@@ -357,7 +361,125 @@ async function fixture(options: {
   return { ctx, workspace, fresh, host, executor, executeStage, validator, adapter, bidFiber }
 }
 
+async function seedReviewImage(workspace: BidWorkspace, writer: Agent) {
+  const png = await chapterImageFixturePng()
+  const connection = bidImageConnectionSpecSchema.parse({ baseURL: 'https://cpa.example/v1', model: 'test-image',
+    apiKeyEnv: 'PP_API_KEY', timeoutMs: 1000, maxImageBytes: 20 * 1024 * 1024 })
+  const prompt = '统一蓝灰色等距方案插画，白色背景。'
+  const style = { schema_version: 1 as const, prompt, sha256: createHash('sha256').update(prompt).digest('hex'), connection }
+  const commits = createTestBidRunContext().commits
+  await commits.writeJson(join(workspace.projectRoot, BID_IMAGE_STYLE_PATH), style)
+  const provider: BidImageProvider = {
+    resolve: () => connection,
+    view: async () => ({ baseURL: connection.baseURL, effectiveBaseURL: connection.baseURL,
+      model: connection.model, credentialConfigured: true, enabled: true }),
+    discoverModels: async () => [connection.model],
+    generate: async () => ({ png, width: 24, height: 16, model: connection.model }),
+  }
+  const project = createBidProjectImageSession(workspace, provider, style, commits)
+  const images: import('../src/chapter-images.ts').BidChapterImage[] = []
+  const signal = new AbortController().signal
+  await project.generate('SEC-1', images,
+    { title: '方案效果图', purpose: '表达拟采用方案', prompt: '园区设备布局', size: '1536x1024' }, signal, writer)
+  const image = await project.review('SEC-1', images, { image_position: 0, decision: 'accept', reason: '画面符合方案和统一风格。' }, signal)
+  const metadataPath = join(workspace.projectRoot, 'chapters/meta/0001.json')
+  const metadata = parseChapterMetadata(JSON.parse(await readFile(metadataPath, 'utf8')))
+  await commits.publish(async (lease) => {
+    await lease.writeJson(metadataPath, { ...metadata, images: [image] })
+    await lease.writeText(join(workspace.projectRoot, 'chapters/sections/0001.md'),
+      `# 技术方案\n\n![方案效果图][generated]\n\n[generated]: ${image.path}\n`)
+  })
+  return { image, png }
+}
+
 describe('Workspace 项目与独立 Session', () => {
+  it('生成图片只向正式正文引用它的项目会话提供，支持引用式图片并拒绝改动字节', async () => {
+    const { ctx, workspace, fresh } = await fixture({ withPersistence: true })
+    await seedProjectArtifacts(workspace)
+    const agent = await fresh('image-review-reader')
+    const { image, png } = await seedReviewImage(workspace, agent)
+    expect((await ctx.bid.getReviewChapter(agent.session, 'SEC-1')).images).toMatchObject([{ id: image.id, path: image.path }])
+    expect(await ctx.bid.getReviewImage(agent.session, image.id)).toEqual({ base64: png.toString('base64'), mimeType: 'image/png' })
+    await expect(ctx.bid.getReviewImage(agent.session, '../manifest.json')).rejects.toThrow('BID_REVIEW_IMAGE_UNKNOWN')
+    const metadataPath = join(workspace.projectRoot, 'chapters/meta/0001.json')
+    const metadata = parseChapterMetadata(JSON.parse(await readFile(metadataPath, 'utf8')))
+    const forgedId = `IMG-${'b'.repeat(64)}`
+    await writeFile(metadataPath, JSON.stringify({ ...metadata, images: [{ ...image, id: forgedId }] }))
+    await expect(ctx.bid.getReviewImage(agent.session, forgedId)).rejects.toThrow('BID_IMAGE_LEDGER_MISMATCH')
+    await writeFile(metadataPath, JSON.stringify(metadata))
+    const otherRoot = join(workspace.root, 'other-project')
+    await mkdir(otherRoot)
+    await seedProjectArtifacts(new BidWorkspace(otherRoot))
+    const other = await fresh('image-other-reader', otherRoot)
+    await expect(ctx.bid.getReviewImage(other.session, image.id)).rejects.toThrow('BID_REVIEW_IMAGE_UNKNOWN')
+    await writeFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), `# 技术方案\n\n\`![图](${image.path})\`\n`)
+    expect((await ctx.bid.getReviewChapter(agent.session, 'SEC-1')).images).toBeUndefined()
+    await expect(ctx.bid.getReviewImage(agent.session, image.id)).rejects.toThrow('BID_REVIEW_IMAGE_UNKNOWN')
+    await writeFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), `# 技术方案\n\n![图](${image.path})\n`)
+    await writeFile(join(workspace.projectRoot, image.path), Buffer.concat([png, Buffer.from('changed')]))
+    await expect(ctx.bid.getReviewImage(agent.session, image.id)).rejects.toThrow('BID_IMAGE_CONTENT_CHANGED')
+  })
+
+  it('前章仍未保存 metadata 时，后章正式图片仍可读取', async () => {
+    const { ctx, workspace, fresh } = await fixture({ withPersistence: true })
+    await seedProjectArtifacts(workspace)
+    const agent = await fresh('image-after-pending-reader')
+    const { image, png } = await seedReviewImage(workspace, agent)
+    const outlinePath = join(workspace.projectRoot, 'outline/confirmed-outline.json')
+    const outline = parseOutlineArtifact(JSON.parse(await readFile(outlinePath, 'utf8')))
+    const section = outline.sections[0]!
+    section.order = 2
+    outline.sections.unshift({ ...section, id: 'SEC-PENDING', order: 1, title: '待写方案' })
+    await writeFile(outlinePath, JSON.stringify(outline))
+    const logPath = join(workspace.projectRoot, 'chapters/execution-log.json')
+    const log = parseOrMigrateChapterExecutionLog(JSON.parse(await readFile(logPath, 'utf8')))
+    log.sections.unshift({ ...log.sections[0]!, section_id: 'SEC-PENDING', storage_serial: 2,
+      status: 'running', final_writer_child_session_id: null, final_reviewer_child_session_id: null })
+    await writeFile(logPath, JSON.stringify(log))
+    expect(await ctx.bid.getReviewImage(agent.session, image.id)).toEqual({ base64: png.toString('base64'), mimeType: 'image/png' })
+  })
+
+  it('S5 重置保留已确认项目风格和参考图，S1 重置清除它们', async () => {
+    const { ctx, workspace, fresh } = await fixture({ withPersistence: true })
+    await seedProjectArtifacts(workspace)
+    await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'completed' })
+    const agent = await fresh('image-style-reset')
+    const { image, png } = await seedReviewImage(workspace, agent)
+    const style = await readBidImageStyle(workspace)
+    await ctx.bid.resetStage(agent, 'chapter_writing')
+    expect(await readBidImageStyle(workspace)).toEqual(style)
+    expect(await readFile(join(workspace.projectRoot, image.path))).toEqual(png)
+    await expect(readFile(join(workspace.projectRoot, 'chapters/meta/0001.json'))).rejects.toMatchObject({ code: 'ENOENT' })
+    await ctx.bid.resetStage(agent, 'file_intake')
+    expect(await readBidImageStyle(workspace)).toBeNull()
+    await expect(readFile(join(workspace.projectRoot, image.path))).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  it('原文迁入章节的正式图片保持源章身份，并按源章账本授权读取', async () => {
+    const { ctx, workspace, fresh } = await fixture({ withPersistence: true })
+    await seedProjectArtifacts(workspace)
+    const agent = await fresh('image-migrated-reader')
+    const { image, png } = await seedReviewImage(workspace, agent)
+    const outlinePath = join(workspace.projectRoot, 'outline/confirmed-outline.json')
+    const outline = parseOutlineArtifact(JSON.parse(await readFile(outlinePath, 'utf8')))
+    outline.sections.push({ ...outline.sections[0]!, id: 'SEC-MOVED', order: 2, title: '迁入方案' })
+    await writeFile(outlinePath, JSON.stringify(outline))
+    const logPath = join(workspace.projectRoot, 'chapters/execution-log.json')
+    const log = parseOrMigrateChapterExecutionLog(JSON.parse(await readFile(logPath, 'utf8')))
+    log.sections.push({ ...log.sections[0]!, section_id: 'SEC-MOVED', storage_serial: 2 })
+    log.next_storage_serial = 3
+    await writeFile(logPath, JSON.stringify(log))
+    const metadataPath = join(workspace.projectRoot, 'chapters/meta/0001.json')
+    const metadata = parseChapterMetadata(JSON.parse(await readFile(metadataPath, 'utf8')))
+    const markdown = await readFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), 'utf8')
+    await writeFile(metadataPath, JSON.stringify({ ...metadata, images: [] }))
+    await writeFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), '# 技术方案\n\n原图片已随方案迁入新章。\n')
+    await writeFile(join(workspace.projectRoot, 'chapters/meta/0002.json'), JSON.stringify({ ...metadata, section_id: 'SEC-MOVED' }))
+    await writeFile(join(workspace.projectRoot, 'chapters/sections/0002.md'), markdown)
+    expect((await ctx.bid.getReviewChapter(agent.session, 'SEC-MOVED')).images).toMatchObject([{ id: image.id }])
+    expect(await ctx.bid.getReviewImage(agent.session, image.id)).toEqual({ base64: png.toString('base64'), mimeType: 'image/png' })
+  })
+
   it('真实 Host 的修订纯职责冲突交 Main 执行恢复，同 Work 无用户问题且门禁前正文保持不变', async () => {
     const { ctx, workspace, fresh, adapter } = await fixture({ withPersistence: true, withPreset: true })
     const outline = await writeChapterInputs(workspace)

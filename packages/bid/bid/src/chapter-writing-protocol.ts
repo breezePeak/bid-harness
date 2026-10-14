@@ -32,7 +32,7 @@ export interface ChapterProtocol<T> {
    * 注册当前 Agent 私有的工具及参数检查。
    * @param definition 本次执行私有的工具定义。
    */
-  register(definition: Omit<ToolDefinition, 'output'>): void
+  register(definition: Omit<ToolDefinition, 'output'> & Partial<Pick<ToolDefinition, 'output'>>): void
   /** 在下一次请求组装前挂载或卸载当前协议的私有工具。 */
   setToolsEnabled(enabled: boolean): void
   /**
@@ -118,7 +118,7 @@ export function createChapterProtocol<T>(agent: Agent, finishName: string, maxCo
     register(definition) {
       const registered: ToolDefinition = {
         ...definition,
-        output: {
+        output: definition.output ?? {
           schema: { type: 'object' },
           render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }],
         },

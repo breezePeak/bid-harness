@@ -4,6 +4,17 @@ import type { DocxTemplateId } from './docx-format-contract.ts'
 import type { FlowchartSpec } from './flowchart.ts'
 import type { BidResearchDiagnostics } from './research-diagnostics-contract.ts'
 
+/** 作图设置的非敏感前端投影。 */
+export interface BidImageGenerationView {
+  baseURL: string
+  effectiveBaseURL: string
+  model: string
+  credentialConfigured: boolean
+  enabled: boolean
+  /** 配置或凭据不可用时的安全诊断。 */
+  error?: string
+}
+
 /** The ordered Bid Harness stages owned by the control plane. */
 export const BID_STAGES = [
   'file_intake',
@@ -717,6 +728,16 @@ export interface BidReviewMaterialView {
   readonly summary: string
 }
 
+/** 当前章节已发布图片的展示身份；路径仅用于匹配正文，不授予文件读取权限。 */
+export interface BidReviewImageView {
+  readonly id: string
+  readonly title: string
+  readonly path: string
+  readonly sha256: string
+  readonly width: number
+  readonly height: number
+}
+
 /** Browser-safe body for a selected S5 outline section. */
 export interface BidReviewChapterView {
   readonly section_id: string
@@ -727,6 +748,8 @@ export interface BidReviewChapterView {
   readonly markdown: string | null
   /** Host-validated structured flowcharts; legacy chapters return an empty list. */
   readonly flowcharts?: readonly FlowchartSpec[]
+  /** Host 绑定到当前正式正文的生成图片。 */
+  readonly images?: readonly BidReviewImageView[]
   /** 完整 markdown 的 SHA-256；正文尚未生成时为 null。 */
   readonly content_sha256: string | null
   readonly requirement_ids: readonly string[]
