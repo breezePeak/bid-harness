@@ -33,17 +33,24 @@ export interface BidImageGenerationRequest {
   size: BidImageSize
   /** 经完整解码校验后按原字节发送，须与会话事件的参考附件一致。 */
   reference?: Buffer
-  /** 项目风格记录冻结的连接；缺省使用当前配置。 */
-  connection?: BidImageConnectionSpec
+  /** 项目已冻结的模型；缺省使用正式作图配置中的模型。 */
+  model?: string
+  /**
+   * HTTP 调用前记录同一次解析的实际连接；失败或取消后不发送请求。
+   * @param connection 从当前正式配置解析的连接，不含凭据值。
+   * @returns 请求日志持久化完成。
+   */
+  beforeRequest?: (connection: BidImageConnectionSpec) => Promise<void>
 }
 
 /** 设置 UI 与 S5 共用的作图能力。 */
 export interface BidImageProvider {
   /**
-   * 返回当前启用连接。
-   * @returns 不含密钥的连接，未选择模型时为 undefined。
+   * 从当前正式配置解析连接，项目记录只能指定模型。
+   * @param model 已解析的项目冻结模型；缺省使用当前全局模型。
+   * @returns 不含密钥的连接，未选择全局或项目模型时为 undefined。
    */
-  resolve(): BidImageConnectionSpec | undefined
+  resolve(model?: string): BidImageConnectionSpec | undefined
   /**
    * 查询作图设置和就绪状态。
    * @returns 不含凭据值的设置投影。
@@ -57,7 +64,7 @@ export interface BidImageProvider {
   discoverModels(signal: AbortSignal): Promise<string[]>
   /**
    * 生成单图，有参考图时调用编辑接口，不自动重试计费请求。
-   * @param request 程序绑定的语义、图幅、参考图及项目连接。
+   * @param request 程序绑定的语义、图幅、参考图、冻结模型及请求记录回调。
    * @param signal 所属操作的取消信号。
    * @returns 经字节与像素限制验证的 PNG。
    */
@@ -203,8 +210,7 @@ export function createBidImageProvider(ctx: Context, source?: () => BidImageGene
       : source()
     return resolveBidImageConfig(value ?? {})
   }
-  const connection = (): BidImageConnectionSpec => {
-    const options = config()
+  const connection = (options: Required<BidImageGenerationConfig>): BidImageConnectionSpec => {
     const pp = ppSettingsSchema.safeParse(ctx.get('settings')?.get(PP_NAMESPACE))
     if (!pp.success || pp.data.providers.pp.apiKeyEnv === undefined) {
       throw new BidImageError('BID_IMAGE_CONFIG_INVALID', '请先配置 pp 模型提供方及其已有凭据。')
@@ -221,7 +227,11 @@ export function createBidImageProvider(ctx: Context, source?: () => BidImageGene
     url.pathname = path.endsWith('/v1') ? path : `${path}/v1`
     return { ...parsed.data, baseURL: url.toString().replace(/\/+$/u, ''), model: options.model }
   }
-  const resolve = (): BidImageConnectionSpec | undefined => config().model === '' ? undefined : connection()
+  const resolve = (model?: string): BidImageConnectionSpec | undefined => {
+    const options = config()
+    const selectedModel = model ?? options.model
+    return selectedModel === '' ? undefined : connection({ ...options, model: selectedModel })
+  }
   const apiKey = async (spec: BidImageConnectionSpec, signal: AbortSignal): Promise<string> => {
     checkAbort(signal)
     const credentials = ctx.get('credentials')
@@ -241,7 +251,7 @@ export function createBidImageProvider(ctx: Context, source?: () => BidImageGene
       }
       let spec: BidImageConnectionSpec
       try {
-        spec = connection()
+        spec = connection(options)
       } catch (error) {
         return { ...view, error: error instanceof BidImageError ? error.message : '作图配置不可用。' }
       }
@@ -252,7 +262,7 @@ export function createBidImageProvider(ctx: Context, source?: () => BidImageGene
       return view
     },
     async discoverModels(signal) {
-      const spec = connection()
+      const spec = connection(config())
       using operation = deadline(signal, spec.timeoutMs, 'BID_IMAGE_TIMEOUT')
       const key = await apiKey(spec, operation.signal)
       const body = await requestJson(`${spec.baseURL}/models`, { headers: { Authorization: `Bearer ${key}` } }, MAX_LISTING_BYTES, operation.signal)
@@ -261,10 +271,13 @@ export function createBidImageProvider(ctx: Context, source?: () => BidImageGene
       return [...new Set(parsed.data.data.map(entry => entry.id))]
     },
     async generate(request, signal) {
-      const current = request.connection ?? resolve()
-      const spec = current === undefined ? undefined : { ...current }
+      const current = resolve(request.model)
+      const spec = current === undefined ? undefined : Object.freeze(current)
       if (spec === undefined) throw new BidImageError('BID_IMAGE_DISABLED', '请先选择并保存作图模型。')
       using operation = deadline(signal, spec.timeoutMs, 'BID_IMAGE_TIMEOUT')
+      checkAbort(operation.signal)
+      await request.beforeRequest?.(spec)
+      checkAbort(operation.signal)
       const key = await apiKey(spec, operation.signal)
       let body: string | FormData
       let path: string

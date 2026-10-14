@@ -11,7 +11,7 @@ import { z } from 'zod'
 import type { BidWorkspace } from './index.ts'
 import type { BidCommitScope } from './run-coordinator.ts'
 import { chapterToolArgs, createChapterProtocol, type ChapterProtocol } from './chapter-writing-protocol.ts'
-import { bidImageConnectionSpecSchema, type BidImageConnectionSpec, type BidImageProvider } from './bid-image-provider.ts'
+import type { BidImageConnectionSpec, BidImageProvider } from './bid-image-provider.ts'
 import { DOCX_MAX_BODY_IMAGE_BYTES, docxImageDimensions } from './docx-image.ts'
 import { assertNoLinkedPath, within } from './workspace-path.ts'
 import { bidImageRequestedSchema } from './bid-events.ts'
@@ -37,11 +37,11 @@ const referenceSchema = bidChapterImageSchema.pick({
   id: true, path: true, content_sha256: true, request_sha256: true, width: true, height: true,
 })
 const styleSchema = z.object({
-  schema_version: z.literal(1), prompt: text, sha256,
-  connection: bidImageConnectionSpecSchema, reference_image: referenceSchema.optional(),
+  schema_version: z.literal(2), prompt: text, sha256,
+  model: z.string().trim().min(1).max(200), reference_image: referenceSchema.optional(),
 }).strict()
 
-/** 项目冻结的视觉描述、连接及已确认参考图。 */
+/** 项目冻结的视觉描述、模型及已确认参考图。 */
 export type BidImageStyle = z.infer<typeof styleSchema>
 
 /** S5 重置时仍保留的项目风格文件。 */
@@ -275,7 +275,7 @@ export async function readBidImageBytes(workspace: BidWorkspace, imageId: BidIma
  * 安装一次项目风格规划的私有完成工具。
  * @param agent 当前 S5 规划 Agent。
  * @param workspace 目标项目。
- * @param connection 已解析且不含凭据的连接。
+ * @param connection 正式配置解析的连接；仅保存其中选定模型。
  * @param commits 当前 Run 的文件提交权限。
  * @param maxContinuations 未提交时的有限续行次数。
  * @returns 必须在 finally 中释放的风格协议。
@@ -293,7 +293,7 @@ export function attachBidImageStyle(agent: Agent, workspace: BidWorkspace, conne
         if (saved.prompt !== input.prompt) throw new ToolArgsError(['项目图片风格已确定，不能由本轮重新覆盖。'])
         return runtime.finish(exec, saved)
       }
-      const style = styleSchema.parse({ schema_version: 1, prompt: input.prompt, sha256: digest(input.prompt), connection })
+      const style = styleSchema.parse({ schema_version: 2, prompt: input.prompt, sha256: digest(input.prompt), model: connection.model })
       exec.signal.throwIfAborted()
       await commits.writeJson(within(workspace.projectRoot, BID_IMAGE_STYLE_PATH), style)
       return runtime.finish(exec, style)
@@ -304,7 +304,7 @@ export function attachBidImageStyle(agent: Agent, workspace: BidWorkspace, conne
 
 /** 当前项目共享的生图执行；首张图确认前其他章节等待。 */
 export interface BidProjectImageSession {
-  /** 全书所有章节共享的固定风格与连接。 */
+  /** 全书所有章节共享的固定风格与模型。 */
   readonly style: BidImageStyle
   /**
    * 生成或复用当前章图片，并在首图确认前等待其他章节。
@@ -349,7 +349,7 @@ async function waitForReference(promise: Promise<void>, signal: AbortSignal): Pr
  * 创建全书共享的首图结算与资产提交执行器。
  * @param workspace 当前 Run 的项目。
  * @param provider 已配置的图片提供方。
- * @param style 全书冻结的风格与连接。
+ * @param style 全书冻结的风格与模型。
  * @param commits 当前 Run 的发布权限。
  * @returns 章节工具共享的执行器。
  */
@@ -376,7 +376,7 @@ export function createBidProjectImageSession(workspace: BidWorkspace, provider: 
         await waitForReference(first.done.promise, signal)
       }
       signal.throwIfAborted()
-      const requestHash = digest(JSON.stringify({ sectionId, ...input, style: style.sha256, connection: style.connection }))
+      const requestHash = digest(JSON.stringify({ sectionId, ...input, style: style.sha256, model: style.model }))
       const ownsFirst = style.reference_image === undefined && first === undefined
       if (ownsFirst) first = { sectionId, done: Promise.withResolvers<void>() }
       const saved = images.find(image => image.request_sha256 === requestHash)
@@ -408,17 +408,20 @@ export function createBidProjectImageSession(workspace: BidWorkspace, provider: 
           reference = Buffer.from((await attachments.readImage(referenceAttachment, signal)).data)
         }
         const prompt = `${style.prompt}\n\n本图用途：${input.purpose}\n本图内容：${input.prompt}`
-        writer.session.append('bid.image.requested', bidImageRequestedSchema.parse({
-          section_id: sectionId, request_sha256: requestHash, style_sha256: style.sha256, prompt, size: input.size,
-          model: style.connection.model, base_url: style.connection.baseURL,
-          ...(style.reference_image === undefined || referenceAttachment === undefined ? {} : {
-            reference: { ...style.reference_image, attachment: referenceAttachment },
-          }),
-        }))
-        if (!await writer.ctx.sessions.flush(writer.session)) throw new Error('BID_IMAGE_REQUEST_LOG_UNAVAILABLE')
         signal.throwIfAborted()
         const result = await provider.generate({ prompt,
-          size: input.size, ...(reference === undefined ? {} : { reference }), connection: style.connection }, signal)
+          size: input.size, ...(reference === undefined ? {} : { reference }), model: style.model,
+          async beforeRequest(spec) {
+            writer.session.append('bid.image.requested', bidImageRequestedSchema.parse({
+              section_id: sectionId, request_sha256: requestHash, style_sha256: style.sha256, prompt, size: input.size,
+              model: spec.model, base_url: spec.baseURL,
+              ...(style.reference_image === undefined || referenceAttachment === undefined ? {} : {
+                reference: { ...style.reference_image, attachment: referenceAttachment },
+              }),
+            }))
+            if (!await writer.ctx.sessions.flush(writer.session)) throw new Error('BID_IMAGE_REQUEST_LOG_UNAVAILABLE')
+          },
+        }, signal)
         signal.throwIfAborted()
         const hash = digest(result.png)
         const image = bidChapterImageSchema.parse({
@@ -583,7 +586,7 @@ export async function validateChapterImages(workspace: BidWorkspace, images: rea
   const paths = chapterImagePaths(markdown)
   if (images.length > 0) {
     const style = await readBidImageStyle(workspace)
-    if (style === null || images.some(image => image.style_sha256 !== style.sha256 || image.model !== style.connection.model)) {
+    if (style === null || images.some(image => image.style_sha256 !== style.sha256 || image.model !== style.model)) {
       issues.push('章节图片与项目已确定的风格或模型不一致。')
     }
   }

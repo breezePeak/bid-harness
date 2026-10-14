@@ -41,10 +41,10 @@ it('通过已有 pp 配置生成概念图及保持项目风格的参考图', asy
   const signal = new AbortController().signal
   const models = await images.discoverModels(signal)
   expect(models).toContain(connection.model)
-  const first = await images.generate({ connection, size: '1536x1024',
+  const first = await images.generate({ model: connection.model, size: '1536x1024',
     prompt: '标书技术方案概念配图：数据中心机房的等距透视商务插画。浅白背景、蓝灰色主色和少量青色点缀，不含文字、数字、标识，不表示任何真实企业业绩或项目现场。',
   }, signal)
-  const second = await images.generate({ connection, size: '1536x1024', reference: first.png,
+  const second = await images.generate({ model: connection.model, size: '1536x1024', reference: first.png,
     prompt: '保持参考图的蓝灰色和青色配色、浅白背景、等距透视与线条质感，绘制维护人员检查网络设备的另一个概念场景，不含文字、数字、标识，不表示真实企业业绩或现场。',
   }, signal)
   for (const image of [first, second]) {

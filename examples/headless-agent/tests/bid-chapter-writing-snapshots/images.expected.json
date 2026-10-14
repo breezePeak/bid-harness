@@ -1,31 +1,25 @@
 {
   "style": {
-    "schema_version": 1,
+    "schema_version": 2,
     "prompt": "蓝灰色写实工业插图，浅色背景，统一透视和光照，不在画面内写文字。",
     "sha256": "e3c47cd37d6b9935d965674884a00e7c740d76fec135291ef1362e74342dad3b",
-    "connection": {
-      "baseURL": "https://cpa.example/v1",
-      "model": "snapshot-image-model",
-      "timeoutMs": 300000,
-      "maxImageBytes": 20971520,
-      "apiKeyEnv": "BID_IMAGE_SNAPSHOT_KEY"
-    },
+    "model": "snapshot-image-model",
     "reference_image": {
-      "id": "IMG-ebd8063de40164f6264a43b6feb914d564363b901a180096ac0c14e4b5e02187",
+      "id": "IMG-4c8ac4cfff14433af428d9f9b62bb8bcafdc6a6ea5cd9b8fd86e9b23f4c11d7d",
       "path": "chapters/images/61642d638e475948433624c1f962ef6f24d69247aed51c8046ca902dc55a673b.png",
       "content_sha256": "61642d638e475948433624c1f962ef6f24d69247aed51c8046ca902dc55a673b",
-      "request_sha256": "50c293e493d33c546232e5162ff8fb89d77eb626db434deffef41ff15e47134c",
+      "request_sha256": "bf3d1170f4b265b906153f45bbc3da039f6d35b37a53c48d76ad9d56101bf49c",
       "width": 24,
       "height": 16
     }
   },
   "images": [
     {
-      "id": "IMG-ebd8063de40164f6264a43b6feb914d564363b901a180096ac0c14e4b5e02187",
+      "id": "IMG-4c8ac4cfff14433af428d9f9b62bb8bcafdc6a6ea5cd9b8fd86e9b23f4c11d7d",
       "section_id": "SEC-SECURITY",
       "path": "chapters/images/61642d638e475948433624c1f962ef6f24d69247aed51c8046ca902dc55a673b.png",
       "content_sha256": "61642d638e475948433624c1f962ef6f24d69247aed51c8046ca902dc55a673b",
-      "request_sha256": "50c293e493d33c546232e5162ff8fb89d77eb626db434deffef41ff15e47134c",
+      "request_sha256": "bf3d1170f4b265b906153f45bbc3da039f6d35b37a53c48d76ad9d56101bf49c",
       "width": 24,
       "height": 16,
       "title": "访问控制实施场景",

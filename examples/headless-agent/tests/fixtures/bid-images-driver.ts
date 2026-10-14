@@ -25,9 +25,10 @@ const png = await chapterImageFixturePng()
 const originalFetch = globalThis.fetch
 const requests: string[] = []
 globalThis.fetch = async (input, init) => {
-  const url = String(input)
+  const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
   if (url !== 'https://cpa.example/v1/images/generations') throw new Error(`非预期图片请求：${url}`)
-  requests.push(String(init?.body))
+  if (typeof init?.body !== 'string') throw new Error('生图回放要求实际 JSON 请求正文')
+  requests.push(init.body)
   return new Response(JSON.stringify({ data: [{ b64_json: png.toString('base64') }] }), { status: 200,
     headers: { 'content-type': 'application/json' } })
 }
@@ -53,7 +54,7 @@ try {
         callId: CallId('freeze-existing-style'), signal: new AbortController().signal })
       if (result.isError) throw new Error('项目原风格建立失败')
     } finally { runtime.dispose() }
-    await settings.update({ model: '', baseURL: 'https://changed.example/v1' })
+    await settings.update({ model: '' })
   }
   const result = await runChapterWritingLoop(host, process.cwd(), frozen ? 'frozen' : true)
   const style = await readBidImageStyle(result.workspace)

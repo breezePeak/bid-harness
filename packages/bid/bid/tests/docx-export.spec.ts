@@ -21,8 +21,8 @@ import { detectFlowchartExportEnvironment, type NativeVisioExport } from '../src
 import { renderFlowchartImage } from '../src/flowchart-image.ts'
 import { bindFlowchartModelAnchors, bindFlowchartModelInputs } from '../src/flowchart.ts'
 import { bidChapterImageSchema, chapterImageLedgerPath } from '../src/chapter-images.ts'
-import { bidImageConnectionSpecSchema } from '../src/bid-image-provider.ts'
 import { chapterImageFixturePng } from './fixtures/chapter-image-png.ts'
+import * as pageEstimate from '../src/page-estimate.ts'
 
 const reads = vi.hoisted(() => ({ afterRead: undefined as ((path: string) => Promise<void>) | undefined }))
 vi.mock('node:fs/promises', async (importOriginal) => {
@@ -252,9 +252,7 @@ describe('Bid DOCX export', () => {
       await mkdir(join(workspace.projectRoot, 'chapters/images'), { recursive: true })
       await writeFile(join(workspace.projectRoot, image.path), png)
       await writeFile(join(workspace.projectRoot, 'chapters/image-style.json'), JSON.stringify({
-        schema_version: 1, prompt, sha256: hash(prompt), connection: bidImageConnectionSpecSchema.parse({
-          baseURL: 'https://cpa.example/v1', model: image.model, apiKeyEnv: 'TEST_PP_KEY', timeoutMs: 1000, maxImageBytes: 1024 * 1024,
-        }),
+        schema_version: 2, prompt, sha256: hash(prompt), model: image.model,
       }))
       await writeFile(ledgerPath, ledger)
       await writeFile(metadataPath, metadata)
@@ -670,7 +668,12 @@ describe('Bid DOCX export', () => {
     await writeFile(join(workspace.projectRoot, 'chapters/writing-plan.json'), `${JSON.stringify(plan)}\n`)
 
     await expect(validateDocxExport(workspace, 'docx_export', artifacts)).resolves.toEqual({ ok: true })
-    const warnings = await assessDocxExportPageTarget(workspace)
+    // 篇幅告警用例使用确定性 fast 估算；外部 Office 分页由 page-estimate 测试负责。
+    const estimate = pageEstimate.estimateChapterWritingPages
+    const scopedEstimate = vi.spyOn(pageEstimate, 'estimateChapterWritingPages').mockImplementationOnce(
+      (project, confirmed, options) => estimate(project, confirmed, { ...options, method: 'fast' }),
+    )
+    const warnings = await assessDocxExportPageTarget(workspace).finally(() => { scopedEstimate.mockRestore() })
     expect(warnings).toHaveLength(1)
     expect(warnings[0]?.code).toBe('DOCX_EXPORT_PAGE_TARGET_BELOW')
     await expect(readFile(join(workspace.outputRoot, 'bid.docx'))).resolves.not.toHaveLength(0)

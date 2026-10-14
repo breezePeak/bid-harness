@@ -4,9 +4,9 @@ import type { AddressInfo } from 'node:net'
 import sharp from 'sharp'
 import schemastery from '@deepseek-ai/schemastery'
 import { installSettingsSection, SettingsProvider, settingsNamespace } from '@deepseek-ai/dsh-settings'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { BID_IMAGE_SETTINGS_NAMESPACE, BidImageGenerationConfig, resolveBidImageConfig, bidImageConnectionSpecSchema } from '../src/bid-image-config.ts'
-import { createBidImageProvider } from '../src/bid-image-provider.ts'
+import { createBidImageProvider, type BidImageConnectionSpec } from '../src/bid-image-provider.ts'
 
 const cleanups: Array<() => void | Promise<void>> = []
 const signal = (): AbortSignal => new AbortController().signal
@@ -40,11 +40,12 @@ function provider(baseURL: string, config: Record<string, unknown> = {}) {
     'llm-pi-ai': { providers: { pp: { baseURL, apiKeyEnv: 'PP_TEST_KEY' } } },
   }
   cleanups.push(ctx.provide('settings', { get: (namespace: string) => settings[namespace] }))
+  const resolveCredential = vi.fn(async (_ref: string) => ({ value: 'test-key', source: 'memory' }))
   cleanups.push(ctx.provide('credentials', {
-    resolve: async () => ({ value: 'test-key', source: 'memory' }),
+    resolve: resolveCredential,
     describe: async () => ({ configured: true, source: 'memory', writable: true }),
   }))
-  return { ctx, settings, images: createBidImageProvider(ctx) }
+  return { ctx, settings, images: createBidImageProvider(ctx), resolveCredential }
 }
 
 function json(response: ServerResponse, value: unknown): void {
@@ -52,8 +53,22 @@ function json(response: ServerResponse, value: unknown): void {
   response.end(JSON.stringify(value))
 }
 
+function generatedBody(init: RequestInit | undefined): unknown {
+  if (typeof init?.body !== 'string') throw new Error('生成请求必须使用JSON文本')
+  return JSON.parse(init.body) as unknown
+}
+
 async function png(): Promise<Buffer> {
   return sharp({ create: { width: 24, height: 16, channels: 3, background: '#225588' } }).png().toBuffer()
+}
+
+async function mockImageFetch() {
+  const source = await png()
+  const fetch = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(JSON.stringify({
+    data: [{ b64_json: source.toString('base64') }],
+  }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+  cleanups.push(() => { fetch.mockRestore() })
+  return fetch
 }
 
 describe('标书作图配置', () => {
@@ -127,12 +142,83 @@ describe('标书作图配置', () => {
     await expect(images.generate({ prompt: '项目示意图', size: '1536x1024' }, signal())).rejects.toMatchObject({ code: 'BID_IMAGE_DISABLED' })
   })
 
-  it('项目恢复拒绝含密钥、非法凭据引用和未选择模型的连接记录', () => {
+  it('正式连接规范拒绝密钥值、非法凭据引用和未选择模型', () => {
     const spec = provider('http://127.0.0.1:8317/v1').images.resolve()!
     expect(bidImageConnectionSpecSchema.safeParse(spec).success).toBe(true)
     for (const invalid of [{ ...spec, apiKey: 'secret' }, { ...spec, apiKeyEnv: 'bad-ref' }, { ...spec, model: '' }]) {
       expect(bidImageConnectionSpecSchema.safeParse(invalid).success).toBe(false)
     }
+  })
+
+  it('已有项目只冻结模型，全局未选模型时仍从正式配置解析连接', () => {
+    const { images } = provider('https://official.example/v1', { model: '' })
+    expect(images.resolve()).toBeUndefined()
+    expect(images.resolve('frozen-image-model')).toMatchObject({
+      model: 'frozen-image-model', baseURL: 'https://official.example/v1', apiKeyEnv: 'PP_TEST_KEY',
+    })
+  })
+})
+
+describe('作图目的地只接受正式配置', () => {
+  it('忽略请求中额外的恶意连接，fetch 与凭据解析仍使用正式配置', async () => {
+    const fetch = await mockImageFetch()
+    const { images, resolveCredential } = provider('https://official.example/v1')
+    const request = { prompt: '方案场景', size: '1024x1024' as const,
+      connection: { baseURL: 'https://untrusted.example/v1', model: 'injected-model', apiKeyEnv: 'OTHER_PRIVATE_KEY',
+        timeoutMs: 1, maxImageBytes: 1 },
+    }
+    await images.generate(request, signal())
+    expect(resolveCredential).toHaveBeenCalledExactlyOnceWith('PP_TEST_KEY')
+    expect(fetch).toHaveBeenCalledOnce()
+    const [target, init] = fetch.mock.calls[0]!
+    expect(target).toBe('https://official.example/v1/images/generations')
+    expect(init?.headers).toEqual({ Authorization: 'Bearer test-key', 'Content-Type': 'application/json' })
+    expect(init?.redirect).toBe('error')
+    expect(generatedBody(init)).toEqual({ model: 'gpt-image-2', prompt: '方案场景', size: '1024x1024', n: 1, output_format: 'png' })
+  })
+
+  it('正式地址与pp引用变化后保留项目模型，回调日志等于同一次解析的实际请求', async () => {
+    const fetch = await mockImageFetch()
+    const { images, settings, resolveCredential } = provider('https://previous.example/v1')
+    const model = images.resolve()!.model
+    settings['bid-images'] = { model: '', baseURL: 'https://current.example/cpa', timeoutMs: 1000, maxImageBytes: 1024 }
+    settings['llm-pi-ai'] = { providers: { pp: { baseURL: 'https://current.example/v1', apiKeyEnv: 'PP_CURRENT_KEY' } } }
+    let recorded: BidImageConnectionSpec | undefined
+    await images.generate({ prompt: '继续项目风格', size: '1536x1024', model,
+      async beforeRequest(connection) {
+        recorded = { ...connection }
+        settings['bid-images'] = { model: 'next-model', baseURL: 'https://next.example/v1' }
+        settings['llm-pi-ai'] = { providers: { pp: { baseURL: 'https://next.example/v1', apiKeyEnv: 'PP_NEXT_KEY' } } }
+      },
+    }, signal())
+    expect(recorded).toEqual({ model: 'gpt-image-2', baseURL: 'https://current.example/cpa/v1', apiKeyEnv: 'PP_CURRENT_KEY',
+      timeoutMs: 1000, maxImageBytes: 1024 })
+    expect(resolveCredential).toHaveBeenCalledExactlyOnceWith('PP_CURRENT_KEY')
+    expect(fetch).toHaveBeenCalledOnce()
+    const [target, init] = fetch.mock.calls[0]!
+    expect(target).toBe(`${recorded?.baseURL}/images/generations`)
+    expect(generatedBody(init)).toEqual({ model: recorded?.model, prompt: '继续项目风格', size: '1536x1024', n: 1, output_format: 'png' })
+  })
+
+  it('请求记录回调失败时不解析凭据也不发起HTTP', async () => {
+    const fetch = await mockImageFetch()
+    const { images, resolveCredential } = provider('https://official.example/v1')
+    await expect(images.generate({ prompt: '方案场景', size: '1024x1024',
+      beforeRequest: () => Promise.reject(new Error('request log unavailable')),
+    }, signal())).rejects.toThrow('request log unavailable')
+    expect(fetch).not.toHaveBeenCalled()
+    expect(resolveCredential).not.toHaveBeenCalled()
+  })
+
+  it('记录回调期间取消后不解析凭据也不发起HTTP', async () => {
+    const fetch = await mockImageFetch()
+    const { images, resolveCredential } = provider('https://official.example/v1')
+    const controller = new AbortController()
+    await expect(images.generate({ prompt: '方案场景', size: '1024x1024',
+      beforeRequest: () => { controller.abort(); return Promise.resolve() },
+    }, controller.signal)).rejects.toMatchObject({ code: 'BID_IMAGE_CANCELLED' })
+    expect(fetch).not.toHaveBeenCalled()
+    expect(resolveCredential).not.toHaveBeenCalled()
   })
 })
 
@@ -201,20 +287,23 @@ describe('CPA Images API 真实 HTTP 入口', () => {
     expect(calls).toBe(0)
   })
 
-  it('项目冻结连接在后续配置改变后仍使用原地址与模型', async () => {
+  it('项目冻结模型在正式配置改变后使用新地址与原模型', async () => {
     const source = await png()
     let usedModel = ''
+    let oldCalls = 0
+    const previous = await serve((_request, response) => { oldCalls++; response.end() })
     const baseURL = await serve(async (request, response) => {
       const chunks: Buffer[] = []
       for await (const chunk of request) chunks.push(chunk as Buffer)
       usedModel = (JSON.parse(Buffer.concat(chunks).toString('utf8')) as { model: string }).model
       json(response, { data: [{ b64_json: source.toString('base64') }] })
     })
-    const { images, settings } = provider(baseURL)
-    const connection = images.resolve()!
-    settings['bid-images'] = { baseURL: 'http://127.0.0.1:1/v1', model: 'different-model' }
-    await images.generate({ prompt: '场景', size: '1024x1024', connection }, signal())
+    const { images, settings } = provider(previous)
+    const model = images.resolve()!.model
+    settings['bid-images'] = { baseURL, model: '' }
+    await images.generate({ prompt: '场景', size: '1024x1024', model }, signal())
     expect(usedModel).toBe('gpt-image-2')
+    expect(oldCalls).toBe(0)
   })
 
   it.each([

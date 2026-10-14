@@ -177,7 +177,7 @@ it('S5 真实 Loader 按需生图、拒绝未确认图片并保存统一风格�
   expect(JSON.parse(result.stdout)).toMatchObject({ generated: 1, images: [{ visual_status: 'accepted' }] })
 }, LOADER_SMOKE_TEST_TIMEOUT_MS + 20_000)
 
-it('S5 已冻结项目风格继续使用原模型与连接，全局关闭和改地址只影响新项目', async () => {
+it('S5 已冻结风格和模型不被全局关闭覆盖，仍使用当前正式连接', async () => {
   const result = await runLoaderSmoke({
     label: 'S5 已冻结作图设置', tempDirPrefix: 'dsh-s5-frozen-images-',
     binScript: fileURLToPath(new URL('./fixtures/bid-images-driver.ts', import.meta.url)),
@@ -186,7 +186,7 @@ it('S5 已冻结项目风格继续使用原模型与连接，全局关闭和改�
     tsconfigPath: fileURLToPath(new URL('../../../tsconfig.json', import.meta.url)),
   })
   expect(JSON.parse(result.stdout)).toMatchObject({ generated: 1,
-    style: { connection: { baseURL: 'https://cpa.example/v1', model: 'snapshot-image-model' } },
+    style: { schema_version: 2, model: 'snapshot-image-model' },
     images: [{ visual_status: 'accepted', model: 'snapshot-image-model' }],
   })
 }, LOADER_SMOKE_TEST_TIMEOUT_MS + 20_000)

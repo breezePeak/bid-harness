@@ -90,7 +90,7 @@ export function BidImageSettings({ load, getModels, save }: BidImageSettingsInje
   const disabled = view === null || !view.writable || saving
   return <section className={css.section} aria-label="标书作图设置">
     <h2>标书作图</h2>
-    <p className={css.hint}>S5 按章节需要生成图片，同一项目沿用统一风格和作图模型。</p>
+    <p className={css.hint}>S5 按章节需要生成图片，同一项目沿用统一风格和作图模型。模型选择用于新项目；已有项目沿用原模型。</p>
     {view === null && !error && <p role="status">正在读取作图配置…</p>}
     <label className={css.field}>
       <span>作图接口地址</span>
@@ -98,12 +98,12 @@ export function BidImageSettings({ load, getModels, save }: BidImageSettingsInje
         placeholder={view?.effectiveBaseURL || '留空沿用当前 CPA 地址'}
         onChange={(event) => { setBaseURL(event.target.value); setSaved(false) }} />
     </label>
-    <p className={css.hint}>留空沿用当前 CPA 地址。修改地址并保存后，再刷新模型列表。</p>
+    <p className={css.hint}>留空沿用当前 CPA 地址。接口地址修改对后续请求生效，保存后可刷新模型列表。</p>
     <label className={css.field}>
       <span>作图模型</span>
       <select aria-label="作图模型" value={model} disabled={disabled} className={css.select}
         onChange={(event) => { setModel(event.target.value); setSaved(false) }}>
-        <option value="">未启用作图</option>
+        <option value="">新项目不生成图片</option>
         {model !== '' && !models.includes(model) && <option value={model}>{model}</option>}
         {models.map(id => <option key={id} value={id}>{id}</option>)}
       </select>

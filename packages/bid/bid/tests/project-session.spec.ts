@@ -366,7 +366,7 @@ async function seedReviewImage(workspace: BidWorkspace, writer: Agent) {
   const connection = bidImageConnectionSpecSchema.parse({ baseURL: 'https://cpa.example/v1', model: 'test-image',
     apiKeyEnv: 'PP_API_KEY', timeoutMs: 1000, maxImageBytes: 20 * 1024 * 1024 })
   const prompt = '统一蓝灰色等距方案插画，白色背景。'
-  const style = { schema_version: 1 as const, prompt, sha256: createHash('sha256').update(prompt).digest('hex'), connection }
+  const style = { schema_version: 2 as const, prompt, sha256: createHash('sha256').update(prompt).digest('hex'), model: connection.model }
   const commits = createTestBidRunContext().commits
   await commits.writeJson(join(workspace.projectRoot, BID_IMAGE_STYLE_PATH), style)
   const provider: BidImageProvider = {
@@ -374,7 +374,10 @@ async function seedReviewImage(workspace: BidWorkspace, writer: Agent) {
     view: async () => ({ baseURL: connection.baseURL, effectiveBaseURL: connection.baseURL,
       model: connection.model, credentialConfigured: true, enabled: true }),
     discoverModels: async () => [connection.model],
-    generate: async () => ({ png, width: 24, height: 16, model: connection.model }),
+    generate: async (request) => {
+      await request.beforeRequest?.({ ...connection, model: request.model ?? connection.model })
+      return { png, width: 24, height: 16, model: request.model ?? connection.model }
+    },
   }
   const project = createBidProjectImageSession(workspace, provider, style, commits)
   const images: import('../src/chapter-images.ts').BidChapterImage[] = []

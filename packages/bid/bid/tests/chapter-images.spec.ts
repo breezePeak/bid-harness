@@ -61,9 +61,19 @@ async function fixture() {
   const style = styleRuntime.captured()!
   styleRuntime.dispose()
   const png = await chapterImageFixturePng()
-  const generate = vi.fn<BidImageProvider['generate']>(async () => ({ png, width: 24, height: 16, model: connection.model }))
+  const currentConnection = { ...connection }
+  const resolve: BidImageProvider['resolve'] = (model = currentConnection.model) => model === '' ? undefined : { ...currentConnection, model }
+  const beforeRequest = async (request: Parameters<BidImageProvider['generate']>[0]) => {
+    const spec = resolve(request.model)
+    if (spec === undefined) throw new Error('未启用测试生图模型')
+    await request.beforeRequest?.(spec)
+  }
+  const generate = vi.fn<BidImageProvider['generate']>(async (request) => {
+    await beforeRequest(request)
+    return { png, width: 24, height: 16, model: request.model ?? currentConnection.model }
+  })
   const provider: BidImageProvider = {
-    resolve: () => connection,
+    resolve,
     view: async () => ({ ...connection, effectiveBaseURL: connection.baseURL, enabled: true, credentialConfigured: true }),
     discoverModels: async () => [connection.model], generate,
   }
@@ -72,7 +82,8 @@ async function fixture() {
   const runtime = createChapterProtocol<unknown>(agent, 'submit_chapter', 0)
   const assertImageInput = vi.fn(async () => {})
   attachChapterImageTools(agent, runtime, workspace, 'SEC-1', images, project, assertImageInput)
-  return { ctx, agent, workspace, commits, call, project, images, runtime, provider, generate, png, assertImageInput }
+  return { ctx, agent, workspace, commits, call, project, images, runtime, provider, generate, png, assertImageInput,
+    beforeRequest, currentConnection }
 }
 
 describe('S5 真正插图工具与资产', () => {
@@ -148,6 +159,9 @@ describe('S5 真正插图工具与资产', () => {
   it('工具拒绝非法位置、模型身份、未确认图片和不支持看图的路由', async () => {
     const { call, generate, assertImageInput, runtime } = await fixture()
     expect((await call('generate_bid_image', { ...request, id: '自造身份' })).isError).toBe(true)
+    for (const supplied of [{ baseURL: 'https://untrusted.example/v1' }, { apiKeyEnv: 'OTHER_KEY' }, { connection }]) {
+      expect((await call('generate_bid_image', { ...request, ...supplied })).isError).toBe(true)
+    }
     for (const image_position of [-1, 0.5, 99]) {
       expect((await call('review_bid_image', { image_position, decision: 'accept', reason: '确认' })).isError).toBe(true)
     }
@@ -155,6 +169,46 @@ describe('S5 真正插图工具与资产', () => {
     expect((await call('generate_bid_image', request)).isError).toBe(true)
     expect(generate).not.toHaveBeenCalled()
     runtime.dispose()
+  })
+
+  it('项目风格只保存模型和语义，旧格式及磁盘连接字段不能经真实工具恢复', async () => {
+    const { agent, workspace, commits, call, project, generate } = await fixture()
+    const path = join(workspace.projectRoot, 'chapters/image-style.json')
+    const style = await readBidImageStyle(workspace)
+    expect(style).toMatchObject({ schema_version: 2, model: connection.model })
+    expect(style).not.toHaveProperty('connection')
+    const runtime = attachBidImageStyle(agent, workspace, connection, commits, 0)
+    try {
+      for (const extra of [{ schema_version: 1 }, { connection },
+        { baseURL: 'https://untrusted.example/v1' }, { apiKeyEnv: 'OTHER_SECRET' }]) {
+        await writeFile(path, JSON.stringify({ ...style, ...extra }))
+        await expect(readBidImageStyle(workspace)).rejects.toThrow()
+        expect((await call('set_image_style', { prompt: project.style.prompt })).isError).toBe(true)
+      }
+      expect(generate).not.toHaveBeenCalled()
+      await writeFile(path, JSON.stringify(style))
+      expect((await call('set_image_style', { prompt: project.style.prompt })).isError).toBeFalsy()
+    } finally { runtime.dispose() }
+  })
+
+  it('恢复冻结模型时只解析当前正式地址，连接变化不改变图片请求缓存身份', async () => {
+    const { agent, workspace, call, project, generate, images, currentConnection } = await fixture()
+    await call('generate_bid_image', request)
+    await call('review_bid_image', { image_position: 0, decision: 'accept', reason: '已查看首图，符合方案。' })
+    const savedId = images[0]!.id
+    currentConnection.model = ''
+    currentConnection.baseURL = 'https://current-config.example/v1'
+    await call('generate_bid_image', request)
+    expect(images[0]!.id).toBe(savedId)
+    expect(generate).toHaveBeenCalledOnce()
+    expect((await call('generate_bid_image', { ...request, prompt: '当前正式接口生成第二场景' })).isError).toBeFalsy()
+    expect(generate.mock.calls.at(-1)![0]).toMatchObject({ model: project.style.model })
+    expect(generate.mock.calls.at(-1)![0]).not.toHaveProperty('connection')
+    expect(agent.session.events.findLast(event => event.type === 'bid.image.requested')).toMatchObject({
+      data: { model: connection.model, base_url: currentConnection.baseURL },
+    })
+    expect(await readBidImageStyle(workspace)).toMatchObject({ model: connection.model })
+    expect(await readBidImageStyle(workspace)).not.toHaveProperty('connection')
   })
 
   it('并发章节在首图接受后使用同一参考图；失败Writer释放等待且取消等待不发请求', async () => {
@@ -233,15 +287,18 @@ describe('S5 真正插图工具与资产', () => {
   })
 
   it('不同Writer并发生成的大图在串行提交处拒绝累计超限，首个资产保持可用', async () => {
-    const { project, images, png, generate, agent } = await fixture()
+    const { project, images, png, generate, agent, beforeRequest } = await fixture()
     const signal = new AbortController().signal
     await project.generate('SEC-1', images, request, signal, agent)
     await project.review('SEC-1', images, { image_position: 0, decision: 'accept', reason: '通过' }, signal)
     project.release('SEC-1')
-    generate.mockImplementation(async ({ prompt }) => ({
-      png: Buffer.concat([png, Buffer.alloc(11 * 1024 * 1024 - png.length - 1), Buffer.from([prompt.includes('二区') ? 2 : 1])]),
-      width: 24, height: 16, model: connection.model,
-    }))
+    generate.mockImplementation(async (request) => {
+      await beforeRequest(request)
+      return {
+        png: Buffer.concat([png, Buffer.alloc(11 * 1024 * 1024 - png.length - 1), Buffer.from([request.prompt.includes('二区') ? 2 : 1])]),
+        width: 24, height: 16, model: request.model ?? connection.model,
+      }
+    })
     const first: BidChapterImage[] = []
     const second: BidChapterImage[] = []
     const results = await Promise.allSettled([
@@ -256,9 +313,10 @@ describe('S5 真正插图工具与资产', () => {
   })
 
   it('付费请求前完整prompt和参考附件已持久化，接口失败仍保留该次请求', async () => {
-    const { ctx, agent, project, images, generate } = await fixture()
+    const { ctx, agent, project, images, generate, beforeRequest } = await fixture()
     const signal = new AbortController().signal
     generate.mockImplementationOnce(async (request) => {
+      await beforeRequest(request)
       const persisted = await ctx.sessionPersistence.inspect(agent.id, signal)
       expect(persisted?.events.findLast(event => event.type === 'bid.image.requested'))
         .toMatchObject({ data: { prompt: request.prompt, size: request.size, model: connection.model } })

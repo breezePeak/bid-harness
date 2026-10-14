@@ -1,4 +1,4 @@
-/** 标书作图配置与可持久化连接规范；凭据只保留已有 pp 路由的引用。 */
+/** 标书作图配置与请求连接规范；凭据引用只从正式 pp 配置读取。 */
 
 import z from '@deepseek-ai/schemastery'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
@@ -8,7 +8,7 @@ import { z as zod } from 'zod'
 /** 标书作图独立设置分节。 */
 export const BID_IMAGE_SETTINGS_NAMESPACE = settingsNamespace('bid-images')
 
-/** 用户配置；空地址继承 pp，空模型关闭作图。 */
+/** 用户配置；空地址继承 pp，空模型不为新项目启用作图。 */
 export interface BidImageGenerationConfig {
   /** 作图 API 根地址，路径后追加 images/generations 或 images/edits。 */
   baseURL?: string
@@ -40,7 +40,7 @@ const apiRootSchema = zod.url().refine((value) => {
     && url.search === '' && url.hash === ''
 }, '作图接口地址必须为不含认证、查询参数和片段的 HTTP(S) 地址。')
 
-/** 项目冻结的连接规范；不含密钥，恢复时须经过此 Schema。 */
+/** 正式配置解析出的单次请求连接规范，不作为项目文件的授权。 */
 export const bidImageConnectionSpecSchema = zod.object({
   baseURL: apiRootSchema,
   model: zod.string().trim().min(1).max(200),
@@ -49,7 +49,7 @@ export const bidImageConnectionSpecSchema = zod.object({
   apiKeyEnv: zod.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/u).transform(credentialRef),
 }).strict()
 
-/** 已确认、可持久化且不含密钥的项目作图连接。 */
+/** 不含密钥的单次请求连接，由提供方从正式配置解析。 */
 export type BidImageConnectionSpec = zod.output<typeof bidImageConnectionSpecSchema>
 
 /**

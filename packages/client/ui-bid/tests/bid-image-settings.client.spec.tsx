@@ -35,7 +35,7 @@ describe('BidImageSettings', () => {
     await waitFor(() => { expect(save).toHaveBeenLastCalledWith({ baseURL: 'https://images.example/v1', model: '' }, 8) })
   })
 
-  it('保存失败保留编辑内容，模型目录失败仍可禁用当前模型', async () => {
+  it('保存失败保留编辑内容，模型目录失败仍可关闭新项目作图', async () => {
     render(<BidImageSettings {...props({ getModels: async () => { throw new Error('CPA 目录暂不可用') },
       save: async () => { throw new Error('设置版本已变化，请重新读取') } })} />)
     await screen.findByText(/CPA 目录暂不可用/u)

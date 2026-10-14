@@ -1760,7 +1760,7 @@ export class BidHostRuntime extends TypertRemoteService {
   static inject = ['agents', 'sessionProjections', 'sessions', 'subagents', 'userQuestions']
   static Config = Config
 
-  /** S5 与配置界面共享的生图能力；连接由项目风格记录冻结，密钥仅在请求时解析。 */
+  /** S5 与配置界面共享的生图能力；接口和凭据由正式配置持有，密钥仅在请求时解析。 */
   readonly imageGeneration: BidImageProvider
 
   private readonly config: Config
