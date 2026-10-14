@@ -7,11 +7,27 @@
  * dispose with the fiber.
  */
 import { Context } from '@deepseek-ai/cordis'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, expectTypeOf, it } from 'vitest'
 import type { SessionId } from '@deepseek-ai/dsh-api-remotes/client'
-import { createScope, scopeOf } from '../src/client/agents/scope.ts'
+import { createScope, scopeOf, type AgentContext } from '../src/client/agents/scope.ts'
+import type { ClientContext } from '../src/client/index.ts'
+import type { ISessions } from '../src/client/contract/sessions.ts'
 
 const sid = (k: string): SessionId => k as SessionId
+
+/**
+ * 客户端会话服务与作用域访问的编译期契约。
+ * @param ctx 客户端上下文。
+ */
+function clientSessionContracts(ctx: ClientContext): void {
+  expectTypeOf(ctx.sessions).toEqualTypeOf<ISessions>()
+  expectTypeOf(ctx.get('sessions')).toEqualTypeOf<ISessions | undefined>()
+  expectTypeOf(ctx.sessions.scope(sid('a'))).toEqualTypeOf<AgentContext | undefined>()
+  expectTypeOf<'get' extends keyof ClientContext['sessions'] ? true : false>().toEqualTypeOf<false>()
+  // @ts-expect-error -- 作用域必须接收程序绑定的会话身份。
+  ctx.sessions.scope('plain-session')
+}
+void clientSessionContracts
 
 declare module '@deepseek-ai/cordis' {
   interface Events {

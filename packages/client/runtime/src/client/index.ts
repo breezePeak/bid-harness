@@ -109,8 +109,11 @@ export type {
 } from './sessions/projection-store.ts'
 export type { SessionId } from '@deepseek-ai/dsh-client-connection/client'
 
-/** Client-side Cordis context after declaration merging. */
-export type ClientContext = Context
+/** 声明合并后的客户端 Cordis 上下文，会话服务由客户端目录与作用域实现拥有。 */
+export interface ClientContext extends Context {
+  /** 客户端会话目录及作用域访问。 */
+  readonly sessions: import('./contract/sessions.ts').ISessions
+}
 
 declare module '@deepseek-ai/dsh-typert-protocol' {
   interface TypertContextMap {
