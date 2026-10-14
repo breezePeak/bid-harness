@@ -29,17 +29,29 @@ export interface Config {
   provider?: string
   /** Maximum hosted searches in one auxiliary request. */
   maxUses?: number
-  /** @deprecated Migrated to the DeepSeek Provider. */
+  /** 旧版搜索密钥；首次搜索前迁入 DeepSeek Provider 的 search 设置。
+   * @deprecated 使用 DeepSeek Provider 的 search.apiKey。
+   */
   apiKey?: string
-  /** @deprecated Migrated to the DeepSeek Provider. */
+  /** 旧版搜索凭据引用；首次搜索前迁入 DeepSeek Provider 的 search 设置。
+   * @deprecated 使用 DeepSeek Provider 的 search.apiKeyEnv。
+   */
   apiKeyEnv?: string
-  /** @deprecated Migrated to the DeepSeek Provider. */
+  /** 旧版搜索接口地址；首次搜索前迁入 DeepSeek Provider 的 search 设置。
+   * @deprecated 使用 DeepSeek Provider 的 search.baseURL。
+   */
   baseURL?: string
-  /** @deprecated Migrated to the DeepSeek Provider. */
+  /** 旧版搜索模型；首次搜索前迁入 DeepSeek Provider 的 search 设置。
+   * @deprecated 使用 DeepSeek Provider 的 search.model。
+   */
   model?: string
-  /** @deprecated Migrated to the DeepSeek Provider. */
+  /** 旧版搜索 API 版本；首次搜索前迁入 DeepSeek Provider 的 search 设置。
+   * @deprecated 使用 DeepSeek Provider 的 search.apiVersion。
+   */
   apiVersion?: string
-  /** @deprecated Migrated to the DeepSeek Provider. */
+  /** 旧版搜索输出上限；首次搜索前迁入 DeepSeek Provider 的 search 设置。
+   * @deprecated 使用 DeepSeek Provider 的 search.maxTokens。
+   */
   maxTokens?: number
 }
 
