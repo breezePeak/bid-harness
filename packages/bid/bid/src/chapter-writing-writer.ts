@@ -16,10 +16,11 @@ import { buildWebEvidenceChunkIndex } from './web-evidence-chunks.ts'
 import { bindFlowchartModelAnchors, bindFlowchartModelInputs, flowchartModelDraftSchema, normalizeFlowchartInputs, projectFlowchartModelAnchors, type FlowchartSpec } from './flowchart.ts'
 import { indexChapterContentBlocks } from './chapter-content-reuse.ts'
 import { parseDocumentChunkIndex } from './document-chunk.ts'
-import { chapterImagePaths, projectChapterImageAnchors, readBidImages, validateChapterImages, type BidChapterImage } from './chapter-images.ts'
+import { chapterImageCaptions, chapterImageMarkdown, chapterImagePaths, projectChapterImageAnchors, readBidImages, validateChapterImages, type BidChapterImage } from './chapter-images.ts'
 
 const text = z.string().trim().min(1)
 const position = z.number().int().nonnegative()
+const imageCaption = z.string().regex(/^[^\r\n\u2028\u2029]+$/u).trim().min(1).max(200)
 const strings = z.array(text).optional()
 const localSemantics = { usage: z.enum(['reference', 'background', 'reuse', 'adapt']), summary: text }
 const webSemantics = { usage: z.enum(['reference', 'background']), summary: text, supports: text }
@@ -39,7 +40,7 @@ const writerInput = z.object({
     unresolved_topics: strings,
     handoff: z.object(handoffFields).strict().optional(),
     flowcharts: z.array(flowchartModelDraftSchema).max(100).optional(),
-    images: z.array(z.object({ image_position: position }).strict()).max(100).optional(),
+    images: z.array(z.object({ image_position: position, caption: imageCaption.optional() }).strict()).max(100).optional(),
   }).strict(),
 }).strict()
 
@@ -72,8 +73,9 @@ export const chapterWriterOutputSchema: ObjectJsonSchema = {
             from_position: positionParameter, to_position: positionParameter, label: stringParameter,
           }, required: ['from_position', 'to_position'], additionalProperties: false } },
         }, required: ['title', 'nodes', 'edges'], additionalProperties: false } },
-        images: { type: 'array', items: { type: 'object', properties: { image_position: positionParameter },
-          required: ['image_position'], additionalProperties: false } },
+        images: { type: 'array', items: { type: 'object', properties: { image_position: positionParameter,
+          caption: { type: 'string', description: '正文图题：单行非空文本，最多 200 字符；仅调整图题时复用原图片位置。' } },
+        required: ['image_position'], additionalProperties: false } },
       }, additionalProperties: false,
     },
   }, required: ['markdown', 'metadata'], additionalProperties: false,
@@ -332,7 +334,8 @@ export async function bindChapterWriterInput(
     if (image === undefined || !images.some(selected => selected.id === image.id)) {
       throw new ToolArgsError([`markdown: 未选择的图片位置 ${imagePosition}。`])
     }
-    return `![${image.title.replace(/[\\[\]]/gu, '\\$&')}](${image.path})\n\n图 ${image.title}`
+    const caption = input.metadata.images?.find(selected => selected.image_position === Number(imagePosition))?.caption ?? image.title
+    return chapterImageMarkdown(image, caption)
   })
   const flowcharts = normalizeFlowchartInputs(context.section.id, [
     ...preservedFlowcharts, ...bindFlowchartModelInputs(context.section.id, input.metadata.flowcharts ?? [], preservedFlowcharts.length,
@@ -472,6 +475,7 @@ export function projectChapterWriterCandidate(candidate: AcceptedChapterCandidat
     for (const [position, block] of blocks.entries()) markdown = markdown.replaceAll(block.markdown.trim(), `{{reuse:${position}}}`)
   }
   const selectedImages = (candidate.metadata.images ?? []).filter(image => !preservedImagePaths.includes(image.path))
+  const captions = chapterImageCaptions(markdown)
   return {
     markdown: projectChapterImageAnchors(projectFlowchartModelAnchors(markdown, candidate.metadata.flowcharts,
       refs.dependencyFlowcharts.map(value => value.chart)), selectedImages.map((image) => {
@@ -500,6 +504,7 @@ export function projectChapterWriterCandidate(candidate: AcceptedChapterCandidat
       unresolved_topics: candidate.metadata.unresolved_topics, handoff,
       ...(candidate.metadata.images === undefined ? {} : { images: selectedImages.map(image => ({
         image_position: refs.images.findIndex(item => item.id === image.id),
+        ...(captions.get(image.path) ? { caption: captions.get(image.path) } : {}),
       })) }),
       flowcharts: candidate.metadata.flowcharts
         .filter(flowchart => !preservedFlowcharts.some(original => original.key === flowchart.key)).map(flowchart => ({

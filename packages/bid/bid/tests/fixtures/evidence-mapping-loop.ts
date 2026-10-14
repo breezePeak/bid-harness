@@ -900,7 +900,7 @@ export async function runChapterWritingLoop(ctx: Context, root: string, images: 
   }
   if (images) {
     candidate.markdown += '\n\n{{image:0}}'
-    Object.assign(candidate.metadata, { images: [{ image_position: 0 }] })
+    Object.assign(candidate.metadata, { images: [{ image_position: 0, caption: '访问控制实施场景示意图' }] })
   }
   const coverage = { status: 'covered', evidence_quote_refs: ['Q2'], issue: null }
   const summary = {

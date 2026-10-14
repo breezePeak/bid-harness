@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { normalizeSessionSnapshot } from '@deepseek-ai/dsh-acp-snapshot'
 import {
+  BidWorkspace,
   parseChapterMetadata, parseChapterWritingCompletionState, parseChapterWritingManifest,
   parseEvidenceMapArtifact, parseGlobalComplianceReviewArtifact,
 } from '@deepseek-ai/dsh-bid'
@@ -11,6 +12,7 @@ import { LOADER_SMOKE_TEST_TIMEOUT_MS, runLoaderSmoke } from '@deepseek-ai/dsh-l
 import type { SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
 import { expect, it } from 'vitest'
 import { readDocxXml } from '../../../packages/bid/bid/src/docx-template.ts'
+import { readChapterImages } from '../../../packages/bid/bid/src/chapter-images.ts'
 
 const fixtureDir = fileURLToPath(new URL('./bid-chapter-writing-snapshots/', import.meta.url))
 const configPath = fileURLToPath(new URL('../bid-evidence-mapping.cordis.snapshot.yml', import.meta.url))
@@ -153,20 +155,32 @@ it('S5 真实 Loader 按需生图、拒绝未确认图片并保存统一风格�
       const ids = logs.map(log => (JSON.parse(log.split('\n')[0]!) as SessionHeader).id)
       const [header, ...lines] = writerLog.trimEnd().split('\n')
       const events = lines.map(line => JSON.parse(line) as SessionEvent)
-      const callIds = new Set(['generate-scene', 'reject-unconfirmed-image', 'accept-scene'])
+      expect(events.filter(event => event.type === 'bid.image.requested')).toHaveLength(1)
+      const repaired = events.find(event => event.type === 'tool/call' && String(event.data.callId) === 'resubmit-web-candidate')
+      if (repaired?.type !== 'tool/call') throw new Error('缺少已确认图片的修复重绑定调用')
+      expect(JSON.parse(repaired.data.arguments)).toMatchObject({
+        metadata: { images: [{ image_position: 0, caption: '访问控制实施场景示意图' }] },
+      })
+      const callIds = new Set(['generate-scene', 'reject-unconfirmed-image', 'accept-scene', 'resubmit-web-candidate'])
       const selected = events.filter(event => event.type === 'bid.image.requested' || event.type === 'tool/call' && callIds.has(String(event.data.callId))
         || event.type === 'tool/result' && callIds.has(String(event.data.message.source.callId)))
-      expect(selected).toHaveLength(7)
+      expect(selected).toHaveLength(9)
       const transcript = normalizeSessionSnapshot([header, ...selected.map(event => JSON.stringify(event)), ''].join('\n'),
         { sessionIds: ids, cwd, cwdAliases: [cwd.replaceAll('\\', '/')] })
       const projectRoot = join(cwd, '.bid-harness')
       const metadata = parseChapterMetadata(JSON.parse(await readFile(join(projectRoot, 'chapters/meta/0001.json'), 'utf8')))
       expect(metadata.images).toHaveLength(1)
       expect(metadata.images![0]!.visual_status).toBe('accepted')
+      expect(metadata.images![0]!.title).toBe('访问控制实施场景')
+      expect(metadata.images![0]!).not.toHaveProperty('caption')
+      expect(await readChapterImages(new BidWorkspace(cwd), 'SEC-SECURITY')).toEqual(metadata.images)
       const document = await readDocxXml(await readFile(join(projectRoot, 'output/bid.docx')))
       expect(JSON.stringify(document['word/document.xml'])).toContain('w:drawing')
+      expect(JSON.stringify(document['word/document.xml'])).toContain('访问控制实施场景示意图')
       const payload = { style: JSON.parse(await readFile(join(projectRoot, 'chapters/image-style.json'), 'utf8')) as unknown,
         images: metadata.images, markdown: await readFile(join(projectRoot, 'output/bid.md'), 'utf8') }
+      expect(payload.markdown).toContain(`![访问控制实施场景示意图](${metadata.images![0]!.path})\n\n图 访问控制实施场景示意图`)
+      expect(payload.markdown.match(/访问控制实施场景示意图/gu)).toHaveLength(2)
       const expected = { 'images-writer.expected.jsonl': transcript, 'images.expected.json': JSON.stringify(payload, null, 2) + '\n' }
       if (process.env.DSH_SNAPSHOT === 'refresh') {
         for (const [name, content] of Object.entries(expected)) await writeFile(join(fixtureDir, name), content)
@@ -174,7 +188,7 @@ it('S5 真实 Loader 按需生图、拒绝未确认图片并保存统一风格�
       for (const [name, content] of Object.entries(expected)) expect(content).toBe(await readFile(join(fixtureDir, name), 'utf8'))
     },
   })
-  expect(JSON.parse(result.stdout)).toMatchObject({ generated: 1, images: [{ visual_status: 'accepted' }] })
+  expect(JSON.parse(result.stdout)).toMatchObject({ generated: 1, images: [{ visual_status: 'accepted', title: '访问控制实施场景' }] })
 }, LOADER_SMOKE_TEST_TIMEOUT_MS + 20_000)
 
 it('S5 已冻结风格和模型不被全局关闭覆盖，仍使用当前正式连接', async () => {

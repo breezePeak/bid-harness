@@ -9,7 +9,7 @@ import LlmRuntime, { CallId } from '@deepseek-ai/dsh-llm'
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
 import JsonlPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
-import ToolRuntime from '@deepseek-ai/dsh-tools'
+import ToolRuntime, { assertSupportedJsonSchema } from '@deepseek-ai/dsh-tools'
 import { chapterImageFixturePng } from './fixtures/chapter-image-png.ts'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { BidWorkspace } from '../src/index.ts'
@@ -17,7 +17,7 @@ import { createTestBidRunContext } from '../src/run-coordinator.ts'
 import { attachBidImageStyle, attachChapterImageTools, createBidProjectImageSession,
   readBidImageStyle, readBidImageBytes, readChapterImages, validateChapterImages, chapterImagePaths, type BidChapterImage } from '../src/chapter-images.ts'
 import { createChapterProtocol } from '../src/chapter-writing-protocol.ts'
-import { bindChapterWriterInput, createChapterWriterReferences, projectChapterWriterCandidate } from '../src/chapter-writing-writer.ts'
+import { bindChapterWriterInput, chapterWriterOutputSchema, createChapterWriterReferences, projectChapterWriterCandidate } from '../src/chapter-writing-writer.ts'
 import { bidImageConnectionSpecSchema, type BidImageProvider } from '../src/bid-image-provider.ts'
 import { emptyChapterContext, outlineFixture } from './fixtures/chapter-writing-inputs.ts'
 import { allowedWritingCapabilitySourceWrites } from '../src/bid-writing-capability.ts'
@@ -87,6 +87,94 @@ async function fixture() {
 }
 
 describe('S5 真正插图工具与资产', () => {
+  it('真实提交工具只改正文图题，恢复和迁入复用原图片身份及参考图', async () => {
+    const { workspace, call, images, generate, runtime } = await fixture()
+    assertSupportedJsonSchema(chapterWriterOutputSchema)
+    await call('generate_bid_image', request)
+    await call('review_bid_image', { image_position: 0, decision: 'accept', reason: '画面与方案一致。' })
+    const context = emptyChapterContext(outlineFixture().sections.find(section => section.id === 'SEC-1')!)
+    const refs = createChapterWriterReferences(context, [], images)
+    const manifest = await workspace.readManifest()
+    const originalImages = await readChapterImages(workspace, context.section.id)
+    const originalStyle = await readBidImageStyle(workspace)
+    let candidate: Awaited<ReturnType<typeof bindChapterWriterInput>> | undefined
+    runtime.register({
+      name: 'submit_chapter', description: '提交当前章节正文。', parameters: { ...chapterWriterOutputSchema },
+      async execute(args, exec) {
+        candidate = await bindChapterWriterInput(workspace, manifest, context, refs, args, [])
+        return runtime.finish(exec, candidate)
+      },
+    })
+    const input = (image: unknown) => ({
+      markdown: `# ${context.section.title}\n\n{{image:0}}`, metadata: { images: [image] },
+    })
+    for (const caption of ['', ' ', '\n方案', '方案\n', '方案\r图', '方案\u2028图', '方案\u2029图', '图'.repeat(201)]) {
+      expect((await call('submit_chapter', input({ image_position: 0, caption }))).isError).toBe(true)
+    }
+    for (const derived of [{ id: images[0]!.id }, { path: images[0]!.path }, { title: '替换资产标题' }]) {
+      expect((await call('submit_chapter', input({ image_position: 0, caption: '方案示意图', ...derived }))).isError).toBe(true)
+    }
+    expect(runtime.captured()).toBeUndefined()
+    expect((await call('submit_chapter', input({ image_position: 0, caption: '方案示意图' }))).isError).toBeFalsy()
+    expect(runtime.captured()).toEqual(candidate)
+    expect(candidate!.markdown).toContain(`![方案示意图](${images[0]!.path})\n\n图 方案示意图`)
+    expect(candidate!.metadata.images).toEqual(images)
+    const restored = createChapterWriterReferences(context, [], await readChapterImages(workspace, context.section.id))
+    const projected = projectChapterWriterCandidate(candidate!, restored)
+    expect(projected).toMatchObject({ metadata: { images: [{ image_position: 0, caption: '方案示意图' }] } })
+    const rebound = await bindChapterWriterInput(workspace, manifest, context, restored, projected, [])
+    expect(rebound).toEqual(candidate)
+    const referenced = candidate!.markdown.replace(`![方案示意图](${images[0]!.path})`, '![方案示意图][scene]')
+      + `\n\n[scene]: ${images[0]!.path}`
+    const referenceProjection = projectChapterWriterCandidate({ ...candidate!, markdown: referenced }, restored)
+    const referenceRebound = await bindChapterWriterInput(workspace, manifest, context, restored, referenceProjection, [])
+    expect(referenceRebound.markdown).toContain('图 方案示意图')
+    expect(referenceRebound.metadata.images).toEqual(images)
+    const withParagraph = { ...candidate!, markdown: candidate!.markdown.replace('图 方案示意图', '图 方案示意图 的方案说明') }
+    expect(projectChapterWriterCandidate(withParagraph, restored).markdown).toContain('图 方案示意图 的方案说明')
+    expect(projectChapterWriterCandidate({ ...candidate!, markdown: candidate!.markdown + '\n方案延续说明。' }, restored).markdown)
+      .toContain('图 方案示意图\n方案延续说明。')
+    expect(() => projectChapterWriterCandidate({ ...candidate!,
+      markdown: candidate!.markdown + `\n\n![另一图题](${images[0]!.path})`,
+    }, restored)).toThrow('同一图片的多处展示须使用相同图题')
+    const migratedContext = { ...context, section: { ...context.section, id: 'SEC-2', title: '迁入章节' } }
+    const migratedRefs = createChapterWriterReferences(migratedContext, [], [])
+    const blocks = indexChapterContentBlocks(context.section.id, candidate!.markdown)
+      .filter(block => block.type !== 'heading' && block.markdown.trim() !== '')
+    const migrated = await bindChapterWriterInput(workspace, manifest, migratedContext, migratedRefs, {
+      markdown: '# 迁入章节\n\n' + blocks.map((_block, position) => `{{reuse:${position}}}`).join('\n\n'), metadata: {},
+    }, [], [], candidate!.markdown)
+    const migratedProjection = projectChapterWriterCandidate(migrated, migratedRefs, [], candidate!.markdown)
+    expect(await bindChapterWriterInput(workspace, manifest, migratedContext, migratedRefs,
+      migratedProjection, [], [], candidate!.markdown)).toEqual(migrated)
+    expect(migrated.metadata.images).toEqual(images)
+    expect(migrated.markdown).toContain(`![方案示意图](${images[0]!.path})\n\n图 方案示意图`)
+    expect(await readChapterImages(workspace, context.section.id)).toEqual(originalImages)
+    expect(await readBidImageStyle(workspace)).toEqual(originalStyle)
+    expect(generate).toHaveBeenCalledOnce()
+    runtime.dispose()
+  })
+
+  it('正文图题的 Markdown 标点原样展示，修复投影不引入其他图片或字符变化', async () => {
+    const { workspace, call, images, generate, runtime } = await fixture()
+    await call('generate_bid_image', request)
+    await call('review_bid_image', { image_position: 0, decision: 'accept', reason: '图片通过确认。' })
+    const context = emptyChapterContext(outlineFixture().sections.find(section => section.id === 'SEC-1')!)
+    const refs = createChapterWriterReferences(context, [], images)
+    const manifest = await workspace.readManifest()
+    const caption = '方案 [维护]\\巡检 ![额外](evil.png) <script> &copy;'
+    const candidate = await bindChapterWriterInput(workspace, manifest, context, refs, {
+      markdown: `# ${context.section.title}\n\n{{image:0}}`, metadata: { images: [{ image_position: 0, caption }] },
+    }, [])
+    expect(chapterImagePaths(candidate.markdown)).toEqual([images[0]!.path])
+    const projected = projectChapterWriterCandidate(candidate, refs)
+    expect(projected).toMatchObject({ metadata: { images: [{ image_position: 0, caption }] } })
+    expect(await bindChapterWriterInput(workspace, manifest, context, refs, projected, [])).toEqual(candidate)
+    expect(candidate.metadata.images).toEqual(images)
+    expect(generate).toHaveBeenCalledOnce()
+    runtime.dispose()
+  })
+
   it('真实工具先发图，再确认并按位置绑定；修复投影和恢复保持同一图片', async () => {
     const { ctx, agent, workspace, call, images, generate, assertImageInput, runtime } = await fixture()
     const result = await call('generate_bid_image', request)

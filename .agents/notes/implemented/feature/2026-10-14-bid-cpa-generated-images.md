@@ -10,7 +10,7 @@ Status: implemented
 
 Bid 包集中配置和调用 CPA Images API，使用已有 Settings 与 `pp` Credentials 引用。前端选择服务实际公布的一个生图模型；项目在 S5 写作前冻结模型和语义风格，首张视觉确认图片成为共同参考。作图与聊天分别配置，已有项目保留原模型；接口地址、凭据引用与请求限制由正式配置持有，每次请求重新解析。接口不接受新密钥字段，不向模型或项目文件保存密钥值或凭据引用，详见[作图凭据目的地](../bug-fix/2026-10-14-bid-image-credential-destination.md)。
 
-Writer 只提交图像语义、比例和图片位置。Host 生成请求摘要、资产身份、不可变 PNG 路径和正文引用，复验正式账本、文件摘要与尺寸。图片查看复用[原生多模态链路](../feature/2026-09-21-bid-global-multimodal-image-input.md)，位置绑定遵循[程序身份规则](../bug-fix/2026-10-05-bid-host-id-bindings.md)。生成图片与[结构化流程图](../feature/2026-09-15-flowchart-content-blocks.md)各自保留其正文表示，三个已有决定仍适用于各自对象。
+Writer 只提交图像语义、比例和图片位置；正文图题允许独立调整并复用原图片，详见[正文图题与图片资产](../bug-fix/2026-10-15-bid-image-body-captions.md)。Host 生成请求摘要、资产身份、不可变 PNG 路径和正文引用，复验正式账本、文件摘要与尺寸。图片查看复用[原生多模态链路](../feature/2026-09-21-bid-global-multimodal-image-input.md)，位置绑定遵循[程序身份规则](../bug-fix/2026-10-05-bid-host-id-bindings.md)。生成图片与[结构化流程图](../feature/2026-09-15-flowchart-content-blocks.md)各自保留其正文表示，三个已有决定仍适用于各自对象。
 
 真实图片通过私有工具回执进入原 Writer 会话；恢复的 pending 图片必须重新展示或已有可证明的真实展示记录，才能确认。实际提示、模型、接口、图幅和参考附件在计费请求前持久化，附件原字节作为参考输入，使会话日志能够重建模型输入。模型决定内容和风格是否符合要求，程序控制权限、身份、字节预算、取消和发布。S5 在接纳时遵守 Word 的全书图片资源预算，正式章节 metadata 与图片通过同一 Work 发布；前端仅按当前项目已发布正文引用的资产身份读取图片。
 

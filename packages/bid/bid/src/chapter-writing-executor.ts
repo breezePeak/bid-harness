@@ -3209,7 +3209,7 @@ async function runChapterWriting(
         ), ...(imageProject === undefined ? [] : [
           `项目统一插图风格：${imageProject.style.prompt}`,
           '在插图确有助于解释方案、现场布置、设备外观或实施场景时，按需调用 generate_bid_image 生成真正图片，不为每章机械配图。恢复已有图片时先用 view_bid_image 看图，不重复付费生成。真实图片展示后必须在下一次模型请求调用 review_bid_image 明确接受或拒绝，检查图片内容是否准确、是否存在多余文字或误导事实、是否保持项目风格；拒绝后修改 prompt 再生成。',
-          '正文独立段落使用 {{image:图片位置}} 放置已接受图片，并在 metadata.images 中选择 {image_position:图片位置}。图片身份、文件路径和图题编号由程序绑定，不抄写；生成图只表达方案，不作为企业资质、真实业绩或现场事实的证据。',
+          '正文独立段落使用 {{image:图片位置}} 放置已接受图片，并在 metadata.images 中选择 {image_position:图片位置, caption:可选的单行图题}；图题最多 200 字符，省略时使用生成时的标题。仅调整图题时复用原图片位置，不重新作图。图片身份、文件路径和图题编号由程序绑定，不抄写；生成图只表达方案，不作为企业资质、真实业绩或现场事实的证据。',
         ])].join('\n')
         const seed = preservation?.seedBySectionId?.get(sectionId)
         const seedFlowcharts = preservation?.seedFlowchartsBySectionId?.get(sectionId)

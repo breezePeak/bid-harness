@@ -53,6 +53,7 @@ const ledgerSchema = z.object({ schema_version: z.literal(1), section_id: text,
 interface MarkdownNode {
   type: string
   children?: readonly MarkdownNode[] | undefined
+  alt?: string | null | undefined
   url?: string | undefined
   identifier?: string | undefined
   position?: {
@@ -83,6 +84,18 @@ function markdownImages(markdown: string): Array<{ url: string; node: MarkdownNo
 
 function markdownImageUrls(markdown: string): string[] { return [...new Set(markdownImages(markdown).map(image => image.url))] }
 
+function captionText(caption: string): string { return caption.replace(/[!-/:-@[-`{-~]/gu, '\\$&') }
+
+/**
+ * 按已授权图片资产展开正文位置，图题仅影响替代文字与普通文本段落。
+ * @param image Host 已绑定的图片记录。
+ * @param caption 本次正文的语义图题，省略时使用资产标题。
+ * @returns 不含模型指定路径或额外 Markdown 结构的图片与图题。
+ */
+export function chapterImageMarkdown(image: BidChapterImage, caption = image.title): string {
+  return `![${captionText(caption)}](${image.path})\n\n图 ${captionText(caption)}`
+}
+
 function markdownImagePath(url: string): string | undefined {
   if (/^[a-z][a-z\d+.-]*:|^\/\//iu.test(url)) return undefined
   let decoded: string
@@ -104,7 +117,26 @@ export function chapterImagePaths(markdown: string): string[] {
 }
 
 /**
- * 将正式图片引用投影为 Writer 位置锚点，保留其余正文与未使用定义。
+ * 读取正文生成图片的实际替代文字，同一图片的多处展示须使用相同图题。
+ * @param markdown 当前完整 Markdown 正文。
+ * @returns 按规范图片路径绑定的图题；冲突时拒绝投影，避免丢失正文语义。
+ */
+export function chapterImageCaptions(markdown: string): ReadonlyMap<string, string> {
+  const captions = new Map<string, string>()
+  for (const { url, node } of markdownImages(markdown)) {
+    const path = markdownImagePath(url)
+    if (path?.startsWith('chapters/images/') !== true) continue
+    const caption = node.alt ?? ''
+    if (captions.has(path) && captions.get(path) !== caption) throw new ToolArgsError([
+      'markdown: 同一图片的多处展示须使用相同图题，不能将不同图题合并到一个图片位置。',
+    ])
+    captions.set(path, caption)
+  }
+  return captions
+}
+
+/**
+ * 将正式图片引用投影为 Writer 位置锚点，只移除紧随图片且匹配实际替代文字的图题。
  * @param markdown 已绑定的完整正文。
  * @param positions 当前图片的程序位置表。
  * @returns 支持 inline/reference 图片的模型正文。
@@ -116,8 +148,9 @@ export function projectChapterImageAnchors(markdown: string, positions: readonly
     const start = node.position?.start.offset
     let end = node.position?.end.offset
     if (start === undefined || end === undefined) throw new Error('BID_IMAGE_MARKDOWN_POSITION_INVALID')
-    const caption = `\n\n图 ${selected.image.title}`
-    if (markdown.slice(end).startsWith(caption)) end += caption.length
+    const caption = `\n\n图 ${captionText(node.alt ?? selected.image.title)}`
+    if (markdown.slice(end).startsWith(caption)
+      && /^(?:\r?\n[\t ]*\r?\n|[\r\n]*$)/u.test(markdown.slice(end + caption.length))) end += caption.length
     return [{ start, end, replacement: `{{image:${selected.position}}}` }]
   }).sort((left, right) => right.start - left.start)
   for (const change of changes) markdown = markdown.slice(0, change.start) + change.replacement + markdown.slice(change.end)

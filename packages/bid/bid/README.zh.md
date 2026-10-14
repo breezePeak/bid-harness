@@ -202,6 +202,8 @@ S5 完成后项目保持 `chapter_writing/completed`，审核项标签和逐章�
 
 Writer 按本章用途调用 `generate_bid_image`，通过现有附件链路查看真实图片，再用 `review_bid_image` 接受或拒绝；恢复中的图片可以用 `view_bid_image` 重新查看。实际 Writer 路由必须声明图片输入能力。正文仅提交程序发放的图片位置，Host 用不透明的 `BidImageId` 绑定项目内 PNG、图题、摘要和正式 metadata；生成效果图不能作为真实现场、业绩或资质证据。前端审阅和 Word 导出使用同一份图片。
 
+`submit_chapter` 的 `metadata.images` 可以提交 `{image_position, caption}` 指定正文图题；`caption` 为可选的单行文本，最多 200 字符，省略时使用生成时的标题。修改图题复用已确认的图片位置，不重新作图；正式图片记录、参考图与资产身份保持原样。修复与恢复从正文实际替代文字还原图题，迁入原文继续保留图片及图注。详见[正文图题与图片资产](../../../.agents/notes/implemented/bug-fix/2026-10-15-bid-image-body-captions.md)。
+
 图片字节与受控账本在当前 Work 中持久化，成功请求在修订和恢复中复用。实际提示、模型、接口、图幅及参考附件在付费调用前写入会话日志，日志未持久化时拒绝发送；参考附件与接口收到的图片字节一致。图片接纳与导出共用全书不同资源总计 20 MiB 的限制。HTTP 或解码错误保留明确诊断，生图请求不自动重试；取消后不能发布迟到结果。生成接口必须返回内嵌图片字节，不自动下载外部图片 URL。视觉确认记录不能替代采购要求和事实依据审核。
 
 ## Known Limitations and Deferred Work
