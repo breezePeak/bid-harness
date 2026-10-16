@@ -436,7 +436,7 @@ export interface Config {
   bidderName: string
 }
 
-/** 用户配置；空地址继承 pp，空模型关闭作图。 */
+/** 用户配置；空地址继承 pp，空模型不为新项目启用作图。 */
 export interface BidImageGenerationConfig {
   /** 作图 API 根地址，路径后追加 images/generations 或 images/edits。 */
   baseURL?: string
@@ -449,7 +449,7 @@ export interface BidImageGenerationConfig {
 }
 ```
 
-Source: [`packages/bid/bid/src/index.ts:531`](../packages/bid/bid/src/index.ts)
+Source: [`packages/bid/bid/src/index.ts:532`](../packages/bid/bid/src/index.ts)
 
 <a id="deepseek-aidsh-client-connection"></a>
 

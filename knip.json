@@ -215,6 +215,7 @@
     "packages/bid/bid": {
       "entry": [
         "tests/**/*.spec.ts",
+        "tests/**/*.e2e.ts",
         "tests/fixtures/generate-table-page-anchors.ts"
       ],
       "project": [

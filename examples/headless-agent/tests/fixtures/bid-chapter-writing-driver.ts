@@ -7,6 +7,7 @@ import { executeDocxExport } from '../../../../packages/bid/bid/src/docx-export.
 import { readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { parseChapterExecutionLog } from '../../../../packages/bid/bid/src/chapter-writing-plan-artifacts.ts'
+import { keylessNativeOffice } from '../../../../packages/bid/bid/tests/fixtures/general-docx.ts'
 
 async function withFixedExportDate<T>(run: () => Promise<T>): Promise<T> {
   const systemDate = Date
@@ -39,7 +40,7 @@ try {
   const runtime = await orchestrator.drive()
   const askedForRequirements = agent.session.events.some(event =>
     event.type === 'bid.user_confirmation.required' && event.data.stage === 'chapter_writing')
-  await withFixedExportDate(() => executeDocxExport(workspace, createTestBidRunContext()))
+  await withFixedExportDate(() => executeDocxExport(workspace, createTestBidRunContext(), undefined, undefined, keylessNativeOffice))
   const logPath = join(workspace.projectRoot, 'chapters/execution-log.json')
   const log = parseChapterExecutionLog(JSON.parse(await readFile(logPath, 'utf8')))
   for (const section of log.sections) {
@@ -50,7 +51,7 @@ try {
     section.final_reviewer_child_session_id = null
   }
   await writeFile(logPath, JSON.stringify(log))
-  await withFixedExportDate(() => executeDocxExport(workspace, createTestBidRunContext(), 'output/saved.docx'))
+  await withFixedExportDate(() => executeDocxExport(workspace, createTestBidRunContext(), 'output/saved.docx', undefined, keylessNativeOffice))
   process.stdout.write(`${JSON.stringify({ artifacts, evidence_synced: evidenceSynced, askedForRequirements, runtime, allowed_actions: getBidClientProjection(runtime).allowedActions })}\n`)
 } finally {
   await ctx?.fiber.dispose()

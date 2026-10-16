@@ -16,6 +16,7 @@ import { SessionId } from '@deepseek-ai/dsh-session'
 import { BidWorkspace } from '@deepseek-ai/dsh-bid'
 import { executeDocxExport } from '../../../../packages/bid/bid/src/docx-export.ts'
 import { createTestBidRunContext } from '../../../../packages/bid/bid/src/run-coordinator.ts'
+import { keylessNativeOffice } from '../../../../packages/bid/bid/tests/fixtures/general-docx.ts'
 
 const configPath = process.argv[2]
 if (configPath === undefined) throw new Error('缺少生图回放配置路径')
@@ -59,7 +60,7 @@ try {
   const result = await runChapterWritingLoop(host, process.cwd(), frozen ? 'frozen' : true)
   const style = await readBidImageStyle(result.workspace)
   const images = await readChapterImages(result.workspace, 'SEC-SECURITY')
-  await executeDocxExport(result.workspace, createTestBidRunContext())
+  await executeDocxExport(result.workspace, createTestBidRunContext(), undefined, undefined, keylessNativeOffice)
   const markdown = await readFile(join(result.workspace.projectRoot, 'output/bid.md'), 'utf8')
   process.stdout.write(JSON.stringify({ generated: requests.length, style, images,
     markdown, image_sha256: images.length === 0 ? null : createHash('sha256').update(await readFile(join(result.workspace.projectRoot, images[0]!.path))).digest('hex') }) + '\n')

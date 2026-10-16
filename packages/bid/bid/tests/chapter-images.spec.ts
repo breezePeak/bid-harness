@@ -131,9 +131,9 @@ describe('S5 真正插图工具与资产', () => {
     expect(referenceRebound.markdown).toContain('图 方案示意图')
     expect(referenceRebound.metadata.images).toEqual(images)
     const withParagraph = { ...candidate!, markdown: candidate!.markdown.replace('图 方案示意图', '图 方案示意图 的方案说明') }
-    expect(projectChapterWriterCandidate(withParagraph, restored).markdown).toContain('图 方案示意图 的方案说明')
-    expect(projectChapterWriterCandidate({ ...candidate!, markdown: candidate!.markdown + '\n方案延续说明。' }, restored).markdown)
-      .toContain('图 方案示意图\n方案延续说明。')
+    expect(projectChapterWriterCandidate(withParagraph, restored)).toMatchObject({ markdown: expect.stringContaining('图 方案示意图 的方案说明') })
+    expect(projectChapterWriterCandidate({ ...candidate!, markdown: candidate!.markdown + '\n方案延续说明。' }, restored))
+      .toMatchObject({ markdown: expect.stringContaining('图 方案示意图\n方案延续说明。') })
     expect(() => projectChapterWriterCandidate({ ...candidate!,
       markdown: candidate!.markdown + `\n\n![另一图题](${images[0]!.path})`,
     }, restored)).toThrow('同一图片的多处展示须使用相同图题')
