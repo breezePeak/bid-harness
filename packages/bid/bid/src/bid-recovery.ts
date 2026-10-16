@@ -86,6 +86,21 @@ export function bidEvidenceMappingTakeoverRun(session: Session, task: BidTaskSta
 }
 
 const STAGES = new Set(['tender_analysis', 'outline_generation', 'evidence_mapping', 'chapter_writing'])
+
+/**
+ * 选择可由新的直接用户消息继续的失败 Run；自动恢复预算保持原值。
+ * @param session 保存原 Run 和失败通知的会话。
+ * @param task 当前项目状态。
+ * @returns 可修复或可重试的原 Run；输入、权限及外部阻断不授予继续。
+ */
+export function bidUserContinuableRun(session: Session, task: BidTaskState): ReturnType<typeof bidRecoverableRun> {
+  if (task.status !== 'failed' || !STAGES.has(task.stage)) return
+  const run = bidRecoverableRun(session, task)
+  if (run?.error?.recovery === undefined || run.work.kind === 'file_intake') return
+  const recovery = classifyBidRecovery(run.work, run.error)
+  return recovery?.kind === 'repair' || recovery?.kind === 'retry' ? run : undefined
+}
+
 const BLOCKED_CODE = new RegExp(
   'INPUT_(?:INVALID|CHANGED|MISMATCH|MISSING|CORRUPT)|FILE_(?:MISSING|CORRUPT)|REVISION_(?:CONFLICT|MISMATCH)|RUN_RETIRED|EACCES|EPERM|'
   + 'CHAPTER_REVISION_(?:NOT_WRITABLE|SELECTION_INVALID|CONTEXT_UNAVAILABLE)|CREDENTIAL|QUOTA|PROVIDER|INFRASTRUCTURE|'

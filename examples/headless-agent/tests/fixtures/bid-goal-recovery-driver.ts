@@ -2,11 +2,11 @@
 import { boot } from '@deepseek-ai/dsh-app-boot'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { CallId, LlmAdapter, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
+import { CallId, createUserMessage, LlmAdapter, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import { SessionId, type Session } from '@deepseek-ai/dsh-session'
 import { BidHostRuntime, BidWorkspace, BidRunCoordinator, buildBidStageTask, checkpointBidProjectState } from '@deepseek-ai/dsh-bid'
 import { persistBidWorkRequest } from '../../../../packages/bid/bid/src/work-descriptor.ts'
-import { safeRecoverableBidFailure } from '../../../../packages/bid/bid/src/bid-recovery.ts'
+import { bidRunRecoveryEligibility, safeRecoverableBidFailure } from '../../../../packages/bid/bid/src/bid-recovery.ts'
 import { BidStageExecutionError } from '../../../../packages/bid/bid/src/control-plane-contract.ts'
 
 interface Operation { runs: BidRunCoordinator }
@@ -31,6 +31,10 @@ class GoalRecoveryAdapter extends LlmAdapter {
   goalInspected = false
   goalCompleted = false
   goalRead = false
+  explicitContinuation = false
+  continueEnabled = false
+  continueInspected = false
+  continueStarted = false
   constructor(private readonly parentId: SessionId) { super() }
   override resolveModel(provider: string, model: string): Promise<{ provider: string; id: string; name: string }> {
     return Promise.resolve({ provider, id: model, name: model })
@@ -41,6 +45,16 @@ class GoalRecoveryAdapter extends LlmAdapter {
       return
     }
     this.requests.push(options)
+    if (this.explicitContinuation) {
+      if (this.continueEnabled && !this.continueInspected) {
+        this.continueInspected = true
+        yield* tool('bid_stage_inspect', { view: 'recovery' })
+      } else if (this.continueEnabled && !this.continueStarted) {
+        this.continueStarted = true
+        yield* tool('bid_resume_current_run', {})
+      } else yield { type: 'finish', reason: { kind: 'stop' } }
+      return
+    }
     if (this.goalEnabled && !this.goalInspected) {
       this.goalInspected = true
       yield* tool('bid_stage_inspect', { view: 'summary' })
@@ -70,6 +84,7 @@ class GoalRecoveryAdapter extends LlmAdapter {
 const configPath = process.argv[2]
 if (configPath === undefined) throw new Error('缺少 Bid Goal 回放配置')
 const stale = process.argv[3] === 'stale'
+const explicitContinuation = process.argv[3] === 'continue'
 let ctx: Context | undefined
 try {
   ctx = await boot('bid-goal-recovery-snapshot', configPath)
@@ -77,6 +92,7 @@ try {
   await checkpointBidProjectState(workspace, { stage: 'tender_analysis', status: 'ready', run: null })
   const sessionId = SessionId('bid-goal-recovery')
   const adapter = new GoalRecoveryAdapter(sessionId)
+  adapter.explicitContinuation = explicitContinuation
   ctx.llm.registerAdapter(['mock'], adapter)
   const { agent } = await ctx.agentLoop.createAgent(ctx, {
     sessionId, agentOptions: { provider: 'mock', model: 'mock' },
@@ -137,7 +153,29 @@ try {
     }
     await agent.whenIdle()
   }
-  if (stale) {
+  if (explicitContinuation) {
+    adapter.continueEnabled = true
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: '继续' }], source: { kind: 'user' } }))
+    await agent.whenIdle()
+    await Promise.allSettled(host.recoveryTasks)
+    await agent.whenIdle()
+    const events = agent.session.events
+    const runs = events.filter(event => event.type === 'bid.run.started')
+    const decision = bidRunRecoveryEligibility(agent.session)
+    process.stdout.write(JSON.stringify({
+      startedRuns: runs.length, sameWork: runs.every(event => event.data.run.work.workId === failed.work.workId),
+      resumeOfOriginal: runs[1]?.data.run.resumeOf?.runId === failed.runId,
+      automaticEligible: decision.eligible, attempts: decision.attempts,
+      automaticRound: events.findLast(event => event.type === 'bid.recovery.round')?.data.round,
+      automaticBudget: events.findLast(event => event.type === 'bid.recovery.round')?.data.budget,
+      calls: events.filter(event => event.type === 'tool/call').map(event => event.data.name),
+      userMessages: events.flatMap(event => event.type === 'user/message' && event.data.source.kind === 'user'
+        ? event.data.content.flatMap(block => block.type === 'text' ? [block.text] : []) : []),
+      continuationGuidance: adapter.requests.flatMap(request => request.messages.flatMap(message => message.content
+        .flatMap(block => block.type === 'text' ? block.text.split('\n') : [])))
+        .find(line => line.includes('新的直接用户消息明确要求继续')),
+    }) + '\n')
+  } else if (stale) {
     const rejected: boolean[] = []
     for (const instruction of ['重试当前任务', '换一种方法修复', '再次检查后继续']) {
       let denial: unknown

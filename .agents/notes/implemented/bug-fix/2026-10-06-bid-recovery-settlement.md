@@ -24,6 +24,8 @@ S4 已完成结构修复后的新恢复以会话及接纳事件序号关联下�
 
 required 页数检查的执行异常与实际不足分别适用失败恢复和完成门禁，部分替代[页数结果校验](2026-09-10-bid-s5-live-chat-page-result-validation.md)与[建议性审查风险](2026-09-12-bid-s5-advisory-review-risk.md)中的完成规则；`preferred` 与只读审查的设计依据继续有效。[S2–S5 Goal 恢复](../feature/2026-09-23-bid-s2-s5-goal-recovery.md)及[校验失败交 Main 修复](2026-09-26-bid-validation-main-agent-recovery.md)保留其授权、范围和修复工具约束，续行调度与预算由本决定补充。
 
+原任务失败后新的直接用户消息可授权一次继续，详见[用户继续授权](2026-10-16-bid-explicit-user-continuation.md)；这项授权不重置本记录的自动纠正预算。
+
 ## Alternatives considered
 
 **仅在提示词中要求继续。** 文字承诺没有执行凭据，无法判断同一失败是否解除，也不能持久限制无动作回合。

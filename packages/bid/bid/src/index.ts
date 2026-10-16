@@ -184,7 +184,7 @@ import { BID_STAGES, BidStageExecutionError, isBidDocumentRole } from './control
 import { BID_BINARY_UPLOAD_PATH, BID_UPLOAD_FILES_HEADER, BID_UPLOAD_SESSION_HEADER } from './control-plane-contract.ts'
 import { appendBidSchemaWarning, createBidSchemaWarning } from './bid-events.ts'
 import type {} from '@deepseek-ai/dsh-goal-round-driver'
-import { bidCapabilityTakeoverRun, bidCompletedCapabilityRun, bidEvidenceMappingTakeoverRun, bidRecoverableRun, bidRecoveryFingerprint, bidRecoveryInstructionRepeated, bidRunRecoveryEligibility, bidWritingPlanRecoveryEligibility, isBidWritingPlanRecoverableFailure, safeRecoverableBidFailure } from './bid-recovery.ts'
+import { bidCapabilityTakeoverRun, bidCompletedCapabilityRun, bidEvidenceMappingTakeoverRun, bidRecoverableRun, bidRecoveryFingerprint, bidRecoveryInstructionRepeated, bidRunRecoveryEligibility, bidUserContinuableRun, bidWritingPlanRecoveryEligibility, isBidWritingPlanRecoverableFailure, safeRecoverableBidFailure } from './bid-recovery.ts'
 import { BidRecoveryDriver, type BidRecoveryNotice } from './bid-recovery-driver.ts'
 import { resolveBidToolAuthorization, withBidNativeTaskAuthorization } from './bid-tool-authorization.ts'
 import type { BidSessionEventMap } from './bid-events.ts'
@@ -3846,10 +3846,11 @@ export class BidHostRuntime extends TypertRemoteService {
         throw new BidOrchestratorError('BID_ACTION_NOT_ALLOWED', '当前主会话无法恢复挂起任务。')
       }
       const current = bidSessionTaskState(session)
-      if (current.status !== 'suspended' || current.run.cause === 'awaiting_input') {
-        throw new BidOrchestratorError('BID_RESUME_NOT_ALLOWED', '当前任务不在可由聊天继续的挂起状态。')
+      if ((current.status !== 'suspended' || current.run.cause === 'awaiting_input')
+        && bidUserContinuableRun(session, current) === undefined) {
+        throw new BidOrchestratorError('BID_RESUME_NOT_ALLOWED', '当前任务不在可由聊天继续的状态。')
       }
-      if (current.run.cause === 'user_stop') {
+      if (current.status === 'suspended' && current.run.cause === 'user_stop') {
         const messageIndex = session.events.findIndex(event => event.type === 'user/message'
           && String(event.data.id) === authorization.message_id && event.data.source.kind === 'user')
         const stoppedIndex = session.events.findIndex((event) => {
@@ -6096,13 +6097,13 @@ export class BidHostRuntime extends TypertRemoteService {
   }
 
   /**
-   * Resume one exact suspended Run after checking its project revision and durable checkpoints.
-   * @param session - Bid Session that owns the suspended Run.
-   * @param suspendedRunId - Exact suspended attempt selected by the client.
-   * @param expectedProjectRevision - Project revision observed by the client.
-   * @param onAccepted - Callback invoked after the replacement Run is durable.
-   * @param recovery - 主 Agent 修复指令，在项目锁内重验并记录。
-   * @returns State reached when the resumed work next settles.
+   * 核对项目版本和持久检查点，继续原挂起 Run 或用户新授权的失败 Run。
+   * @param session 拥有原 Run 的 Bid 会话。
+   * @param suspendedRunId 客户端选定的原 Run，必须与当前任务一致。
+   * @param expectedProjectRevision 客户端读取的项目修订号。
+   * @param onAccepted 新 Run 持久化后的接纳回调。
+   * @param recovery 主 Agent 自动修复指令；省略时，失败 Run 须有失败之后的新直接用户消息，只授权继续一次。
+   * @returns 原任务下一次结算时的项目状态。
    */
 
   async resumeCurrentRun(
@@ -6119,13 +6120,28 @@ export class BidHostRuntime extends TypertRemoteService {
       throw new BidOrchestratorError('BID_OPERATION_IN_PROGRESS', 'A Bid operation is already running for this Session.')
     }
     const expectedRecovery = recovery === undefined ? undefined : bidRunRecoveryEligibility(session, this.config.modelStageRepairAttempts)
+    const authorization = recovery === undefined ? resolveBidToolAuthorization(session) : undefined
     const operation = this.beginOperation(session)
     let admitted = false
     try {
       const task = await this.prepareOperation(operation)
       const suspended = bidRecoverableRun(session, task)
+      let acceptedRecovery = recovery
+      const userContinuation = recovery === undefined && task.status === 'failed'
+      if (userContinuation) {
+        const currentAuthorization = resolveBidToolAuthorization(session)
+        const message = session.events.find(event => event.type === 'user/message'
+          && String(event.data.id) === authorization?.message_id && event.data.source.kind === 'user')
+        const failed = session.events.findLast(event => event.type === 'bid.run.notice'
+          && event.data.noticeId === `run:${suspendedRunId}:failed`)
+        if (bidUserContinuableRun(session, task) === undefined || message?.type !== 'user/message'
+          || currentAuthorization?.message_id !== authorization?.message_id || failed === undefined || message.seq <= failed.seq) {
+          throw new Error('BID_USER_CONTINUATION_REQUIRED: 继续失败任务需要失败之后新的直接用户消息。')
+        }
+        acceptedRecovery = { instruction: message.data.content.flatMap(block => block.type === 'text' ? [block.text] : []).join('\n') }
+      }
       if (operation.projectRevision !== expectedProjectRevision || suspended?.runId !== suspendedRunId
-        || task.status !== 'suspended' && (recovery === undefined || task.status !== 'failed')) {
+        || task.status !== 'suspended' && (acceptedRecovery === undefined || task.status !== 'failed')) {
         throw new BidOrchestratorError('BID_RESUME_NOT_ALLOWED', '原 Run 或项目状态已改变，不能恢复。')
       }
       if (suspended.work.kind === 'file_intake') await readFileIntakeWork(operation.workspace, suspended.work)
@@ -6141,13 +6157,13 @@ export class BidHostRuntime extends TypertRemoteService {
           throw new BidOrchestratorError('BID_RESUME_OWNER_SESSION_REQUIRED', '请回到原授权会话继续目录补修；当前会话不能恢复原 Work。')
         }
       }
-      if (recovery !== undefined) {
+      if (acceptedRecovery !== undefined) {
         const main = this.ctx.agents.get(session.id)
         const eligibility = bidRunRecoveryEligibility(session, this.config.modelStageRepairAttempts)
         if (main?.session !== session
-          || !eligibility.eligible || eligibility.target?.runId !== suspendedRunId
-          || eligibility.target.workId !== expectedRecovery?.target?.workId
-          || eligibility.fingerprint !== expectedRecovery.fingerprint
+          || !userContinuation && !eligibility.eligible || eligibility.target?.runId !== suspendedRunId
+          || !userContinuation && (eligibility.target.workId !== expectedRecovery?.target?.workId
+            || eligibility.fingerprint !== expectedRecovery.fingerprint)
           || suspended.work.kind === 'file_intake' || suspended.work.stage === 'file_intake'
           || suspended.work.stage === 'docx_export' && suspended.work.kind !== 'capability_task'
           || suspended.error?.recovery === undefined
@@ -6174,23 +6190,25 @@ export class BidHostRuntime extends TypertRemoteService {
             }
           }
         }
-        if (bidRecoveryInstructionRepeated(session, eligibility.target, eligibility.fingerprint, recovery.instruction)) {
+        if (!userContinuation && bidRecoveryInstructionRepeated(
+          session, eligibility.target, eligibility.fingerprint, acceptedRecovery.instruction,
+        )) {
           throw new BidOrchestratorError('BID_RECOVERY_DUPLICATE_INSTRUCTION', '同一问题不能重复提交相同修复指令。')
         }
-        const acceptedRecovery = session.append('bid.recovery.requested', {
+        const acceptedEvent = session.append('bid.recovery.requested', {
           ownerSessionId: String(session.id),
           target: { kind: 'run', workId: suspended.work.workId, runId: suspendedRunId },
           unit: suspended.error.recovery.unit,
-          instruction: recovery.instruction,
+          instruction: acceptedRecovery.instruction,
           progressFingerprint: eligibility.fingerprint,
         })
         await this.ctx.sessions.flush(session)
         operation.recovery = {
           workId: suspended.work.workId,
           ownerSessionId: String(session.id),
-          requestSeq: acceptedRecovery.seq,
+          requestSeq: acceptedEvent.seq,
           unit: suspended.error.recovery.unit,
-          instruction: recovery.instruction,
+          instruction: acceptedRecovery.instruction,
           issues: suspended.error.issues ?? [],
         }
       } else {

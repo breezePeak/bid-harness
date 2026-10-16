@@ -18,7 +18,7 @@ import { BidHostRuntime, BidRunCoordinator, BidWorkspace, checkpointBidProjectSt
 } from '../src/index.ts'
 import { type BidWorkDescriptor } from '../src/control-plane-contract.ts'
 import type { Session } from '@deepseek-ai/dsh-session'
-import { safeRecoverableBidFailure } from '../src/bid-recovery.ts'
+import { bidRunRecoveryEligibility, safeRecoverableBidFailure } from '../src/bid-recovery.ts'
 import { inspectBidStage } from '../src/stage-interaction.ts'
 import * as ToolGoal from '@deepseek-ai/dsh-tool-goal'
 import { resolveBidToolAuthorization } from '../src/bid-tool-authorization.ts'
@@ -394,6 +394,64 @@ it('无 Goal 时主 Agent 恢复原 Run；重复失败再次 steer，相同指�
   }
 }, 15_000)
 
+
+it.each([0, 3])('自动纠正耗尽且已执行 %i 次时新消息可继续原 Run，同一消息和自动通知不能重复授权', async (attempts) => {
+  const { host, agent, workspace } = await setup('tender_analysis', false)
+  const session = agent.session
+  const message = (text: string, human = true) => session.append('user/message', createUserMessage({
+    content: [{ type: 'text', text }], source: human ? { kind: 'user' } : { kind: 'plugin', plugin: 'test', form: 'notice', summary: '自动继续' },
+  }), { surfaceOp: 'append' })
+  session.append('turn/start', { turn: 1 })
+  message('开始')
+  const payload = { stage: 'tender_analysis' }
+  const inputs = buildBidStageTask('tender_analysis').inputs.map(path => ({ path, sha256: null }))
+  const descriptor = await persistBidWorkRequest(workspace, 'stage_execution', 'tender_analysis', payload,
+    { stage: 'tender_analysis', inputs, payload })
+  const failure = safeRecoverableBidFailure(descriptor, new Error('missing submission'))
+  const operation = host.beginOperation(session)
+  await host.prepareOperation(operation)
+  const original = await operation.runs.start(descriptor)
+  await operation.runs.suspend('retry_exhausted', failure)
+  for (let round = 1; round <= attempts; round++) session.append('bid.recovery.requested', {
+    ownerSessionId: String(session.id), target: { kind: 'run', workId: descriptor.workId, runId: original.runId },
+    unit: descriptor.workId, instruction: `自动修复 ${round}`, progressFingerprint: 'unchanged',
+  })
+  session.append('bid.recovery.round', { ownerSessionId: String(session.id),
+    target: { kind: 'run', workId: descriptor.workId, runId: original.runId }, fingerprint: 'unchanged',
+    round: 3, budget: 3, state: 'blocked', reason: 'BID_RECOVERY_BUDGET_EXHAUSTED' })
+  vi.spyOn(agent, 'steer').mockImplementation(() => {})
+  await host.finishOperation(session, operation)
+  const call = (args = {}) => agent.ctx.tools.execute({ agent, name: 'bid_resume_current_run',
+    arguments: args, callId: CallId('user-continue'), signal: new AbortController().signal })
+  expect(bidRunRecoveryEligibility(session)).toMatchObject({ eligible: false, attempts })
+  expect(await inspectBidStage(workspace, session, undefined, 'recovery'))
+    .toMatchObject({ eligible: false, available_actions: ['bid_resume_current_run'] })
+  expect((await call()).isError).toBe(true)
+  message('继续', false)
+  expect((await call()).isError).toBe(true)
+
+  const internals = host as unknown as { automaticOrchestrator: (...args: unknown[]) => unknown }
+  internals.automaticOrchestrator = (_agent, _workspace, _signal, resumedOperation) => ({
+    resume: async (runId: string, onAccepted: (run: Awaited<ReturnType<BidRunCoordinator['start']>>) => void) => {
+      const current = resumedOperation as Operation
+      const run = await current.runs.start(descriptor, { runId, cause: 'retry_exhausted' })
+      onAccepted(run)
+      return current.runs.suspend('retry_exhausted', failure)
+    },
+  })
+  message('继续')
+  expect((await call({ run_id: original.runId })).isError).toBe(true)
+  expect(await call()).toMatchObject({ isError: false, value: { accepted: true, execution_status: 'started', completed: false } })
+  await vi.waitFor(() => { expect(host.inFlight.size).toBe(0) })
+  expect(bidRunRecoveryEligibility(session)).toMatchObject({ eligible: false, attempts: attempts + 1 })
+  expect((await call()).isError).toBe(true)
+  expect(session.events.filter(event => event.type === 'bid.run.started')).toHaveLength(2)
+  message('继续')
+  expect(await call()).toMatchObject({ isError: false, value: { accepted: true } })
+  await vi.waitFor(() => { expect(host.inFlight.size).toBe(0) })
+  expect(bidRunRecoveryEligibility(session)).toMatchObject({ eligible: false, attempts: attempts + 2 })
+  expect(session.events.filter(event => event.type === 'bid.run.started').every(event => event.data.run.work.workId === descriptor.workId)).toBe(true)
+})
 
 it.each(['user_stop', 'awaiting_input', 'provider unavailable', 'quota exhausted', 'credential missing'] as const)(
   '%s 只在需要主 Agent 解释阻断时唤醒', async (cause) => {

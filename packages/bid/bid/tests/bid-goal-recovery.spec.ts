@@ -43,12 +43,13 @@ it.each(['PI_AI_ERROR', 'TRANSPORT', 'SERVER', 'TIMEOUT'])('S4 的 %s 开放新�
     fingerprint: 'old-server', round: 0, budget: 3, state: 'blocked', reason: message })
   expect(bidRunRecoveryEligibility(session)).toMatchObject({ eligible: true, attempts: 0, target })
   expect(await inspectBidStage(undefined, session, undefined, 'recovery'))
-    .toMatchObject({ eligible: true, available_actions: ['bid_recover_task', 'bid_run_task(supersede=true)'], failure: { cause: { code } } })
+    .toMatchObject({ eligible: true, available_actions: ['bid_recover_task', 'bid_resume_current_run', 'bid_run_task(supersede=true)'], failure: { cause: { code } } })
   for (const code of ['AUTH', 'QUOTA', 'INVALID_REQUEST', 'INPUT_CHANGED', 'EACCES', 'PI_AI_ERROR']) {
     session.append('bid.task.changed', { state: { stage: s4.stage, status: 'failed', run: null,
       failure: safeRecoverableBidFailure(s4, error, [...failure.issues!, { code, message: '真实阻断' }]) } })
     expect(bidRunRecoveryEligibility(session).eligible).toBe(false)
     expect(bidEvidenceMappingTakeoverRun(session, session.events.findLast(event => event.type === 'bid.task.changed')!.data.state)).toBeUndefined()
+    expect((await inspectBidStage(undefined, session, undefined, 'recovery')).available_actions).not.toContain('bid_resume_current_run')
   }
   session.append('bid.task.changed', { state: { stage: s4.stage, status: 'failed', run: null, failure } })
   session.append('bid.recovery.round', { ownerSessionId: String(session.id), target,
@@ -119,7 +120,7 @@ it.each(['budget', 'server'])('已接纳旧 blocked 恢复后，新的输出超�
   session.append('bid.task.changed', { state: { stage: s4.stage, status: 'failed', run: null, failure } })
   expect(bidRunRecoveryEligibility(session)).toMatchObject({ eligible: true, attempts: 1, target: { runId: current.runId } })
   expect(await inspectBidStage(undefined, session, undefined, 'recovery'))
-    .toMatchObject({ eligible: true, available_actions: ['bid_recover_task', 'bid_run_task(supersede=true)'] })
+    .toMatchObject({ eligible: true, available_actions: ['bid_recover_task', 'bid_resume_current_run', 'bid_run_task(supersede=true)'] })
   for (const code of ['AUTH', 'EACCES', 'INPUT_CHANGED', 'FILE_CORRUPT']) {
     session.append('bid.task.changed', { state: { stage: s4.stage, status: 'failed', run: null,
       failure: safeRecoverableBidFailure(s4, new BidStageExecutionError([{ code, message: '真实阻断' }])) } })

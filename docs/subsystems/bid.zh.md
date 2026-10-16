@@ -90,13 +90,13 @@ async uploadIncomingFiles( session: Session, incoming: readonly IncomingFile[], 
 async runCapabilityTask( agent: Agent, task: BidCapabilityTask, authorization: CapabilityTaskRequest['authorization'], inputPaths: readonly string[], onAdmitted?: (run: BidRunContext) => Promise<void>, supersede?: CapabilitySupersede, completeTask?: BidCapabilityTask, ): Promise<BidTaskState>
 
 /**
- * Resume one exact suspended Run after checking its project revision and durable checkpoints.
- * @param session - Bid Session that owns the suspended Run.
- * @param suspendedRunId - Exact suspended attempt selected by the client.
- * @param expectedProjectRevision - Project revision observed by the client.
- * @param onAccepted - Callback invoked after the replacement Run is durable.
- * @param recovery - 主 Agent 修复指令，在项目锁内重验并记录。
- * @returns State reached when the resumed work next settles.
+ * 核对项目版本和持久检查点，继续原挂起 Run 或用户新授权的失败 Run。
+ * @param session 拥有原 Run 的 Bid 会话。
+ * @param suspendedRunId 客户端选定的原 Run，必须与当前任务一致。
+ * @param expectedProjectRevision 客户端读取的项目修订号。
+ * @param onAccepted 新 Run 持久化后的接纳回调。
+ * @param recovery 主 Agent 自动修复指令；省略时，失败 Run 须有失败之后的新直接用户消息，只授权继续一次。
+ * @returns 原任务下一次结算时的项目状态。
  */
 async resumeCurrentRun( session: Session, suspendedRunId: string, expectedProjectRevision: number, onAccepted?: (run: BidRunContext) => void, recovery?: { instruction: string }, ): Promise<BidTaskState>
 

@@ -42,7 +42,7 @@ import { buildWritableSectionWorklist } from './section-evidence-context.ts'
 import { assertNoLinkedPath, within } from './workspace-path.ts'
 import type { BidRunData, BidTaskFailure, BidTaskState, BidEvidenceMappingProgress } from './control-plane-contract.ts'
 import { bidCapabilityTakeoverRun, bidCompletedCapabilityRun, bidEvidenceMappingTakeoverRun,
-  bidRecoverableRun, bidRunRecoveryEligibility, bidWritingPlanRecoveryEligibility } from './bid-recovery.ts'
+  bidRecoverableRun, bidRunRecoveryEligibility, bidUserContinuableRun, bidWritingPlanRecoveryEligibility } from './bid-recovery.ts'
 import { resolveBidToolAuthorization } from './bid-tool-authorization.ts'
 import { bidModelTaskJsonSchema, bindBidModelTask, bindBidModelSteps, bindBidModelProjectQuery,
   bindBidModelWritingPlan, bindBidModelReference, collectBidModelTaskCatalog,
@@ -241,7 +241,8 @@ async function inspectBidStageValue(
     ? bidWritingPlanRecoveryEligibility(session) : bidRunRecoveryEligibility(session)
   const availableActions = [
     ...(recoveryDecision.eligible ? ['bid_recover_task'] : []),
-    ...(task.status === 'suspended' && task.run.cause !== 'awaiting_input' ? ['bid_resume_current_run'] : []),
+    ...(task.status === 'suspended' && task.run.cause !== 'awaiting_input'
+      || bidUserContinuableRun(session, task) !== undefined ? ['bid_resume_current_run'] : []),
     ...(bidCapabilityTakeoverRun(session, task) ?? bidEvidenceMappingTakeoverRun(session, task)) === undefined
       ? [] : ['bid_run_task(supersede=true)'],
   ]
@@ -651,17 +652,20 @@ function renderIdleStageInteractionPrompt(
   task?: BidTaskState,
   recoveryAvailable = false,
   takeoverAvailable = false,
+  userContinuationAvailable = false,
 ): string {
   return [
     `当前 Bid 阶段：${stage}；当前状态：${status}。`,
     '用户询问阶段或要求处理正式业务时，先调用 bid_stage_inspect(view=summary) 获取权威状态。正式 Artifact 修改必须通过 Host 业务工具。',
     status === 'ready' ? '普通问答不启动业务写操作；用户明确授权的局部修改可调用 bid_run_task，不能把该任务当作原生阶段确认。'
-      : recoveryAvailable
-        ? '先用 bid_stage_inspect(view=recovery) 核对失败、原目标和检查点。同一目标的继续或修复使用 bid_recover_task；Host 重验原 Work、输入、候选与有限恢复预算，保留已完成研究和正式确认。'
-        : takeoverAvailable
-          ? '先读取失败诊断。原目标当前不可恢复；只有用户给出新目标时，才用 bid_run_task(supersede=true) 创建新 Work。Host 核对新的直接用户授权并保留旧候选。'
-          : '当前失败不可恢复。读取具体诊断，说明实际阻断及需要补齐的输入、凭证或程序修复；解释和建议不代表修复已执行。',
-    '若用户询问为什么没开始或现在能不能继续，应解释当前 Host 状态和正式入口。',
+      : userContinuationAvailable
+        ? '先用 bid_stage_inspect(view=recovery) 核对失败、原目标和检查点。新的直接用户消息明确要求继续或重试原任务时，调用 bid_resume_current_run 实际执行；即使自动恢复预算已耗尽，也可按这次新授权继续一次。保留原 Work、已保存候选和正式校验，不重置自动预算；普通问答不启动恢复。'
+        : recoveryAvailable
+          ? '先用 bid_stage_inspect(view=recovery) 核对失败、原目标和检查点。同一目标的继续或修复使用 bid_recover_task；Host 重验原 Work、输入、候选与有限恢复预算，保留已完成研究和正式确认。'
+          : takeoverAvailable
+            ? '先读取失败诊断。原目标当前不可恢复；只有用户给出新目标时，才用 bid_run_task(supersede=true) 创建新 Work。Host 核对新的直接用户授权并保留旧候选。'
+            : '当前失败不可恢复。读取具体诊断，说明实际阻断及需要补齐的输入、凭证或程序修复；解释和建议不代表修复已执行。',
+    ...userContinuationAvailable ? [] : ['若用户询问为什么没开始或现在能不能继续，应解释当前 Host 状态和正式入口。'],
     status === 'ready'
       ? '阶段已经准备好；Host 将自动驱动，不把普通聊天当作启动命令。'
       : task?.stage === 'evidence_mapping'
@@ -754,6 +758,7 @@ export function installStageInteractionTools(
       const suspended = task.status === 'suspended' ? task.run : undefined
       const repairable = bidRecoverableRun(agent.session, task)
       const chatResume = suspended !== undefined && suspended.cause !== 'awaiting_input'
+        || bidUserContinuableRun(agent.session, task) !== undefined
       const stage = isBidMainSession(agent.session) ? task.stage : undefined
       const scope = stage === undefined ? undefined : `${stage}:${suspended === undefined ? task.status : `suspended:${suspended.runId}`}`
       const recoveryAvailable = bidRunRecoveryEligibility(agent.session).eligible
@@ -930,7 +935,9 @@ export function installStageInteractionTools(
           const definition: ToolDefinition = {
             name,
             description: name === recoveryTool ? '主 Agent 对 inspect recovery 的当前失败目标提交具体修复办法，Host 校验并执行；相同问题必须改变策略。'
-              : name === 'bid_resume_current_run' ? '继续当前已授权的挂起任务，Host 绑定 Run 和项目版本；内部可修复失败使用 bid_recover_task。'
+              : name === 'bid_resume_current_run' ? task.status === 'failed'
+                ? '根据当前失败之后新的直接用户消息继续原任务一次；Host 绑定原 Run 和项目版本，保留候选及校验，自动预算不重置。'
+                : '继续当前已授权的挂起任务，Host 绑定 Run 和项目版本；内部可修复失败使用 bid_recover_task。'
                 : name === 'bid_stage_inspect' ? '读取当前阶段的有界权威快照；传正文引用时校验原文身份并返回受控正文。'
                   : name === 'bid_project_inspect' ? '按真实项目对象与章节位置分页读取已保存资料；不依赖当前阶段，也不修改项目。'
                     : name === 'bid_run_task' ? '用当前用户消息或原生 Goal 轮次授权有序业务能力任务；Host 核对项目输入、范围和候选文件，再发布实际结果。提问与讨论不得调用。'
@@ -952,8 +959,10 @@ export function installStageInteractionTools(
               if (name === 'bid_resume_current_run') {
                 z.object({}).strict().parse(args)
                 const state = await readBidProjectState(workspaceFor(agent.session))
-                if (state?.status !== 'suspended') throw new Error('BID_RUN_RESUME_NOT_READY')
-                return execute(agent, { action: name, run_id: state.run.runId,
+                if (state === undefined) throw new Error('BID_RUN_RESUME_NOT_READY')
+                const run = state.status === 'suspended' ? state.run : bidUserContinuableRun(agent.session, state)
+                if (run === undefined) throw new Error('BID_RUN_RESUME_NOT_READY')
+                return execute(agent, { action: name, run_id: run.runId,
                   expected_project_revision: state.revision }, exec.signal)
               }
               if (name === recoveryTool) {
@@ -1094,7 +1103,8 @@ export function installStageInteractionTools(
       const prompt = failureMessage && task.status === 'failed'
         ? renderIdleStageInteractionPrompt(task.stage, task.status, task,
           bidRunRecoveryEligibility(agent.session).eligible || bidWritingPlanRecoveryEligibility(agent.session).eligible,
-          (bidCapabilityTakeoverRun(agent.session, task) ?? bidEvidenceMappingTakeoverRun(agent.session, task)) !== undefined)
+          (bidCapabilityTakeoverRun(agent.session, task) ?? bidEvidenceMappingTakeoverRun(agent.session, task)) !== undefined,
+          hasUser && bidUserContinuableRun(agent.session, task) !== undefined)
         : suspended !== undefined ? renderSuspendedRunPrompt(
           task.stage,
           suspended.runId,
@@ -1111,7 +1121,8 @@ export function installStageInteractionTools(
               : task.status === 'ready' || task.status === 'failed'
                 ? renderIdleStageInteractionPrompt(task.stage, task.status, task,
                   bidRunRecoveryEligibility(agent.session).eligible || bidWritingPlanRecoveryEligibility(agent.session).eligible,
-                  (bidCapabilityTakeoverRun(agent.session, task) ?? bidEvidenceMappingTakeoverRun(agent.session, task)) !== undefined)
+                  (bidCapabilityTakeoverRun(agent.session, task) ?? bidEvidenceMappingTakeoverRun(agent.session, task)) !== undefined,
+                  hasUser && bidUserContinuableRun(agent.session, task) !== undefined)
                 : undefined
       if (prompt === undefined) return decision
       const progress = task.status === 'running' ? renderCurrentRunProgress(task.run) : undefined

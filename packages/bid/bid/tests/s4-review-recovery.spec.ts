@@ -104,7 +104,9 @@ it.each(['valid', 'output_limit', 'missing', 'fingerprint', 'input', 'checkpoint
       await agent.whenIdle()
       await Promise.all([...operations.values()].map(operation => operation.done))
       const calls = result.requests.slice(before).filter(request => request.sessionId === agent.id)
-      expect(calls[0]?.tools?.map(tool => tool.name)).toEqual(['bid_project_inspect', 'bid_recover_task', 'bid_stage_inspect'])
+      expect(calls[0]?.tools?.map(tool => tool.name)).toEqual([
+        'bid_project_inspect', 'bid_recover_task', 'bid_stage_inspect', 'grep', 'read', 'web_fetch', 'web_search', 'write',
+      ])
       expect(JSON.stringify(calls[0]?.messages)).toContain('同一目标的继续或修复使用 bid_recover_task')
       expect(JSON.stringify(calls[0]?.messages)).not.toContain('已终止的能力任务不能沿用原授权重试')
       const inspections = agent.session.events.filter(event => event.type === 'tool/result'
@@ -145,7 +147,8 @@ it.each(['valid', 'output_limit', 'missing', 'fingerprint', 'input', 'checkpoint
         await agent.whenIdle()
         await Promise.all([...operations.values()].map(operation => operation.done))
         expect(result.requests[retryBefore]?.tools?.map(tool => tool.name))
-          .toEqual(['bid_project_inspect', 'bid_recover_task', 'bid_stage_inspect'])
+          .toEqual(['bid_project_inspect', 'bid_recover_task', 'bid_resume_current_run', 'bid_run_task', 'bid_stage_inspect',
+            'grep', 'read', 'web_fetch', 'web_search', 'write'])
         const reviews = result.requests.slice(retryBefore).filter(request => request.system?.includes('技术标目录轻量复核'))
         expect(reviews.length).toBeGreaterThan(0)
         expect(reviews.every(request => request.maxTokens === 8_192)).toBe(true)

@@ -520,7 +520,7 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
     methods: [
       {
         signature: 'readonly imageGeneration: BidImageProvider',
-        description: 'S5 与配置界面共享的生图能力；连接由项目风格记录冻结，密钥仅在请求时解析。',
+        description: 'S5 与配置界面共享的生图能力；接口和凭据由正式配置持有，密钥仅在请求时解析。',
         parameters: [],
       },
       {
@@ -573,9 +573,9 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
       },
       {
         signature: 'async resumeCurrentRun( session: Session, suspendedRunId: string, expectedProjectRevision: number, onAccepted?: (run: BidRunContext) => void, recovery?: { instruction: string }, ): Promise<BidTaskState>',
-        description: 'Resume one exact suspended Run after checking its project revision and durable checkpoints.',
-        parameters: [{ name: 'session', description: 'Bid Session that owns the suspended Run.' }, { name: 'suspendedRunId', description: 'Exact suspended attempt selected by the client.' }, { name: 'expectedProjectRevision', description: 'Project revision observed by the client.' }, { name: 'onAccepted', description: 'Callback invoked after the replacement Run is durable.' }, { name: 'recovery', description: '主 Agent 修复指令，在项目锁内重验并记录。' }],
-        returns: 'State reached when the resumed work next settles.',
+        description: '核对项目版本和持久检查点，继续原挂起 Run 或用户新授权的失败 Run。',
+        parameters: [{ name: 'session', description: '拥有原 Run 的 Bid 会话。' }, { name: 'suspendedRunId', description: '客户端选定的原 Run，必须与当前任务一致。' }, { name: 'expectedProjectRevision', description: '客户端读取的项目修订号。' }, { name: 'onAccepted', description: '新 Run 持久化后的接纳回调。' }, { name: 'recovery', description: '主 Agent 自动修复指令；省略时，失败 Run 须有失败之后的新直接用户消息，只授权继续一次。' }],
+        returns: '原任务下一次结算时的项目状态。',
       },
       {
         signature: '@Remote(\'getDocxTemplateLibrary\') async getDocxTemplateLibrary(session: Session): Promise<DocxTemplateLibraryView>',
@@ -3511,7 +3511,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'BidImageGenerationRequest',
-    declaration: 'export interface BidImageGenerationRequest {\n    prompt: string;\n    size: BidImageSize;\n    reference?: Buffer;\n    connection?: BidImageConnectionSpec;\n}',
+    declaration: 'export interface BidImageGenerationRequest {\n    prompt: string;\n    size: BidImageSize;\n    reference?: Buffer;\n    model?: string;\n    beforeRequest?: (connection: BidImageConnectionSpec) => Promise<void>;\n}',
   },
   {
     name: 'BidImageGenerationView',
@@ -3523,7 +3523,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'BidImageProvider',
-    declaration: 'export interface BidImageProvider {\n    resolve(): BidImageConnectionSpec | undefined;\n    view(): Promise<BidImageGenerationView>;\n    discoverModels(signal: AbortSignal): Promise<string[]>;\n    generate(request: BidImageGenerationRequest, signal: AbortSignal): Promise<BidGeneratedImage>;\n}',
+    declaration: 'export interface BidImageProvider {\n    resolve(model?: string): BidImageConnectionSpec | undefined;\n    view(): Promise<BidImageGenerationView>;\n    discoverModels(signal: AbortSignal): Promise<string[]>;\n    generate(request: BidImageGenerationRequest, signal: AbortSignal): Promise<BidGeneratedImage>;\n}',
   },
   {
     name: 'BidImageSize',
