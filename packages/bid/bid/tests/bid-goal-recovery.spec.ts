@@ -237,6 +237,30 @@ it('相同指纹与方案只在同一 Work 内视为重复', async () => {
     { kind: 'run', workId: 'second', runId: 'run-second' }, 'same-fingerprint', '重查来源')).toBe(false)
 })
 
+it('旧版候选指纹从原 Run 失败重算，同一缺项和相同策略在重启后仍被识别', async () => {
+  const ctx = new Context()
+  cleanup.push(() => ctx.fiber.dispose())
+  await ctx.plugin(SessionStore)
+  const session = ctx.sessions.create()
+  const failure = safeRecoverableBidFailure(work, new BidStageExecutionError([
+    { code: 'OUTLINE_SHARED_COMPLIANCE_MISSING', artifact: 'outline/outline.json', message: '缺少在线演示合规要求' },
+  ]))
+  session.append('bid.run.started', { run: run('old-run') })
+  session.append('bid.task.changed', { state: { stage: work.stage, status: 'failed', run: null, failure } })
+  session.append('bid.recovery.requested', { ownerSessionId: String(session.id),
+    target: { kind: 'run', workId: work.workId, runId: 'old-run' }, unit: 'outline/outline.json',
+    instruction: '保留演示要求并先写方案', progressFingerprint: '旧版包含候选 Hash 的指纹' })
+  session.append('bid.run.started', { run: run('new-run') })
+  session.append('bid.task.changed', { state: { stage: work.stage, status: 'suspended', run: {
+    ...run('new-run'), cause: 'retry_exhausted', error: { ...failure,
+      recovery: { ...failure.recovery!, candidateSha256: 'c'.repeat(64) } },
+    progress: { phase: 'executing', summary: '其他章节已修复', completed: 5, total: 6, updatedAt: 3 },
+  } } })
+  const decision = bidRunRecoveryEligibility(session)
+  expect(decision).toMatchObject({ attempts: 1, sameProblemCount: 1, requiresStrategyChange: true })
+  expect(bidRecoveryInstructionRepeated(session, decision.target!, decision.fingerprint, '保留演示要求并先写方案')).toBe(true)
+})
+
 it.each(['EVIDENCE_MAPPING_OUTLINE_SCOPE_STALE', 'EVIDENCE_MAPPING_DEPENDENCY_STALE',
   'OUTLINE_GENERATION_INPUT_CHANGED', 'PREVIOUS_TARGET_INVALID', 'EACCES', 'INVARIANT_VIOLATION', 'STALE_BASE'])
 ('候选可修也不能掩盖后续 %s', (code) => {
@@ -364,7 +388,8 @@ it.each(['repair', 'retry'] as const)('%s 不因两次自动接管耗尽权限',
     run: { ...run('run-two'), cause: 'retry_exhausted', error: failureB } } })
   const second = bidRunRecoveryEligibility(session)
   expect(second).toMatchObject({ eligible: true, attempts: 1 })
-  expect(second.fingerprint).not.toBe(first.fingerprint)
+  expect(second.fingerprint).toBe(first.fingerprint)
+  expect(second).toMatchObject({ sameProblemCount: 1, requiresStrategyChange: true })
   session.append('bid.recovery.requested', {
     ownerSessionId: String(session.id), target: { kind: 'run', workId: work.workId, runId: 'run-two' },
     unit: 'outline/outline.json', instruction: '补全目录', progressFingerprint: second.fingerprint!,

@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
+import { BidStageAttentionRequiredError } from '../src/control-plane-contract.ts'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import SessionStore from '@deepseek-ai/dsh-session'
 import {
@@ -41,6 +42,26 @@ function recordFailedOutlineRun(current: Awaited<ReturnType<typeof session>>, no
 }
 
 describe('BidOrchestrator', () => {
+  it('正文缺口保存原 Work 等待输入，回答后续行原 Run，不登记执行失败', async () => {
+    const current = await session()
+    current.append('bid.task.changed', { state: { stage: 'chapter_writing', status: 'ready', run: null } })
+    const execute = vi.fn(async () => {
+      if (execute.mock.calls.length === 1) throw new BidStageAttentionRequiredError([
+        { code: 'CHAPTER_WRITING_INPUT_REQUIRED', artifact: 'SEC-1', message: '请明确演示资料的处理方式。' },
+      ])
+      return artifacts('chapter_writing')
+    })
+    const orchestrator = new BidOrchestrator(current, { canExecute: () => true, execute }, { validate: async () => ({ ok: true }) })
+    const waiting = await orchestrator.runConfirmedStage()
+    expect(waiting).toMatchObject({ status: 'suspended', run: { cause: 'awaiting_input' } })
+    if (waiting.status !== 'suspended') throw new Error('未保存原阶段输入边界')
+    const completed = await orchestrator.resume(waiting.run.runId)
+    expect(completed).toMatchObject({ status: 'completed' })
+    expect(current.events.filter(event => event.type === 'bid.run.started').map(event => event.data.run.work.workId))
+      .toEqual([waiting.run.work.workId, waiting.run.work.workId])
+    expect(current.events.some(event => event.type === 'bid.recovery.requested'
+      || event.type === 'bid.task.changed' && event.data.state.status === 'failed')).toBe(false)
+  })
   it('accepts an explicit S1 upload from the initial waiting state', async () => {
     const current = await session()
     const execute = vi.fn(async (task: BidStageTask, _run: BidRunContext) => artifacts(task.stage))

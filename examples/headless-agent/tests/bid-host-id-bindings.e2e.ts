@@ -198,7 +198,9 @@ describe.skipIf(!process.env.DEEPSEEK_API_KEY && !process.env.DSH_BID_EVAL_PROVI
       expect(modelValues.flatMap(canonicalFields)).toEqual([])
       const missingPoint = catalog.points[0]!
       const incomplete = structuredClone(outline)
+      incomplete.global_compliance_ids = []
       for (const section of incomplete.sections) {
+        section.compliance_ids = []
         section.scoring_response_point_ids = section.scoring_response_point_ids?.filter(id => id !== missingPoint.id)
         section.scoring_response_points = section.scoring_response_points.filter(point =>
           point.scoring_id !== missingPoint.scoring_id || point.response_point !== missingPoint.text)
@@ -213,6 +215,8 @@ describe.skipIf(!process.env.DEEPSEEK_API_KEY && !process.env.DSH_BID_EVAL_PROVI
       const repairedOutline = parseOutlineArtifact(await read('outline/outline.json'))
       expect(repairedOutline.sections.some(section => section.writable
         && section.scoring_response_point_ids?.includes(missingPoint.id))).toBe(true)
+      expect([...repairedOutline.global_compliance_ids, ...repairedOutline.sections.flatMap(section => section.compliance_ids)])
+        .toContain(complianceId)
       const repairValues = submissions.slice(repairStart).map(value => JSON.parse(value) as Record<string, unknown>)
       expect(repairValues.some(value => Array.isArray(value.operations) && value.operations.length > 0)).toBe(true)
       expect(repairValues.flatMap(canonicalFields)).toEqual([])

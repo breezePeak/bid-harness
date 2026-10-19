@@ -27,6 +27,59 @@ afterEach(() => {
 })
 
 describe('Bid PublicationBatch', () => {
+  it('并发读取等待正在发布的批次，回调内读取不删除自身准备文件', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-publication-live-read-'))
+    const projectRoot = join(root, '.bid-harness')
+    const prepared = Promise.withResolvers<undefined>()
+    const release = Promise.withResolvers<undefined>()
+    const target = join(projectRoot, 'result.txt')
+    const publishing = publishBidBatch(root, projectRoot, async (lease) => {
+      await lease.writeText(target, 'new')
+      await reconcileBidPublications(root, projectRoot)
+      expect(await readdir(join(projectRoot, '.publications'))).toHaveLength(1)
+      prepared.resolve(undefined)
+      await release.promise
+    })
+    await prepared.promise
+    const reconciled = vi.fn()
+    const reads = [reconcileBidPublications(root, projectRoot).then(reconciled),
+      reconcileBidPublications(root, join(projectRoot, '.')).then(reconciled)]
+    await new Promise<void>(resolve => setImmediate(resolve))
+    expect(reconciled).not.toHaveBeenCalled()
+    release.resolve(undefined)
+    await publishing
+    await Promise.all(reads)
+    expect(reconciled).toHaveBeenCalledTimes(2)
+    expect(await readFile(target, 'utf8')).toBe('new')
+    expect(await readdir(join(projectRoot, '.publications'))).toEqual([])
+  })
+
+  it('已结束发布的异步回调不能绕过后续发布的等待', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-publication-late-read-'))
+    const projectRoot = join(root, '.bid-harness')
+    const wake = Promise.withResolvers<undefined>()
+    const prepared = Promise.withResolvers<undefined>()
+    const release = Promise.withResolvers<undefined>()
+    const reconciled = vi.fn()
+    let lateRead: Promise<void> | undefined
+    await publishBidBatch(root, projectRoot, async () => {
+      lateRead = wake.promise.then(async () => { await reconcileBidPublications(root, projectRoot); reconciled() })
+    })
+    const publishing = publishBidBatch(root, projectRoot, async (lease) => {
+      await lease.writeText(join(projectRoot, 'result.txt'), 'new')
+      prepared.resolve(undefined)
+      await release.promise
+    })
+    await prepared.promise
+    wake.resolve(undefined)
+    await new Promise<void>(resolve => setImmediate(resolve))
+    expect(reconciled).not.toHaveBeenCalled()
+    release.resolve(undefined)
+    await publishing
+    await lateRead
+    expect(reconciled).toHaveBeenCalledOnce()
+  })
+
   it('丢弃没有 commit intent 的 prepared batch', async () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-publication-prepared-'))
     const projectRoot = join(root, '.bid-harness')

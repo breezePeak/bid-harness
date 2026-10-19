@@ -877,6 +877,35 @@ describe('S3 需求、合规、框架与结构局部修复', () => {
     expect(followup).not.toHaveBeenCalled()
     expect(JSON.parse(await readFile(join(workspace.projectRoot, 'outline/outline.json'), 'utf8'))).toEqual(withTechnicalDeviation(outline))
   })
+
+  it('合规缺项按本次位置和条款定位，后续演示准备保留为全局要求', async () => {
+    const workspace = await fixture()
+    const rule = '系统须在线演示，采用静态页面、PPT或录屏演示不得分。'
+    await writeFile(join(workspace.projectRoot, 'analysis/compliance.json'), JSON.stringify({ ...compliance,
+      compliance_items: [...compliance.compliance_items, { ...compliance.compliance_items[0],
+        id: 'COM-007', type: '演示方式', raw_text: rule, normalized_rule: rule, severity: 'warning' }],
+    }))
+    await publishOutline(workspace, reviewedOutline)
+    const { agent } = modelAgent(workspace, async (prompt, submitReview) => {
+      if (prompt.includes('局部关联与结构修复')) {
+        const line = prompt.split('\n').find(line => line.startsWith('尚未覆盖的业务位置及条款：'))!
+        expect(JSON.parse(line.slice(line.indexOf('{')))).toEqual({ requirements: [], scoring: [],
+          compliance: [{ position: 1, text: rule, severity: 'warning' }] })
+        expect(prompt).toContain('先写技术方案，可配示意图；实际演示以后准备。')
+        return { operations: [{ type: 'update_global_compliance', global_compliance_ids: ['COMP-DELIVERY', 'COM-007'] }] }
+      }
+      await submitReview()
+    })
+    const run = createTestBidRunContext()
+    await executeOutlineGeneration(agent, workspace, buildBidStageTask('outline_generation'), { run, recovery: {
+      workId: run.work.workId, unit: 'outline/outline.json', instruction: '先写技术方案，可配示意图；实际演示以后准备。',
+      issues: [{ code: 'OUTLINE_SHARED_COMPLIANCE_MISSING', artifact: 'outline/outline.json', message: '遗漏 COM-007' }],
+    } })
+    const result = JSON.parse(await readFile(join(workspace.projectRoot, 'outline/outline.json'), 'utf8')) as OutlineArtifact
+    expect(result.global_compliance_ids).toEqual(['COMP-DELIVERY', 'COM-007'])
+    expect(result.sections).toEqual(withTechnicalDeviation(reviewedOutline).sections)
+    await expect(validateOutlineGeneration(workspace, 'outline_generation', artifacts)).resolves.toEqual({ ok: true })
+  })
 })
 
 describe('outline-generation Blueprint Quality Review', () => {

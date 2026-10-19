@@ -441,6 +441,11 @@ export class BidOrchestrator {
         return 'aborted'
       }
       if (error instanceof BidStageAttentionRequiredError) {
+        if (stage === 'chapter_writing' && error.issues.length > 0
+          && error.issues.every(issue => issue.code === 'CHAPTER_WRITING_INPUT_REQUIRED')) {
+          await this.runs.suspend('awaiting_input', { message: '正文编写需要补充输入。', issues: [...error.issues] })
+          return 'waiting_user'
+        }
         await this.runs.complete(run, () => {
           this.attentionRequired(
             stage,

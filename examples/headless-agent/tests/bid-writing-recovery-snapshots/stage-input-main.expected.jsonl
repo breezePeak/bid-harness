@@ -1,0 +1,2 @@
+{"type":"session","version":0,"id":"{{sessionId}}","createdAt":0,"cwd":"{{cwd}}","delegationDepth":0,"agentPreset":"bid"}
+{"type":"user/message","data":{"source":{"kind":"user"},"content":[{"type":"text","text":"问题：以下章节需要补充资料或明确写作方式，请填写处理意见。\n缺少实际演示资料，请明确本章写作方式。\n用户回答：先写方案并配示意图，实际演示后续准备"}],"role":"user","id":"{{sessionId}}"},"surfaceOp":"append"}

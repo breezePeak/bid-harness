@@ -193,22 +193,32 @@ export function safeRecoverableBidFailure(
  * Stable work/problem identity without Run ids or timestamps.
  * @param work - Durable input identity.
  * @param failure - Structured problem at the suspended boundary.
- * @param progress - Latest durable business checkpoint, excluding its timestamp.
+ * @param _progress 已保存进度；候选内容和进度变化不改变未解决问题的身份。
  * @returns SHA-256 for repeated-problem detection.
  */
-export function bidRecoveryFingerprint(work: BidWorkDescriptor, failure: BidTaskFailure, progress?: BidRunProgress): string {
+export function bidRecoveryFingerprint(work: BidWorkDescriptor, failure: BidTaskFailure, _progress?: BidRunProgress): string {
   const issues: readonly StageValidationIssue[] = failure.issues ?? []
   return createHash('sha256').update(JSON.stringify({
     input: work.inputFingerprint,
     unit: failure.recovery?.unit,
     issues: issues.map(issue => [issue.code, issue.artifact ?? issue.path ?? '', issue.message.trim()]).sort(),
     code: failure.code,
-    candidate: failure.recovery?.candidateSha256,
-    checkpoint: progress === undefined ? null : {
-      phase: progress.phase, summary: progress.summary,
-      completed: progress.completed, total: progress.total, details: progress.details,
-    },
   })).digest('hex')
+}
+
+/** 历史记录从原 Run 的权威失败重算，旧版候选或进度指纹不清除相同问题。 */
+function recordedProblemFingerprint(session: Session, target: { kind: 'run'; runId: string; workId: string },
+  seq: number, fallback: string): string {
+  const started = session.events.findLast(event => event.seq < seq && event.type === 'bid.run.started'
+    && event.data.run.runId === target.runId && event.data.run.work.workId === target.workId)
+  if (started?.type !== 'bid.run.started') return fallback
+  const failed = session.events.findLast(event => event.seq > started.seq && event.seq < seq
+    && (event.type === 'bid.task.changed' && event.data.state.stage === started.data.run.work.stage
+      && event.data.state.status === 'failed'
+      || event.type === 'bid.run.suspended' && event.data.run.runId === target.runId))
+  const failure = failed?.type === 'bid.task.changed' && failed.data.state.status === 'failed'
+    ? failed.data.state.failure : failed?.type === 'bid.run.suspended' ? failed.data.run.error : undefined
+  return failure === undefined ? fallback : bidRecoveryFingerprint(started.data.run.work, failure)
 }
 
 /**
@@ -237,7 +247,8 @@ export function bidRunRecoveryEligibility(session: Session, budget?: number): {
   }
   const history = session.events.flatMap(event => event.type === 'bid.recovery.requested'
     && event.data.target.kind === 'run'
-    && event.data.target.workId === run.work.workId ? [event.data] : [])
+    && event.data.target.workId === run.work.workId ? [{ ...event.data,
+      progressFingerprint: recordedProblemFingerprint(session, event.data.target, event.seq, event.data.progressFingerprint) }] : [])
   const attempts = history.length
   const target = { kind: 'run' as const, runId: run.runId, workId: run.work.workId }
   const fingerprint = run.error === undefined ? undefined : bidRecoveryFingerprint(run.work, run.error, run.progress)
@@ -292,7 +303,7 @@ export function renderBidRecoveryContext(recovery: ModelStageExecutionOptions['r
     `失败单元：${sanitizeBidErrorText(recovery.unit)}`,
     ...recovery.issues.slice(0, 5).map(issue => `原问题：${sanitizeBidErrorText(issue.code)}${issue.path === undefined && issue.artifact === undefined
       ? '' : ` ${sanitizeBidErrorText(issue.path ?? issue.artifact ?? '')}`} ${sanitizeBidErrorText(issue.message)}`),
-    `改进处理办法：${sanitizeBidErrorText(recovery.instruction, 4000)}`,
+    `改进处理办法：${sanitizeBidErrorText(recovery.instruction, 16000)}`,
     '继续使用原提交工具和原校验规则；不得改上游事实或代替用户确认。',
   ].join('\n')
 }
@@ -373,5 +384,7 @@ export function bidRecoveryInstructionRepeated(session: Session,
     && (target.kind === 'run'
       ? event.data.target.kind === 'run' && event.data.target.workId === target.workId
       : event.data.target.kind === 'writing_plan' && event.data.target.requestId === target.requestId)
-    && event.data.progressFingerprint === fingerprint && event.data.instruction.trim() === instruction.trim())
+    && (event.data.target.kind === 'run'
+      ? recordedProblemFingerprint(session, event.data.target, event.seq, event.data.progressFingerprint)
+      : event.data.progressFingerprint) === fingerprint && event.data.instruction.trim() === instruction.trim())
 }

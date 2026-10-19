@@ -18,7 +18,7 @@ Host 的 `BidRunCoordinator` 是 Long Run 的唯一授权者。它先将 `bid.ru
 
 `BidCommitScope` 在每次正式写入前取得短租约，退休后拒绝新租约，并让已获租约的最小提交收敛。顶层执行器和内部异步调度登记在 Activity Scope；挂起依次关闭调度、退休 Commit 与 Activity、记录 cancelling、清理 Run 私有 inbox、中止并等待 Main Agent、Child、Activity 和 Commit 全部收敛，最后持久化 suspended。`complete()` 同样负责异步持久化终态，Run completed 与其拥有的 Workflow 完成、待确认或 attention 结果在同一次项目 checkpoint 中提交；成功 start 的 Run 不依赖外围 operation 顺便补写终态。
 
-Long Run 的模型候选只写 `runs/<workId>/work/`，正式产物由 Commit Scope 发布，不备份、临时覆盖或回滚 canonical 文件。Commit Scope 与短 ProjectMutation 共用 PublicationBatch：字节先进入事务目录，写入 manifest 和 commit intent 后再替换目标；项目首次读取前会清理未进入 intent 的批次，并对已有 intent 的批次前滚。因此崩溃后的下一次可读状态只对应完整旧版本或完整新版本。
+Long Run 的模型候选只写 `runs/<workId>/work/`，正式产物由 Commit Scope 发布，不备份、临时覆盖或回滚 canonical 文件。Commit Scope 与短 ProjectMutation 共用 PublicationBatch：字节先进入事务目录，写入 manifest 和 commit intent 后再替换目标；项目首次读取前会清理未进入 intent 的批次，并对已有 intent 的批次前滚。因此崩溃后的下一次可读状态只对应完整旧版本或完整新版本。同一进程的发布与恢复按项目串行；读取状态不能把正在准备或提交的批次当作崩溃遗留删除。发布回调内读取当前状态不恢复自身批次，回调退出后该重入权限失效；跨进程所有权仍由 Host 项目锁约束。
 
 所有短确定性写入归 ProjectMutation，以项目锁、expected revision、PublicationBatch 和一次 revision bump 共同提交；纯读取口只返回现有文件或派生视图，不初始化、修复或刷新文件。项目 revision 只表示 Run 控制转换或 ProjectMutation，不随同一 Run 的进度 checkpoint 和 steering command 增长。Word 模板、预览与导出属于独立 DOCX Operation；DOCX 和 `lastExport` 在一个 PublicationBatch 中提交。
 

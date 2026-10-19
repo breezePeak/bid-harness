@@ -496,6 +496,15 @@ export function renderOutlineGenerationRepairTask(
     return { position: context.catalog.points.indexOf(point), text: point.text,
       scoring_position: context.scoring.scoring_items.indexOf(item), scoring_raw_text: item.raw_text }
   })
+  const uncovered = {
+    requirements: inputs.requirements.requirements.flatMap((item, position) => context.outline.sections
+      .some(section => section.requirement_ids.includes(item.id)) ? [] : [{ position, text: item.normalized_requirement }]),
+    scoring: inputs.scoring.scoring_items.flatMap((item, position) => context.outline.sections
+      .some(section => section.scoring_ids.includes(item.id)) ? [] : [{ position, text: item.raw_text }]),
+    compliance: inputs.compliance.compliance_items.flatMap((item, position) => context.outline.global_compliance_ids.includes(item.id)
+      || context.outline.sections.some(section => section.compliance_ids.includes(item.id))
+      ? [] : [{ position, text: item.normalized_rule, severity: item.severity }]),
+  }
   return [
     '当前阶段：outline_generation / ' + (responsePointsOnly ? '局部响应点修复' : '局部关联与结构修复'),
     'Bid Session：' + agent.id,
@@ -503,10 +512,12 @@ export function renderOutlineGenerationRepairTask(
     JSON.stringify(outlineModelInputView(inputs)),
     '当前目录（包含 purpose、must_answer 和已有关联）：' + JSON.stringify(outlineModelView(context.outline, inputs)),
     '未被可写叶子覆盖的响应点及所属评分原文：' + JSON.stringify(missing),
+    ...responsePointsOnly ? [] : ['尚未覆盖的业务位置及条款：' + JSON.stringify(uncovered)],
     ...(responsePointsOnly ? [
       '只使用 update_section、add_section 或 split_section 修复响应点及具体写作要求；业务关联只提交 response_point_positions，不修改需求、评分、合规、框架关联或 origin。',
     ] : context.associations === undefined ? [] : [
       '按问题选择 requirement_positions、scoring_positions、compliance_positions、framework_refs、origin 或 global_compliance_positions；新增或拆分章节时明确分配必要关联。已有全局覆盖的材料核验 Compliance 不分配给技术叶子。结构错误使用 move/add/delete/split/merge 或 repair_structure；层级和 writable 由程序根据 parent_position 派生。父节点的 must_answer 和响应点由程序清空，其要求仍须分配给合适的可写叶节。不得返回 writable。重复身份只能提交 regenerate_id=true，由程序分配新编号。',
+      '只约束投标活动或后续准备、无需在当前正文展开的合规要求，保留在 global_compliance_positions；尚未提供的材料或尚未开展的活动不等于目录无法生成，不得虚构已经完成。',
     ]),
     ...renderStageRepairIssues(issues), context.failure ?? '',
     '判断已有章节能否承担：能则补充关联并完善具体 must_answer；update_section 修改 response_point_positions 时，同一操作必须提交该可写章节完整且具体的 must_answer。确实缺少内容时新增章节或局部拆分。保留未涉及章节的内容和相对顺序。不得默认挂到第一章、结构父节点或集中放入索引附录。只补关联没有实际写作指导不算修复。',

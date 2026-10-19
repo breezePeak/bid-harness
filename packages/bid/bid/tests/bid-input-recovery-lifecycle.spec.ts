@@ -1,7 +1,7 @@
 /** 原生问题在真实 Host、Agent 和 JSONL 重启之间保存答案、执行次数与接纳事实。 */
 
 import { createHash } from 'node:crypto'
-import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
@@ -24,6 +24,8 @@ import { bindBidInputRecovery, readBidInputRecovery } from '../src/bid-input-rec
 import * as inputRecovery from '../src/bid-input-recovery.ts'
 import { persistBidWorkRequest } from '../src/work-descriptor.ts'
 import { seedProjectArtifacts } from './fixtures/project-session.ts'
+import { writingRequestSchema } from '../src/writing-requirements.ts'
+import { recordBidUserAnswer } from '../src/bid-user-input.ts'
 
 class InputLifecycleAdapter extends LlmAdapter {
   override resolveModel(provider: string, model: string) { return Promise.resolve({ provider, id: model, name: model }) }
@@ -66,12 +68,13 @@ async function fixture(budget?: number, root?: string) {
   const host = ctx.bid as unknown as { automaticOrchestrator(agent: Agent, workspace: BidWorkspace, signal?: AbortSignal): BidOrchestrator
     pendingRunDecisions: Map<string, Promise<void>>
     pendingRunDecisionControllers: Map<string, AbortController>
+    pendingCapabilityInputControllers: Map<string, AbortController>
     inFlight: Map<string, { session: Session; runs: ConstructorParameters<typeof BidOrchestrator>[5] }>
     ensureRunDecision(agent: Agent): void }
   host.automaticOrchestrator = (_agent, _workspace, signal) => {
     const operation = [...host.inFlight.values()][0]
     if (operation === undefined) throw new Error('没有真实 Host 操作')
-    return new BidOrchestrator(operation.session, { canExecute: stage => stage === 'evidence_mapping', execute },
+    return new BidOrchestrator(operation.session, { canExecute: stage => stage === 'evidence_mapping' || stage === 'chapter_writing', execute },
       { validate: async () => ({ ok: true, issues: [] }) }, signal, undefined, operation.runs)
   }
   const fresh = async () => {
@@ -111,6 +114,113 @@ function answerImmediately(ctx: Context) {
   return ctx.userQuestions.registerProvider({ ask: async ({ questions }) => ({ answers: [{ id: questions[0]!.id,
     selected: ['继续未完成任务（推荐）'] }] }) })
 }
+
+it('整阶段正文缺口自动提问，答案落盘后重启直接续行原 Work，保留完成正文且不扣失败预算', async () => {
+  const first = await fixture()
+  await seedProjectArtifacts(first.workspace)
+  const stage = 'chapter_writing' as const
+  const payload = { stage }
+  const inputs = await Promise.all(buildBidStageTask(stage).inputs.map(async (path) => {
+    try { return { path, sha256: createHash('sha256').update(await readFile(join(first.workspace.projectRoot, path))).digest('hex') } }
+    catch (error: unknown) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { path, sha256: null }
+      throw error
+    }
+  }))
+  const work = await persistBidWorkRequest(first.workspace, 'stage_execution', stage, payload, { stage, inputs, payload })
+  const run = { runId: 'stage-input-run', epoch: 1, baseProjectRevision: 1, work, cause: 'awaiting_input' as const,
+    startedAt: 1, updatedAt: 2, error: { message: '正文编写需要输入',
+      issues: [{ code: 'CHAPTER_WRITING_INPUT_REQUIRED', artifact: 'SEC-2', message: '在线演示资料未提供，需明确写作方式。' }] } }
+  await checkpointBidProjectState(first.workspace, { stage, status: 'suspended', run })
+  const retained = await readFile(join(first.workspace.projectRoot, 'chapters/sections/0001.md'), 'utf8')
+  const asked = vi.fn(async ({ questions }: Parameters<typeof first.ctx.userQuestions.ask>[0]) => ({ answers: [{
+    id: questions[0]!.id, selected: [], custom: '可以先生成几张图就行，后续演示这种再说了',
+  }] }))
+  first.ctx.userQuestions.registerProvider({ ask: asked })
+  const save = inputRecovery.writeBidInputRecovery
+  vi.spyOn(inputRecovery, 'writeBidInputRecovery').mockImplementation(async (workspace, record) => {
+    await save(workspace, record)
+    if (record.kind === 'stage' && record.phase === 'answered') {
+      for (const controller of first.host.pendingCapabilityInputControllers.values()) controller.abort(new Error('答案落盘后重启'))
+    }
+  })
+  const agent = await first.fresh()
+  await vi.waitFor(() => { expect(asked).toHaveBeenCalledOnce() })
+  await vi.waitFor(() => { expect(first.execute).not.toHaveBeenCalled() })
+  const input = bindBidInputRecovery(String(agent.id), run, 'stage', run.runId)
+  await vi.waitFor(async () => { expect(await readBidInputRecovery(first.workspace, input, 3))
+    .toMatchObject({ phase: 'answered', attempts: 0, answer: { custom: '可以先生成几张图就行，后续演示这种再说了' } }) })
+  await first.ctx.sessions.flush(agent.session)
+  await first.fiber.dispose()
+  vi.restoreAllMocks()
+  const restarted = await fixture(undefined, first.workspace.root)
+  const ask = vi.spyOn(restarted.ctx.userQuestions, 'ask')
+  const restored = await restarted.fresh()
+  await vi.waitFor(async () => {
+    expect((await readBidInputRecovery(restarted.workspace, input, 3)).error).toBeUndefined()
+    expect(restarted.execute).toHaveBeenCalledOnce()
+  })
+  await vi.waitFor(async () => { expect(await readBidInputRecovery(restarted.workspace, input, 3)).toMatchObject({ phase: 'applied', attempts: 1 }) })
+  expect(ask).not.toHaveBeenCalled()
+  expect(restored.session.events.some(event => event.type === 'bid.recovery.requested')).toBe(false)
+  const admitted = restored.session.events.findLast(event => event.type === 'bid.run.started')
+  expect(admitted?.data.run).toMatchObject({ work: { workId: work.workId }, resumeOf: { runId: run.runId, cause: 'awaiting_input' } })
+  expect(await readFile(join(restarted.workspace.projectRoot, 'chapters/sections/0001.md'), 'utf8')).toBe(retained)
+}, 20_000)
+
+it('旧正文 waiting_user 缺口在重启后恢复原阶段问题，已消费的写作计划不阻止提问', async () => {
+  const first = await fixture()
+  await seedProjectArtifacts(first.workspace)
+  await checkpointBidProjectState(first.workspace, { stage: 'chapter_writing', status: 'completed', run: null })
+  const agent = await first.fresh()
+  const plan = JSON.parse(await readFile(join(first.workspace.projectRoot, 'chapters/writing-plan.json'), 'utf8')) as {
+    confirmed_outline_sha256: string
+    plan_version: number }
+  await writeFile(join(first.workspace.projectRoot, 'chapters/writing-request.json'), JSON.stringify(writingRequestSchema.parse({
+    schema_version: 1, request_id: 'consumed-writing-question', attempt_id: 'consumed-attempt', owner_session_id: String(agent.id),
+    confirmed_outline_sha256: plan.confirmed_outline_sha256, state: 'consumed', continuation: 'allowed',
+    answer: { question_id: 'consumed-writing-question', kind: 'no_additional_requirements', selected: ['直接开始'] },
+    applied_plan_version: plan.plan_version,
+  })))
+  const prior = recordBidUserAnswer(agent.session, [{ id: 'prior-work-question',
+    question: '以下章节需要补充资料或明确写作方式，请填写处理意见。', detail: '缺少演示资料' }],
+  { answers: [{ id: 'prior-work-question', selected: [], custom: '先写方案并配示意图，实际演示后续准备' }] })
+  const stage = 'chapter_writing' as const
+  const payload = { stage }
+  const inputs = await Promise.all(buildBidStageTask(stage).inputs.map(async (path) => {
+    try { return { path, sha256: createHash('sha256').update(await readFile(join(first.workspace.projectRoot, path))).digest('hex') } }
+    catch (error: unknown) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { path, sha256: null }
+      throw error
+    }
+  }))
+  const work = await persistBidWorkRequest(first.workspace, 'stage_execution', stage, payload, { stage, inputs, payload })
+  const run = { runId: 'legacy-stage-input', epoch: 1, baseProjectRevision: 1, work, startedAt: 1, updatedAt: 2 }
+  agent.session.append('bid.run.started', { run })
+  agent.session.append('bid.run.completed', { run })
+  const state = { stage, status: 'waiting_user' as const, run: null, reason: '缺少演示资料',
+    issues: [{ code: 'CHAPTER_WRITING_INPUT_REQUIRED', artifact: 'SEC-2', message: '缺少演示资料' }] }
+  agent.session.append('bid.task.changed', { state })
+  await checkpointBidProjectState(first.workspace, state)
+  await first.ctx.sessions.flush(agent.session)
+  await first.fiber.dispose()
+  const restarted = await fixture(undefined, first.workspace.root)
+  const ask = vi.fn(async ({ questions }: Parameters<typeof restarted.ctx.userQuestions.ask>[0]) => ({ answers: [{
+    id: questions[0]!.id, selected: [], custom: '先写方案并配示意图，实际演示后续准备',
+  }] }))
+  restarted.ctx.userQuestions.registerProvider({ ask })
+  const restored = await restarted.fresh()
+  await vi.waitFor(() => { expect(ask).toHaveBeenCalledOnce(); expect(restarted.execute).toHaveBeenCalledOnce() })
+  expect(restored.session.events.findLast(event => event.type === 'bid.run.started')?.data.run)
+    .toMatchObject({ work: { workId: work.workId }, resumeOf: { runId: run.runId, cause: 'awaiting_input' } })
+  expect(restored.session.events.some(event => event.type === 'bid.recovery.requested')).toBe(false)
+  const record = await readBidInputRecovery(restarted.workspace, bindBidInputRecovery(String(restored.id), run, 'stage', run.runId), 3)
+  expect(record.answer_message_id).toBeDefined()
+  expect(record.answer_message_id).not.toBe(String(prior.id))
+  expect(restored.session.events.filter(event => event.type === 'user/message' && event.data.source.kind === 'user'
+    && event.data.content.some(block => block.type === 'text' && block.text.includes('用户回答：先写方案并配示意图，实际演示后续准备'))))
+    .toHaveLength(2)
+}, 20_000)
 
 it.each([1, undefined])('预算 %s：提问期间卸载和重启不消耗执行次数', async (budget) => {
   const first = await fixture(budget)

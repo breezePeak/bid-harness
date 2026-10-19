@@ -83,6 +83,8 @@ export interface DefaultBidCapabilityContext {
   readonly webSearchEnabled: boolean
   readonly writingControl: ChapterWritingControl
   readonly recovery?: ModelStageExecutionOptions['recovery']
+  /** 原阶段缺资料问题中已保存的真实回答。 */
+  readonly inputAnswer?: string
 }
 
 /** 从默认阶段查找业务能力，不把内部 StageTask 当作公共能力授权。
@@ -124,6 +126,7 @@ export function executeDefaultBidCapability(
       maxCompletionRepairRounds: context.chapterWritingCompletionRepairRounds,
       webSearchEnabled: context.webSearchEnabled,
       control: context.writingControl,
+      ...(context.inputAnswer === undefined ? {} : { inputAnswer: context.inputAnswer }),
     })
   }
 }

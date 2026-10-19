@@ -23,7 +23,7 @@ function mainModelTrace(log: string): string {
   }).join('\n')}\n`
 }
 
-it.each(['assignment-conflict', 'corrupt-format', 'saved-TIMEOUT', 'saved-TRANSPORT'])('%s 真实 Writer/Host 失败经 Main 纠正或明确阻断', async (scenario) => {
+it.each(['assignment-conflict', 'corrupt-format', 'saved-TIMEOUT', 'saved-TRANSPORT', 'stage-input'])('%s 真实 Writer/Host 续行、修复或明确阻断', async (scenario) => {
   const result = await runLoaderSmoke({
     label: `Bid 写作恢复 ${scenario}`, tempDirPrefix: 'dsh-bid-writing-recovery-snapshot-', mode: 'src', processTimeoutMs: 60_000,
     binScript: fileURLToPath(new URL('./fixtures/bid-writing-recovery-driver.ts', import.meta.url)),
@@ -64,6 +64,12 @@ it.each(['assignment-conflict', 'corrupt-format', 'saved-TIMEOUT', 'saved-TRANSP
     },
   })
   const summary = JSON.parse(result.stdout) as Record<string, unknown>
+  if (scenario === 'stage-input') {
+    expect(summary).toEqual({ questions: 1, researchReceivedAnswer: true, finalStatus: 'completed', bodyPreserved: true,
+      sameWork: true, resumedOriginal: true, journalPhase: 'applied', attempts: 1, answerBound: true,
+      writerSections: ['SEC-2'], recoveryRequests: 0, failures: 0 })
+    return
+  }
   if (scenario.startsWith('saved-')) {
     expect(summary).toMatchObject({ questions: 1, noGoal: true, requestState: 'consumed', answer: '重点说明实施步骤。',
       planIncludesAnswer: true, originalFailure: true, recoveryRequests: 1, confirmCalls: 1, startedRuns: 1, planVersion: 1, finalStatus: 'completed',

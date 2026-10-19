@@ -1,4 +1,5 @@
 /** 无密钥 Loader 应用回放：真实 Host 执行职责冲突恢复与损坏格式结算。 */
+import { createHash } from 'node:crypto'
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
@@ -15,6 +16,13 @@ import { writeInputs } from '../../../../packages/bid/bid/tests/fixtures/chapter
 import { registerIntegrationTools } from '../../../../packages/bid/bid/tests/fixtures/evidence-mapping-loop.ts'
 import { scriptedVerificationCall } from '../../../../packages/bid/bid/tests/fixtures/task-verifier.ts'
 import type { WritingRequest } from '../../../../packages/bid/bid/src/writing-requirements.ts'
+import { bindBidInputRecovery, readBidInputRecovery } from '../../../../packages/bid/bid/src/bid-input-recovery.ts'
+import { persistBidWorkRequest } from '../../../../packages/bid/bid/src/work-descriptor.ts'
+import { parseEvidenceMapArtifact } from '../../../../packages/bid/bid/src/evidence-mapping-artifacts.ts'
+import { mappingModelReply } from '../../../../packages/bid/bid/tests/fixtures/mapping-model-positions.ts'
+import { BidStageAttentionRequiredError } from '../../../../packages/bid/bid/src/control-plane-contract.ts'
+
+const stageAnswer = '先写方案并配示意图，实际演示后续准备'
 
 function tool(name: string, args: object): StreamChunk[] {
   return [{ type: 'block-start', index: 0, blockType: 'tool-call' },
@@ -30,11 +38,73 @@ function answer(text: string): StreamChunk[] {
 class WritingRecoveryAdapter extends LlmAdapter {
   readonly chapter = new ChapterAdapter()
   readonly mainRequests: GenerateOptions[] = []
+  readonly researchSteps = new Map<string, number>()
+  researchReceivedAnswer = false
   constructor(private readonly mainId: SessionId, private readonly scenario: string) { super() }
   override resolveModel(provider: string, model: string): Promise<{ provider: string; id: string; name: string }> {
     return Promise.resolve({ provider, id: model, name: model })
   }
   override async * stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+    if (options.system?.includes('技术标目录轻量复核 Subagent')) {
+      yield* mappingModelReply(tool('structured_output', { scope: 'technical_bid', issues: [], blocking_issues: [] }), options)
+      return
+    }
+    if (options.tools?.some(item => item.name === 'finish_mapping_task')) {
+      const prompt = options.messages.flatMap(message => message.content).flatMap(block => block.type === 'text' ? [block.text] : []).join('\n')
+      this.researchReceivedAnswer ||= prompt.includes(stageAnswer)
+      if (!this.researchReceivedAnswer) throw new Error('真实章节研究没有收到用户回答')
+      const step = this.researchSteps.get(String(options.sessionId)) ?? 0
+      this.researchSteps.set(String(options.sessionId), step + 1)
+      const rejected = options.messages.flatMap(message => message.content).findLast(block => block.type === 'tool-result' && block.isError)
+      if (rejected !== undefined) throw new Error('研究脚本参数被正式入口拒绝：' + JSON.stringify(rejected))
+      const checklistLine = prompt.split('\n').find(line => line.startsWith('answer_checklists：'))!
+      const [checklist] = JSON.parse(checklistLine.slice('answer_checklists：'.length)) as Array<{
+        section_id: string
+        items: { item_ref: string }[]
+      }>
+      const objectsLine = prompt.split('\n').find(line => line.startsWith('对象位置：'))!
+      const objects = JSON.parse(objectsLine.slice('对象位置：'.length)) as {
+        references: { kind: string; position: number }[]
+      }
+      const basis = { kind: 'section_responsibility', explanation: '用户确认先写拟实施方案，实际演示资料后续准备。', requirement_positions: [] }
+      if (step === 0) yield* mappingModelReply(tool('submit_section_research_assessment', {
+        sufficient_for_blueprint: true,
+        evidence_requirement: { kind: 'not_required', reason: '本节先写专业方案，不声称已部署或已完成实际演示。' },
+        diagnostics: { tender_and_response_points: '按已确认职责响应演示要求。', technical_approach: '先写方案并准备示意图。',
+          evidence_and_inferences: '示意图不证明系统现状。', project_specific_quality_risks: '实际演示条件后续准备。' },
+        key_findings: [{ finding: '方案和实际演示准备分别说明。', explanation: '真实资料后续核实，不虚构现状。',
+          nature: 'professional_design', basis: [{ reference_position: objects.references.find(item => item.kind === 'requirement')!.position }],
+          evidence_boundary: '不宣称已完成演示。' }],
+        unresolved_gaps: [],
+      }), options)
+      else if (step === 1) yield* mappingModelReply(tool('submit_section_mapping', {
+        section_id: checklist!.section_id, local_materials: [], web_materials: [],
+      }), options)
+      else if (step === 2) yield* mappingModelReply(tool('update_section_task', {
+        section_id: checklist!.section_id, basis,
+        answer_plan: checklist!.items.map(item => ({ target_refs: [item.item_ref], mode: 'proposal',
+          content: '先编写实施方案并准备示意图，实际系统演示条件后续核实。',
+          basis: [{ kind: 'section_responsibility' }], boundary: '示意图不是真实系统截图，不宣称已部署或已测试。' })),
+      }), options)
+      else if (step === 3) yield* tool('finish_mapping_task', {})
+      else throw new Error('真实研究未收敛：' + JSON.stringify(options.messages.at(-1)?.content))
+      return
+    }
+    if (options.tools?.some(item => item.name === 'finish_final_check')) {
+      const step = this.researchSteps.get(String(options.sessionId)) ?? 0
+      this.researchSteps.set(String(options.sessionId), step + 1)
+      if (step === 0) yield* tool('list_review_items', {})
+      else if (step === 1) {
+        const result = options.messages.flatMap(message => message.content)
+          .filter(block => block.type === 'tool-result').flatMap(block => block.content)
+          .filter(block => block.type === 'text').map(block => JSON.parse(block.text) as { pending_items?: { review_ref: string }[] })
+          .findLast(item => item.pending_items !== undefined)
+        yield* mappingModelReply(tool('review_items', { items: result!.pending_items!.map(item => ({ review_ref: item.review_ref,
+          decision: 'keep', reason: '按用户决定写专业方案，不虚构实际演示成果。' })) }), options)
+      } else if (step === 2) yield* tool('finish_final_check', {})
+      else throw new Error('研究终审未收敛：' + JSON.stringify(options.messages.at(-1)?.content))
+      return
+    }
     const verification = options.messages.flatMap(message => message.content)
       .find(block => block.type === 'text' && block.text.includes('核验输入：'))
     if (verification?.type === 'text') {
@@ -54,7 +124,9 @@ class WritingRecoveryAdapter extends LlmAdapter {
     }
     this.mainRequests.push(options)
     const last = options.messages.at(-1)?.source
-    if (this.scenario.startsWith('saved-')) {
+    if (this.scenario === 'stage-input') {
+      yield* answer('已按用户回答继续原任务，保留完成正文。')
+    } else if (this.scenario.startsWith('saved-')) {
       if (this.mainRequests.length === 1) {
         yield { type: 'finish', reason: { kind: 'error', failure: { code: this.scenario.slice('saved-'.length), message: '暂态计划请求故障' } } }
       } else if (this.mainRequests.length === 2) {
@@ -109,14 +181,32 @@ try {
   await workspace.import([{ name: 'reference.md', role: 'reference', bytes: new TextEncoder().encode('已核验的项目实施参考资料。') }])
   registerIntegrationTools(ctx, process.cwd(), [])
   const savedRequirements = scenario.startsWith('saved-')
+  const stageInput = scenario === 'stage-input'
+  if (stageInput) {
+    await writeFile(join(workspace.projectRoot, 'outline/outline.json'), JSON.stringify(outline))
+    await writeFile(join(workspace.projectRoot, 'outline/quality-report.json'), JSON.stringify({ schema_version: 1,
+      scope: 'technical_bid', checked_requirement_ids: ['REQ-1', 'REQ-2', 'REQ-3'], checked_scoring_ids: ['SCORE-1', 'SCORE-2', 'SCORE-3'],
+      checked_scoring_response_point_ids: ['RP-000001', 'RP-000002', 'RP-000003'], reviewed_section_ids: outline.sections.map(item => item.id), issues: [] }))
+    const evidencePath = join(workspace.projectRoot, 'analysis/evidence-map.json')
+    const evidence = parseEvidenceMapArtifact(JSON.parse(await readFile(evidencePath, 'utf8')))
+    evidence.section_mappings[1]!.answer_plan = evidence.section_mappings[1]!.answer_plan!.map(item => ({
+      ...item, mode: 'gap', content: '实际演示资料未提供。', basis: [], boundary: '不能虚构演示系统。', required_input: '请明确演示章节写作方式。',
+    }))
+    await writeFile(evidencePath, JSON.stringify(evidence))
+  }
   if (savedRequirements) await rm(join(workspace.projectRoot, 'chapters/writing-plan.json'))
   else {
     const seed = new ChapterAdapter()
     ctx.effect(() => ctx!.llm.registerAdapter(['seed'], seed))
     const seedAgent = ctx.agentLoop.create(SessionId('parent'), { provider: 'seed', model: 'mock' }, { cwd: process.cwd() })
-    await executeChapterWriting(seedAgent, workspace, buildBidStageTask('chapter_writing'), {
-      maxRepairAttempts: 1, maxConcurrency: 1, run: createTestBidRunContext(),
-    })
+    try {
+      await executeChapterWriting(seedAgent, workspace, buildBidStageTask('chapter_writing'), {
+        maxRepairAttempts: 1, maxConcurrency: 1, run: createTestBidRunContext(),
+      })
+    } catch (error: unknown) {
+      if (!stageInput || !(error instanceof BidStageAttentionRequiredError)
+        || !error.issues.every(issue => issue.code === 'CHAPTER_WRITING_INPUT_REQUIRED')) throw error
+    }
   }
   const bodyPath = join(workspace.projectRoot, 'chapters/sections/0001.md')
   const beforeBody = savedRequirements ? '' : await readFile(bodyPath, 'utf8')
@@ -130,22 +220,68 @@ try {
     await mkdir(join(workspace.projectRoot, 'word-export'), { recursive: true })
     await writeFile(join(workspace.projectRoot, 'word-export/default.config.json'), '{损坏')
   }
-  await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: savedRequirements ? 'waiting_user' : 'completed', run: null })
+  const stage = 'chapter_writing' as const
+  const payload = { stage }
+  const inputs = stageInput ? await Promise.all(buildBidStageTask(stage).inputs.map(async path => ({ path,
+    sha256: createHash('sha256').update(await readFile(join(workspace.projectRoot, path))).digest('hex') }))) : []
+  const work = stageInput ? await persistBidWorkRequest(workspace, 'stage_execution', stage, payload, { stage, inputs, payload }) : undefined
+  const suspended = work === undefined ? undefined : { runId: 'stage-input-original', epoch: 1, baseProjectRevision: 0,
+    work, cause: 'awaiting_input' as const, startedAt: 1, updatedAt: 2, error: { message: '演示章节需要用户决定。',
+      issues: [{ code: 'CHAPTER_WRITING_INPUT_REQUIRED', artifact: 'SEC-2', message: '缺少实际演示资料，请明确本章写作方式。' }] } }
+  await checkpointBidProjectState(workspace, suspended === undefined
+    ? { stage, status: savedRequirements ? 'waiting_user' : 'completed', run: null }
+    : { stage, status: 'suspended', run: suspended })
   const mainId = SessionId('bid-writing-recovery-main')
   const adapter = new WritingRecoveryAdapter(mainId, scenario)
   ctx.effect(() => ctx!.llm.registerAdapter(['mock'], adapter))
   let questions = 0
   ctx.effect(() => ctx!.userQuestions.registerProvider({ ask: async ({ questions: items }) => {
     questions++
-    if (!savedRequirements) throw new Error('执行故障不应创建用户问题')
-    return { answers: [{ id: items[0]!.id, selected: [], custom: '重点说明实施步骤。' }] }
+    if (!savedRequirements && !stageInput) throw new Error('执行故障不应创建用户问题')
+    return { answers: [{ id: items[0]!.id, selected: [], custom: stageInput ? stageAnswer : '重点说明实施步骤。' }] }
   } }))
   const { agent } = await ctx.agentLoop.createAgent(ctx, {
     sessionId: mainId, agentOptions: { provider: 'mock', model: 'mock' }, meta: { cwd: process.cwd(), agentPreset: 'bid' },
   })
-  const host = ctx.bid as unknown as { inFlight: Map<string, { done: Promise<void> }>; recoveryTasks: Set<Promise<unknown>> }
+  const host = ctx.bid as unknown as { inFlight: Map<string, { done: Promise<void> }>
+    recoveryTasks: Set<Promise<unknown>>
+    pendingCapabilityInputs: Map<string, Promise<void>> }
   await until(() => agent.session.events.some(event => event.type === 'bid.project.resumed') && host.inFlight.size === 0, '项目恢复并释放操作锁')
-  if (savedRequirements) {
+  if (stageInput) {
+    try {
+      await until(async () => {
+        const state = await readBidProjectState(workspace)
+        if (state?.status === 'failed') throw new Error(JSON.stringify(state.failure))
+        return state?.status === 'completed'
+      }, '原阶段按真实回答完成缺口章节')
+    }
+    catch (error: unknown) {
+      throw new Error(JSON.stringify({ state: await readBidProjectState(workspace), questions,
+        journal: await readBidInputRecovery(workspace, bindBidInputRecovery(String(mainId), suspended!, 'stage', suspended!.runId), 3),
+        researchReceivedAnswer: adapter.researchReceivedAnswer,
+        events: agent.session.events.filter(event => event.type.startsWith('bid.')).slice(-8),
+      }), { cause: error })
+    }
+    await until(() => host.inFlight.size === 0 && host.pendingCapabilityInputs.size === 0, '输入结算')
+    await agent.whenIdle()
+    await ctx.sessions.flush(agent.session)
+    const journal = await readBidInputRecovery(workspace, bindBidInputRecovery(String(mainId), suspended!, 'stage', suspended!.runId), 3)
+    const started = agent.session.events.findLast(event => event.type === 'bid.run.started')
+    const reviewerIds = [...adapter.researchSteps.keys(), ...[...adapter.chapter.requests.entries()]
+      .filter(([, request]) => request.role !== 'plan').map(([id]) => id)]
+    await writeFile(join(process.cwd(), 'recovery-snapshot.json'), JSON.stringify({ mainId, reviewerIds }))
+    process.stdout.write(`${JSON.stringify({ questions, researchReceivedAnswer: adapter.researchReceivedAnswer,
+      finalStatus: (await readBidProjectState(workspace))?.status,
+      bodyPreserved: await readFile(bodyPath, 'utf8') === beforeBody,
+      sameWork: started?.data.run.work.workId === suspended!.work.workId,
+      resumedOriginal: started?.data.run.resumeOf?.runId === suspended!.runId,
+      journalPhase: journal.phase, attempts: journal.attempts,
+      answerBound: agent.session.events.some(event => event.type === 'user/message' && String(event.data.id) === journal.answer_message_id),
+      writerSections: [...adapter.chapter.requests.values()].filter(item => item.role === 'writer').map(item => item.sectionId),
+      recoveryRequests: agent.session.events.filter(event => event.type === 'bid.recovery.requested').length,
+      failures: agent.session.events.filter(event => event.type === 'bid.task.changed' && event.data.state.status === 'failed').length,
+    })}\n`)
+  } else if (savedRequirements) {
     await ctx.bid.requestWritingRequirements(agent.session, { mode: 'ensure' })
     const requestPath = join(workspace.projectRoot, 'chapters/writing-request.json')
     await until(async () => (JSON.parse(await readFile(requestPath, 'utf8')) as WritingRequest).state === 'consumed', '原回答生成计划')

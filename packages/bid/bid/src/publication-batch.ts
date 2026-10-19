@@ -1,3 +1,5 @@
+/** 项目批量发布与恢复共用进程内队列；跨进程写权限仍由 Host 项目锁负责。 */
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { randomUUID } from 'node:crypto'
 import { mkdir, readFile, readdir, rm } from 'node:fs/promises'
 import { relative, resolve, sep } from 'node:path'
@@ -16,6 +18,31 @@ const manifestSchema = z.object({
   entries: z.array(entrySchema),
 }).strict()
 type PublicationManifest = z.infer<typeof manifestSchema>
+
+const publicationQueues = new Map<string, Promise<void>>()
+const publicationOwner = new AsyncLocalStorage<{ key: string; active: boolean }>()
+
+function publicationKey(projectRoot: string): string {
+  const path = resolve(projectRoot)
+  return process.platform === 'win32' ? path.toLowerCase() : path
+}
+
+async function withPublicationQueue<T>(projectRoot: string, action: () => Promise<T>): Promise<T> {
+  const key = publicationKey(projectRoot)
+  const current = publicationOwner.getStore()
+  if (current?.key === key && current.active) return action()
+  const previous = publicationQueues.get(key)
+  const done = Promise.withResolvers<void>()
+  publicationQueues.set(key, done.promise)
+  await previous
+  const owner = { key, active: true }
+  try { return await publicationOwner.run(owner, action) }
+  finally {
+    owner.active = false
+    if (publicationQueues.get(key) === done.promise) publicationQueues.delete(key)
+    done.resolve()
+  }
+}
 
 /** Writes accepted by one crash-recoverable logical publication. */
 export interface BidPublicationLease {
@@ -63,6 +90,13 @@ async function applyManifest(
  * @param projectRoot - Project containing publication recovery records.
  */
 export async function reconcileBidPublications(workspaceRoot: string, projectRoot: string): Promise<void> {
+  // 发布回调可以读取当前状态，但不能把自己尚在准备的批次当作崩溃遗留删除。
+  const owner = publicationOwner.getStore()
+  if (owner?.key === publicationKey(projectRoot) && owner.active) return
+  return withPublicationQueue(projectRoot, () => reconcileIdlePublications(workspaceRoot, projectRoot))
+}
+
+async function reconcileIdlePublications(workspaceRoot: string, projectRoot: string): Promise<void> {
   const root = publicationRoot(projectRoot)
   await assertNoLinkedPath(workspaceRoot, root)
   let entries
@@ -104,6 +138,10 @@ export async function publishBidBatch<T>(
   projectRoot: string,
   write: (lease: BidPublicationLease) => Promise<T>,
 ): Promise<T> {
+  return withPublicationQueue(projectRoot, () => publishBatch(workspaceRoot, projectRoot, write))
+}
+
+async function publishBatch<T>(workspaceRoot: string, projectRoot: string, write: (lease: BidPublicationLease) => Promise<T>): Promise<T> {
   const id = randomUUID()
   const transactionRoot = resolve(publicationRoot(projectRoot), id)
   const stagedRoot = resolve(transactionRoot, 'staged')

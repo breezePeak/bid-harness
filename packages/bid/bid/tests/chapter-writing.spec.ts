@@ -2023,14 +2023,21 @@ describe('chapter-writing executor', () => {
     const retained = await readFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), 'utf8')
     expect(parseChapterWritingManifest(JSON.parse(await readFile(join(workspace.projectRoot,
       'chapters/manifest.json'), 'utf8'))).chapters.map(item => item.section_id)).toEqual(['SEC-1'])
-    // 已核验的新输入经章节研究生成计划；Host 不根据回答文本自动更改 gap 语义。
-    map.section_mappings[1]!.answer_plan = originalPlan
-    await writeFile(path, JSON.stringify(map))
+    const research = vi.fn<SectionResearch>(async (_agent, _workspace, request) => {
+      expect(request.sectionIds).toEqual(['SEC-2'])
+      expect(request.reason).toContain('先写拟实施方案并配示意图，真实演示后续准备')
+      map.section_mappings[1]!.answer_plan = originalPlan
+      await writeFile(path, JSON.stringify(map))
+      return { artifacts: [], outline, evidence: map }
+    })
+    sectionResearchHook.run = research
     const resumed = fixtureAgent(workspace, outline)
     await executeChapterWriting(resumed.agent, workspace, buildBidStageTask('chapter_writing'), {
       resumeCandidate: true,
+      inputAnswer: '先写拟实施方案并配示意图，真实演示后续准备',
       scoped: { targetSectionIds: ['SEC-1', 'SEC-2'], mode: 'write', instruction: '编写两个章节。' },
     })
+    expect(research).toHaveBeenCalledOnce()
     expect(resumed.starts).toHaveLength(1)
     expect(resumed.starts[0]?.request.label).toContain('章节2')
     expect(await readFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), 'utf8')).toBe(retained)

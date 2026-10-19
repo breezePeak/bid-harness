@@ -53,9 +53,13 @@ S6 只对流程图、表格和图片执行最终页面视觉审核；标题、�
 
 `bid.recovery.round` 在原 Session 持久化失败指纹、目标、消息身份、预算和结算。Host 在 Main 回合结束后核验真实恢复动作；只回复文字时按退避安排下一轮，执行后仍失败时要求改变策略。纠正轮、原 Work 的执行恢复及同轮通知确认重试分别受 `modelStageRepairAttempts` 限制；新 Run、重复事件及重启不清零，配置提高也不扩大已记录预算。终点明确区分恢复、等待具体输入、用户停止和阻断。通知已落盘但尚未派发时复用原消息身份；终止报告也保留派发记录。原生决策与能力输入另以 `runs/<workId>/input-<hash>.json` 保存答案及应用状态；收到答案不等于续行成功，临时应用失败复用原答案，已经接纳的 Run 只补结算。停止期间不自动恢复；用户新消息明确要求继续后，Host 重新核验当前授权与检查点。
 
+主 Agent 先核对用户已有回答；业务选择或资料缺失时通过 `ask_user_question` 提问，回答后继续原任务。用户指定先写正文、后续准备的事项保留相应要求，不因缺少该事项的实物材料直接判定目录无法生成。S3 局部修复提示同时提供未覆盖需求、评分和合规条款在本次输入表中的位置及原文，模型按位置选择关联，程序绑定正式身份并保持原校验。
+
 S4 执行日志保存首次基础设施重试预算和每次失败的模型或 Web 通道；检查点恢复从日志还原已消耗次数。重启、换 Provider 或提高配置均不扩大原预算，已完成章节继续复用原检查点。
 
-后台 Execution Agent 直接调用 `ask_user_question` 会在工具执行前被拒绝；Host 将有界的问题原文写入原 Run 的失败记录，取消并结算后台执行。项目锁释放后，主 Agent 收到失败通知，可检查原任务并决定修复或向用户提问。问题不会只挂在 Execution 子会话等待用户，Host 不替主 Agent 选择业务处理方式。
+后台 Execution Agent 的 `ask_user_question` 由 Host 在原 Main 会话的原生问题空间展示，真实回答返回原工具调用；普通澄清不终止 Run，也不消耗失败恢复预算。Main 的工具提问与后台转交提问均在问题、选项、当前任务和取消状态核对后，把问题及真实回答保存为程序生成的用户消息，供当前授权和不可变任务来源使用。旧问题、空答案及其他任务的回答不授予新执行权限。
+
+整阶段正文的资料缺口保存为原 Run 的 `awaiting_input`，Host 自动提出原生问题；答案与应用状态落盘后恢复原 Work，已完成章节仍按原检查点核验复用。重启复用已保存答案，选择稍后补充则保持等待。新的继续请求把本任务已有用户原话及先前方案送入执行器；重复问题以输入、失败单元和错误项识别，候选内容与普通进度变化不清除相同问题的记录。
 
 只有用户显式 `/goal` 才创建 Goal。Goal Round 与普通主 Agent 使用相同的当前阶段公开工具；已有 Goal 可读取、更新或提前完成。项目有后台操作时 Busy Gate 只等待，不消耗轮数；后台释放项目后重新请求 Driver。Bid 停止、重置和 S5 完成不改变 Goal，Goal 暂停、清除或完成也不取消 Bid。Host 重启按 Bid 自身的 Run ID、project revision、输入指纹、检查点和停止状态续行，不检查或重新激活 Goal。
 
@@ -65,7 +69,7 @@ S4 Initial Mapping 的客户可见编号检查只归当前任务可编辑的 Sec
 
 每个 Host 入口明确归入 Long Run、Project Mutation、Pure Read 或 Independent DOCX Operation。Long Run 在启动前持久化请求和输入身份，以 Work Descriptor 区分完整阶段、文件接入、资料重映射、目录重生成、目录确认及章节修订；恢复按原 work kind 分派，并复用 `runs/<workId>/work/` 候选与匹配输入指纹的检查点，不按 stage 猜测。每个 Run 的持久化快照记录 Interaction Session 与 Execution Session 身份；Host 在 Execution Session 中运行执行器及其 Child、Writer 和 Reviewer，Interaction Session 始终可处理项目聊天。Run 启动后，执行器、Child、Worker、Parser 和 Renderer 统一使用 `run.signal` 并登记 Activity；只有调度、Agent、Child、Activity 与 Commit 全部收敛后才持久化 suspended 或 completed。
 
-Long Run 的正式文件只能由 Commit Scope 发布，短确定性修改由带 expected project revision 的 Project Mutation 提交，读取入口不创建或刷新文件。两种写入所有者共用 crash-safe PublicationBatch；项目读取先对 commit intent 前滚或清理未提交批次。项目 revision 只随 Run 控制转换或 Project Mutation 增长，同一 Run 的进度与 command journal 不把 revision 当 checkpoint 计数器。S5 steering 在响应 accepted 前写入 durable command journal；挂起主 S5 Run 保留自身身份，恢复时才应用已保存修订。独立 Word 操作不改变 Workflow revision，但 DOCX、Markdown 快照和 `lastExport` 使用同一 PublicationBatch。
+Long Run 的正式文件只能由 Commit Scope 发布，短确定性修改由带 expected project revision 的 Project Mutation 提交，读取入口不创建或刷新文件。两种写入所有者共用 crash-safe PublicationBatch；项目读取先等待本进程正在执行的批次，再对崩溃遗留 commit intent 前滚或清理未提交批次，不删除活动批次。项目 revision 只随 Run 控制转换或 Project Mutation 增长，同一 Run 的进度与 command journal 不把 revision 当 checkpoint 计数器。S5 steering 在响应 accepted 前写入 durable command journal；挂起主 S5 Run 保留自身身份，恢复时才应用已保存修订。独立 Word 操作不改变 Workflow revision，但 DOCX、Markdown 快照和 `lastExport` 使用同一 PublicationBatch。
 
 The browser sends one ordered, same-origin binary S1 request whose body contains the original selected file streams and whose small headers carry their names, roles, types, and sizes. The Host resolves the live Session from that request, admits the complete batch under a project lock, imports through `BidWorkspace`, validates the resulting `manifest.json`, input, corpus, chunk index, and chunks, then calls `drive()`. A body that cannot reconstruct every declared file records S1 as failed and cannot advance it. Host 在 `agent/session-start` 先读取项目状态；waiting_user、failed 和 completed 保持原状态，只由现有驱动器执行 pending 阶段。
 

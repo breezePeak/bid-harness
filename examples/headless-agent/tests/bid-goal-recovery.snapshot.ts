@@ -30,6 +30,23 @@ it('源码装配的 Host 拒绝通过更换指令重跑失效目录 Work', async
   expect(JSON.parse(result.stdout)).toEqual({ rejected: [true, true, true], toolAvailable: false, acceptedEvents: 0, startedRuns: 1 })
 }, LOADER_SMOKE_TEST_TIMEOUT_MS)
 
+it('失败先询问具体业务选择，等用户回答后才修复原任务', async () => {
+  const configPath = fileURLToPath(new URL('../bid-goal-recovery.cordis.snapshot.yml', import.meta.url))
+  const result = await runLoaderSmoke({
+    label: 'Bid 失败澄清后继续', tempDirPrefix: 'dsh-bid-clarify-',
+    binScript: fileURLToPath(new URL('./fixtures/bid-goal-recovery-driver.ts', import.meta.url)),
+    configPath, binArgs: [configPath, 'clarify'], mode: 'src',
+    tsconfigPath: fileURLToPath(new URL('../../../tsconfig.json', import.meta.url)),
+  })
+  expect(JSON.parse(result.stdout)).toEqual({
+    waiting: { round: 1, recoveries: 0, startedRuns: 1 }, questionCount: 1,
+    calls: ['bid_stage_inspect', 'ask_user_question', 'bid_recover_task'],
+    instruction: '按用户回答先写技术方案并配示意图，演示后续准备；保留演示方式要求。',
+    answerRecorded: true,
+    answerVisible: true, clarificationGuidance: true, stageGuidance: true,
+  })
+}, LOADER_SMOKE_TEST_TIMEOUT_MS)
+
 it('自动预算耗尽后用户说继续，通过真实工具启动原 S2，保留原 Work 和预算', async () => {
   const configPath = fileURLToPath(new URL('../bid-goal-recovery.cordis.snapshot.yml', import.meta.url))
   const result = await runLoaderSmoke({
@@ -43,5 +60,20 @@ it('自动预算耗尽后用户说继续，通过真实工具启动原 S2，保�
     automaticRound: 3, automaticBudget: 3,
     calls: ['bid_stage_inspect', 'bid_resume_current_run'], userMessages: ['继续'],
     continuationGuidance: '先用 bid_stage_inspect(view=recovery) 核对失败、原目标和检查点。新的直接用户消息明确要求继续或重试原任务时，调用 bid_resume_current_run 实际执行；即使自动恢复预算已耗尽，也可按这次新授权继续一次。保留原 Work、已保存候选和正式校验，不重置自动预算；普通问答不启动恢复。',
+  })
+}, LOADER_SMOKE_TEST_TIMEOUT_MS)
+
+it('自动预算耗尽后的原生回答直接授权原任务续行，无需再发继续消息', async () => {
+  const configPath = fileURLToPath(new URL('../bid-goal-recovery.cordis.snapshot.yml', import.meta.url))
+  const result = await runLoaderSmoke({
+    label: 'Bid 原生回答继续失败任务', tempDirPrefix: 'dsh-bid-native-continue-',
+    binScript: fileURLToPath(new URL('./fixtures/bid-goal-recovery-driver.ts', import.meta.url)),
+    configPath, binArgs: [configPath, 'native-continue'], mode: 'src',
+    tsconfigPath: fileURLToPath(new URL('../../../tsconfig.json', import.meta.url)),
+  })
+  expect(JSON.parse(result.stdout)).toMatchObject({ startedRuns: 2, sameWork: true, resumeOfOriginal: true,
+    automaticEligible: false, attempts: 1, automaticBudget: 3, questionCount: 1, nativeAnswerAccepted: true,
+    calls: ['ask_user_question', 'bid_stage_inspect', 'bid_resume_current_run'],
+    userMessages: ['问题：在线演示还没准备好，本次标书先怎样处理？\n用户回答：可以先生成几张图就行，后续演示这种再说了'],
   })
 }, LOADER_SMOKE_TEST_TIMEOUT_MS)

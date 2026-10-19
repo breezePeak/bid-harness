@@ -2129,7 +2129,8 @@ async function runChapterWriting(
       options.run.reportProgress({ phase: 'executing', summary: `正在补齐 ${String(stale.length)} 个章节的任务级依据` })
       await executeSectionResearch(agent, workspace, {
         outline, sectionIds: stale.map(section => section.id), mode: 'supplement',
-        reason: scoped?.instruction ?? '为当前写作任务补齐或复核逐项依据计划',
+        reason: [scoped?.instruction ?? '为当前写作任务补齐或复核逐项依据计划',
+          ...options.inputAnswer === undefined ? [] : [`用户针对本次资料缺口的真实回答：${options.inputAnswer}。回答须按语义核验，不证明未提供的企业事实。`]].join('\n'),
         allowOutlineRefinement: false,
       }, {
         run: options.run, maxRepairAttempts: options.maxRepairAttempts,

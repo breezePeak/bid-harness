@@ -3342,7 +3342,7 @@ describe('Workspace 项目与独立 Session', () => {
     }
   })
 
-  it('后台 Execution 提问由 Main Agent 接管，不在子会话等待用户', async () => {
+  it('后台连续业务提问在 Main 原生空间回答并返回原执行，不产生失败或消耗修复预算', async () => {
     const { ctx, workspace, fresh, host, executor, executeStage, adapter } = await fixture()
     await seedProjectArtifacts(workspace)
     const paused = await checkpointBidProjectState(workspace, { stage: 'evidence_mapping', status: 'failed' })
@@ -3352,6 +3352,13 @@ describe('Workspace 项目与独立 Session', () => {
     const agent = await fresh('execution-question-main')
     await agent.whenIdle()
     const ask = vi.fn(async () => ({ answers: [] }))
+    const replies: AskUserQuestionItem[][] = []
+    ctx.userQuestions.registerProvider({ ask: async (request) => {
+      expect(request.agent).toBe(agent)
+      replies.push(request.questions)
+      return { answers: request.questions.map(question => ({ id: question.id, selected: [],
+        custom: `第 ${String(replies.length)} 次回答：先写方案和示意图，演示后续准备` })) }
+    } })
     ctx.tools.register({
       name: 'ask_user_question', description: 'Ask the user',
       parameters: { type: 'object', properties: { questions: { type: 'array', items: { type: 'object' } } }, required: ['questions'] },
@@ -3370,32 +3377,24 @@ describe('Workspace 项目与独立 Session', () => {
       const execution = operation.executionHandle?.agent
       if (execution === undefined) throw new Error('测试未找到 Execution Agent')
       const request = { questions: [{ id: 'directory_restructure', question: '是否现在启动目录编辑任务？' }] }
-      const result = await ctx.tools.execute({ agent: execution, name: 'ask_user_question', arguments: request,
-        callId: CallId('execution-question'), signal: new AbortController().signal })
-      expect(result).toMatchObject({ isError: true })
-      expect(JSON.stringify(result)).toContain('BID_EXECUTION_QUESTION_REQUIRES_MAIN_AGENT')
+      for (let index = 0; index < 4; index++) {
+        const result = await ctx.tools.execute({ agent: execution, name: 'ask_user_question', arguments: request,
+          callId: CallId(`execution-question-${String(index)}`), signal: new AbortController().signal })
+        expect(result).toMatchObject({ isError: false, value: { answers: [{ id: 'directory_restructure',
+          custom: `第 ${String(index + 1)} 次回答：先写方案和示意图，演示后续准备` }] } })
+      }
+      expect(replies).toHaveLength(4)
       expect(ask).not.toHaveBeenCalled()
       expect(adapter.requests.filter(request => String(request.sessionId) === String(agent.id))).toHaveLength(initialMainRequests)
       expect(runtime(agent.session)).toMatchObject({ stage: 'evidence_mapping', status: 'running' })
-      adapter.script.push(answer('原任务已失败，我会检查问题并接管用户提问。'))
       stageGate.resolve([])
       const settled = await retry
-      expect(settled, JSON.stringify(settled)).toMatchObject({ ok: true, value: { stage: 'evidence_mapping', status: 'failed' } })
-      expect(runtime(agent.session)).toMatchObject({ stage: 'evidence_mapping', status: 'failed',
-        failure: { issues: [{ code: 'BID_EXECUTION_QUESTION_REQUIRES_MAIN_AGENT' }] } })
-      await vi.waitFor(() => {
-        expect(adapter.requests.filter(request => String(request.sessionId) === String(agent.id)).at(-1)?.messages)
-          .toEqual(expect.arrayContaining([expect.objectContaining({ content: expect.arrayContaining([
-            expect.objectContaining({ type: 'text', text: expect.stringContaining('是否现在启动目录编辑任务？') }),
-          ]) })]))
-      })
+      expect(settled, JSON.stringify(settled)).toMatchObject({ ok: true, value: { stage: 'evidence_mapping', status: 'waiting_user' } })
+      expect(agent.session.events.some(event => event.type === 'bid.recovery.requested')).toBe(false)
+      expect(agent.session.events.some(event => event.type === 'bid.task.changed' && event.data.state.status === 'failed')).toBe(false)
       await agent.whenIdle()
-      expect(adapter.requests.filter(request => String(request.sessionId) === String(agent.id)).at(-1)?.messages)
-        .toEqual(expect.arrayContaining([expect.objectContaining({ content: expect.arrayContaining([
-          expect.objectContaining({ type: 'text', text: expect.stringContaining('是否现在启动目录编辑任务？') }),
-        ]) })]))
-      expect(agent.session.deriveMessages().at(-1)?.content)
-        .toContainEqual({ type: 'text', text: '原任务已失败，我会检查问题并接管用户提问。' })
+      expect(agent.session.events.filter(event => event.type === 'user/message' && event.data.source.kind === 'user'))
+        .toHaveLength(4)
     } finally {
       stageGate.resolve([])
       await retry

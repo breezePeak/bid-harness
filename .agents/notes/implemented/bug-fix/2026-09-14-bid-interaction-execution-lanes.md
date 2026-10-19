@@ -14,7 +14,7 @@ Bid Host 为每个 Long Run 保留一个顶层 Interaction Session，并创建�
 
 同项目任一顶层 Interaction Session 都可在 Run 期间发送多轮消息并调用 `bid_stage_inspect`。读取直接使用项目快照；公开回复的模型错误、停止原因和日志只属于该聊天 Agent，不改变 Run、Artifact 或调度器。普通消息不创建第二个 operation，不路由到 Execution Session，也不使用 `agent-busy` 重试。
 
-Execution Agent 是 Host 创建的运行时根，通用[子级提问守卫](2026-08-01-ask-user-delegated-caller-guard.zh.md)不会拦截它。Bid 在工具执行前拒绝该 Agent 的 `ask_user_question`，只把有界问题与执行身份作为 plugin notice 投递给 Interaction Agent 并唤醒它；后台执行不等待子会话中的用户回答。Interaction Agent 判断是否解释或向用户追问，Host 不选择业务答案。
+Execution Agent 是 Host 创建的运行时根，通用[子级提问守卫](2026-08-01-ask-user-delegated-caller-guard.zh.md)不会拦截它。Bid 将该 Agent 的 `ask_user_question` 转到原 Interaction Session 的原生问题空间，真实回答返回原调用；提问、任务身份与回答持久化由[恢复结算](2026-10-06-bid-recovery-settlement.md)拥有。Host 不选择业务答案，普通澄清不终止原 Run。
 
 S5 的明确修改继续通过现有 Writing Plan 与 durable command journal 进入唯一项目写入者。命令在 accepted 响应前持久化，调度器只在既有安全点应用计划版本；进度询问和解释不创建命令。并发顺序、重复和恢复语义由 command ID、计划版本及 journal 状态确定，不新增第二套指令队列。
 
@@ -32,7 +32,7 @@ S5 的明确修改继续通过现有 Writing Plan 与 durable command journal �
 
 **把用户消息直接投递给 Execution Session。** 这会重新引入私有工具串话，并允许聊天 Stop、模型错误或上下文增长干扰阶段协议。
 
-**把 Execution Agent 改成由 Interaction Agent 持有的子级。** 这会改变现有 Host operation 的结构所有权；仅为阻止提问而改动执行通道生命周期没有必要。Bid 在调用边界拒绝并转交主 Agent 即可。
+**把 Execution Agent 改成由 Interaction Agent 持有的子级。** 这会改变现有 Host operation 的结构所有权；原生提问转交不要求改变双通道的运行时归属。
 
 **新增通用 RunInstruction 队列。** S5 已有带身份、版本、状态和恢复语义的 command journal；平行实现会产生两个命令真相源。其他阶段没有已授权的运行中写操作，不需要空泛扩展点。
 
@@ -44,4 +44,4 @@ S5 的明确修改继续通过现有 Writing Plan 与 durable command journal �
 
 运行中的聊天不再占用执行 Agent，公开回复失败也不会终止阶段；所有 Artifact 写入仍经过同一个 operation、Run coordinator 和 commit scope。每个活动 operation 额外持有一个内部 Session，其日志按现有 Session 存储恢复，并在运行收敛后释放 live Agent。内部 Execution Session 使用 `subagent` origin 作为现有路由隔离标记，目录中以「Bid 阶段执行」的一次性子代理身份呈现；监控和调试仍通过 Run 快照身份区分它与真正执行章节工作的后代 Child。
 
-Execution 的用户提问会快速返回工具拒绝，将有界问题写入原 Run 的失败记录并取消执行；结算和项目锁释放后，主 Agent 收到失败通知，按原任务身份检查恢复。Host 不自动回答问题，也不代替主 Agent 选择恢复动作。
+Execution 的用户提问等待原 Interaction Session 中的真实回答，原 Run 的停止信号仍取消该等待。Host 不自动回答问题，也不代替用户选择业务处理方式。

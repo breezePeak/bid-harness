@@ -13,6 +13,7 @@ interface Operation { runs: BidRunCoordinator }
 interface HostInternals {
   executeStageInteraction(agent: Agent, input: unknown, signal: AbortSignal): Promise<unknown>
   recoveryTasks: Set<Promise<unknown>>
+  recoveryDriver: { request(agent: Agent): Promise<void> }
   beginOperation(session: Session): Operation
   prepareOperation(operation: Operation): Promise<unknown>
   finishOperation(session: Session, operation: Operation): Promise<void>
@@ -35,6 +36,9 @@ class GoalRecoveryAdapter extends LlmAdapter {
   continueEnabled = false
   continueInspected = false
   continueStarted = false
+  nativeContinuation = false
+  continueAsked = false
+  clarify = false
   constructor(private readonly parentId: SessionId) { super() }
   override resolveModel(provider: string, model: string): Promise<{ provider: string; id: string; name: string }> {
     return Promise.resolve({ provider, id: model, name: model })
@@ -46,7 +50,10 @@ class GoalRecoveryAdapter extends LlmAdapter {
     }
     this.requests.push(options)
     if (this.explicitContinuation) {
-      if (this.continueEnabled && !this.continueInspected) {
+      if (this.continueEnabled && this.nativeContinuation && !this.continueAsked) {
+        this.continueAsked = true
+        yield* tool('ask_user_question', { questions: [{ id: 'demo', question: '在线演示还没准备好，本次标书先怎样处理？' }] })
+      } else if (this.continueEnabled && !this.continueInspected) {
         this.continueInspected = true
         yield* tool('bid_stage_inspect', { view: 'recovery' })
       } else if (this.continueEnabled && !this.continueStarted) {
@@ -70,9 +77,19 @@ class GoalRecoveryAdapter extends LlmAdapter {
       this.goalCompleted = true
       yield* tool('update_goal', { action: 'complete', goal_id: current.goal.id, revision: current.goal.revision })
     } else if (this.requests.length === 1) yield* tool('bid_stage_inspect', { view: 'recovery' })
-    else if (this.requests.length === 2) yield* tool('bid_recover_task', {
-      target: 'run', instruction: '核对原文来源，针对当前失败单元补齐缺失内容。',
+    else if (this.clarify && this.requests.length === 2) yield* tool('ask_user_question', {
+      questions: [{ id: 'demo', question: '在线演示尚未准备，本次标书先怎样处理？',
+        options: [{ label: '先写技术方案并配示意图，演示后续准备' }, { label: '先补齐演示资料' }] }],
     })
+    else if (this.requests.length === (this.clarify ? 3 : 2)) {
+      const result = options.messages.flatMap(message => message.content).findLast(block =>
+        block.type === 'tool-result' && block.toolCallId === 'ask_user_question')
+      const reply = result?.type === 'tool-result' ? result.content.find(block => block.type === 'text') : undefined
+      const answer = reply?.type === 'text' ? JSON.parse(reply.text) as { answers: Array<{ selected: string[]; custom?: string }> } : undefined
+      yield* tool('bid_recover_task', { target: 'run', instruction: this.clarify
+        ? `按用户回答${answer?.answers.map(item => item.custom ?? item.selected.join('；')).join('；') ?? '缺少回答'}；保留演示方式要求。`
+        : '核对原文来源，针对当前失败单元补齐缺失内容。' })
+    }
     else {
       yield { type: 'block-start', index: 0, blockType: 'text' }
       yield { type: 'block-end', index: 0, block: { type: 'text', text: '已确认当前失败状态。' } }
@@ -84,7 +101,9 @@ class GoalRecoveryAdapter extends LlmAdapter {
 const configPath = process.argv[2]
 if (configPath === undefined) throw new Error('缺少 Bid Goal 回放配置')
 const stale = process.argv[3] === 'stale'
-const explicitContinuation = process.argv[3] === 'continue'
+const nativeContinuation = process.argv[3] === 'native-continue'
+const explicitContinuation = process.argv[3] === 'continue' || nativeContinuation
+const clarify = process.argv[3] === 'clarify'
 let ctx: Context | undefined
 try {
   ctx = await boot('bid-goal-recovery-snapshot', configPath)
@@ -93,7 +112,17 @@ try {
   const sessionId = SessionId('bid-goal-recovery')
   const adapter = new GoalRecoveryAdapter(sessionId)
   adapter.explicitContinuation = explicitContinuation
+  adapter.nativeContinuation = nativeContinuation
+  adapter.clarify = clarify
   ctx.llm.registerAdapter(['mock'], adapter)
+  const asked = Promise.withResolvers<undefined>()
+  const answer = Promise.withResolvers<{ answers: Array<{ id: string; selected: string[]; custom?: string }> }>()
+  let questionCount = 0
+  if (clarify || nativeContinuation) ctx.userQuestions.registerProvider({ ask: () => {
+    questionCount++
+    asked.resolve(undefined)
+    return answer.promise
+  } })
   const { agent } = await ctx.agentLoop.createAgent(ctx, {
     sessionId, agentOptions: { provider: 'mock', model: 'mock' },
     meta: { cwd: process.cwd(), agentPreset: 'bid' },
@@ -142,6 +171,17 @@ try {
   adapter.runId = failed.runId
   await operation.runs.suspend('retry_exhausted', safeRecoverableBidFailure(failed.work, new BidStageExecutionError(issues)))
   await host.finishOperation(agent.session, operation)
+  let waiting: { round: number | undefined; recoveries: number; startedRuns: number } | undefined
+  if (clarify) {
+    await asked.promise
+    await host.recoveryDriver.request(agent)
+    waiting = {
+      round: agent.session.events.findLast(event => event.type === 'bid.recovery.round')?.data.round,
+      recoveries: agent.session.events.filter(event => event.type === 'bid.recovery.requested').length,
+      startedRuns: agent.session.events.filter(event => event.type === 'bid.run.started').length,
+    }
+    answer.resolve({ answers: [{ id: 'demo', selected: ['先写技术方案并配示意图，演示后续准备'] }] })
+  }
   await agent.whenIdle()
   await Promise.allSettled(host.recoveryTasks)
   await agent.whenIdle()
@@ -153,9 +193,31 @@ try {
     }
     await agent.whenIdle()
   }
-  if (explicitContinuation) {
+  if (clarify) {
+    const events = agent.session.events
+    process.stdout.write(JSON.stringify({
+      waiting, questionCount,
+      calls: events.filter(event => event.type === 'tool/call').map(event => event.data.name),
+      instruction: events.find(event => event.type === 'bid.recovery.requested')?.data.instruction,
+      answerRecorded: events.some(event => event.type === 'user/message' && event.data.source.kind === 'user'
+        && event.data.content.some(block => block.type === 'text' && block.text.includes('用户回答：先写技术方案并配示意图，演示后续准备'))),
+      answerVisible: adapter.requests.some(request => request.messages.some(message => message.content.some(
+        block => block.type === 'tool-result' && block.toolCallId === 'ask_user_question'
+          && JSON.stringify(block.content).includes('先写技术方案并配示意图，演示后续准备')))),
+      clarificationGuidance: adapter.requests.some(request => request.messages.some(message => message.content.some(
+        block => block.type === 'text' && block.text.includes('先检查用户已有回答；缺少业务选择或资料时，用 ask_user_question')))),
+      stageGuidance: adapter.requests.some(request => request.messages.some(message => message.content.some(
+        block => block.type === 'text' && block.text.includes('不重复询问，也不只生成独立附件后把原任务留在失败状态')))),
+    }) + '\n')
+  } else if (explicitContinuation) {
     adapter.continueEnabled = true
-    agent.followup(createUserMessage({ content: [{ type: 'text', text: '继续' }], source: { kind: 'user' } }))
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: nativeContinuation ? '请澄清原失败任务的业务选择。' : '继续' }],
+      source: nativeContinuation ? { kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'notice', summary: '澄清原任务业务选择' }
+        : { kind: 'user' } }))
+    if (nativeContinuation) {
+      await asked.promise
+      answer.resolve({ answers: [{ id: 'demo', selected: [], custom: '可以先生成几张图就行，后续演示这种再说了' }] })
+    }
     await agent.whenIdle()
     await Promise.allSettled(host.recoveryTasks)
     await agent.whenIdle()
@@ -164,6 +226,8 @@ try {
     const decision = bidRunRecoveryEligibility(agent.session)
     process.stdout.write(JSON.stringify({
       startedRuns: runs.length, sameWork: runs.every(event => event.data.run.work.workId === failed.work.workId),
+      ...(nativeContinuation ? { questionCount, nativeAnswerAccepted: events.some(event => event.type === 'bid.recovery.requested'
+        && event.data.instruction.includes('可以先生成几张图就行，后续演示这种再说了')) } : {}),
       resumeOfOriginal: runs[1]?.data.run.resumeOf?.runId === failed.runId,
       automaticEligible: decision.eligible, attempts: decision.attempts,
       automaticRound: events.findLast(event => event.type === 'bid.recovery.round')?.data.round,

@@ -12,7 +12,7 @@ const journalSchema = z.object({
   schema_version: z.literal(1), owner_session_id: z.string().min(1),
   work_id: z.string().min(1), request_sha256: z.string().regex(/^[a-f0-9]{64}$/u),
   run_id: z.string().min(1), question_key: z.string().min(1),
-  kind: z.enum(['decision', 'capability']),
+  kind: z.enum(['decision', 'capability', 'stage']),
   phase: z.enum(['pending', 'reading_checkpoint', 'asking', 'answered', 'applying', 'accepted', 'applied', 'failed', 'blocked']),
   attempts: z.number().int().nonnegative(), budget: z.number().int().min(1).max(20),
   preparation_failures: z.number().int().nonnegative().default(0),
@@ -20,6 +20,7 @@ const journalSchema = z.object({
     accepted_run: z.object({ run_id: z.string().min(1), epoch: z.number().int().positive() }).strict().optional() }).strict().optional(),
   decision: z.enum(['continue', 'restart_stage', 'stop']).optional(),
   answer: z.object({ id: z.string().min(1), selected: z.array(z.string()), custom: z.string().max(4000).optional() }).strict().optional(),
+  answer_message_id: z.string().min(1).optional(),
   error: z.object({ code: z.string(), message: z.string(), phase: z.string() }).strict().optional(),
 }).strict().refine(record => record.application === undefined || record.application.attempt === record.attempts,
   '应用标识必须绑定当前持久执行次数。').refine(record => record.phase !== 'accepted'

@@ -580,7 +580,7 @@ export function inspectBidStage(
 export function renderStageInteractionPrompt(stage: string): string {
   if (stage === 'chapter_writing') return [
     '当前 Bid 阶段：chapter_writing；当前状态：waiting_user。',
-    '正式写作尚未开始。处理正式写作要求时，先调用 bid_stage_inspect(view=task_contract_context)，结合已确认目录、招标要求和资料映射理解用户的自然语言要求。',
+    '当前可能等待首次写作要求，也可能是正文执行中的资料缺口。先调用 bid_stage_inspect(view=task_contract_context)，结合已确认计划、完成章节、招标要求和资料映射理解用户的自然语言要求；已有计划时保留完成进度。',
     '只追问影响执行的关键歧义或冲突。资料不足、能力限制或招标要求冲突必须指出并提出处理建议；用户明确要求改变目录时，可调用 bid_run_task 组合目录、资料与写作能力。',
     '保留用户原话。没有特殊要求时，仍应按招标要求、目录和现有资料形成默认计划。未提供的指标不得变成用户硬性要求。',
     '初始整体写作要求由 Host 原生提问；先读取 task_contract_context.writing_request 中已保存的真实回答，不要再次询问这个初始问题。请求身份由程序绑定，Host 会在首次计划提交时把原生自定义回答原文加入 user_requirements。',
@@ -666,6 +666,7 @@ function renderIdleStageInteractionPrompt(
             ? '先读取失败诊断。原目标当前不可恢复；只有用户给出新目标时，才用 bid_run_task(supersede=true) 创建新 Work。Host 核对新的直接用户授权并保留旧候选。'
             : '当前失败不可恢复。读取具体诊断，说明实际阻断及需要补齐的输入、凭证或程序修复；解释和建议不代表修复已执行。',
     ...userContinuationAvailable ? [] : ['若用户询问为什么没开始或现在能不能继续，应解释当前 Host 状态和正式入口。'],
+    ...status === 'failed' ? ['先核对用户已有回答和具体缺项；缺少业务决定或资料时用 ask_user_question 提问，收到回答后继续原任务。用户已说明的处理方式应落实到修复要求，不重复询问，也不只生成独立附件后把原任务留在失败状态；同一问题修复后仍存在时，不重复泛化指令或只报告错误。'] : [],
     status === 'ready'
       ? '阶段已经准备好；Host 将自动驱动，不把普通聊天当作启动命令。'
       : task?.stage === 'evidence_mapping'

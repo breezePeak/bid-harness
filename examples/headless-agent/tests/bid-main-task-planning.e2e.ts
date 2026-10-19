@@ -24,6 +24,7 @@ import * as ToolFs from '@deepseek-ai/dsh-tool-fs'
 import * as ToolFsSearch from '@deepseek-ai/dsh-tool-fs-search'
 import LocalSubprocess from '@deepseek-ai/dsh-subprocess-local'
 import UserQuestionService from '@deepseek-ai/dsh-user-questions'
+import * as ToolAskUser from '@deepseek-ai/dsh-tool-ask-user'
 import { BidHostRuntime, DEFAULT_BID_CONFIG, parseOutlineArtifact, readBidProjectState } from '@deepseek-ai/dsh-bid'
 import { describe, expect, it } from 'vitest'
 import { seedMainTaskPlanningProject } from '../../../packages/bid/bid/tests/fixtures/main-task-planning-loop.ts'
@@ -38,6 +39,7 @@ const cases = [
   { id: 'A02-1', text: split }, { id: 'A02-2', text: split }, { id: 'A02-3', text: split },
   { id: 'A02-six', text: '只修改本章 S2.3，拆成收集输入、边界确认、校验结果、内业处理、复核整改、交付成果六个真实目录子章节。完整迁移原文，每个原文块唯一归属，表题和完整表格同章，流程图完整保留；原文不必分到每个子章，但所有六章都必须完成正文和独立审核，未分配原文的子章也要写完。不改其他章节，不虚构资料、人员、设备、标准或固定格式。' },
   { id: 'A02-clarification', text: 'S2.3', clarification: '本章也需要小章节。把三个阶段拆成真实目录子章节，保留原文、表格和流程图，并完成正文和审核。不要改其他章节；具体是哪章等我确认后再执行。' },
+  { id: 'A02-native-answer', text: '把我指定章节的三个阶段拆成真实目录子章节，完整保留原文、表格和流程图并完成正文和独立审核，不改其他章节。具体章节先用原生问题问我，得到回答后直接执行，不要再让我补一句继续。' },
   { id: 'A03', text: '只修改 S2.3 中“流程一：收集输入。”这一个选区，将“收集输入”改为“收集并登记输入”，完成本次修订和审核。选区外所有字节、空白、锚点及目录均保持不变。' },
   { id: 'A04', text: split + '这是隔离测试项目中的授权故障注入验收：请提交第一份仅含正文修订、缺少目录修改的计划，验证 Host 必须据实拒绝；随后立即在同一 Work 自行修正计划并完成上述全部要求。不要直接提交完整计划跳过故障注入，不需要我继续催促。' },
   { id: 'A14', text: '更正第一条招标要求，将 REQ-1 的要求改为“回答主题1并保持可追踪交付”，只修改这条需求，不修改正文和目录。在当前阶段运行中登记排队，完成后主动报告实际结果。' },
@@ -91,6 +93,13 @@ describe.skipIf(!process.env.DEEPSEEK_API_KEY && !process.env.DSH_BID_EVAL_PROVI
       await ctx.plugin(spawn, { providerName: 'spawn' })
       await ctx.plugin(SessionProjectionRegistry)
       await ctx.plugin(UserQuestionService)
+      await ctx.plugin(ToolAskUser)
+      let questionCount = 0
+      if (scenario.id === 'A02-native-answer') ctx.userQuestions.registerProvider({ ask: async ({ questions }) => {
+        questionCount++
+        expect(questionCount).toBe(1)
+        return { answers: questions.map(question => ({ id: question.id, selected: [], custom: 'S2.3，工作流程这一章。' })) }
+      } })
       await ctx.plugin(BidHostRuntime, { ...DEFAULT_BID_CONFIG,
         allowedExtensions: [...DEFAULT_BID_CONFIG.allowedExtensions], modelStageRepairAttempts: 2,
         evidenceMappingMaxConcurrency: 2, chapterWritingMaxConcurrency: 2, chapterWritingCompletionRepairRounds: 2,
@@ -201,6 +210,17 @@ describe.skipIf(!process.env.DEEPSEEK_API_KEY && !process.env.DSH_BID_EVAL_PROVI
         return readFile(join(workspace.projectRoot, location.contentPath), 'utf8')
       }))
       const events = agent.session.events
+      if (scenario.id === 'A02-native-answer') {
+        expect(questionCount).toBe(1)
+        const start = events.find(event => event.type === 'bid.run.started')
+        if (start?.type !== 'bid.run.started') throw new Error('原生回答后没有执行原任务')
+        const { capabilityTaskRequestSchema } = await import('../../../packages/bid/bid/src/bid-capability-task.ts')
+        const { readBidWorkRequest } = await import('../../../packages/bid/bid/src/work-descriptor.ts')
+        const source = capabilityTaskRequestSchema.parse(await readBidWorkRequest(workspace, start.data.run.work)).source_snapshot
+        report.source_snapshot = source
+        expect(source?.message.text).toContain('用户回答：S2.3，工作流程这一章。')
+        expect(source?.context_messages?.map(item => item.text)).toContain(scenario.text)
+      }
       report.tools = events.filter(event => event.type === 'tool/call' || event.type === 'tool/result')
       report.notices = events.filter(event => event.type === 'bid.run.notice')
       report.turn_ends = events.filter(event => event.type === 'turn/end')

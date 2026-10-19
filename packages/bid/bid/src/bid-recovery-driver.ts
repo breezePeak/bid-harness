@@ -135,7 +135,7 @@ export class BidRecoveryDriver {
       && event.data.round === round.round - 1 && sameBidRecoveryTarget(event.data.target, round.target))
     const fresh = createUserMessage({ content: [{ type: 'text', text: [...notice.facts,
       ...(blocked ? [round.reason, '恢复已终止。报告原始失败、已尝试的动作和具体 blocker。'] : [
-        `纠正轮：${round.round}/${round.budget}。仅文字回复不算恢复；必须执行具体修复并核验结果。`,
+        `纠正轮：${round.round}/${round.budget}。先检查用户已有回答；缺少业务选择或资料时，用 ask_user_question 提出具体问题并等待回答，再继续原任务；能够自行修复的问题执行修复并核验结果。`,
         ...(previous?.type === 'bid.recovery.round' && previous.data.state === 'no_effect'
           ? ['上一轮没有有效动作，请落实修复。'] : []),
       ])].join('\n') }], source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'notice',
