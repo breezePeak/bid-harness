@@ -4,13 +4,22 @@ const SECRET = /(?:authorization\s*[:=]\s*bearer\s+|bearer\s+|(?:api[_-]?key|tok
 const PROVIDER_PAYLOAD = /(?:provider\s+(?:payload|response)|raw\s+(?:payload|response))\s*[:=][\s\S]*/giu
 
 /**
+ * 隐去文本中的凭据，不截断任务输入或删除其后的正文。
+ * @param value 用户输入或待输出诊断。
+ * @returns 保留完整非敏感内容的文本。
+ */
+export function redactBidSecrets(value: string): string {
+  return value.replace(SECRET, '$1[REDACTED]')
+}
+
+/**
  * Remove credentials and provider payloads from one browser-visible diagnostic.
  * @param value - Untrusted diagnostic text.
  * @param maxChars - Maximum sanitized characters retained.
  * @returns Length-bounded browser-safe text.
  */
 export function sanitizeBidErrorText(value: string, maxChars = 2_000): string {
-  const sanitized = value.replace(SECRET, '$1[REDACTED]').replace(PROVIDER_PAYLOAD, 'provider response: [REDACTED]').trim()
+  const sanitized = redactBidSecrets(value).replace(PROVIDER_PAYLOAD, 'provider response: [REDACTED]').trim()
   return sanitized.slice(0, maxChars) || 'Bid Run 执行失败。'
 }
 

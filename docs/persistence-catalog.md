@@ -257,7 +257,7 @@ Source: [`packages/core/session/src/types.ts:277`](../packages/core/session/src/
 'bid.capability.input.received': { workId: string; stepId: string; questionId: string; answer: AskUserQuestionAnswerItem }
 ```
 
-Source: [`packages/bid/bid/src/bid-events.ts:257`](../packages/bid/bid/src/bid-events.ts)
+Source: [`packages/bid/bid/src/bid-events.ts:269`](../packages/bid/bid/src/bid-events.ts)
 
 ### `bid.capability.input.required/*`
 
@@ -277,7 +277,7 @@ Source: [`packages/bid/bid/src/bid-events.ts:257`](../packages/bid/bid/src/bid-e
 'bid.capability.input.required': { workId: string; stepId: string; questionId: string; question: AskUserQuestionItem }
 ```
 
-Source: [`packages/bid/bid/src/bid-events.ts:248`](../packages/bid/bid/src/bid-events.ts)
+Source: [`packages/bid/bid/src/bid-events.ts:260`](../packages/bid/bid/src/bid-events.ts)
 
 ### `bid.docx_export.changed/*`
 
@@ -294,7 +294,7 @@ Source: [`packages/bid/bid/src/bid-events.ts:248`](../packages/bid/bid/src/bid-e
 'bid.docx_export.changed': { operation: DocxExportOperation }
 ```
 
-Source: [`packages/bid/bid/src/bid-events.ts:276`](../packages/bid/bid/src/bid-events.ts)
+Source: [`packages/bid/bid/src/docx-export-operation.ts:46`](../packages/bid/bid/src/docx-export-operation.ts)
 
 ### `bid.goal.bound/*`
 
@@ -313,7 +313,7 @@ Source: [`packages/bid/bid/src/bid-events.ts:276`](../packages/bid/bid/src/bid-e
 'bid.goal.bound': { goalId: string; ownerSessionId: string; initialS2WorkId: string }
 ```
 
-Source: [`packages/bid/bid/src/bid-events.ts:326`](../packages/bid/bid/src/bid-events.ts)
+Source: [`packages/bid/bid/src/bid-events.ts:346`](../packages/bid/bid/src/bid-events.ts)
 
 ### `bid.goal.recovery.requested/*`
 
@@ -342,7 +342,7 @@ Source: [`packages/bid/bid/src/bid-events.ts:326`](../packages/bid/bid/src/bid-e
 }
 ```
 
-Source: [`packages/bid/bid/src/bid-events.ts:337`](../packages/bid/bid/src/bid-events.ts)
+Source: [`packages/bid/bid/src/bid-events.ts:357`](../packages/bid/bid/src/bid-events.ts)
 
 ### `bid.image.requested/*`
 
@@ -353,7 +353,7 @@ Source: [`packages/bid/bid/src/bid-events.ts:337`](../packages/bid/bid/src/bid-e
 ```ts persistence-catalog
 /**
  * 付费作图调用前记录的完整输入；失败与取消仍保留，不进入聊天模型历史。
- * @param section_id 当前 Writer 允许写入的完整章节身份。
+ * @param owner 当前章节或独立任务步骤的程序身份。
  * @param request_sha256 程序绑定的图片请求摘要。
  * @param style_sha256 项目冻结的风格描述摘要。
  * @param prompt 实际发送的完整作图提示。
@@ -366,7 +366,7 @@ Source: [`packages/bid/bid/src/bid-events.ts:337`](../packages/bid/bid/src/bid-e
 'bid.image.requested': BidImageRequestedData
 ```
 
-Source: [`packages/bid/bid/src/bid-events.ts:173`](../packages/bid/bid/src/bid-events.ts)
+Source: [`packages/bid/bid/src/bid-events.ts:183`](../packages/bid/bid/src/bid-events.ts)
 
 ### `bid.project.resumed/*`
 
@@ -380,14 +380,10 @@ Source: [`packages/bid/bid/src/bid-events.ts:173`](../packages/bid/bid/src/bid-e
  * @param state 已持久化的项目任务状态。
  * @param revision 项目状态文件的修订号。
  */
-'bid.project.resumed': (
-  | { state: BidTaskState }
-  | LegacyBidControlState
-  | { runtime: LegacyBidRuntimeState }
-) & { revision: number }
+'bid.project.resumed': { state: BidTaskState; revision: number }
 ```
 
-Source: [`packages/bid/bid/src/bid-events.ts:179`](../packages/bid/bid/src/bid-events.ts)
+Source: [`packages/bid/bid/src/bid-events.ts:189`](../packages/bid/bid/src/bid-events.ts)
 
 ### `bid.recovery.requested/*`
 
@@ -403,6 +399,7 @@ Source: [`packages/bid/bid/src/bid-events.ts:179`](../packages/bid/bid/src/bid-e
  * @param unit 当前失败单元。
  * @param instruction 主 Agent 提交的具体修复方案。
  * @param progressFingerprint 恢复前的问题与检查点摘要。
+ * @param sourceMessageId 接纳时的真实用户消息；自动纠正没有新用户消息时省略。
  */
 'bid.recovery.requested': {
   ownerSessionId: string
@@ -410,10 +407,11 @@ Source: [`packages/bid/bid/src/bid-events.ts:179`](../packages/bid/bid/src/bid-e
   unit: string
   instruction: string
   progressFingerprint: string
+  sourceMessageId?: string
 }
 ```
 
-Source: [`packages/bid/bid/src/bid-events.ts:287`](../packages/bid/bid/src/bid-events.ts)
+Source: [`packages/bid/bid/src/bid-events.ts:294`](../packages/bid/bid/src/bid-events.ts)
 
 ### `bid.recovery.round/*`
 
@@ -449,7 +447,7 @@ Source: [`packages/bid/bid/src/bid-events.ts:287`](../packages/bid/bid/src/bid-e
 }
 ```
 
-Source: [`packages/bid/bid/src/bid-events.ts:307`](../packages/bid/bid/src/bid-events.ts)
+Source: [`packages/bid/bid/src/bid-events.ts:327`](../packages/bid/bid/src/bid-events.ts)
 
 ### `bid.run.cancelling/*`
 
@@ -459,10 +457,10 @@ Source: [`packages/bid/bid/src/bid-events.ts:307`](../packages/bid/bid/src/bid-e
 
 ```ts persistence-catalog
 /** One exact execution attempt is draining before it can become resumable. */
-'bid.run.cancelling': { runId: string; epoch: number; stage: BidStage }
+'bid.run.cancelling': { runId: string; epoch: number }
 ```
 
-Source: [`packages/bid/bid/src/bid-events.ts:193`](../packages/bid/bid/src/bid-events.ts)
+Source: [`packages/bid/bid/src/bid-events.ts:199`](../packages/bid/bid/src/bid-events.ts)
 
 ### `bid.run.completed/*`
 
@@ -475,7 +473,7 @@ Source: [`packages/bid/bid/src/bid-events.ts:193`](../packages/bid/bid/src/bid-e
 'bid.run.completed': { run: BidRunData }
 ```
 
-Source: [`packages/bid/bid/src/bid-events.ts:199`](../packages/bid/bid/src/bid-events.ts)
+Source: [`packages/bid/bid/src/bid-events.ts:203`](../packages/bid/bid/src/bid-events.ts)
 
 ### `bid.run.decision.received/*`
 
@@ -487,14 +485,14 @@ Source: [`packages/bid/bid/src/bid-events.ts:199`](../packages/bid/bid/src/bid-e
 /** The explicit option selected for one previously requested native question. */
 'bid.run.decision.received': {
   decisionKey: string
-  stage: BidStage
+  stage: BidStage | null
   runId: string
   decisionType: BidRunDecisionType | 'stage_start'
   decision: BidRunDecision
 }
 ```
 
-Source: [`packages/bid/bid/src/bid-events.ts:233`](../packages/bid/bid/src/bid-events.ts)
+Source: [`packages/bid/bid/src/bid-events.ts:245`](../packages/bid/bid/src/bid-events.ts)
 
 ### `bid.run.decision.required/*`
 
@@ -506,14 +504,14 @@ Source: [`packages/bid/bid/src/bid-events.ts:233`](../packages/bid/bid/src/bid-e
 /** Native DSH question required before a suspended Run can proceed; stage_start is legacy replay data. */
 'bid.run.decision.required': {
   decisionKey: string
-  stage: BidStage
+  stage: BidStage | null
   runId: string
   decisionType: BidRunDecisionType | 'stage_start'
   question: AskUserQuestionItem
 }
 ```
 
-Source: [`packages/bid/bid/src/bid-events.ts:225`](../packages/bid/bid/src/bid-events.ts)
+Source: [`packages/bid/bid/src/bid-events.ts:237`](../packages/bid/bid/src/bid-events.ts)
 
 ### `bid.run.notice/*`
 
@@ -522,11 +520,13 @@ Source: [`packages/bid/bid/src/bid-events.ts:225`](../packages/bid/bid/src/bid-e
 #### `bid.run.notice` — log-only
 
 ```ts persistence-catalog
-/** Model-invisible terminal Run row for the conversation timeline. */
+/** 聊天时间线中的 Run 终态，不进入模型上下文。
+ * @param noticeId 当前终态的持久去重身份。
+ */
 'bid.run.notice': BidRunNotice
 ```
 
-Source: [`packages/bid/bid/src/bid-events.ts:197`](../packages/bid/bid/src/bid-events.ts)
+Source: [`packages/bid/bid/src/control-plane-contract.ts:110`](../packages/bid/bid/src/control-plane-contract.ts)
 
 ### `bid.run.progress/*`
 
@@ -536,10 +536,10 @@ Source: [`packages/bid/bid/src/bid-events.ts:197`](../packages/bid/bid/src/bid-e
 
 ```ts persistence-catalog
 /** Latest bounded milestone for the exact active Run identity. */
-'bid.run.progress': { runId: string; epoch: number; stage: BidStage; progress: BidRunProgress }
+'bid.run.progress': { runId: string; epoch: number; progress: BidRunProgress }
 ```
 
-Source: [`packages/bid/bid/src/bid-events.ts:189`](../packages/bid/bid/src/bid-events.ts)
+Source: [`packages/bid/bid/src/bid-events.ts:195`](../packages/bid/bid/src/bid-events.ts)
 
 ### `bid.run.start_failed/*`
 
@@ -552,7 +552,7 @@ Source: [`packages/bid/bid/src/bid-events.ts:189`](../packages/bid/bid/src/bid-e
 'bid.run.start_failed': { runId: string; epoch: number }
 ```
 
-Source: [`packages/bid/bid/src/bid-events.ts:191`](../packages/bid/bid/src/bid-events.ts)
+Source: [`packages/bid/bid/src/bid-events.ts:197`](../packages/bid/bid/src/bid-events.ts)
 
 ### `bid.run.started/*`
 
@@ -565,7 +565,7 @@ Source: [`packages/bid/bid/src/bid-events.ts:191`](../packages/bid/bid/src/bid-e
 'bid.run.started': { run: BidRunData }
 ```
 
-Source: [`packages/bid/bid/src/bid-events.ts:187`](../packages/bid/bid/src/bid-events.ts)
+Source: [`packages/bid/bid/src/bid-events.ts:193`](../packages/bid/bid/src/bid-events.ts)
 
 ### `bid.run.suspended/*`
 
@@ -578,7 +578,7 @@ Source: [`packages/bid/bid/src/bid-events.ts:187`](../packages/bid/bid/src/bid-e
 'bid.run.suspended': { run: BidRunData & { cause: import('./control-plane-contract.ts').BidRunSuspensionCause; error?: BidTaskFailure } }
 ```
 
-Source: [`packages/bid/bid/src/bid-events.ts:195`](../packages/bid/bid/src/bid-events.ts)
+Source: [`packages/bid/bid/src/bid-events.ts:201`](../packages/bid/bid/src/bid-events.ts)
 
 ### `bid.schema.warning/*`
 
@@ -591,7 +591,7 @@ Source: [`packages/bid/bid/src/bid-events.ts:195`](../packages/bid/bid/src/bid-e
 'bid.schema.warning': BidSchemaWarning
 ```
 
-Source: [`packages/bid/bid/src/bid-events.ts:278`](../packages/bid/bid/src/bid-events.ts)
+Source: [`packages/bid/bid/src/bid-events.ts:284`](../packages/bid/bid/src/bid-events.ts)
 
 ### `bid.stage.attention_required/*`
 
@@ -610,7 +610,7 @@ Source: [`packages/bid/bid/src/bid-events.ts:278`](../packages/bid/bid/src/bid-e
 'bid.stage.attention_required': { stage: BidStage; status: 'attention_required'; reason: string; issues: StageValidationIssue[] }
 ```
 
-Source: [`packages/bid/bid/src/bid-events.ts:213`](../packages/bid/bid/src/bid-events.ts)
+Source: [`packages/bid/bid/src/bid-events.ts:225`](../packages/bid/bid/src/bid-events.ts)
 
 ### `bid.stage.completed/*`
 
@@ -623,7 +623,7 @@ Source: [`packages/bid/bid/src/bid-events.ts:213`](../packages/bid/bid/src/bid-e
 'bid.stage.completed': { stage: BidStage; status: 'completed'; artifacts: StageArtifact[] }
 ```
 
-Source: [`packages/bid/bid/src/bid-events.ts:205`](../packages/bid/bid/src/bid-events.ts)
+Source: [`packages/bid/bid/src/bid-events.ts:217`](../packages/bid/bid/src/bid-events.ts)
 
 ### `bid.stage.failed/*`
 
@@ -642,7 +642,7 @@ Source: [`packages/bid/bid/src/bid-events.ts:205`](../packages/bid/bid/src/bid-e
 'bid.stage.failed': { stage: BidStage; status: 'failed'; reason: string; issues?: StageValidationIssue[] }
 ```
 
-Source: [`packages/bid/bid/src/bid-events.ts:221`](../packages/bid/bid/src/bid-events.ts)
+Source: [`packages/bid/bid/src/bid-events.ts:233`](../packages/bid/bid/src/bid-events.ts)
 
 ### `bid.stage.reset/*`
 
@@ -655,7 +655,7 @@ Source: [`packages/bid/bid/src/bid-events.ts:221`](../packages/bid/bid/src/bid-e
 'bid.stage.reset': { stage: BidStage; status?: 'pending' | 'waiting_start' | 'ready' | 'waiting_user' }
 ```
 
-Source: [`packages/bid/bid/src/bid-events.ts:223`](../packages/bid/bid/src/bid-events.ts)
+Source: [`packages/bid/bid/src/bid-events.ts:235`](../packages/bid/bid/src/bid-events.ts)
 
 ### `bid.stage.started/*`
 
@@ -668,7 +668,7 @@ Source: [`packages/bid/bid/src/bid-events.ts:223`](../packages/bid/bid/src/bid-e
 'bid.stage.started': { stage: BidStage; status: 'running' }
 ```
 
-Source: [`packages/bid/bid/src/bid-events.ts:203`](../packages/bid/bid/src/bid-events.ts)
+Source: [`packages/bid/bid/src/bid-events.ts:215`](../packages/bid/bid/src/bid-events.ts)
 
 ### `bid.task.changed/*`
 
@@ -681,7 +681,7 @@ Source: [`packages/bid/bid/src/bid-events.ts:203`](../packages/bid/bid/src/bid-e
 'bid.task.changed': { state: BidTaskState }
 ```
 
-Source: [`packages/bid/bid/src/bid-events.ts:185`](../packages/bid/bid/src/bid-events.ts)
+Source: [`packages/bid/bid/src/bid-events.ts:191`](../packages/bid/bid/src/bid-events.ts)
 
 ### `bid.user_confirmation.received/*`
 
@@ -701,7 +701,7 @@ Source: [`packages/bid/bid/src/bid-events.ts:185`](../packages/bid/bid/src/bid-e
   | { stage: 'outline_generation' | 'evidence_mapping'; confirmed: false; feedback: string }
 ```
 
-Source: [`packages/bid/bid/src/bid-events.ts:266`](../packages/bid/bid/src/bid-events.ts)
+Source: [`packages/bid/bid/src/bid-events.ts:278`](../packages/bid/bid/src/bid-events.ts)
 
 ### `bid.user_confirmation.required/*`
 
@@ -714,7 +714,30 @@ Source: [`packages/bid/bid/src/bid-events.ts:266`](../packages/bid/bid/src/bid-e
 'bid.user_confirmation.required': { stage: BidStage; status: 'waiting_user' }
 ```
 
-Source: [`packages/bid/bid/src/bid-events.ts:259`](../packages/bid/bid/src/bid-events.ts)
+Source: [`packages/bid/bid/src/bid-events.ts:271`](../packages/bid/bid/src/bid-events.ts)
+
+### `bid.user_input.recorded/*`
+
+<a id="biduser_inputrecorded--log-only"></a>
+
+#### `bid.user_input.recorded` — log-only
+
+```ts persistence-catalog
+/**
+ * Host 将原生回答关联到真实提问任务；未绑定 Work 的 Main 问题只属于当前会话。
+ * @param messageId 保存真实回答的用户消息。
+ * @param questionKey Host 从实际工具调用或输入检查点取得的问题身份。
+ * @param work 原提问的 Work 与请求版本；普通 Main 问题为 null。
+ * @dshScopeScan unsupported
+ */
+'bid.user_input.recorded': {
+  messageId: string
+  questionKey: string
+  work: { workId: string; requestSha256: string } | null
+}
+```
+
+Source: [`packages/bid/bid/src/bid-events.ts:309`](../packages/bid/bid/src/bid-events.ts)
 
 ### `bid.visual-review.request/*`
 
@@ -724,10 +747,11 @@ Source: [`packages/bid/bid/src/bid-events.ts:259`](../packages/bid/bid/src/bid-e
 
 ```ts persistence-catalog
 /**
- * 一次 S6 最终 Word 页面视觉审核请求；不进入正文对话上下文。
+ * 一次图内容或最终 Word 页面视觉审核请求；不进入正文对话上下文。
  * @param blockId 被审核的稳定视觉块标识。
- * @param inputHash 内容、模板、页面、样式及版本的联合摘要。
- * @param messages 当前页及相邻页图片与短审核约束。
+ * @param inputHash 被审核输入的内容及版本摘要。
+ * @param messages 实际图片附件与本次审核约束。
+ * @param system 当前图内容或页面检查职责。
  * @param provider 实际调用的服务商。
  * @param model 实际调用的模型。
  * @param maxTokens 输出上限。
@@ -735,14 +759,15 @@ Source: [`packages/bid/bid/src/bid-events.ts:259`](../packages/bid/bid/src/bid-e
 'bid.visual-review.request': {
   blockId: string
   inputHash: string
-  messages: Message[]
+  messages: import('@deepseek-ai/dsh-llm').Message[]
+  system: string
   provider: string
   model: string
   maxTokens: number
 }
 ```
 
-Source: [`packages/bid/bid/src/docx-visual-review.ts:32`](../packages/bid/bid/src/docx-visual-review.ts)
+Source: [`packages/bid/bid/src/bid-events.ts:383`](../packages/bid/bid/src/bid-events.ts)
 
 ### `bid.word-format.request/*`
 
@@ -768,7 +793,22 @@ Source: [`packages/bid/bid/src/docx-visual-review.ts:32`](../packages/bid/bid/sr
 }
 ```
 
-Source: [`packages/bid/bid/src/docx-format-suggestions.ts:18`](../packages/bid/bid/src/docx-format-suggestions.ts)
+Source: [`packages/bid/bid/src/docx-format-suggestions.ts:19`](../packages/bid/bid/src/docx-format-suggestions.ts)
+
+### `bid.workflow.continuation/*`
+
+<a id="bidworkflowcontinuation--log-only"></a>
+
+#### `bid.workflow.continuation` — log-only
+
+```ts persistence-catalog
+/** 当前路线让出的持久 Work 引用；恢复或重置后为 null。
+ * @param reference 原会话、Run 与请求的精确引用。
+ */
+'bid.workflow.continuation': { reference: { schema_version: 1; owner_session_id: string; run_id: string; work: BidWorkDescriptor } | null }
+```
+
+Source: [`packages/bid/bid/src/bid-events.ts:213`](../packages/bid/bid/src/bid-events.ts)
 
 ### `bid.workflow.failed/*`
 
@@ -781,7 +821,22 @@ Source: [`packages/bid/bid/src/docx-format-suggestions.ts:18`](../packages/bid/b
 'bid.workflow.failed': { stage: BidStage; reason: string; issues?: StageValidationIssue[] }
 ```
 
-Source: [`packages/bid/bid/src/bid-events.ts:201`](../packages/bid/bid/src/bid-events.ts)
+Source: [`packages/bid/bid/src/bid-events.ts:205`](../packages/bid/bid/src/bid-events.ts)
+
+### `bid.workflow.started/*`
+
+<a id="bidworkflowstarted--log-only"></a>
+
+#### `bid.workflow.started` — log-only
+
+```ts persistence-catalog
+/** 真实用户消息授权的完整路线接纳凭据。
+ * @param source 程序绑定的来源身份及接纳时内容摘要。
+ */
+'bid.workflow.started': { source: { session_id: string; message_id: string; content_sha256: string } }
+```
+
+Source: [`packages/bid/bid/src/bid-events.ts:209`](../packages/bid/bid/src/bid-events.ts)
 
 ### `bid.writing_entry.changed/*`
 
@@ -794,7 +849,7 @@ Source: [`packages/bid/bid/src/bid-events.ts:201`](../packages/bid/bid/src/bid-e
 'bid.writing_entry.changed': { view: WritingEntryView }
 ```
 
-Source: [`packages/bid/bid/src/bid-events.ts:270`](../packages/bid/bid/src/bid-events.ts)
+Source: [`packages/bid/bid/src/bid-events.ts:282`](../packages/bid/bid/src/bid-events.ts)
 
 ### `command/*`
 

@@ -5,35 +5,17 @@ import { dirname } from 'node:path'
 import { writeFileAtomic } from '@deepseek-ai/dsh-atomic-write'
 import { z } from 'zod'
 import type { BidTaskState } from './control-plane-contract.ts'
-import {
-  bidTaskStateSchema,
-  legacyBidControlStateSchema,
-  legacyBidRuntimeSchema,
-  normalizeLegacyBidControlState,
-} from './runtime-state.ts'
+import { bidTaskStateSchema } from './runtime-state.ts'
 import { assertNoLinkedPath } from './workspace-path.ts'
 import { publishBidBatch, reconcileBidPublications, type BidPublicationLease } from './publication-batch.ts'
-import { recordOnlySchemaVersion } from './schema-version.ts'
 
 const projectMetadataSchema = z.object({
-  schema_version: recordOnlySchemaVersion(4),
+  schema_version: z.literal(5),
   revision: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
   updated_at: z.number().int().nonnegative(),
 }).loose()
 
-const legacyProjectStateSchema = z.object({
-  schema_version: recordOnlySchemaVersion(3),
-  // oxlint-disable typescript/no-deprecated -- 读取 v3 记录仍需使用原始结构。
-  workflow: legacyBidControlStateSchema.shape.workflow,
-  run: legacyBidControlStateSchema.shape.run,
-  last_run: legacyBidControlStateSchema.shape.lastRun,
-  runtime: legacyBidRuntimeSchema.optional(),
-  // oxlint-enable typescript/no-deprecated
-  revision: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
-  updated_at: z.number().int().nonnegative(),
-}).strict()
-
-/** 持久化元数据与唯一任务状态；读取旧 v3 后也只向调用方暴露此结构。 */
+/** 持久化元数据与唯一任务状态。 */
 export type BidProjectState = BidTaskState & {
   readonly schema_version: number
   readonly revision: number
@@ -53,29 +35,13 @@ export function bidProjectTaskState(state: BidProjectState): BidTaskState {
 }
 
 /**
- * Parse the current single-state format, then normalize the legacy v3 structure.
+ * 严格读取当前项目格式；旧格式拒绝读取并保留原件。
  * @param value 待解析的磁盘数据。
  * @returns 已校验的项目状态。
  */
 export function parseBidProjectState(value: unknown): BidProjectState {
-  const metadata = projectMetadataSchema.safeParse(value)
-  if (metadata.success) {
-    const { schema_version, revision, updated_at, ...candidate } = metadata.data
-    const task = bidTaskStateSchema.safeParse(candidate)
-    if (task.success) return { schema_version, revision, updated_at, ...task.data }
-  }
-
-  const legacy = legacyProjectStateSchema.parse(value)
-  return {
-    schema_version: 4,
-    revision: legacy.revision,
-    updated_at: legacy.updated_at,
-    ...normalizeLegacyBidControlState({
-      workflow: legacy.workflow,
-      run: legacy.run,
-      lastRun: legacy.last_run,
-    }),
-  }
+  const { schema_version, revision, updated_at, ...candidate } = projectMetadataSchema.parse(value)
+  return { schema_version, revision, updated_at, ...bidTaskStateSchema.parse(candidate) }
 }
 
 /**
@@ -110,7 +76,7 @@ export async function writeBidProjectState(workspace: ProjectWorkspace, state: B
   await assertNoLinkedPath(workspace.root, workspace.projectStatePath)
   const task = bidProjectTaskState(state)
   const validated: BidProjectState = {
-    schema_version: 4,
+    schema_version: 5,
     revision: state.revision,
     updated_at: state.updated_at,
     ...task,
@@ -132,7 +98,7 @@ export async function checkpointBidProjectState(
   const normalized = bidTaskStateSchema.parse(task)
   if (previous !== undefined && JSON.stringify(bidProjectTaskState(previous)) === JSON.stringify(normalized)) return previous
   const state: BidProjectState = {
-    schema_version: 4,
+    schema_version: 5,
     revision: (previous?.revision ?? 0) + 1,
     updated_at: Date.now(),
     ...normalized,
@@ -158,7 +124,7 @@ export async function commitBidProjectMutation(
   const previous = await readBidProjectState(workspace)
   if ((previous?.revision ?? 0) !== expectedRevision) throw new Error('BID_PROJECT_REVISION_CONFLICT')
   const state: BidProjectState = {
-    schema_version: 4,
+    schema_version: 5,
     revision: expectedRevision + 1,
     updated_at: Date.now(),
     ...bidTaskStateSchema.parse(task),

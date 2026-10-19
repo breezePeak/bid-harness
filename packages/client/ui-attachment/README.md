@@ -1,31 +1,25 @@
 # @deepseek-ai/dsh-client-ui-attachment
 
-English | [中文](README.zh.md)
+会话附件呈现插件，通过 `ctx.slots.inject` 接入 Conversation 的草稿附件栏、文件拖放、历史图片和原图预览。附件的接纳、持久身份和上传重试由 Conversation 与 Host 管理；本包只呈现状态。
 
-Dynamic attachment presentation plugin for the conversation UI. It waits for the conversation package's `conversation.input.attachments` and `conversation.message.images` declarations through `ctx.slots.inject`, then registers the composer draft-image rail, document drop target, chat-history image gallery, and original-image lightbox. The conversation slot owner supplies attachment data, image loading, callbacks, and its namespace translator; presentation components remain pure props and are not exported from the package entry.
+## 附件栏与拖放
 
-## Attachment rail
+图片草稿显示缩略图，普通文件显示文件名和大小。用户可以在发送前移除附件；失败后草稿和已上传引用保留，可再次发送。横向附件栏支持滚轮、边缘翻页按钮和键盘聚焦，拖放覆盖层跟随当前会话是否允许接入文件。普通文件在 Host 支持时通过原件上传端点接入，上传本身不解析内容或开启专业阶段。
 
-`AttachmentRail` renders pending draft images as fixed 64px thumbnails (16px radius) in one horizontally scrolling row whose scrollbar stays hidden. Overflow is announced by circular edge arrows instead: each pages one viewport (minus one card of context, floored at 200px) with smooth scrolling (instant under `prefers-reduced-motion: reduce`), and arrow visibility is recomputed from scroll geometry on scroll, item-count changes, and rail size changes (a ResizeObserver on the rail element, so sidebar and panel resizes count, not only window resizes). The rail scrolls horizontally only: a non-passive listener consumes every wheel tick with a vertical component — nothing scrolls the conversation behind the composer — converting a pure vertical wheel to a horizontal step (LINE/PAGE deltas normalized to pixels, per-tick travel clamped to 60px) and keeping a diagonal pan's horizontal intent, while purely horizontal pans stay native. A newly added item is revealed at the rail's end; removal keeps the scroll position, and a rail that mounts over an already-populated draft keeps its start position. Each thumbnail opens its original through `onOpen` on a single click, and its remove control sits inside the card's top-right corner, hidden until the card is hovered or the control keyboard-focused; coarse-pointer (touch) surfaces show it permanently because they have no hover. The owner decides mounting and renders the rail only while items exist.
+## 历史图片与预览
 
-## Message images and the lightbox
-
-`MessageImage` renders one durable history image, loading a session-authorized URL through the owner's `ImageLoader`; a failed load renders an explicit retry control, and a settled load answers a single click by opening `ImageLightbox` (clicks during loading are ignored). Sizing follows DeepSeek Chat: a message's lone image (`variant="single"`) renders at 240px on its longer edge with the displayed aspect ratio clamped to [0.25, 4] — the overflow is cropped by `object-fit: cover`, anchored to the top of very tall images and the left of very wide ones — and never upscales past its natural size; an image among several (`variant="tile"`) is a fixed 64px square. `ImageGallery` wraps a message's images in one aligned wrapping flex group (`end` for user messages, `start` for assistant messages), picks the variant from the image count, and renders nothing for an empty list. `ImageLightbox` is a document-level modal preview over the shared dialog mask (`--dsw-alias-bg-mask-1` + `--dsw-mask-blur`, painted on its own layer so the blur never touches the previewed image) that closes on Escape, a mask press, or its close control, and restores focus to its opener on unmount.
-
-## Drop overlay
-
-`DropOverlay` is the full-viewport invitation shown while a file drag is over the page: illustration, title, and a limits line while drops are accepted (`disabled` swaps the blocked illustration and hides the limits line). The layer is pointer-inert — the owner's document-level drag listeners keep the enter/leave count and decide accept/reject; the overlay only shows state. It portals to the body like the lightbox.
+历史图片使用会话授权的加载器读取，失败时显示重试。单图保留纵横比，图片组使用缩略图；点击打开原图预览。预览可通过关闭按钮、遮罩或 Escape 关闭，并恢复先前焦点。普通文件的持久聊天卡片由 Conversation 从消息原件引用投影，刷新后仍显示同一版本的名称和大小。
 
 ## Model Experience
 
-None, as the plugin only renders attachment state supplied by the conversation UI and contributes no model-visible input.
+本包不生成提示或工具 Schema。普通文件的模型可见清单由 Host 在消息接纳时保存；图片内容由会话模型路由处理。
 
 #### KV Cache effect
 
-None; this package neither assembles nor sends a provider request.
+显示、移除草稿和打开预览不会发起模型请求。
 
 ## Known Limitations and Deferred Work
 
-- **Images only** — non-image files have no rail card or history renderer yet; DeepSeek Chat-style file cards and upload-progress states wait until the composer accepts non-image attachments.
-- **No zoom or download in the lightbox** — the preview renders the original at fit-to-viewport size only.
-- **The lightbox does not trap focus** — it sets `aria-modal` and restores focus on close, but Tab can reach the page behind it.
+- 原图预览只适配视口，不提供缩放或下载。
+- 预览恢复关闭前的焦点，但尚未限制 Tab 焦点只能在弹层内移动。
+- 文件类型、数量和大小遵循 Host 上传配置；本包不提供任意格式的浏览器预览。

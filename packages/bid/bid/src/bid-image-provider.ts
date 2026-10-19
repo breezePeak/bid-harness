@@ -276,8 +276,6 @@ export function createBidImageProvider(ctx: Context, source?: () => BidImageGene
       if (spec === undefined) throw new BidImageError('BID_IMAGE_DISABLED', '请先选择并保存作图模型。')
       using operation = deadline(signal, spec.timeoutMs, 'BID_IMAGE_TIMEOUT')
       checkAbort(operation.signal)
-      await request.beforeRequest?.(spec)
-      checkAbort(operation.signal)
       const key = await apiKey(spec, operation.signal)
       let body: string | FormData
       let path: string
@@ -300,6 +298,8 @@ export function createBidImageProvider(ctx: Context, source?: () => BidImageGene
         path = 'edits'
       }
       const responseLimit = 4 * Math.ceil(spec.maxImageBytes / 3) + 1024 * 1024
+      await request.beforeRequest?.(spec)
+      checkAbort(operation.signal)
       const reply = await requestJson(`${spec.baseURL}/images/${path}`, { method: 'POST', headers, body }, responseLimit, operation.signal)
       const parsed = imageReplySchema.safeParse(reply)
       if (!parsed.success) throw new BidImageError('BID_IMAGE_INVALID_RESPONSE', '作图接口必须返回单张内嵌图片，不能仅返回 URL。')

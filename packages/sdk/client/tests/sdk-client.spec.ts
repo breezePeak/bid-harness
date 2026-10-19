@@ -531,7 +531,7 @@ it('保留 Bid 内部失败、原 Run 通知及 Main Agent 恢复指令，不产
   const result = await harness.run('核对恢复记录')
   expect(result.events.some(event => event.type === 'bid.run.suspended')).toBe(false)
   expect(result.events.find(event => event.type === 'bid.task.changed')?.data).toEqual({
-    state: { stage: 'chapter_writing', status: 'failed', run: null,
+    state: { workflow: { kind: 'full_bid', stage: 'chapter_writing' }, status: 'failed', run: null,
       failure: { code: 'BID_TASK_RESULT_UNMET', message: '当前章节尚需修复。' } },
   })
   expect(result.events.find(event => event.type === 'bid.run.notice')?.data).toMatchObject({
@@ -539,7 +539,10 @@ it('保留 Bid 内部失败、原 Run 通知及 Main Agent 恢复指令，不产
   })
   expect(result.events.find(event => event.type === 'bid.recovery.requested')?.data).toEqual({
     ownerSessionId: result.sessionId, target: { kind: 'run', workId: 'work-1', runId: 'run-1' },
-    unit: 'outline/outline.json', instruction: '核对原文并修正当前章节。', progressFingerprint: 'a'.repeat(64),
+    unit: 'outline/outline.json', instruction: '核对原文并修正当前章节。', progressFingerprint: 'a'.repeat(64), sourceMessageId: 'answer-1',
+  })
+  expect(result.events.find(event => event.type === 'bid.user_input.recorded')?.data).toEqual({
+    messageId: 'answer-1', questionKey: 'question-1', work: { workId: 'work-1', requestSha256: 'b'.repeat(64) },
   })
   expect(result.events.find(event => event.type === 'bid.recovery.round')?.data).toEqual({
     ownerSessionId: result.sessionId, target: { kind: 'run', workId: 'work-1', runId: 'run-1' },

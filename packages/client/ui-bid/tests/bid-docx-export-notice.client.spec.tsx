@@ -2,7 +2,6 @@
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import type { ConversationMatch, ConversationNodeContext } from '@deepseek-ai/dsh-client-runtime/client'
 import type { SessionEvent } from '@deepseek-ai/dsh-session/types'
-import type {} from '@deepseek-ai/dsh-bid'
 import type { DocxExportOperation } from '@deepseek-ai/dsh-bid/control-plane'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { BidDocxExportNotice } from '../src/client/BidDocxExportNotice.tsx'

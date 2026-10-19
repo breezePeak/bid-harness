@@ -38,6 +38,7 @@ export type {
   BidChapterWritingGateResult,
   BidClientProjection,
   BidCapabilityPlanView,
+  BidTaskDeliverablesView,
   BidComposerCapability,
   BidComposerReason,
   BidDocumentRole,
@@ -88,7 +89,7 @@ export { applyOutlineEdits, buildOutlineView } from './outline-confirmation-brow
 export type { OutlineEditOperation, OutlineViewSection } from './outline-confirmation-browser.ts'
 export type { OutlineArtifact, OutlineSection } from './outline-generation-artifacts.ts'
 export type { OutlineDraftView, OutlineReviewContext } from './outline-confirmation-artifacts.ts'
-export type { OutlineDraftMutationRequest, OutlineDraftIdentityRequest, OutlineDraftMutationResult } from './outline-draft-store.ts'
+export type { OutlineDraftMutationRequest, OutlineDraftIdentityRequest, OutlineDraftMutationResult } from './outline-confirmation-browser.ts'
 export { OUTLINE_CONFIRMATION_ISSUES } from './outline-confirmation-issues.ts'
 export type { OutlineConfirmationIssueCode, OutlineConfirmationRepairAction } from './outline-confirmation-issues.ts'
 export { applyTenderAnalysisEdits } from './tender-analysis-confirmation.ts'

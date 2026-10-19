@@ -24,8 +24,9 @@ export function bidRecoverableRun(session: Session, task: BidTaskState):
   const started = notice?.type === 'bid.run.notice' ? session.events.findLast(event => event.type === 'bid.run.started'
     && event.data.run.runId === notice.data.runId) : undefined
   if (started?.type !== 'bid.run.started' || notice?.type !== 'bid.run.notice'
-    || started.data.run.work.stage !== task.stage
-    || notice.data.noticeId !== `run:${started.data.run.runId}:failed` || notice.data.stage !== task.stage) return
+    || started.data.run.work.kind !== 'capability_task' && started.data.run.work.stage !== task.workflow?.stage
+    || notice.data.noticeId !== `run:${started.data.run.runId}:failed`
+    || notice.data.stage !== (started.data.run.work.kind === 'capability_task' ? null : started.data.run.work.stage)) return
   return { ...started.data.run, cause: 'executor_error', error: task.failure }
 }
 
@@ -37,8 +38,7 @@ export function bidRecoverableRun(session: Session, task: BidTaskState):
  */
 export function bidCompletedCapabilityRun(session: Session, task: BidTaskState): BidRunData | undefined {
   if (task.status !== 'ready' && task.status !== 'waiting_user' && task.status !== 'completed') return
-  const started = session.events.findLast(event => event.type === 'bid.run.started'
-    && event.data.run.work.kind === 'capability_task')
+  const started = session.events.findLast(event => event.type === 'bid.run.started' && event.data.run.work.kind === 'capability_task')
   const notice = started?.type === 'bid.run.started' ? session.events.findLast(event => event.type === 'bid.run.notice'
     && event.data.runId === started.data.run.runId) : undefined
   const completed = started?.type === 'bid.run.started' ? session.events.findLast(event => event.type === 'bid.run.completed'
@@ -46,7 +46,8 @@ export function bidCompletedCapabilityRun(session: Session, task: BidTaskState):
   if (started?.type !== 'bid.run.started' || notice?.type !== 'bid.run.notice'
     || completed?.type !== 'bid.run.completed' || completed.data.run.runId !== started.data.run.runId
     || completed.data.run.work.workId !== started.data.run.work.workId
-    || started.data.run.work.kind !== 'capability_task' || started.data.run.work.stage !== task.stage
+    || started.data.run.work.kind !== 'capability_task'
+    || notice.data.stage !== null
     || notice.data.kind !== 'completed' || notice.data.runId !== started.data.run.runId
     || notice.data.workId !== started.data.run.work.workId) return
   return started.data.run
@@ -66,8 +67,8 @@ export function bidCapabilityTakeoverRun(session: Session, task: BidTaskState): 
   const started = session.events.findLast(event => event.type === 'bid.run.started')
   const notice = session.events.findLast(event => event.type === 'bid.run.notice')
   if (started?.type !== 'bid.run.started' || notice?.type !== 'bid.run.notice'
-    || started.data.run.work.kind !== 'capability_task' || started.data.run.work.stage !== task.stage
-    || notice.data.noticeId !== `run:${started.data.run.runId}:failed` || notice.data.stage !== task.stage) return
+    || started.data.run.work.kind !== 'capability_task'
+    || notice.data.noticeId !== `run:${started.data.run.runId}:failed` || notice.data.stage !== null) return
   return started.data.run
 }
 
@@ -78,7 +79,7 @@ export function bidCapabilityTakeoverRun(session: Session, task: BidTaskState): 
  * @returns 与当前可修复或可重试故障对应的阶段 Run；其他阻断不授予接管。
  */
 export function bidEvidenceMappingTakeoverRun(session: Session, task: BidTaskState): BidRunData | undefined {
-  if (task.status !== 'failed' || task.stage !== 'evidence_mapping') return
+  if (task.status !== 'failed' || task.workflow?.stage !== 'evidence_mapping') return
   const run = bidRecoverableRun(session, task)
   if (run?.work.kind !== 'stage_execution') return
   const recovery = classifyBidRecovery(run.work, task.failure)
@@ -94,7 +95,7 @@ const STAGES = new Set(['tender_analysis', 'outline_generation', 'evidence_mappi
  * @returns 可修复或可重试的原 Run；输入、权限及外部阻断不授予继续。
  */
 export function bidUserContinuableRun(session: Session, task: BidTaskState): ReturnType<typeof bidRecoverableRun> {
-  if (task.status !== 'failed' || !STAGES.has(task.stage)) return
+  if (task.status !== 'failed') return
   const run = bidRecoverableRun(session, task)
   if (run?.error?.recovery === undefined || run.work.kind === 'file_intake') return
   const recovery = classifyBidRecovery(run.work, run.error)
@@ -145,8 +146,7 @@ export function classifyBidRecovery(
   work: BidWorkDescriptor,
   failure: BidTaskFailure,
 ): Recovery | undefined {
-  const taskProblem = work.kind === 'capability_task' && ['BID_TASK_PLAN_MISMATCH', 'BID_TASK_RESULT_UNMET'].includes(failure.code ?? '')
-  if ((!STAGES.has(work.stage) && !taskProblem) || work.kind === 'file_intake') return undefined
+  if (work.kind !== 'capability_task' && (!STAGES.has(work.stage) || work.kind === 'file_intake')) return undefined
   if (['BID_TASK_SCOPE_AUTHORIZATION_REQUIRED', 'BID_TASK_SOURCE_ISSUE_CHANGED'].includes(failure.code ?? '')) {
     return { kind: 'blocked', unit: work.workId, reason: failure.message }
   }
@@ -212,9 +212,9 @@ function recordedProblemFingerprint(session: Session, target: { kind: 'run'; run
   const started = session.events.findLast(event => event.seq < seq && event.type === 'bid.run.started'
     && event.data.run.runId === target.runId && event.data.run.work.workId === target.workId)
   if (started?.type !== 'bid.run.started') return fallback
-  const failed = session.events.findLast(event => event.seq > started.seq && event.seq < seq
-    && (event.type === 'bid.task.changed' && event.data.state.stage === started.data.run.work.stage
-      && event.data.state.status === 'failed'
+  const next = session.events.find(event => event.seq > started.seq && event.type === 'bid.run.started')
+  const failed = session.events.findLast(event => event.seq > started.seq && event.seq < seq && (next === undefined || event.seq < next.seq)
+    && (event.type === 'bid.task.changed' && event.data.state.status === 'failed'
       || event.type === 'bid.run.suspended' && event.data.run.runId === target.runId))
   const failure = failed?.type === 'bid.task.changed' && failed.data.state.status === 'failed'
     ? failed.data.state.failure : failed?.type === 'bid.run.suspended' ? failed.data.run.error : undefined
@@ -240,9 +240,7 @@ export function bidRunRecoveryEligibility(session: Session, budget?: number): {
 } {
   const task = session.events.reduce(reduceBidTaskState, BID_INITIAL_TASK_STATE)
   const run = bidRecoverableRun(session, task)
-  const taskProblem = run?.work.kind === 'capability_task'
-    && ['BID_TASK_PLAN_MISMATCH', 'BID_TASK_RESULT_UNMET'].includes(run.error?.code ?? '')
-  if (run === undefined || !STAGES.has(task.stage) && !taskProblem || run.work.kind === 'file_intake') {
+  if (run === undefined || run.work.kind !== 'capability_task' && (!STAGES.has(run.work.stage) || run.work.kind === 'file_intake')) {
     return { eligible: false, reason: '当前没有可修复的原 Run。', attempts: 0, sameProblemCount: 0, previousInstructions: [], requiresStrategyChange: false }
   }
   const history = session.events.flatMap(event => event.type === 'bid.recovery.requested'
@@ -303,7 +301,7 @@ export function renderBidRecoveryContext(recovery: ModelStageExecutionOptions['r
     `失败单元：${sanitizeBidErrorText(recovery.unit)}`,
     ...recovery.issues.slice(0, 5).map(issue => `原问题：${sanitizeBidErrorText(issue.code)}${issue.path === undefined && issue.artifact === undefined
       ? '' : ` ${sanitizeBidErrorText(issue.path ?? issue.artifact ?? '')}`} ${sanitizeBidErrorText(issue.message)}`),
-    `改进处理办法：${sanitizeBidErrorText(recovery.instruction, 16000)}`,
+    `改进处理办法：${recovery.modelContext?.text ?? sanitizeBidErrorText(recovery.instruction, 16000)}`,
     '继续使用原提交工具和原校验规则；不得改上游事实或代替用户确认。',
   ].join('\n')
 }

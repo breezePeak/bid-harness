@@ -10,25 +10,26 @@ import { CallId, type GenerateOptions } from '@deepseek-ai/dsh-llm'
  * @returns 先完整读取证据，再提交不包含身份或摘要的可控工具调用。
  */
 export function scriptedVerificationCall(input: {
+  phase?: 'plan' | 'result'
   requirements?: readonly object[]
   sources: readonly { selected: boolean; text?: string; context_messages?: readonly string[] }[]
   task: { steps: readonly { call: { capability: string } }[] }
   evidence: readonly { evidence_position: number; total_characters: number }[]
 }, messages: GenerateOptions['messages']): { name: string; args: object } {
   const file = input.evidence[0]
-  if (file === undefined) throw new Error('执行器核验回放缺少证据文件')
+  if (file === undefined && input.phase !== 'plan') throw new Error('执行器核验回放缺少证据文件')
   const reads = messages.flatMap(message => message.content).filter(block => block.type === 'tool-result')
     .filter(block => block.toolCallId === CallId('verification')).flatMap(block => block.content)
     .filter(block => block.type === 'text').map(block => JSON.parse(block.text) as {
       evidence_position?: number
       end?: number
       next_start?: number | null
-    }).filter(read => read.evidence_position === file.evidence_position)
+    }).filter(read => read.evidence_position === file?.evidence_position)
   const previous = reads.at(-1)
-  if (previous?.end !== file.total_characters) return { name: 'read_task_evidence', args: {
+  if (file !== undefined && previous?.end !== file.total_characters) return { name: 'read_task_evidence', args: {
     evidence_position: file.evidence_position, start: previous?.next_start ?? 0, length: 12_000,
   } }
-  const check = { met: true, reason: '测试指定的执行器校验已通过', evidence_positions: [file.evidence_position] }
+  const check = { met: true, reason: '测试指定的执行器校验已通过', evidence_positions: file === undefined ? [] : [file.evidence_position] }
   if (input.requirements !== undefined) return { name: 'structured_output', args: { checks: input.requirements.map(() => check) } }
   const requirement = { source_quote: input.sources[0]?.context_messages?.[0] ?? input.sources[0]?.text ?? '执行器测试指定的业务产物', object: 'review',
     new_children: false, completed_content: false, repair: false, preserve_migrated_content: false, check }
@@ -44,11 +45,14 @@ export function scriptedVerificationCall(input: {
 /** 可控验收只验证既有执行器，任务规划反例单独提供错误或结构结论。 */
 export const executorTestVerifier: BidTaskVerifier = async (input) => {
   const requirements = input.requirements ?? [...[input.source.message.message_id,
+    ...input.source.amendments?.map(message => message.message_id) ?? [],
     ...input.source.issues.map(issue => issue.issue_id)].map(source_id => ({
     source_id, source_quote: source_id === input.source.message.message_id ? input.source.message.text
-      : input.source.issues.find(issue => issue.issue_id === source_id)!.instruction,
+      : input.source.amendments?.find(message => message.message_id === source_id)?.text
+        ?? input.source.issues.find(issue => issue.issue_id === source_id)!.instruction,
     description: source_id === input.source.message.message_id ? input.source.message.text
-      : input.source.issues.find(issue => issue.issue_id === source_id)!.instruction, object: 'review' as const,
+      : input.source.amendments?.find(message => message.message_id === source_id)?.text
+        ?? input.source.issues.find(issue => issue.issue_id === source_id)!.instruction, object: 'review' as const,
     section_ids: [], new_children: false, completed_content: false, repair: false, preserve_migrated_content: false,
   })), ...input.task.steps.some(step => step.call.capability === 'docx.export') ? [{
     source_id: input.source.message.message_id, source_quote: input.source.message.text,

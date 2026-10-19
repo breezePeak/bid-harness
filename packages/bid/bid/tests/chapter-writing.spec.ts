@@ -377,40 +377,20 @@ function emptyHandoff(section_id: string) {
 const fetchedAt = '2026-09-01T00:00:00.000Z'
 const fetchedUrl = 'https://official.example/standard'
 
-const chunkIndex = {
-  schema_version: 1,
-  source_document: 'document.md',
-  chunk_count: 1,
-  chunk_config: { minChars: 1, targetChars: 2, maxChars: 3 },
-  chunks: [{
-    id: 'chunk_0001', path: 'chunk_0001.md', order: 1, heading_path: ['章节'],
-    page_start: null, page_end: null, source_line_start: 1, source_line_end: 1,
-    char_count: 2, prev_chunk: null, next_chunk: null, oversized: false,
-  }],
-}
-
-function manifestFile(id: string, role: 'tender' | 'outline_framework' | 'reference' | 'reference_bid') {
-  const root = `corpus/${role}`
-  return {
-    id, role, originalName: `${role}.md`, inputPath: `input/${role}.md`, corpusPath: root,
-    documentPath: `${root}/document.md`, structurePath: `${root}/structure.json`, metadataPath: `${root}/metadata.json`,
-    chunksPath: `${root}/chunks`, chunkIndexPath: `${root}/chunks/index.json`, mediaType: 'text/markdown',
-    size: 1, sha256: id, parseStatus: 'success', parseError: null,
-  }
+const readableInputs = (['tender', 'outline_framework', 'reference', 'reference_bid'] as const).map(role => ({
+  name: role + '.md', role, bytes: Buffer.from('# 章节\n\n' + role + ' 正文\n'),
+}))
+const readableOwner = { id: SessionId('chapter-readable-materials') }
+const readableFiles = await new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-readable-fixture-')))
+  .import(readableInputs, undefined, readableOwner)
+const materialFile = (role: string) => {
+  const file = readableFiles.find(file => file.role === role)
+  if (file === undefined || file.corpusPath === null) throw new Error('测试材料尚未解析')
+  return { ...file, corpusPath: file.corpusPath }
 }
 
 async function seedReadableMaterials(workspace: BidWorkspace): Promise<void> {
-  await mkdir(workspace.projectRoot, { recursive: true })
-  const files = [
-    manifestFile('TENDER', 'tender'), manifestFile('FRAMEWORK', 'outline_framework'),
-    manifestFile('REFERENCE', 'reference'), manifestFile('REFERENCE-BID', 'reference_bid'),
-  ]
-  await writeFile(workspace.manifestPath, `${JSON.stringify({ version: 4, files })}\n`)
-  for (const file of files) {
-    await mkdir(join(workspace.projectRoot, file.chunksPath), { recursive: true })
-    await writeFile(join(workspace.projectRoot, file.chunkIndexPath), `${JSON.stringify(chunkIndex)}\n`)
-    await writeFile(join(workspace.projectRoot, file.chunksPath, 'chunk_0001.md'), `${file.role} 正文\n`)
-  }
+  await workspace.import(readableInputs, undefined, readableOwner)
   const snapshot = '公开技术资料\n'
   const sourceId = 'WEB-aaaaaaaaaaaaaaaa'
   await mkdir(join(workspace.projectRoot, 'analysis/web-sources'), { recursive: true })
@@ -627,6 +607,7 @@ function fixtureAgent(
       return () => registry.delete(definition.name)
     } }
     const child = { id, options: { provider: 'test', model: 'vision' }, whenIdle: async () => {}, session: { id, header: { cwd: workspace.root, parentSession: 'parent', origin: 'subagent' }, events: [], requestHeader: () => undefined }, ctx: {
+      effect: (setup: () => () => void) => setup(),
       tools: childTools, get: (name: string) => name === 'tools' ? childTools
         : name === 'attachments' ? attachments : name === 'llm' ? llm : undefined,
       on: (name: string, listener: (...args: unknown[]) => void) => { events.set(name, listener); return () => events.delete(name) },
@@ -1761,7 +1742,7 @@ describe('chapter-writing executor', () => {
     expect(await readFile(ledgerPath, 'utf8')).toBe(ledgerText)
     const publishedEvidence = parseEvidenceMapArtifact(JSON.parse(await readFile(evidencePath, 'utf8')))
     expect(publishedEvidence.section_mappings.every(mapping => mapping.local_materials.some(material =>
-      material.file_id === 'REFERENCE'))).toBe(true)
+      material.file_id === materialFile('reference').id))).toBe(true)
     expect(publishedEvidence.section_mappings[1]?.web_materials).toEqual(
       parseEvidenceMapArtifact(JSON.parse(evidenceText)).section_mappings[1]?.web_materials)
   })
@@ -2187,7 +2168,7 @@ describe('chapter-writing executor', () => {
     expect(validateMaterial({ file_position: 0, chunk_position: 0, usage: 'reference', summary: '资料依据' })).toEqual([])
     expect(validateMaterial({ material_position: 0, usage: 'reference', summary: '资料依据' })).toEqual([])
     expect(validateMaterial({ material_ref: 'M1', file_ref: 'F1', chunk: 'chunk_0001', usage: 'reference', summary: '资料依据' })).not.toEqual([])
-    expect(validateMaterial({ source_kind: 'reference', file_id: 'REFERENCE', chunk: 'chunk_0001', usage: 'reference', summary: '资料依据' })).not.toEqual([])
+    expect(validateMaterial({ source_kind: 'reference', file_id: materialFile('reference').id, chunk: 'chunk_0001', usage: 'reference', summary: '资料依据' })).not.toEqual([])
     expect(validateJsonSchemaValue(schema, { ...candidate, metadata: { flowcharts: [{ title: '流程', key: 'model-id', nodes: [], edges: [] }] } })).not.toEqual([])
     expect(validateJsonSchemaValue(schema, { ...candidate, section_id: 'SEC-1' })).not.toEqual([])
     const reviewRequest = fixture.subagents.start.mock.calls.find(([, request]) => request.toolFilter?.allow?.length === 0)![1]
@@ -2330,8 +2311,8 @@ describe('chapter-writing executor', () => {
           section_id: 'SEC-1',
 
           local_materials: [
-            { source_kind: 'reference', file_id: 'REFERENCE', chunk: 'chunk_0001', usage: 'reference', summary: '项目资料' },
-            { source_kind: 'reference_bid', file_id: 'REFERENCE-BID', chunk: 'chunk_0001', usage: 'adapt', summary: '旧标书方案' },
+            { source_kind: 'reference', file_id: materialFile('reference').id, chunk: 'chunk_0001', usage: 'reference', summary: '项目资料' },
+            { source_kind: 'reference_bid', file_id: materialFile('reference_bid').id, chunk: 'chunk_0001', usage: 'adapt', summary: '旧标书方案' },
           ],
           web_materials: [{ source_id: 'WEB-aaaaaaaaaaaaaaaa', snapshot_path: 'analysis/web-sources/WEB-aaaaaaaaaaaaaaaa.md', chunk_refs: ['W:WEB-aaaaaaaaaaaaaaaa:C0001'], usage: 'reference', summary: '公开资料', supports: '评分响应' }],
           missing_topics: [], writing_dimensions: ['需求维度', '评分维度'],
@@ -2342,8 +2323,8 @@ describe('chapter-writing executor', () => {
       writingPlan: writingPlanFixture(outlineFixture()),
     })
 
-    expect(context.relatedMaterials.map(material => material.file_id)).toEqual(['REFERENCE'])
-    expect(context.referenceBidMaterials.map(material => material.file_id)).toEqual(['REFERENCE-BID'])
+    expect(context.relatedMaterials.map(material => material.file_id)).toEqual([materialFile('reference').id])
+    expect(context.referenceBidMaterials.map(material => material.file_id)).toEqual([materialFile('reference_bid').id])
     expect(context.webMaterials.map(material => material.source_id)).toEqual(['WEB-aaaaaaaaaaaaaaaa'])
     expect(context.writingDimensions).toEqual(['需求维度', '评分维度'])
     expect(context.compliance).toEqual([])
@@ -2443,8 +2424,8 @@ describe('chapter-writing executor', () => {
       section_mappings: Array<{ local_materials: unknown[]; web_materials: unknown[] }>
     }
     evidence.section_mappings[0]!.local_materials = [
-      { source_kind: 'reference', file_id: 'REFERENCE', chunk: 'chunk_0001', usage: 'reference', summary: '项目资料' },
-      { source_kind: 'reference_bid', file_id: 'REFERENCE-BID', chunk: 'chunk_0001', usage: 'adapt', summary: '旧标书方案' },
+      { source_kind: 'reference', file_id: materialFile('reference').id, chunk: 'chunk_0001', usage: 'reference', summary: '项目资料' },
+      { source_kind: 'reference_bid', file_id: materialFile('reference_bid').id, chunk: 'chunk_0001', usage: 'adapt', summary: '旧标书方案' },
     ]
     evidence.section_mappings[0]!.web_materials = [{
       source_id: 'WEB-aaaaaaaaaaaaaaaa', snapshot_path: 'analysis/web-sources/WEB-aaaaaaaaaaaaaaaa.md',
@@ -2462,9 +2443,9 @@ describe('chapter-writing executor', () => {
     const firstWriter = fixture.starts.find(call => promptText(call.request).split('\n').some(line => line.startsWith('Current Chapter Blueprint：') && line.includes('"id":"SEC-1"')))
     expect(firstWriter).toBeDefined()
     const prompt = promptText(firstWriter!.request)
-    expect(prompt).toContain('corpus/reference/chunks/chunk_0001.md')
+    expect(prompt).toContain(materialFile('reference').corpusPath + '/chunks/chunk_0001.md')
     expect(prompt).toContain('"chunk_position":0')
-    expect(prompt).toContain('corpus/reference_bid/chunks/chunk_0001.md')
+    expect(prompt).toContain(materialFile('reference_bid').corpusPath + '/chunks/chunk_0001.md')
     expect(prompt).toContain('analysis/web-sources/WEB-aaaaaaaaaaaaaaaa.md')
 
     const guard = fixture.guards[0]
@@ -2475,19 +2456,19 @@ describe('chapter-writing executor', () => {
       agent: { session: { id: firstWriter!.run.localAgent!.id, header: { cwd: workspace.root, parentSession: 'parent', origin: 'subagent' } } },
     } as unknown as ToolExecution)
     const sessionPath = (path: string): string => join(workspace.projectRoot, ...path.split('/'))
-    expect(guarded('read', 'file_path', sessionPath('corpus/reference/chunks/chunk_0001.md'))).toBeUndefined()
-    expect(guarded('grep', 'path', sessionPath('corpus/reference/chunks'))).toBeUndefined()
-    expect(guarded('grep', 'path', sessionPath('corpus/reference/chunks/index.json'))).toBeUndefined()
-    expect(guarded('read', 'file_path', sessionPath('corpus/reference_bid/chunks/chunk_0001.md'))).toBeUndefined()
-    expect(guarded('grep', 'path', sessionPath('corpus/reference_bid/chunks/index.json'))).toBeUndefined()
+    expect(guarded('read', 'file_path', sessionPath(materialFile('reference').corpusPath + '/chunks/chunk_0001.md'))).toBeUndefined()
+    expect(guarded('grep', 'path', sessionPath(materialFile('reference').corpusPath + '/chunks'))).toBeUndefined()
+    expect(guarded('grep', 'path', sessionPath(materialFile('reference').corpusPath + '/chunks/index.json'))).toBeUndefined()
+    expect(guarded('read', 'file_path', sessionPath(materialFile('reference_bid').corpusPath + '/chunks/chunk_0001.md'))).toBeUndefined()
+    expect(guarded('grep', 'path', sessionPath(materialFile('reference_bid').corpusPath + '/chunks/index.json'))).toBeUndefined()
     expect(guarded('read', 'file_path', sessionPath('analysis/web-sources/WEB-aaaaaaaaaaaaaaaa.md'), { offset: 1, limit: 1 })).toBeUndefined()
     expect(guarded('read', 'file_path', sessionPath('analysis/web-sources/WEB-aaaaaaaaaaaaaaaa.md'))).toContain('offset')
     expect(guarded('grep', 'path', sessionPath('analysis/web-sources/WEB-aaaaaaaaaaaaaaaa.md'))).toContain('Chunk')
-    expect(guarded('read', 'file_path', sessionPath('corpus/tender/chunks/chunk_0001.md'))).toContain('不可读取')
-    expect(guarded('read', 'file_path', sessionPath('corpus/outline_framework/chunks/chunk_0001.md'))).toBeUndefined()
-    expect(guarded('grep', 'path', sessionPath('corpus/outline_framework/chunks'))).toBeUndefined()
-    expect(guarded('read', 'file_path', sessionPath('corpus/reference/chunks'))).toContain('不可读取')
-    expect(guarded('grep', 'path', sessionPath('corpus/tender/chunks'))).toContain('不可读取')
+    expect(guarded('read', 'file_path', sessionPath(materialFile('tender').corpusPath + '/chunks/chunk_0001.md'))).toContain('不可读取')
+    expect(guarded('read', 'file_path', sessionPath(materialFile('outline_framework').corpusPath + '/chunks/chunk_0001.md'))).toBeUndefined()
+    expect(guarded('grep', 'path', sessionPath(materialFile('outline_framework').corpusPath + '/chunks'))).toBeUndefined()
+    expect(guarded('read', 'file_path', sessionPath(materialFile('reference').corpusPath + '/chunks'))).toContain('不可读取')
+    expect(guarded('grep', 'path', sessionPath(materialFile('tender').corpusPath + '/chunks'))).toContain('不可读取')
     expect(guarded('grep', 'path', sessionPath('corpus'))).toContain('只可检索')
     expect(guarded('read', 'file_path', sessionPath('analysis/web-sources/WEB-bbbbbbbbbbbbbbbb.md'))).toContain('当前章节')
   })
@@ -2522,7 +2503,8 @@ describe('chapter-writing executor', () => {
       } as unknown as ToolExecution)
       const chunkPath = file.chunks[0]!.read_path
       expect(allowed('read', chunkPath)).toBeUndefined()
-      const text = (await readFile(chunkPath, 'utf8')).trim()
+      const text = (await readFile(chunkPath, 'utf8')).split('\n')
+        .filter(line => !line.startsWith('<!--') && !line.startsWith('#')).join(' ').trim()
       return { stopReason: 'completed', output: [], structured: {
         ...candidate, markdown: `结合 ${text}，说明本项目实施流程与质量控制要求。`,
         metadata: { ...candidate.metadata, local_materials_used: [{
@@ -2534,7 +2516,7 @@ describe('chapter-writing executor', () => {
     const artifacts = await executeChapterWriting(fixture.agent, workspace, buildBidStageTask('chapter_writing'), { maxRepairAttempts: 0, maxConcurrency: 1 })
 
     const metadata = parseChapterMetadata(JSON.parse(await readFile(join(workspace.projectRoot, 'chapters/meta/0001.json'), 'utf8')))
-    expect(metadata.local_materials_used).toEqual([{ file_id: 'REFERENCE', source_kind: 'reference', chunk: 'chunk_0001', usage: 'reference', summary: '支撑本章实施流程与质量控制要求。' }])
+    expect(metadata.local_materials_used).toEqual([{ file_id: materialFile('reference').id, source_kind: 'reference', chunk: 'chunk_0001', usage: 'reference', summary: '支撑本章实施流程与质量控制要求。' }])
     expect(await readFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), 'utf8')).toContain('reference 正文')
     const published = parseEvidenceMapArtifact(JSON.parse(await readFile(evidencePath, 'utf8')))
     expect(published.section_mappings[0]?.local_materials).toEqual(metadata.local_materials_used)
@@ -2642,12 +2624,12 @@ describe('chapter-writing executor', () => {
     await seedReadableMaterials(workspace)
 
     const materials = await resolveFrameworkDraftMaterials(workspace, [{
-      file_id: 'FRAMEWORK',
+      file_id: materialFile('outline_framework').id,
       heading_path: ['章节'],
     }])
 
     expect(materials).toHaveLength(1)
-    expect(materials[0]).toMatchObject({ file_id: 'FRAMEWORK', chunk: 'chunk_0001', heading_path: ['章节'] })
+    expect(materials[0]).toMatchObject({ file_id: materialFile('outline_framework').id, chunk: 'chunk_0001', heading_path: ['章节'] })
     await expect(readFile(materials[0]!.chunk_path, 'utf8')).resolves.toContain('outline_framework 正文')
   })
 
@@ -2701,7 +2683,7 @@ describe('chapter-writing executor', () => {
     expect(planningPrompt).toContain('Relation Planning')
     expect(planningPrompt).not.toContain('source_refs')
     expect(planningPrompt).not.toContain('analyzed_tender_files')
-    expect(planningPrompt).not.toContain('corpus/tender')
+    expect(planningPrompt).not.toContain(materialFile('tender').corpusPath)
     expect(fixture.starts.map(item => promptText(item.request))).toEqual([
       expect.stringContaining('"id":"SEC-1"'),
       expect.stringContaining('"id":"SEC-2"'),
@@ -2711,7 +2693,7 @@ describe('chapter-writing executor', () => {
     for (const prompt of fixture.starts.map(item => promptText(item.request))) {
       expect(prompt).not.toContain('source_refs')
       expect(prompt).not.toContain('analyzed_tender_files')
-      expect(prompt).not.toContain('corpus/tender')
+      expect(prompt).not.toContain(materialFile('tender').corpusPath)
       expect(prompt).toContain('Mapped Materials：')
       expect(prompt).toContain('Available Evidence Files：')
       expect(prompt).toContain('Verified Web Chunks：')

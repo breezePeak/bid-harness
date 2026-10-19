@@ -338,9 +338,8 @@ it('新会话可通过模型对象表选择历史 completed 意见，新授权�
     expect(task.steps[0]!.call.input).toMatchObject({ reference: { content_sha256: chapterContentSha256(latest) } })
     const { persistCapabilityTaskRequest } = await import('../src/bid-capability-task.ts')
     const { readBidWorkRequest } = await import('../src/work-descriptor.ts')
-    const work = await persistCapabilityTaskRequest(workspace, session, 'chapter_writing', task,
-      { session_id: String(session.id), message_id: String(message.id) }, [],
-      { stage: 'chapter_writing', status: 'completed', run: null })
+    const work = await persistCapabilityTaskRequest(workspace, session, task,
+      { session_id: String(session.id), message_id: String(message.id) }, [])
     expect(await readBidWorkRequest(workspace, work)).toMatchObject({ source_snapshot: {
       message: { message_id: String(message.id) }, issues: [previous], observed_issues: [],
     }, task: { steps: [{ call: { input: { reference: { content_sha256: chapterContentSha256(latest) } } } }] } })

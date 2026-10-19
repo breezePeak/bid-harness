@@ -10,6 +10,8 @@ The Bid panel could select files, but S1 had no production route from browser by
 
 ## Decision
 
+[任务入口与统一附件](../architecture/2026-10-19-bid-task-entry-and-native-document-assets.md)部分替代本记录：普通附件只接入原件，显式启动完整路线后的 S1 才解析专业资料并推进阶段。Host 校验身份、限额和统一状态的依据保留；传输采用现有二进制入口。
+
 The Bid package exposes browser-safe upload request and result types and generates one Typert Remote, `bid/uploadFiles`. The Host resolves the live Session, requires its resolved preset to be `bid`, takes the workspace root only from `Session.header.cwd`, applies Host-configured file limits, and serializes intake with a per-Session lock. The MVP request carries one complete batch as canonical base64 JSON.
 
 After all bytes pass admission, the Host starts the current program-owned `file_intake` stage and delegates persistence, extraction, and chunking to `BidWorkspace.import()`. The file-intake validator reads the current `manifest.json`, matches each record from that exact batch, and checks the original file, parsed document, required extraction sidecars, chunk index, and every indexed chunk. The orchestrator records completion or failure, the Session projection derives client state, and terminal events are flushed before the Remote returns. Successful intake immediately hands the same Session to the implemented Tender Analysis stage, then the Host stops at `evidence_mapping/pending`; a failed intake retains its durable records and accepts a new upload attempt.

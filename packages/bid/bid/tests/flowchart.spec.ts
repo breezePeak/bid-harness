@@ -15,6 +15,33 @@ const draft: FlowchartDraft = {
   ],
 }
 
+it.each(['TB', 'LR'] as const)('双重判断的 %s 回边走独立外侧通道，不复用前向分支入口', (direction) => {
+  const [spec] = normalizeFlowchartInputs('SEC-MAINTENANCE', [{
+    title: '检查与复核', direction,
+    nodes: [
+      { key: 'check', type: 'decision', text: '是否发现异常？' },
+      { key: 'record', type: 'process', text: '记录结果' },
+      { key: 'review', type: 'process', text: '安排异常复核' },
+      { key: 'done', type: 'decision', text: '复核是否完成？' },
+      { key: 'save', type: 'end', text: '保存记录' },
+    ],
+    edges: [{ from: 'check', to: 'record', label: '否' }, { from: 'check', to: 'review', label: '是' },
+      { from: 'review', to: 'done' }, { from: 'done', to: 'review', label: '否，继续复核' },
+      { from: 'done', to: 'save', label: '是' }, { from: 'record', to: 'save' }],
+  }])
+  const layout = layoutFlowchart(spec!)
+  const routes = [...renderFlowchartSvg(spec!).svg.matchAll(/<polyline points="([^"]+)"/gu)]
+    .map(match => match[1]!.split(' ').map(point => point.split(',').map(Number)))
+  const first = layout.positions.get('N1')!
+  const origin = direction === 'TB' ? first.x + first.width / 2 - routes[0]![0]![0]!
+    : first.y + first.height / 2 - routes[0]![0]![1]!
+  const back = routes[3]!
+  expect(back).toHaveLength(4)
+  const outside = back[1]![direction === 'TB' ? 0 : 1]! + origin
+  expect(outside).toBeGreaterThan(direction === 'TB' ? layout.width : layout.height)
+  expect(back[2]![direction === 'TB' ? 0 : 1]! + origin).toBe(outside)
+})
+
 function expectNoOverlappingNodes(spec: FlowchartSpec): void {
   const layout = layoutFlowchart(spec)
   const boxes = [...layout.positions.entries()]
@@ -111,6 +138,24 @@ describe('flowchart contract', () => {
     expect(validateFlowchartAnchors(markdown, [spec!])).toEqual([])
     expect(resolveFlowchartAnchors(markdown, [spec!], new Map([['quality-control-flow', 3]]))).toContain('```flowchart')
     expect(() => resolveFlowchartAnchors('缺少 anchor', [spec!])).toThrow('FLOWCHART_ANCHOR_MISSING')
+  })
+
+  it.each(['TB', 'LR'] as const)('不等长分支汇合在所有前驱之后，%s 跳过处理步骤的连线不穿过节点', (direction) => {
+    const [spec] = normalizeFlowchartInputs('maintenance', [{ title: '维护闭环', direction,
+      nodes: [{ key: 'check', type: 'decision', text: '发现异常？' }, { key: 'review', type: 'process', text: '异常复核' },
+        { key: 'save', type: 'document', text: '保存记录' }],
+      edges: [{ from: 'check', to: 'review', label: '是' }, { from: 'check', to: 'save', label: '否' },
+        { from: 'review', to: 'save', label: '复核完成' }],
+    }])
+    const boxes = layoutFlowchart(spec!).positions
+    const review = boxes.get('N2')!, save = boxes.get('N3')!
+    expect(direction === 'TB' ? save.y > review.y + review.height : save.x > review.x + review.width).toBe(true)
+    const routes = [...renderFlowchartSvg(spec!).svg.matchAll(/<polyline points="([^"]+)"/gu)]
+      .map(match => match[1]!.split(' ').map(point => point.split(',').map(Number)))
+    const forward = routes[0]![0]!, bypass = routes[1]![0]!
+    expect(bypass[direction === 'TB' ? 0 : 1]).toBeLessThan(forward[direction === 'TB' ? 0 : 1]!)
+    expect(routes[1]).toHaveLength(5)
+    expect(routes[2]!.length).toBeLessThan(5)
   })
 
   it('按方向使用正确的同层轴，并为串行、分支和整改闭环避免节点重叠', () => {

@@ -121,7 +121,7 @@ describe('S4 新明确授权接管', () => {
       const operations = (ctx.bid as unknown as { inFlight: Map<string, { done: Promise<void> }> }).inFlight
       await Promise.all([...operations.values()].map(operation => operation.done))
       await agent.whenIdle()
-      expect(await readBidProjectState(workspace)).toMatchObject({ stage: 'evidence_mapping', status: 'waiting_user' })
+      expect(await readBidProjectState(workspace)).toMatchObject({ workflow: { kind: 'full_bid', stage: 'evidence_mapping' }, status: 'waiting_user' })
       const started = agent.session.events.filter(event => event.type === 'bid.run.started')
       expect(started).toHaveLength(cancel ? 3 : 2)
       const next = started.at(-1)?.data.run

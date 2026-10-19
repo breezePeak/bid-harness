@@ -35,7 +35,7 @@ let ctx: Context | undefined
 try {
   ctx = await boot('bid-execution-question-snapshot', configPath)
   const workspace = new BidWorkspace(process.cwd())
-  await checkpointBidProjectState(workspace, { stage: 'evidence_mapping', status: 'ready', run: null })
+  await checkpointBidProjectState(workspace, { workflow: { kind: 'full_bid', stage: 'evidence_mapping' }, status: 'ready', run: null })
   const mainId = SessionId('bid-execution-question-main')
   const adapter = new QuestionAdapter(mainId)
   ctx.llm.registerAdapter(['mock'], adapter)

@@ -9,6 +9,7 @@ import SandboxedFileSystem from '../../../fs/fs-sandbox/src/index.ts'
 import SandboxPolicyService from '../../../sandbox/sandbox-policy/src/index.ts'
 import { readDocumentOutlineHeadings } from '../src/outline-framework.ts'
 import { ensureTechnicalDeviationSection } from '../src/outline-generation-normalization.ts'
+import { readBidManifestBindings } from '../src/file-manifest.ts'
 import { mappingMaterialRef } from '../src/evidence-mapping-source-tools.ts'
 import { mappingModelArguments, mappingModelQuality } from './fixtures/mapping-model-positions.ts'
 import { chapterLocation } from '../src/chapter-storage.ts'
@@ -221,8 +222,10 @@ it.each(['wrong_file', 'wrong_chunk', 'wrong_corpus', 'wrong_metadata', 'line_ra
     const reference = manifest.files.find(file => file.id === material.fileId)!
     if (failure === 'wrong_chunk') project.source_refs[0]!.chunk = `${reference.chunksPath}/${material.chunk}.md`
     if (failure === 'wrong_corpus') {
-      manifest.files.find(file => file.id === material.tender.fileId)!.corpusPath = reference.corpusPath
-      await writeFile(workspace.manifestPath, JSON.stringify(manifest))
+      const bindings = await readBidManifestBindings(workspace)
+      bindings.files.find(file => String(file.ref.attachmentId) === material.tender.fileId)!.parse_key
+        = bindings.files.find(file => String(file.ref.attachmentId) === material.fileId)!.parse_key
+      await writeFile(workspace.manifestPath, JSON.stringify(bindings))
     }
     if (failure === 'line_range') project.source_refs[0]!.line_end = 1_000_000
     if (failure === 'wrong_metadata') await writeFile(join(workspace.projectRoot, material.tender.path), '<!-- chunk_id: chunk_9999 -->\n\n错误归属的原文。')
@@ -3365,9 +3368,9 @@ describe('evidence-mapping Agent executor', () => {
     const task = { goal: '离线研究当前目录', scope: { kind: 'sections' as const, section_ids: ['SEC-1'] },
       steps: [{ description: '离线研究当前章节', scope: { source: 'task' as const }, call: { capability: 'evidence.research' as const,
         input: { mode: 'supplement' as const, reason: '离线研究当前章节', allow_outline_refinement: false } } }] }
-    const work = await persistCapabilityTaskRequest(workspace, session, 'evidence_mapping', task,
+    const work = await persistCapabilityTaskRequest(workspace, session, task,
       { session_id: String(session.id), message_id: String(message.id) },
-      BID_CAPABILITIES['evidence.research'].requires, { stage: 'evidence_mapping', status: 'completed', run: null })
+      BID_CAPABILITIES['evidence.research'].requires)
     const fixture = mappingFixture(workspace, material)
     const dispatcher = createBidCapabilityDispatcher({ modelStageRepairAttempts: 0,
       evidenceMappingMaxConcurrency: 2, chapterWritingMaxConcurrency: 1, webSearchEnabled: false })
@@ -3465,7 +3468,7 @@ describe('evidence-mapping Agent executor', () => {
     }))
     const context: BidCapabilityExecutionContext = {
       canonical: workspace, working: workspace, agent: fixture.agent,
-      run: createTestBidRunContext({ work: { kind: 'capability_task', stage: 'evidence_mapping', workId: 'UNMET-WORK',
+      run: createTestBidRunContext({ work: { kind: 'capability_task', workId: 'UNMET-WORK',
         requestRef: 'requests/unmet.json', requestSha256: '0'.repeat(64), inputFingerprint: '0'.repeat(64) } }),
       sectionIds: null, stepDirectory: workspace.root,
       inputSources: new Map(), baselineHashes: new Map(), allowedWrites: allowedEvidenceCapabilityWrites(),
@@ -4302,7 +4305,7 @@ describe('evidence-mapping Agent executor', () => {
     quality.checked_scoring_ids.push('SC-006')
     quality.checked_scoring_response_point_ids.push('RP-000003')
     await writeFile(qualityPath, JSON.stringify(quality))
-    await checkpointBidProjectState(workspace, { stage: 'tender_analysis', status: 'ready', run: null })
+    await checkpointBidProjectState(workspace, { workflow: { kind: 'full_bid' as const, stage: 'tender_analysis' }, status: 'ready', run: null })
 
     const configPath = fileURLToPath(new URL('../../../../examples/headless-agent/bid-goal-recovery.cordis.snapshot.yml', import.meta.url))
     const ctx = await boot('bid-evidence-goal-restart', configPath)
@@ -4350,7 +4353,7 @@ describe('evidence-mapping Agent executor', () => {
       }
       const s2Payload = { stage: 'tender_analysis' }
       const s2Inputs = buildBidStageTask('tender_analysis').inputs.map(path => ({ path, sha256: null }))
-      const s2Work = await persistBidWorkRequest(workspace, 'stage_execution', 'tender_analysis', s2Payload,
+      const s2Work = await persistBidWorkRequest(workspace, { kind: 'stage_execution', stage: 'tender_analysis' }, s2Payload,
         { stage: 'tender_analysis', inputs: s2Inputs, payload: s2Payload })
       const s2 = host.beginOperation(agent.session)
       await host.prepareOperation(s2)
@@ -4362,12 +4365,12 @@ describe('evidence-mapping Agent executor', () => {
       const bound = agent.session.events.find(event => event.type === 'bid.goal.bound')
       expect(bound).toBeUndefined()
 
-      await checkpointBidProjectState(workspace, { stage: 'evidence_mapping', status: 'waiting_user', run: null })
+      await checkpointBidProjectState(workspace, { workflow: { kind: 'full_bid' as const, stage: 'evidence_mapping' }, status: 'waiting_user', run: null })
       emitAgentEvent(ctx, agent, 'agent/session-start', { source: 'resume' })
       await vi.waitFor(() => { expect(host.inFlight.size).toBe(0) })
       expect(ctx.goals.get(agent)).toBeUndefined()
-      expect(await readBidProjectState(workspace)).toMatchObject({ stage: 'evidence_mapping', status: 'waiting_user' })
-      await checkpointBidProjectState(workspace, { stage: 'evidence_mapping', status: 'ready', run: null })
+      expect(await readBidProjectState(workspace)).toMatchObject({ workflow: { kind: 'full_bid' as const, stage: 'evidence_mapping' }, status: 'waiting_user' })
+      await checkpointBidProjectState(workspace, { workflow: { kind: 'full_bid' as const, stage: 'evidence_mapping' }, status: 'ready', run: null })
       const first = mappingFixture(workspace, material)
       const resumed = mappingFixture(workspace, material, false, {
         'MAP-INIT-S2.5': [{ type: 'update_section', section_id: 'S2.5',
@@ -4377,7 +4380,7 @@ describe('evidence-mapping Agent executor', () => {
       const s4Inputs = await Promise.all(buildBidStageTask('evidence_mapping').inputs.map(async path => ({
         path, sha256: createHash('sha256').update(await readFile(join(workspace.projectRoot, path))).digest('hex'),
       })))
-      const s4Work = await persistBidWorkRequest(workspace, 'stage_execution', 'evidence_mapping', s4Payload,
+      const s4Work = await persistBidWorkRequest(workspace, { kind: 'stage_execution', stage: 'evidence_mapping' }, s4Payload,
         { stage: 'evidence_mapping', inputs: s4Inputs, payload: s4Payload })
       host.executionAgent = async () => agent
       host.automaticOrchestrator = (_execution, _workspace, signal, operation) => new BidOrchestrator(
@@ -4398,7 +4401,7 @@ describe('evidence-mapping Agent executor', () => {
       }
       await started
       const failed = await readBidProjectState(workspace)
-      expect(failed).toMatchObject({ stage: 'evidence_mapping', status: 'failed', run: null,
+      expect(failed).toMatchObject({ workflow: { kind: 'full_bid' as const, stage: 'evidence_mapping' }, status: 'failed', run: null,
         failure: { issues: [{ code: 'EVIDENCE_MAPPING_INTERNAL_ID_VISIBLE' }], recovery: { kind: 'repair' } } })
       if (failed === undefined) throw new Error('missing failed project checkpoint')
       expect(bidRecoverableRun(agent.session, failed)).toMatchObject({ runId: adapter.runId,
@@ -4413,7 +4416,7 @@ describe('evidence-mapping Agent executor', () => {
       expect(mappingTaskId(resumed.starts[0]!.request.request)).toBe('MAP-INIT-S2.5')
       resumed.starts[0]!.resolve()
       await vi.waitFor(() => { expect(host.inFlight.size).toBe(0) }, { timeout: 10_000 })
-      expect(await readBidProjectState(workspace)).toMatchObject({ stage: 'evidence_mapping', status: 'waiting_user' })
+      expect(await readBidProjectState(workspace)).toMatchObject({ workflow: { kind: 'full_bid' as const, stage: 'evidence_mapping' }, status: 'waiting_user' })
       await agent.whenIdle()
       const events = agent.session.events
       const recoveries = events.filter(event => event.type === 'bid.recovery.requested')
@@ -5964,7 +5967,7 @@ describe('S4 Host 准入与最终确认', () => {
     }
     session.append('bid.stage.started', { stage: 'evidence_mapping', status: 'running' })
     session.append('bid.user_confirmation.required', { stage: 'evidence_mapping', status: 'waiting_user' })
-    await checkpointBidProjectState(workspace, { stage: 'evidence_mapping', status: 'waiting_user', run: null })
+    await checkpointBidProjectState(workspace, { workflow: { kind: 'full_bid' as const, stage: 'evidence_mapping' }, status: 'waiting_user', run: null })
     Object.assign(fixture.agent, { session })
     const draft = await getOrCreateOutlineDraft(workspace)
     const run = createTestBidRunContext()

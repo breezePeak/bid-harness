@@ -8,8 +8,10 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { Session } from '@deepseek-ai/dsh-session'
 import type { JsonSchemaNode, ToolDefinition } from '@deepseek-ai/dsh-tools'
 import { z } from 'zod'
+import { inspectCandidateDocument } from './document-candidate.ts'
 import type { BidWorkspace } from './index.ts'
-import { buildOutlineView, outlineBusinessBindingSchema, outlineEditOperationSchema } from './outline-confirmation-edits.ts'
+import { outlineEditOperationSchema } from './outline-confirmation-edits.ts'
+import { buildOutlineView, outlineBusinessBindingSchema } from './outline-confirmation-browser.ts'
 import { parseOutlineArtifact } from './outline-generation-artifacts.ts'
 import { getOrCreateOutlineDraft } from './outline-draft-store.ts'
 import { parseEvidenceMapArtifact, parseEvidenceMappingPlan } from './evidence-mapping-artifacts.ts'
@@ -47,8 +49,12 @@ import { resolveBidToolAuthorization } from './bid-tool-authorization.ts'
 import { bidModelTaskJsonSchema, bindBidModelTask, bindBidModelSteps, bindBidModelProjectQuery,
   bindBidModelWritingPlan, bindBidModelReference, collectBidModelTaskCatalog,
   presentBidModelTaskCatalog, bindBidModelOutlineEdit, bidModelOutlineEditJsonSchema, type BidModelTaskCatalog } from './bid-model-task.ts'
-import { capabilityTaskCheckpointSchema } from './bid-capability-task.ts'
+import { capabilityTaskCheckpointSchema, capabilityTaskRequestSchema } from './bid-capability-task.ts'
+import { readBidWorkRequest } from './work-descriptor.ts'
 import { readBidProjectState } from './project-state.ts'
+import { readBidWorkflowContinuation } from './workflow-control.ts'
+import { bidWorkflowFilesSchema } from './file-manifest.ts'
+import { bindBidModelWorkflowFiles } from './bid-model-task.ts'
 
 const identity = { expected_revision: z.number().int().positive(), expected_draft_sha256: z.string().regex(/^[a-f0-9]{64}$/u) }
 const scope = z.array(z.string().min(1)).min(1)
@@ -59,12 +65,16 @@ const modelProjectInspectParams = projectInspectParams.extend({ objects_page: z.
 const supersedeSchema = z.object({
   run_id: z.string().min(1), expected_project_revision: z.number().int().nonnegative(),
 }).strict()
-const runTaskParams = z.object({ task: bidCapabilityTaskSchema, supersede: supersedeSchema.optional() }).strict()
-const modelRunTaskParams = z.object({ task: bidCapabilityTaskSchema, supersede: z.boolean().optional() }).strict()
+const pauseWorkflowSchema = z.boolean().optional().describe('用户要求暂停完整编写路线、先做本任务时为 true；Host 先收敛原 Run 并保存 continuation，不放弃原目标。')
+const runTaskParams = z.object({ task: bidCapabilityTaskSchema,
+  supersede: supersedeSchema.optional(), pause_workflow: pauseWorkflowSchema }).strict()
+const modelRunTaskParams = z.object({ task: bidCapabilityTaskSchema,
+  supersede: z.boolean().optional(), pause_workflow: pauseWorkflowSchema }).strict()
 const planTaskParams = z.object({ work_id: z.string().min(1), from_index: z.number().int().nonnegative(),
   steps: z.array(bidCapabilityStepSchema), restart_pending: z.literal(true).optional() }).strict()
 const resumeRunParams = z.object({ run_id: z.string().min(1),
-  expected_project_revision: z.number().int().nonnegative() }).strict()
+  expected_project_revision: z.number().int().nonnegative(), workflow_continuation: z.boolean().optional() }).strict()
+const modelResumeRunParams = z.object({ target: z.enum(['current', 'workflow']).default('current') }).strict()
 const recoverRunParams = z.object({ target: z.literal('run'), run_id: z.string().min(1), instruction: recoveryInstruction }).strict()
 const recoverWritingPlanParams = z.object({ target: z.literal('writing_plan'), writing_request_id: z.string().min(1),
   attempt_id: z.string().min(1), instruction: recoveryInstruction }).strict()
@@ -82,6 +92,8 @@ const recoveryArtifactPaths = new Set([
 
 /** 在工具执行入口重新验证阶段操作参数，CAS 必须来自最近一次 inspect。 */
 export const stageInteractionSchema = z.union([
+  z.object({ action: z.literal('bid_start_workflow') }).strict(),
+  bidWorkflowFilesSchema.extend({ action: z.literal('bid_use_files') }).strict(),
   projectInspectParams.extend({ action: z.literal('bid_project_inspect') }),
   runTaskParams.extend({ action: z.literal('bid_run_task') }),
   planTaskParams.extend({ action: z.literal('bid_plan_task') }),
@@ -237,16 +249,19 @@ async function inspectBidStageValue(
   view: 'summary' | 'task_contract_context' | 'recovery' = 'summary',
 ) {
   const task = session.events.reduce(reduceBidTaskState, BID_INITIAL_TASK_STATE)
-  const recoveryDecision = task.stage === 'chapter_writing' && task.status === 'waiting_user'
+  const recoveryDecision = task.workflow?.stage === 'chapter_writing' && task.status === 'waiting_user'
     ? bidWritingPlanRecoveryEligibility(session) : bidRunRecoveryEligibility(session)
+  const repairable = bidRecoverableRun(session, task)
   const availableActions = [
+    ...(repairable?.work.kind === 'capability_task' && repairable.cause !== 'awaiting_input'
+      || bidCompletedCapabilityRun(session, task) !== undefined ? ['bid_plan_task'] : []),
     ...(recoveryDecision.eligible ? ['bid_recover_task'] : []),
     ...(task.status === 'suspended' && task.run.cause !== 'awaiting_input'
       || bidUserContinuableRun(session, task) !== undefined ? ['bid_resume_current_run'] : []),
     ...(bidCapabilityTakeoverRun(session, task) ?? bidEvidenceMappingTakeoverRun(session, task)) === undefined
       ? [] : ['bid_run_task(supersede=true)'],
   ]
-  const briefTask = { stage: task.stage, status: task.status,
+  const briefTask = { workflow: task.workflow, status: task.status,
     ...(task.status === 'failed' ? { failure: summarizeFailure(task.failure) } : {}),
     run: task.run === null ? null : { runId: task.run.runId, work: { kind: task.run.work.kind, workId: task.run.work.workId },
       ...(task.status === 'suspended' ? { cause: task.run.cause } : {}) },
@@ -278,7 +293,7 @@ async function inspectBidStageValue(
         artifactDiagnostic = { path: artifact, readable: false, reason: code }
       }
     }
-    if (task.stage === 'chapter_writing' && task.status === 'waiting_user' && workspace !== undefined) {
+    if (task.workflow?.stage === 'chapter_writing' && task.status === 'waiting_user' && workspace !== undefined) {
       try {
         const request = await readOptionalStageJson(workspace, 'chapters/writing-request.json', value => writingRequestSchema.parse(value))
         writingPlanDiagnostic = { readable: request !== null,
@@ -302,9 +317,9 @@ async function inspectBidStageValue(
       progress_fingerprint: decision.fingerprint ?? null,
       writing_plan_diagnostic: writingPlanDiagnostic ?? null,
       artifact_diagnostic: artifactDiagnostic ?? null,
-      mapping_progress: task.stage === 'evidence_mapping' && workspace !== undefined
+      mapping_progress: task.workflow?.stage === 'evidence_mapping' && workspace !== undefined
         ? summarizeMappingProgress(await readEvidenceMappingProgress(workspace)) : null,
-      ...(task.stage !== 'evidence_mapping' || workspace === undefined ? {} : { current_artifacts_summary: {
+      ...(task.workflow?.stage !== 'evidence_mapping' || workspace === undefined ? {} : { current_artifacts_summary: {
         evidence_map: await readOptionalStageJson(workspace, 'analysis/evidence-map.json', parseEvidenceMapArtifact) === null
           ? 'pending' : 'available',
       } }),
@@ -328,7 +343,7 @@ async function inspectBidStageValue(
     started_at: started === null ? null : new Date(started.startedAt).toISOString(),
     latest_public_events: latestPublicEvents(session),
   }
-  if (task.stage === 'file_intake') {
+  if (task.workflow?.stage === 'file_intake') {
     const manifest = await workspace.readManifest()
     const files = manifest.files
     return {
@@ -341,14 +356,14 @@ async function inspectBidStageValue(
       current_artifacts_summary: { manifest: files.length === 0 ? 'pending' as const : 'available' as const },
     }
   }
-  const scoringPath = task.stage === 'tender_analysis' ? 'analysis/scoring-origin.json' : 'analysis/scoring.json'
+  const scoringPath = task.workflow?.stage === 'tender_analysis' ? 'analysis/scoring-origin.json' : 'analysis/scoring.json'
   const [project, requirements, scoring, compliance] = await Promise.all([
     readOptionalStageJson(workspace, 'analysis/project.json', parseTenderProjectArtifact),
     readOptionalStageJson(workspace, 'analysis/requirements.json', parseTenderRequirementsArtifact),
     readOptionalStageJson(workspace, scoringPath, parseTenderScoringArtifact),
     readOptionalStageJson(workspace, 'analysis/compliance.json', parseTenderComplianceArtifact),
   ])
-  if (task.stage === 'tender_analysis') {
+  if (task.workflow?.stage === 'tender_analysis') {
     const selection = scoring === null ? null : await readOptionalStageJson(
       workspace, 'analysis/tender-analysis-selection.json', value => parseTenderScoringSelection(value, scoring),
     )
@@ -363,7 +378,7 @@ async function inspectBidStageValue(
         progress_summary: summary, current_artifacts_summary: summary }
       : { ...base, progress_summary: summary, current_artifacts_summary: summary }
   }
-  if (task.stage === 'chapter_writing' || task.stage === 'docx_export') {
+  if (task.workflow?.stage === 'chapter_writing' || task.workflow?.stage === 'docx_export') {
     const outline = await readOptionalStageJson(workspace, 'outline/confirmed-outline.json', parseOutlineArtifact)
     if (outline === null) return {
       ...base,
@@ -485,18 +500,18 @@ async function inspectBidStageValue(
     }
   }
   const workingOutline = await readOptionalStageJson(workspace, 'outline/outline.json', parseOutlineArtifact)
-  const initialConfirmedOutline = task.stage === 'evidence_mapping' && workingOutline === null
+  const initialConfirmedOutline = task.workflow?.stage === 'evidence_mapping' && workingOutline === null
     ? await readOptionalStageJson(workspace, 'outline/initial-confirmed-outline.json', parseOutlineArtifact)
     : null
   const draft = workingOutline === null ? null : await getOrCreateOutlineDraft(workspace)
   const response_points = await readOptionalStageJson(workspace, 'analysis/scoring-response-points.json', parseScoringResponsePointCatalog)
-  const evidence = task.stage === 'evidence_mapping'
+  const evidence = task.workflow?.stage === 'evidence_mapping'
     ? await readOptionalStageJson(workspace, 'analysis/evidence-map.json', parseEvidenceMapArtifact) : null
   const mappings = new Map(evidence?.section_mappings.map(item => [item.section_id, item]))
-  const mappingPlan = task.stage === 'evidence_mapping'
+  const mappingPlan = task.workflow?.stage === 'evidence_mapping'
     ? await readOptionalStageJson(workspace, 'analysis/evidence-mapping-plan.json', parseEvidenceMappingPlan) : null
-  const mappingProgress = task.stage === 'evidence_mapping' ? await readEvidenceMappingProgress(workspace) : null
-  const mappingTasks = task.stage === 'evidence_mapping' ? (await readEvidenceMappingLog(workspace))?.tasks ?? [] : []
+  const mappingProgress = task.workflow?.stage === 'evidence_mapping' ? await readEvidenceMappingProgress(workspace) : null
+  const mappingTasks = task.workflow?.stage === 'evidence_mapping' ? (await readEvidenceMappingLog(workspace))?.tasks ?? [] : []
   const sections = draft?.outline.sections ?? initialConfirmedOutline?.sections ?? []
   const includeMappingDetails = view === 'task_contract_context'
   const sectionSummary = buildOutlineView(sections).slice(0, MAX_INSPECT_SECTIONS).map(item => ({ ...item,
@@ -669,7 +684,7 @@ function renderIdleStageInteractionPrompt(
     ...status === 'failed' ? ['先核对用户已有回答和具体缺项；缺少业务决定或资料时用 ask_user_question 提问，收到回答后继续原任务。用户已说明的处理方式应落实到修复要求，不重复询问，也不只生成独立附件后把原任务留在失败状态；同一问题修复后仍存在时，不重复泛化指令或只报告错误。'] : [],
     status === 'ready'
       ? '阶段已经准备好；Host 将自动驱动，不把普通聊天当作启动命令。'
-      : task?.stage === 'evidence_mapping'
+      : task?.workflow?.stage === 'evidence_mapping'
         ? '章节研究完成量、目录最终审查和 evidence-map 发布是独立事实；evidence_mappings=0 不表示研究未完成。恢复接纳不等于阶段完成，以实际审核产物和正式确认状态为准。'
         : '恢复接纳不等于任务完成；按实际产物和核验状态说明结果。',
   ].join('\n')
@@ -706,7 +721,7 @@ function renderCurrentRunProgress(run: BidRunData | null): string | undefined {
   if (progress === undefined) return '当前后台进度：阶段已启动，尚未产生首个里程碑。'
   return [
     '当前后台进度：',
-    `阶段：${run.work.stage}`,
+    run.work.kind === 'capability_task' ? '任务：独立能力' : `阶段：${run.work.stage}`,
     `当前步骤：${progress.phase}`,
     `摘要：${progress.summary}`,
     ...progress.completed === undefined || progress.total === undefined
@@ -760,45 +775,48 @@ export function installStageInteractionTools(
       const repairable = bidRecoverableRun(agent.session, task)
       const chatResume = suspended !== undefined && suspended.cause !== 'awaiting_input'
         || bidUserContinuableRun(agent.session, task) !== undefined
-      const stage = isBidMainSession(agent.session) ? task.stage : undefined
-      const scope = stage === undefined ? undefined : `${stage}:${suspended === undefined ? task.status : `suspended:${suspended.runId}`}`
+      const stage = task.workflow?.stage
+      const scope = `${stage ?? 'none'}:${suspended === undefined ? task.status : `suspended:${suspended.runId}`}`
       const recoveryAvailable = bidRunRecoveryEligibility(agent.session).eligible
         || bidWritingPlanRecoveryEligibility(agent.session).eligible
       const takeoverAvailable = (bidCapabilityTakeoverRun(agent.session, task)
         ?? bidEvidenceMappingTakeoverRun(agent.session, task)) !== undefined
       const completedCapability = bidCompletedCapabilityRun(agent.session, task)
+      const continuation = agent.session.events.findLast(event => event.type === 'bid.workflow.continuation')
+      const hasContinuation = continuation?.type === 'bid.workflow.continuation' && continuation.data.reference !== null
       const hasGoal = toolCtx.get('goals')?.get(agent) !== undefined
-      const actualScope = `${scope ?? 'none'}:${String(hasGoal)}:${String(recoveryAvailable)}:${String(takeoverAvailable)}:${completedCapability?.runId ?? ''}`
+      const actualScope = `${scope}:${String(hasGoal)}:${String(recoveryAvailable)}:${String(takeoverAvailable)}:${String(hasContinuation)}:${completedCapability?.runId ?? ''}`
       const existing = mounted.get(agent)
       if (existing?.scope === actualScope) return
       existing?.dispose()
       mounted.delete(agent)
-      if (stage === undefined) return
+      if (!isBidMainSession(agent.session)) return
       const tools = agent.ctx.get('tools')
       if (tools === undefined) throw new Error('Bid stage interaction requires tools')
       const available = task.status === 'ready' || task.status === 'failed'
         ? [BID_INTERACTION_TOOL_NAMES[0]]
         : suspended !== undefined
-          ? task.stage === 'chapter_writing' && suspended.work.kind === 'stage_execution'
+          ? task.workflow?.stage === 'chapter_writing' && suspended.work.kind === 'stage_execution'
             ? [BID_INTERACTION_TOOL_NAMES[0], BID_INTERACTION_TOOL_NAMES[4], BID_INTERACTION_TOOL_NAMES[5], BID_INTERACTION_TOOL_NAMES[10]]
             : [BID_INTERACTION_TOOL_NAMES[0]]
           : task.status !== 'waiting_user'
-            ? task.stage === 'chapter_writing' ? [BID_INTERACTION_TOOL_NAMES[0], BID_INTERACTION_TOOL_NAMES[4], BID_INTERACTION_TOOL_NAMES[5], BID_INTERACTION_TOOL_NAMES[6], BID_INTERACTION_TOOL_NAMES[7], ...(task.status === 'running' ? [...BID_INTERACTION_TOOL_NAMES.slice(8, 10), BID_INTERACTION_TOOL_NAMES[10]] : [])]
-              : task.stage === 'docx_export' && task.status === 'completed' ? [BID_INTERACTION_TOOL_NAMES[0], BID_INTERACTION_TOOL_NAMES[5], BID_INTERACTION_TOOL_NAMES[6], BID_INTERACTION_TOOL_NAMES[7]]
+            ? task.workflow?.stage === 'chapter_writing' ? [BID_INTERACTION_TOOL_NAMES[0], BID_INTERACTION_TOOL_NAMES[4], BID_INTERACTION_TOOL_NAMES[5], BID_INTERACTION_TOOL_NAMES[6], BID_INTERACTION_TOOL_NAMES[7], ...(task.status === 'running' ? [...BID_INTERACTION_TOOL_NAMES.slice(8, 10), BID_INTERACTION_TOOL_NAMES[10]] : [])]
+              : task.workflow?.stage === 'docx_export' && task.status === 'completed' ? [BID_INTERACTION_TOOL_NAMES[0], BID_INTERACTION_TOOL_NAMES[5], BID_INTERACTION_TOOL_NAMES[6], BID_INTERACTION_TOOL_NAMES[7]]
                 : task.status === 'running' ? [BID_INTERACTION_TOOL_NAMES[0], ...BID_INTERACTION_TOOL_NAMES.slice(8, 10)] : [BID_INTERACTION_TOOL_NAMES[0]]
             : stage === 'tender_analysis' ? BID_INTERACTION_TOOL_NAMES.slice(0, 1)
               : stage === 'outline_generation' ? BID_INTERACTION_TOOL_NAMES.slice(0, 3)
                 : stage === 'evidence_mapping' ? BID_INTERACTION_TOOL_NAMES.slice(0, 4) : [BID_INTERACTION_TOOL_NAMES[0], BID_INTERACTION_TOOL_NAMES[4]]
-      const installed = [...new Set([...available, 'bid_project_inspect',
+      const installed = [...new Set([...available, 'bid_project_inspect', 'bid_start_workflow',
+        ...stage === 'file_intake' ? ['bid_use_files'] : [],
         ...task.status === 'failed' && !takeoverAvailable || task.status === 'suspended'
-          && (suspended?.work.kind !== 'capability_task' || suspended.cause === 'awaiting_input')
+          && suspended?.work.kind === 'capability_task' && suspended.cause === 'awaiting_input'
           ? [] : ['bid_run_task'],
         ...(repairable?.work.kind === 'capability_task'
           && repairable.cause !== 'awaiting_input' || bidCompletedCapabilityRun(agent.session, task) !== undefined) ? ['bid_plan_task'] : [],
         ...task.status === 'failed' || task.status === 'suspended' ? [] : [
           'bid_outline_apply_operations', 'bid_outline_regenerate_scope', 'bid_evidence_remap',
           'bid_confirm_writing_plan', 'bid_revise_chapter',
-        ], ...(chatResume ? ['bid_resume_current_run'] : []),
+        ], ...(chatResume || hasContinuation ? ['bid_resume_current_run'] : []),
         ...(recoveryAvailable ? [recoveryTool] : [])])].filter(name => name !== 'bid_plan_revision_batch'
         && name !== 'bid_execute_revision_batch' && name !== 'bid_revise_chapter')
       const disposers: Array<() => void> = []
@@ -812,10 +830,11 @@ export function installStageInteractionTools(
           const inputSchema = { io: 'input' } as const
           let parameters: JsonSchemaNode | undefined = name === 'bid_project_inspect'
             ? bidModelTaskJsonSchema(zodJsonSchema(modelProjectInspectParams, inputSchema))
-            : name === 'bid_run_task' ? bidModelTaskJsonSchema(zodJsonSchema(modelRunTaskParams, inputSchema))
-              : name === 'bid_plan_task' ? bidModelTaskJsonSchema(zodJsonSchema(modelPlanTaskParams, inputSchema))
-                : name === 'bid_resume_current_run' ? zodJsonSchema(z.object({}).strict(), inputSchema)
-                  : name === recoveryTool ? zodJsonSchema(modelRecoverTaskParams, inputSchema) : undefined
+            : name === 'bid_use_files' ? bidModelTaskJsonSchema(zodJsonSchema(bidWorkflowFilesSchema, inputSchema))
+              : name === 'bid_run_task' ? bidModelTaskJsonSchema(zodJsonSchema(modelRunTaskParams, inputSchema))
+                : name === 'bid_plan_task' ? bidModelTaskJsonSchema(zodJsonSchema(modelPlanTaskParams, inputSchema))
+                  : name === 'bid_resume_current_run' ? zodJsonSchema(modelResumeRunParams, inputSchema)
+                    : name === recoveryTool ? zodJsonSchema(modelRecoverTaskParams, inputSchema) : undefined
           const chapterReference: JsonSchemaNode = { oneOf: [{
             type: 'object', properties: { section_id: text, content_sha256: text, scope: { type: 'string', enum: ['chapter'] } },
             required: ['section_id', 'content_sha256', 'scope'], additionalProperties: false,
@@ -935,32 +954,45 @@ export function installStageInteractionTools(
           }
           const definition: ToolDefinition = {
             name,
-            description: name === recoveryTool ? '主 Agent 对 inspect recovery 的当前失败目标提交具体修复办法，Host 校验并执行；相同问题必须改变策略。'
-              : name === 'bid_resume_current_run' ? task.status === 'failed'
-                ? '根据当前失败之后新的直接用户消息继续原任务一次；Host 绑定原 Run 和项目版本，保留候选及校验，自动预算不重置。'
-                : '继续当前已授权的挂起任务，Host 绑定 Run 和项目版本；内部可修复失败使用 bid_recover_task。'
-                : name === 'bid_stage_inspect' ? '读取当前阶段的有界权威快照；传正文引用时校验原文身份并返回受控正文。'
-                  : name === 'bid_project_inspect' ? '按真实项目对象与章节位置分页读取已保存资料；不依赖当前阶段，也不修改项目。'
-                    : name === 'bid_run_task' ? '用当前用户消息或原生 Goal 轮次授权有序业务能力任务；Host 核对项目输入、范围和候选文件，再发布实际结果。提问与讨论不得调用。'
-                      : name === 'bid_plan_task' ? '调整挂起能力任务的未完成步骤；用户要求纠正当前已发布结果时可 append 追加到原 Work。保留已完成步骤与历史发布凭据，保存后调用恢复能力继续。'
-                        : name === 'bid_set_flowchart_visual_review' ? '设置当前 S5 work 的流程图视觉检查策略。skip 表示后续不再启动新的流程图视觉确认；required 表示恢复正常视觉确认。设置会写入当前 work 的命令日志并在挂起恢复后继续生效。'
-                          : name === 'bid_pause_stage' ? '仅在用户明确要求暂停时阻止后续阶段任务启动；已经运行的任务继续收敛。'
-                            : name === 'bid_resume_stage' ? '仅在用户明确要求继续时释放当前阶段的新任务调度门。'
-                              : name === 'bid_revise_chapter' ? '仅在用户明确要求修改引用正文时，把意见交给该章原 Writer；普通解释不得调用。'
-                                : name === 'bid_confirm_writing_plan' ? '保存已获用户确认或直接开始授权的整体写作计划；成功后 Host 启动既有 S5 写作链路。'
-                                  : name === 'bid_plan_revision_batch' ? '将待处理审批意见规划成不可变批次快照；同章节强制聚合，Host 校验依赖图与版本后标记 scheduled，不启动 Writer。'
-                                    : name === 'bid_execute_revision_batch' ? '启动已规划批次的修订执行；复用现有 S5 调度机制按 task 依赖和并发限制逐 section 修订，不重置已完成的章节。'
-                                      : name === 'bid_evidence_remap' ? '只重新研究选中章节或分支。replace 替换旧证据；supplement 保留并补充。完成后等待用户正式确认。'
-                                        : name === 'bid_outline_regenerate_scope' ? '按反馈局部重生成选中章节，保留范围外目录。完成后等待正式确认。'
-                                          : '选择最近 inspect 的 draft_sections 位置执行结构化目录编辑；Host 绑定草稿对象和版本，更新后仍需正式确认。',
+            description: name === 'bid_start_workflow' ? '真实用户要求完整编写标书时启动既有路线；重复调用返回原接纳。单独作图、阅读或局部修改使用能力任务。'
+              : name === 'bid_use_files' ? '把已提交附件用于完整编写路线：从 files 选择位置并指定资料角色，Host 复用原件和语料进入 S1，不要求用户重新上传。'
+                : name === recoveryTool ? '恢复当前失败任务，instruction 只提供执行建议，不修改已保存的能力计划。缺步骤或能力选错时先 bid_plan_task 保存完整步骤，再调用本工具；相同问题必须改变策略。'
+                  : name === 'bid_resume_current_run' ? task.status === 'failed'
+                    ? '根据当前失败之后新的直接用户消息继续原任务一次；Host 绑定原 Run 和项目版本，保留候选及校验，自动预算不重置。'
+                    : '继续当前已授权的挂起任务，Host 绑定 Run 和项目版本；内部可修复失败使用 bid_recover_task。'
+                    : name === 'bid_stage_inspect' ? '读取当前阶段的有界权威快照；传正文引用时校验原文身份并返回受控正文。'
+                      : name === 'bid_project_inspect' ? '只读查询实际对象：files 列附件；document 加 file_position 读取原 Word 段落、表格和图位，返回 document_blocks；file 读取其他附件正文；task 读取已保存计划。不创建任务或修改文件。'
+                        : name === 'bid_run_task' ? '用当前用户消息或原生 Goal 轮次授权有序业务能力任务；Host 核对项目输入、范围和候选文件，再发布实际结果。提问与讨论不得调用。'
+                          : name === 'bid_plan_task' ? '调整挂起能力任务的未完成步骤；用户要求纠正当前已发布结果时可 append 追加到原 Work。保留已完成步骤与历史发布凭据，保存后调用恢复能力继续。'
+                            : name === 'bid_set_flowchart_visual_review' ? '设置当前 S5 work 的流程图视觉检查策略。skip 表示后续不再启动新的流程图视觉确认；required 表示恢复正常视觉确认。设置会写入当前 work 的命令日志并在挂起恢复后继续生效。'
+                              : name === 'bid_pause_stage' ? '仅在用户明确要求暂停时阻止后续阶段任务启动；已经运行的任务继续收敛。'
+                                : name === 'bid_resume_stage' ? '仅在用户明确要求继续时释放当前阶段的新任务调度门。'
+                                  : name === 'bid_revise_chapter' ? '仅在用户明确要求修改引用正文时，把意见交给该章原 Writer；普通解释不得调用。'
+                                    : name === 'bid_confirm_writing_plan' ? '保存已获用户确认或直接开始授权的整体写作计划；成功后 Host 启动既有 S5 写作链路。'
+                                      : name === 'bid_plan_revision_batch' ? '将待处理审批意见规划成不可变批次快照；同章节强制聚合，Host 校验依赖图与版本后标记 scheduled，不启动 Writer。'
+                                        : name === 'bid_execute_revision_batch' ? '启动已规划批次的修订执行；复用现有 S5 调度机制按 task 依赖和并发限制逐 section 修订，不重置已完成的章节。'
+                                          : name === 'bid_evidence_remap' ? '只重新研究选中章节或分支。replace 替换旧证据；supplement 保留并补充。完成后等待用户正式确认。'
+                                            : name === 'bid_outline_regenerate_scope' ? '按反馈局部重生成选中章节，保留范围外目录。完成后等待正式确认。'
+                                              : '选择最近 inspect 的 draft_sections 位置执行结构化目录编辑；Host 绑定草稿对象和版本，更新后仍需正式确认。',
             parameters: (parameters ?? { type: 'object', properties, required, additionalProperties: false }) as Record<string, unknown>,
             output: { schema: {}, render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }] },
             async execute(args, exec) {
               if (exec.agent !== agent) throw new Error('BID_ACTION_NOT_ALLOWED')
+              if (name === 'bid_use_files') {
+                const catalog = modelCatalogs.get(agent)
+                if (catalog === undefined) throw new Error('BID_MODEL_TASK_INSPECT_REQUIRED')
+                return execute(agent, { action: name, ...bindBidModelWorkflowFiles(args, catalog) }, exec.signal)
+              }
               if (name === 'bid_resume_current_run') {
-                z.object({}).strict().parse(args)
+                const selection = modelResumeRunParams.parse(args)
                 const state = await readBidProjectState(workspaceFor(agent.session))
                 if (state === undefined) throw new Error('BID_RUN_RESUME_NOT_READY')
+                if (selection.target === 'workflow') {
+                  const reference = await readBidWorkflowContinuation(workspaceFor(agent.session))
+                  if (reference === null) throw new Error('BID_WORKFLOW_CONTINUATION_MISSING')
+                  return execute(agent, { action: name, run_id: reference.run_id,
+                    expected_project_revision: state.revision, workflow_continuation: true }, exec.signal)
+                }
                 const run = state.status === 'suspended' ? state.run : bidUserContinuableRun(agent.session, state)
                 if (run === undefined) throw new Error('BID_RUN_RESUME_NOT_READY')
                 return execute(agent, { action: name, run_id: run.runId,
@@ -991,17 +1023,19 @@ export function installStageInteractionTools(
                 const path = within(workspace.projectRoot, `runs/${run.work.workId}/task-checkpoint.json`)
                 await assertNoLinkedPath(workspace.root, path)
                 const checkpoint = capabilityTaskCheckpointSchema.parse(JSON.parse(await readFile(path, 'utf8')))
+                const original = capabilityTaskRequestSchema.parse(await readBidWorkRequest(workspace, run.work))
                 const from_index = request.edit === 'append' ? checkpoint.steps.length
                   : checkpoint.steps.findIndex(step => step.status !== 'completed')
                 if (from_index < 0) throw new Error('BID_CAPABILITY_PLAN_PATCH_NOT_READY')
                 return execute(agent, { action: name, work_id: run.work.workId, from_index,
                   ...request.edit === 'restart_pending' ? { restart_pending: true } : {},
-                  steps: bindBidModelSteps(request.steps, catalog) }, exec.signal, authorization ?? null)
+                  steps: bindBidModelSteps(request.steps, catalog, original.task.scope) }, exec.signal, authorization ?? null)
               }
               if (name === 'bid_run_task') {
                 const catalog = modelCatalogs.get(agent)
                 if (catalog === undefined) throw new Error('BID_MODEL_TASK_INSPECT_REQUIRED')
-                const request = z.object({ task: z.unknown(), supersede: z.boolean().optional() }).strict().parse(args)
+                const request = z.object({ task: z.unknown(), supersede: z.boolean().optional(),
+                  pause_workflow: pauseWorkflowSchema }).strict().parse(args)
                 let supersede: z.infer<typeof supersedeSchema> | undefined
                 if (request.supersede === true) {
                   const state = await readBidProjectState(workspaceFor(agent.session))
@@ -1011,6 +1045,7 @@ export function installStageInteractionTools(
                   supersede = { run_id: run.runId, expected_project_revision: state.revision }
                 }
                 return execute(agent, { action: name, ...supersede === undefined ? {} : { supersede },
+                  ...request.pause_workflow === undefined ? {} : { pause_workflow: request.pause_workflow },
                   task: bindBidModelTask(request.task, catalog) }, exec.signal)
               }
               if (name === 'bid_project_inspect') {
@@ -1025,13 +1060,18 @@ export function installStageInteractionTools(
                   modelCatalogs.delete(agent)
                   return result
                 }
+                const collected = await collectBidModelTaskCatalog(query.object === 'candidate_document' || query.object === 'task'
+                  ? workspaceFor(agent.session) : catalogWorkspace, agent.session,
+                query.object === 'document' ? query.file_ref : undefined,
+                query.object === 'candidate_document' ? await inspectCandidateDocument(workspaceFor(agent.session), agent.session,
+                  query.work_id, query.document) : undefined)
                 const current = query.object === 'task' && modelCatalogs.has(agent)
-                  ? catalog : await collectBidModelTaskCatalog(catalogWorkspace, agent.session)
+                  ? { ...catalog, objects: { ...catalog.objects, works: collected.objects.works } } : collected
                 modelCatalogs.set(agent, current)
                 return { ...result as object, objects: presentBidModelTaskCatalog(current,
-                  query.object === 'chapters' ? query.section_ids : [], { page: raw.objects_page ?? ('page' in query ? query.page ?? 0 : 0),
-                    pageSize: 'page_size' in query ? query.page_size ?? 20 : 20,
-                    ...query.object === 'chapters' ? { offset: query.offset ?? 0, maxChars: query.max_chars ?? 6_000 } : {} }) }
+                  query.object === 'chapters' ? query.section_ids : [], { page: raw.objects_page ?? ('page' in query ? query.page : 0),
+                    pageSize: 'page_size' in query ? query.page_size : 20,
+                    ...query.object === 'chapters' ? { offset: query.offset, maxChars: query.max_chars } : {} }) }
               }
               if (name === 'bid_stage_inspect') {
                 const request = z.object({ view: z.enum(['summary', 'task_contract_context', 'recovery']).optional(),
@@ -1101,26 +1141,33 @@ export function installStageInteractionTools(
       if (!goalRound && !hasUser && !failureMessage) return decision
       const resumed = agent.session.events.findLast(event => event.type === 'bid.project.resumed')
       const suspended = task.status === 'suspended' ? task.run : undefined
-      const prompt = failureMessage && task.status === 'failed'
-        ? renderIdleStageInteractionPrompt(task.stage, task.status, task,
+      const stage = task.workflow?.stage
+      const prompt = stage === undefined ? [
+        `当前任务状态：${task.status}；未启动完整编写路线。`,
+        '根据用户目标直接处理问答、文件、作图和文档局部任务；使用 bid_project_inspect 读取真实对象，以位置选择并调用 bid_run_task。身份、版本和路径由 Host 绑定。',
+        '原 Word 先调用 bid_project_inspect(query={object:"document",file_position:所选文件位置}) 读取原文和 document_blocks，再选择真实块位置提交完整配图计划。document.layout_review 是页面审核能力，不提供原稿块位置。流程图用 flowchart.create，场景图用 project_image.create；document.patch 插图后接 document.layout_review(mode=repair)，通过后直接交付修改版，不使用内部章节汇编的 docx.export。文件配图的每步 scope.source=task；previous_targets 只传递内部章节。多步计划以 step_outputs 引用前序图或文档；定位已完成步骤的新节点时查询 candidate_document 并使用其 candidate_blocks。',
+        '用户明确要求完整编写标书时调用 bid_start_workflow；已有附件用 bid_use_files 指定资料用途，缺少必要资料再提问。不要为独立任务启动完整路线，不要求重复确认已经授权的工作。',
+        '任务结束后仍可继续对话。只按已验证并发布的产物报告完成。',
+      ].join('\n') : failureMessage && task.status === 'failed'
+        ? renderIdleStageInteractionPrompt(stage, task.status, task,
           bidRunRecoveryEligibility(agent.session).eligible || bidWritingPlanRecoveryEligibility(agent.session).eligible,
           (bidCapabilityTakeoverRun(agent.session, task) ?? bidEvidenceMappingTakeoverRun(agent.session, task)) !== undefined,
           hasUser && bidUserContinuableRun(agent.session, task) !== undefined)
         : suspended !== undefined ? renderSuspendedRunPrompt(
-          task.stage,
+          stage,
           suspended.runId,
           resumed?.type === 'bid.project.resumed' ? resumed.data.revision : suspended.baseProjectRevision,
           suspended.work.kind,
           suspended.cause,
           suspended.error?.message,
-        ) : task.status === 'waiting_user' ? renderStageInteractionPrompt(task.stage)
-          : (task.stage === 'chapter_writing' && (task.status === 'running' || task.status === 'completed')
-            || task.stage === 'docx_export' && task.status === 'completed')
-            ? renderChapterWritingInteractionPrompt(task.status, task.stage)
+        ) : task.status === 'waiting_user' ? renderStageInteractionPrompt(stage)
+          : (task.workflow?.stage === 'chapter_writing' && (task.status === 'running' || task.status === 'completed')
+            || task.workflow?.stage === 'docx_export' && task.status === 'completed')
+            ? renderChapterWritingInteractionPrompt(task.status, task.workflow.stage)
             : task.status === 'running' || task.status === 'completed'
-              ? renderLiveStageInteractionPrompt(task.stage, task.status)
+              ? renderLiveStageInteractionPrompt(stage, task.status)
               : task.status === 'ready' || task.status === 'failed'
-                ? renderIdleStageInteractionPrompt(task.stage, task.status, task,
+                ? renderIdleStageInteractionPrompt(stage, task.status, task,
                   bidRunRecoveryEligibility(agent.session).eligible || bidWritingPlanRecoveryEligibility(agent.session).eligible,
                   (bidCapabilityTakeoverRun(agent.session, task) ?? bidEvidenceMappingTakeoverRun(agent.session, task)) !== undefined,
                   hasUser && bidUserContinuableRun(agent.session, task) !== undefined)
@@ -1131,7 +1178,7 @@ export function installStageInteractionTools(
         || (bidCapabilityTakeoverRun(agent.session, task) ?? bidEvidenceMappingTakeoverRun(agent.session, task)) !== undefined
         || bidRecoverableRun(agent.session, task)?.work.kind === 'capability_task' && bidRunRecoveryEligibility(agent.session).eligible
       const context = [prompt,
-        '阶段规则只约束正式 Bid 业务。用户要求独立文件处理、数据整理、编程或临时 DOCX/XLSX/PDF 时，使用已配置的 Skill、Shell 和文件工具，必要时编写并运行脚本；检查真实输出并自行修复错误。阶段失败、等待确认、运行或挂起不阻止独立任务，不为独立任务恢复 Run 或触发 S6。普通文件使用工作区的独立路径，不覆盖正式 Bid 状态及产物；正式目录、映射、正文修改和发布仍通过 Host 业务工具校验。',
+        '独立作图、文件和文档局部任务走 bid_run_task。用户要求暂停整本先处理局部任务时设置 pause_workflow=true；Host 收敛原 Run 后保存精确 continuation。局部任务完成不自动继续整本；用户要求继续原完整路线时调用 bid_resume_current_run(target=workflow)。同一能力任务中断后继续用 target=current。',
         'Bid 模式不通过模型创建 Goal。Goal 只能由用户显式 /goal 创建；已有 Goal 可正常读取和更新。后台失败交由你分析并通过当前公开能力处理；Host 只校验和执行。',
         ...(taskToolsAvailable ? [CAPABILITY_TASK_GUIDANCE] : []), ...(progress === undefined ? [] : [progress]),
       ].join('\n')

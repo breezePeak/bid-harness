@@ -14,6 +14,7 @@ import type { SessionProjectionMap } from '@deepseek-ai/dsh-session-projection/t
 import type { RpcId, RpcRequest, RpcResponse } from './rpc.ts'
 import type { ToolEventView } from './events.ts'
 import type { WorkspaceId } from './workspace.ts'
+import type { MessageFileRef, PromptFileRef } from './files.ts'
 
 declare module '@deepseek-ai/dsh-session-projection/types' {
   interface SessionProjectionStateMap {
@@ -56,7 +57,14 @@ declare module '@deepseek-ai/dsh-llm' {
      * carries no transport vocabulary; rpcId and the optional Host-validated browser zone are
      * durable JSON fields passed back to the client with the event.
      */
-    'user-rpc': { kind: 'user'; rpcId: RpcId; clientSubmissionId?: string; clientTimeZone?: string }
+    'user-rpc': {
+      kind: 'user'
+      rpcId: RpcId
+      clientSubmissionId?: string
+      clientTimeZone?: string
+      submissionFingerprint?: string
+      fileRefs?: MessageFileRef[]
+    }
   }
 }
 
@@ -353,6 +361,7 @@ export interface SessionsApi {
     sessionId: SessionId
     mode: 'queue' | 'steer'
     content: PromptContentPart[]
+    fileRefs?: PromptFileRef[]
     clientSubmissionId?: string
     clientTimeZone?: string
   }>):

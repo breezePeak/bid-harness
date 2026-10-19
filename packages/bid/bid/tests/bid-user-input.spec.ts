@@ -1,5 +1,6 @@
 /** 原生回答与普通继续共用程序绑定的授权、来源及恢复上下文。 */
 import { Context } from '@deepseek-ai/cordis'
+import { createHash } from 'node:crypto'
 import SessionStore from '@deepseek-ai/dsh-session'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { expect, it } from 'vitest'
@@ -27,7 +28,9 @@ it('自动通知轮中的真实回答成为当前授权并冻结为任务来源�
     expect(resolveBidToolAuthorization(session)).toEqual({ session_id: String(session.id), message_id: String(answer.id) })
     const event = session.events.at(-1)!
     const source = bindBidTaskSourceContext(session, { message: { session_id: String(session.id),
-      message_id: String(answer.id), seq: event.seq, text: answer.content.flatMap(block => block.type === 'text' ? [block.text] : []).join('\n') },
+      message_id: String(answer.id), seq: event.seq, text: answer.content.flatMap(block => block.type === 'text' ? [block.text] : []).join('\n'),
+      content_sha256: createHash('sha256').update(JSON.stringify({ content: answer.content, source: answer.source })).digest('hex'),
+      file_refs: [], images: [] },
     issues: [], observed_issues: [], queue_revision: 0, root_scope: { kind: 'project' } })
     expect(source.message.text).toContain('后续演示这种再说了')
     session.append('user/message', createUserMessage({ content: [{ type: 'text', text: '按刚才选择执行' }], source: { kind: 'user' } }), { surfaceOp: 'append' })
@@ -68,6 +71,22 @@ it('正文缺口问题的章节详情与真实答案一起保存，不能只留�
   } finally { await ctx.fiber.dispose() }
 })
 
+it('同一实际问题重投只保存一次，变更答案不能覆盖旧回答', async () => {
+  const ctx = new Context()
+  await ctx.plugin(SessionStore)
+  try {
+    const session = ctx.sessions.create()
+    const binding = { questionKey: 'execution:call', work }
+    const reply = { answers: [{ id: 'demo', selected: ['先写方案'] }] }
+    const first = recordBidUserAnswer(session, questions, reply, binding)
+    expect(recordBidUserAnswer(session, questions, reply, binding)).toEqual(first)
+    expect(() => recordBidUserAnswer(session, questions, { answers: [{ id: 'demo', selected: ['稍后补充'] }] }, binding))
+      .toThrow('BID_INPUT_IDENTITY_MISMATCH')
+    expect(session.events.filter(event => event.type === 'user/message')).toHaveLength(1)
+    expect(session.events.filter(event => event.type === 'bid.user_input.recorded')).toHaveLength(1)
+  } finally { await ctx.fiber.dispose() }
+})
+
 it('裸继续保留本 Work 的先前决定及处理方案，不带入其他 Work 的方案，也不递归扩张', async () => {
   const ctx = new Context()
   await ctx.plugin(SessionStore)
@@ -76,16 +95,17 @@ it('裸继续保留本 Work 的先前决定及处理方案，不带入其他 Wor
     const message = (text: string) => session.append('user/message', createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text }] }), { surfaceOp: 'append' })
     message('先写技术标')
     session.append('bid.run.started', { run: { runId: 'run-one', work, epoch: 1, baseProjectRevision: 0, startedAt: 1, updatedAt: 1 } })
-    recordBidUserAnswer(session, questions, { answers: [{ id: 'demo', selected: [], custom: '先生成几张示意图，实际演示后续准备' }] })
+    recordBidUserAnswer(session, questions, { answers: [{ id: 'demo', selected: [], custom: '先生成几张示意图，实际演示后续准备' }] },
+      { questionKey: 'run-one:demo', work })
     for (const [id, instruction] of [['outline-work', '将演示方式保留为全局合规要求'], ['other-work', '其他项目专用策略']]) {
       session.append('bid.recovery.requested', { ownerSessionId: String(session.id), target: { kind: 'run', workId: id!, runId: 'run-one' },
         unit: 'outline/outline.json', instruction: instruction!, progressFingerprint: 'problem' })
     }
     message('继续')
     const instruction = bidContinuationInstruction(session, work, '继续')
-    expect(instruction).toContain('先生成几张示意图，实际演示后续准备')
-    expect(instruction).toContain('将演示方式保留为全局合规要求')
-    expect(instruction).not.toContain('其他项目专用策略')
-    expect(bidContinuationInstruction(session, work, '继续')).toBe(instruction)
+    expect(instruction.text).toContain('先生成几张示意图，实际演示后续准备')
+    expect(instruction.text).toContain('将演示方式保留为全局合规要求')
+    expect(instruction.text).not.toContain('其他项目专用策略')
+    expect(bidContinuationInstruction(session, work, '继续')).toEqual(instruction)
   } finally { await ctx.fiber.dispose() }
 })

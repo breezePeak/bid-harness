@@ -28,9 +28,7 @@ it('请求已保存但命令尚未登记时，相同用户消息只恢复原 Wor
   const requests = join(fixture.workspace.projectRoot, 'requests')
   const before = await readdir(requests)
   const saved = await readFile(join(fixture.workspace.projectRoot, fixture.work.requestRef))
-  const repeated = await persistCapabilityTaskRequest(fixture.workspace, fixture.session, 'chapter_writing',
-    fixture.task, fixture.authorization, ['chapters/execution-log.json'],
-    { stage: 'chapter_writing', status: 'completed', run: null })
+  const repeated = await persistCapabilityTaskRequest(fixture.workspace, fixture.session, fixture.task, fixture.authorization, ['chapters/execution-log.json'])
   expect(repeated).toEqual(fixture.work)
   expect(await readdir(requests)).toEqual(before)
   expect(await readFile(join(fixture.workspace.projectRoot, fixture.work.requestRef))).toEqual(saved)
@@ -56,9 +54,9 @@ it('目录候选校验后中断时旧版本仍可导出，同一 Work 重试才�
       operations: [{ type: 'update_section', section_id: 'SEC-1', title: '设计核验' }],
     } },
   }] })
-  const work = await persistCapabilityTaskRequest(workspace, session, 'chapter_writing', task,
+  const work = await persistCapabilityTaskRequest(workspace, session, task,
     { session_id: String(session.id), message_id: String(message.id) },
-    BID_CAPABILITIES['outline.update'].requires, { stage: 'chapter_writing', status: 'completed', run: null })
+    BID_CAPABILITIES['outline.update'].requires)
   const dispatcher = createBidCapabilityDispatcher({ modelStageRepairAttempts: 1,
     evidenceMappingMaxConcurrency: 1, chapterWritingMaxConcurrency: 1, webSearchEnabled: false })
   const agent = { id: 'outline-fault-agent' } as Parameters<typeof executeCapabilityTask>[3]

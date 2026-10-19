@@ -21,6 +21,11 @@ import { allowedRevisionCapabilityWrites, executeRevisionCapability, validateRev
   type CapabilityRevisionRunner } from './bid-revision-capability.ts'
 import { allowedGenerationWrites, executeGenerationCapability,
   validateGenerationCapability } from './bid-generation-capability.ts'
+import { allowedFlowchartWrites, executeFlowchartCapability, validateFigureCapability } from './figure-capabilities.ts'
+import { allowedProjectImageWrites, allowedProjectImageOutputs, executeProjectImageCapability } from './project-image-capability.ts'
+import type { BidImageProvider } from './bid-image-provider.ts'
+import { allowedDocumentPatchWrites, executeDocumentPatch, validateDocumentCapability } from './document-capability.ts'
+import { allowedDocumentLayoutWrites, allowedDocumentLayoutOutputs, executeDocumentLayoutReview, validateDocumentLayoutReview } from './document-layout-review.ts'
 
 /** 与阶段执行器一致的 Host 配置，来源于已验证的 cordis.yml。 */
 export interface CapabilityDispatcherSettings {
@@ -42,10 +47,12 @@ export interface BidCapabilityDispatcher extends CapabilityTaskDispatcher {
  * 以已注册能力适配器执行一个 Work 的有序步骤。
  * @param settings 当前 Host 的并发、修复与 Web 配置。
  * @param revisionRunner 当前 Run 内的原 Writer 批次执行入口。
+ * @param imageProvider 已配置的项目图提供方。
  * @returns 具备文件许可、执行和候选校验的分派器。
  */
 export function createBidCapabilityDispatcher(settings: CapabilityDispatcherSettings,
   revisionRunner?: CapabilityRevisionRunner,
+  imageProvider?: BidImageProvider,
 ): BidCapabilityDispatcher {
   return {
     executeDefault(task, context) {
@@ -60,6 +67,10 @@ export function createBidCapabilityDispatcher(settings: CapabilityDispatcherSett
     },
     allowedWrites(call, sectionIds, working, stepId) {
       switch (call.capability) {
+        case 'document.patch': return Promise.resolve(allowedDocumentPatchWrites(stepId))
+        case 'document.layout_review': return Promise.resolve(allowedDocumentLayoutWrites(stepId))
+        case 'flowchart.create': return Promise.resolve(allowedFlowchartWrites(stepId))
+        case 'project_image.create': return Promise.resolve(allowedProjectImageWrites(stepId))
         case 'tender.analyze':
         case 'outline.generate': return Promise.resolve(allowedGenerationWrites(call, sectionIds))
         case 'tender.update': return Promise.resolve(allowedTenderUpdateCapabilityWrites())
@@ -83,8 +94,10 @@ export function createBidCapabilityDispatcher(settings: CapabilityDispatcherSett
         default: throw new Error(`BID_CAPABILITY_ADAPTER_UNAVAILABLE: ${call.capability}`)
       }
     },
-    allowedWritesAfter(call, working) {
+    allowedWritesAfter(call, working, stepId) {
       switch (call.capability) {
+        case 'document.layout_review': return allowedDocumentLayoutOutputs(working, stepId)
+        case 'project_image.create': return allowedProjectImageOutputs(working, stepId)
         case 'outline.refine':
         case 'evidence.research': return allowedEvidenceCapabilitySourceWrites(working)
         case 'chapter.write':
@@ -96,6 +109,13 @@ export function createBidCapabilityDispatcher(settings: CapabilityDispatcherSett
     },
     execute(call, context) {
       switch (call.capability) {
+        case 'document.patch': return executeDocumentPatch(call, context)
+        case 'document.layout_review': return executeDocumentLayoutReview(call, context, settings.modelStageRepairAttempts)
+        case 'flowchart.create': return executeFlowchartCapability(call, context)
+        case 'project_image.create': {
+          if (imageProvider === undefined) throw new Error('BID_IMAGE_PROVIDER_UNAVAILABLE')
+          return executeProjectImageCapability(call, context, imageProvider)
+        }
         case 'tender.analyze':
         case 'outline.generate': return executeGenerationCapability(call, context, settings.modelStageRepairAttempts)
         case 'tender.update': return executeTenderUpdateCapability(call, context)
@@ -134,6 +154,10 @@ export function createBidCapabilityDispatcher(settings: CapabilityDispatcherSett
     },
     async validate(call, context: BidCapabilityExecutionContext, result) {
       switch (call.capability) {
+        case 'document.patch': return validateDocumentCapability(context, result)
+        case 'document.layout_review': return validateDocumentLayoutReview(call, context, result)
+        case 'flowchart.create': return validateFigureCapability(context, result)
+        case 'project_image.create': return validateFigureCapability(context, result)
         case 'tender.analyze':
         case 'outline.generate': return validateGenerationCapability(call, context)
         case 'tender.update': return validateTenderUpdateCapability(context)

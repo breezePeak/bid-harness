@@ -18,16 +18,16 @@ const run = {
 }
 
 describe('Bid 项目状态', () => {
-  it('以 v4 扁平结构保存唯一任务状态并只在状态变化时递增修订号', async () => {
+  it('以 v5 保存空闲任务及可空路线，只在状态变化时递增修订号', async () => {
     const project = await workspace()
     await expect(readBidProjectState(project)).resolves.toBeUndefined()
     const initial = await checkpointBidProjectState(project, BID_INITIAL_TASK_STATE)
-    expect(initial).toMatchObject({ schema_version: 4, stage: 'file_intake', status: 'waiting_user', run: null, revision: 1 })
+    expect(initial).toMatchObject({ schema_version: 5, workflow: null, status: 'ready', run: null, revision: 1 })
     expect((await checkpointBidProjectState(project, BID_INITIAL_TASK_STATE)).revision).toBe(1)
-    const ready = await checkpointBidProjectState(project, { stage: 'evidence_mapping', status: 'ready', run: null })
+    const ready = await checkpointBidProjectState(project, { workflow: { kind: 'full_bid', stage: 'evidence_mapping' }, status: 'ready', run: null })
     expect(ready.revision).toBe(2)
     const failed = await checkpointBidProjectState(project, {
-      stage: 'chapter_writing', status: 'failed', run: null,
+      workflow: { kind: 'full_bid', stage: 'chapter_writing' }, status: 'failed', run: null,
       failure: { message: '章节资料不足。', issues: [{ code: 'MISSING_EVIDENCE', message: '缺少施工参数。' }] },
     })
     expect(failed.revision).toBe(3)
@@ -37,16 +37,16 @@ describe('Bid 项目状态', () => {
   it('保留 running 供持锁 Host 在恢复时转换', async () => {
     const project = await workspace()
     await writeBidProjectState(project, {
-      schema_version: 4, stage: 'chapter_writing', status: 'running', run, revision: 12, updated_at: 1,
+      schema_version: 4, workflow: { kind: 'full_bid', stage: 'chapter_writing' }, status: 'running', run, revision: 12, updated_at: 1,
     })
     await expect(readBidProjectState(project)).resolves.toMatchObject({ status: 'running', run, revision: 12 })
   })
 
-  it('结构化读取 v3 并归一为 v4 单一状态', async () => {
+  it.each([3, 4, 999])('拒绝旧或未知项目格式 %s 并保留原件', async (version) => {
     const project = await workspace()
     await mkdir(join(project.root, '.bid-harness'), { recursive: true })
     await writeFile(project.projectStatePath, `${JSON.stringify({
-      schema_version: 3,
+      schema_version: version,
       workflow: { stage: 'chapter_writing', gate: 'ready' },
       run: { ...run, stage: 'chapter_writing', status: 'suspended', cause: 'host_restart' },
       last_run: null,
@@ -54,10 +54,9 @@ describe('Bid 项目状态', () => {
       revision: 12,
       updated_at: 1,
     })}\n`)
-    await expect(readBidProjectState(project)).resolves.toMatchObject({
-      schema_version: 4, stage: 'chapter_writing', status: 'suspended', revision: 12,
-      run: { runId: 'run-12', cause: 'host_restart' },
-    })
+    const before = await readFile(project.projectStatePath, 'utf8')
+    await expect(readBidProjectState(project)).rejects.toThrow('bid-invalid-project-state')
+    expect(await readFile(project.projectStatePath, 'utf8')).toBe(before)
   })
 
   it('拒绝非法状态组合', async () => {
@@ -74,7 +73,7 @@ describe('Bid 项目状态', () => {
     const project = await workspace()
     const initial = await checkpointBidProjectState(project, BID_INITIAL_TASK_STATE)
     const artifact = join(project.root, '.bid-harness', 'outline', 'draft.json')
-    const task = { stage: 'outline_generation', status: 'ready', run: null } as const
+    const task = { workflow: { kind: 'full_bid', stage: 'outline_generation' }, status: 'ready', run: null } as const
     const committed = await commitBidProjectMutation(project, initial.revision, task,
       lease => lease.writeJson(artifact, { revision: 1 }))
     expect(committed.revision).toBe(initial.revision + 1)

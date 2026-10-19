@@ -16,11 +16,12 @@ interface ComposerRailItem extends AttachmentRailItem {
 
 /** Draft-image rail, document drop target, and original-image preview slot entry. */
 export function ComposerAttachments({
-  attachments, canAcceptDrop, onAddImages, onRemoveImage, dropLimits, t,
+  attachments, canAcceptDrop, submitting, onAddImages, onRemoveImage, dropLimits, t,
 }: ComposerAttachmentsProps) {
   const [preview, setPreview] = useState<ComposerAttachment | null>(null)
   const [dragActive, setDragActive] = useState(false)
   const dragDepth = useRef(0)
+  const picker = useRef<HTMLInputElement>(null)
   const closePreview = useCallback(() => { setPreview(null) }, [])
 
   useEffect(() => {
@@ -80,7 +81,7 @@ export function ComposerAttachments({
 
   const railItems = useMemo<ComposerRailItem[]>(() => attachments.map(attachment => ({
     id: attachment.id,
-    previewUrl: attachment.previewUrl,
+    previewUrl: attachment.kind === 'image' ? attachment.previewUrl : undefined,
     alt: attachment.file.name || t('image.pending'),
     removeLabel: t('image.remove', { name: attachment.file.name }),
     attachment,
@@ -88,6 +89,15 @@ export function ComposerAttachments({
 
   return (
     <>
+      <div className={css.addRow}>
+        <button type="button" className={css.add} disabled={!canAcceptDrop} onClick={() => { picker.current?.click() }}>添加附件</button>
+        <input ref={picker} type="file" hidden multiple accept=".doc,.docx,.pdf,.xls,.xlsx,.txt,.md,image/png,image/jpeg,image/webp,image/gif"
+          aria-label="选择附件" disabled={!canAcceptDrop} onChange={(event) => {
+            onAddImages(Array.from(event.currentTarget.files ?? []))
+            event.currentTarget.value = ''
+          }} />
+        {submitting && attachments.length > 0 && <span role="status">正在上传并发送附件…</span>}
+      </div>
       {dragActive && (
         <DropOverlay
           disabled={!canAcceptDrop}
@@ -99,12 +109,12 @@ export function ComposerAttachments({
           <AttachmentRail
             items={railItems}
             labels={attachmentRailLabels(t)}
-            onOpen={(item) => { setPreview(item.attachment) }}
+            onOpen={(item) => { if (item.attachment.kind === 'image') setPreview(item.attachment) }}
             onRemove={(item) => { onRemoveImage(item.attachment.id) }}
           />
         </div>
       )}
-      {preview !== null && (
+      {preview?.kind === 'image' && (
         <ImageLightbox
           src={preview.previewUrl}
           alt={preview.file.name || t('image.original')}

@@ -40,7 +40,7 @@ for (const fault of [undefined, 'after_split', 'after_migration', 'writing', 'be
       await ctx.plugin(UserQuestionService)
       await ctx.plugin(BidHostRuntime)
       const result = await runMainTaskPlanningLoop(ctx, root, fault)
-      expect(result).toMatchObject({ state: 'completed', children: ['收集输入', '校验结果', '交付成果'],
+      expect(result).toMatchObject({ state: 'ready', taskCompleted: true, children: ['收集输入', '校验结果', '交付成果'],
         workbench: Array(3).fill({ status: 'completed', content: true }),
         seedPreserved: true, outsidePreserved: true, exportedChildren: ['收集输入', '校验结果', '交付成果'],
         userMessages: 1 })

@@ -1,8 +1,7 @@
 import { readFile } from 'node:fs/promises'
-import type { StageValidationIssue } from './control-plane-contract.ts'
 import { outlineArtifactSha256, parseOutlineDraft, type OutlineDraftView } from './outline-confirmation-artifacts.ts'
-import { applyOutlineBusinessBindings, applyOutlineEdits, parseOutlineEditOperations,
-  type OutlineBusinessBinding, type OutlineEditOperation } from './outline-confirmation-edits.ts'
+import { applyOutlineBusinessBindings, applyOutlineEdits, parseOutlineEditOperations } from './outline-confirmation-edits.ts'
+import type { OutlineDraftMutationRequest, OutlineDraftIdentityRequest, OutlineDraftMutationResult } from './outline-confirmation-browser.ts'
 import { parseOutlineArtifact } from './outline-generation-artifacts.ts'
 import { validateOutlineDraftForConfirmation } from './outline-confirmation-validator.ts'
 import { parseScoringResponsePointCatalog } from './scoring-response-point-artifacts.ts'
@@ -15,25 +14,6 @@ interface OutlineDraftWorkspace {
   readonly root: string
   readonly projectRoot: string
 }
-
-/** CAS identity and operations required for one S5 mutation. */
-export interface OutlineDraftMutationRequest {
-  readonly expected_revision: number
-  readonly expected_draft_sha256: string
-  readonly operations: readonly OutlineEditOperation[]
-  readonly business_bindings?: readonly OutlineBusinessBinding[]
-}
-
-/** CAS identity required for confirmation or regeneration. */
-export interface OutlineDraftIdentityRequest {
-  readonly expected_revision: number
-  readonly expected_draft_sha256: string
-}
-
-/** Result of a Host draft mutation without changing stage state. */
-export type OutlineDraftMutationResult =
-  | { readonly ok: true; readonly value: OutlineDraftView }
-  | { readonly ok: false; readonly error: { readonly code: 'BID_OUTLINE_DRAFT_CONFLICT' | 'BID_INVALID_USER_OUTLINE' | 'BID_OUTLINE_DRAFT_PERSIST_FAILED'; readonly message: string; readonly issues?: readonly StageValidationIssue[]; readonly current: OutlineDraftView } }
 
 async function readJson(workspace: OutlineDraftWorkspace, path: string): Promise<unknown> {
   const absolute = within(workspace.projectRoot, path)

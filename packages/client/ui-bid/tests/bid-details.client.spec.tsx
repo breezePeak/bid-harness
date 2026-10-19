@@ -2,7 +2,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, expect, it, vi } from 'vitest'
 import type { BidDetailsView, BidStage, BidTaskState } from '@deepseek-ai/dsh-bid/control-plane'
-import { SessionId } from '@deepseek-ai/dsh-session'
+import { SessionId } from '@deepseek-ai/dsh-session/types'
 import { BidDetails } from '../src/client/BidDetails.tsx'
 
 afterEach(cleanup)
@@ -51,7 +51,7 @@ function expectFinalDetails() {
 type FixtureRuntime = { readonly stage: BidStage; readonly status: BidTaskState['status'] | 'pending' }
 
 function fixtureTask(runtime: FixtureRuntime): BidTaskState {
-  if (runtime.status === 'pending') return { stage: runtime.stage, status: 'ready', run: null }
+  if (runtime.status === 'pending') return { workflow: { kind: 'full_bid', stage: runtime.stage }, status: 'ready', run: null }
   if (runtime.status === 'running' || runtime.status === 'suspended') {
     const run = {
       runId: `details-${runtime.stage}`, epoch: 1, baseProjectRevision: 0,
@@ -62,13 +62,13 @@ function fixtureTask(runtime: FixtureRuntime): BidTaskState {
       startedAt: 1, updatedAt: 1,
     }
     return runtime.status === 'running'
-      ? { stage: runtime.stage, status: 'running', run }
-      : { stage: runtime.stage, status: 'suspended', run: { ...run, cause: 'user_stop' } }
+      ? { workflow: { kind: 'full_bid', stage: runtime.stage }, status: 'running', run }
+      : { workflow: { kind: 'full_bid', stage: runtime.stage }, status: 'suspended', run: { ...run, cause: 'user_stop' } }
   }
   if (runtime.status === 'failed') {
-    return { stage: runtime.stage, status: 'failed', run: null, failure: { message: '阶段执行失败' } }
+    return { workflow: { kind: 'full_bid', stage: runtime.stage }, status: 'failed', run: null, failure: { message: '阶段执行失败' } }
   }
-  return { stage: runtime.stage, status: runtime.status, run: null }
+  return { workflow: { kind: 'full_bid', stage: runtime.stage }, status: runtime.status, run: null }
 }
 
 function props(runtime: FixtureRuntime, patch: Partial<Parameters<typeof BidDetails>[0]> = {}): Parameters<typeof BidDetails>[0] {

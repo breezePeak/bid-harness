@@ -68,8 +68,9 @@ export function buildBidStagePlan(
   projection: Pick<BidClientProjection, 'task'>,
   t: TranslateBid,
 ): readonly PlanListItem[] {
+  if (projection.task.workflow === null || projection.task.run?.work.kind === 'capability_task') return []
   const phase = projection.task.run?.progress?.phase ?? 'starting'
-  const steps = stepsFor(projection.task.stage, phase)
+  const steps = stepsFor(projection.task.workflow.stage, phase)
   const matched = steps.findIndex(step => step.phases.includes(phase))
   const finished = projection.task.status === 'waiting_user' || projection.task.status === 'completed'
   const active = finished ? steps.length : matched < 0 ? 0 : matched

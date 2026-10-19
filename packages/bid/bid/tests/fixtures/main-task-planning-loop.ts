@@ -90,6 +90,7 @@ class PlanningAdapter extends ChapterAdapter {
     const prompt = options.messages.flatMap(message => message.content)
       .flatMap(block => block.type === 'text' ? [block.text] : []).join('\n')
     if (prompt.includes('核验输入：')) {
+      if (options.tools?.some(tool => tool.name === 'bid_read_recovery_input')) throw new Error('任务核验不得读取执行者恢复建议')
       const schema = inputJson<{
         $schema?: string
         additionalProperties?: boolean
@@ -98,6 +99,8 @@ class PlanningAdapter extends ChapterAdapter {
       if (schema.$schema !== undefined || schema.additionalProperties !== false
         || !prompt.includes('只返回业务字段，不返回 $schema')) throw new Error('任务核验输出协议混入 schema 元数据或缺少严格字段约束')
       if (!prompt.includes('result 核验在正式发布之前执行')) throw new Error('任务产物核验混淆候选检查与正式发布')
+      if (!prompt.includes('document.layout_review(mode=repair) 包含实际 PDF 渲染')
+        || !prompt.includes('mode=inspect 只检查并产出报告')) throw new Error('任务核验缺少检查与修复能力的准确区别')
       if (!prompt.includes('以这些原始绑定为准')) throw new Error('任务核验缺少原始目录绑定的归属依据')
       const input = inputJson<{
         phase: 'plan' | 'result'
@@ -173,18 +176,19 @@ class PlanningAdapter extends ChapterAdapter {
           && content.text.includes('本项 evidence_positions')))
         if (!this.missingCitationRejected) throw new Error('缺失引用未返回可修正的准确索引。')
       }
-      const requirements = [{
-        source_quote: input.sources[0]?.context_messages?.[0] ?? input.sources[0]?.text ?? '', object: 'outline' as const,
-        new_children: true, completed_content: true, repair: false, preserve_migrated_content: true, check }]
+      const sources = input.sources.map((source, index) => ({ relevant: true, requirements: [{
+        source_quote: source.context_messages?.[0] ?? source.text ?? '', object: index === 0 ? 'outline' : 'review',
+        new_children: index === 0, completed_content: index === 0, repair: false,
+        preserve_migrated_content: index === 0, check }] }))
       if (this.clarify === 'numeric' && input.requirements === undefined && !this.unfoundedRestrictionSubmitted) {
         this.unfoundedRestrictionSubmitted = true
         yield* call('structured_output', { scope_authorized: true, scope_constraints: [{ source_position: 0,
           quote: '仅改目录，不允许写正文', forbidden_capabilities: ['chapter.write'] }],
-        sources: input.sources.map(() => ({ relevant: true, requirements })) })
+        sources })
         return
       }
       yield* call('structured_output', input.requirements === undefined
-        ? { scope_authorized: true, scope_constraints: [], sources: input.sources.map(() => ({ relevant: true, requirements })) }
+        ? { scope_authorized: true, scope_constraints: [], sources }
         : { checks: input.requirements.map(() => check) })
       return
     }
@@ -663,7 +667,7 @@ export async function seedMainTaskPlanningProject(root: string, completeSourceFa
     confirmed_outline_sha256: outlineHash, confirmed_draft_revision: 1, confirmed_draft_sha256: outlineHash,
     authorization: { source: 'user_confirmation' },
   }) + '\n')
-  await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'completed', run: null })
+  await checkpointBidProjectState(workspace, { workflow: { kind: 'full_bid' as const, stage: 'chapter_writing' }, status: 'completed', run: null })
   return workspace
 }
 
@@ -676,7 +680,7 @@ export async function seedMainTaskPlanningProject(root: string, completeSourceFa
  * @param selectedRoute 是否通过会话模型选择覆盖启动时的路由。
  * @param clarify 是否用第二条章节名称消息澄清第一条拆章要求。
  * @param sixSparse 是否拆为六个叶节并模拟漏块、表题分离及原文共享；部分叶节没有迁移草稿。
- * @param restoreStatus 独立能力完成后恢复的原阶段状态；三态纠正场景在 Host 初始化结束后设置。
+ * @param restoreStatus 任务开始前的专业阶段状态；结算根据实际产物重新判断。
  * @returns 工具序列和正式产物事实。
  */
 export async function runMainTaskPlanningLoop(ctx: Context, root: string,
@@ -793,7 +797,7 @@ export async function runMainTaskPlanningLoop(ctx: Context, root: string,
   const host = ctx.bid as unknown as { readonly inFlight: Map<string, { readonly done: Promise<unknown> }> }
   if (fault === 'published_correction' && restoreStatus !== 'completed') {
     await Promise.all([...host.inFlight.values()].map(operation => operation.done))
-    const initial = { stage: 'chapter_writing' as const, status: restoreStatus, run: null }
+    const initial = { workflow: { kind: 'full_bid' as const, stage: 'chapter_writing' as const }, status: restoreStatus, run: null }
     await checkpointBidProjectState(workspace, initial)
     agent.session.append('bid.task.changed', { state: initial })
   }
@@ -830,12 +834,17 @@ export async function runMainTaskPlanningLoop(ctx: Context, root: string,
       await Promise.all([...host.inFlight.values()].map(operation => operation.done))
       await agent.whenIdle()
       const current = await readBidProjectState(workspace)
-      if (current?.status === restoreStatus) return
+      const notice = agent.session.events.findLast(event => event.type === 'bid.run.notice')
+      if (current?.status === 'ready' && notice?.data.kind === 'completed') return
       const round = agent.session.events.findLast(event => event.type === 'bid.recovery.round')
       if (round?.type === 'bid.recovery.round' && ['blocked', 'waiting_input', 'cancelled'].includes(round.data.state)) return
       await new Promise<void>((resolve) => { setTimeout(resolve, 20) })
     }
-    throw new Error('真实任务链未在有界恢复期限内结算。')
+    throw new Error('真实任务链未在有界恢复期限内结算：' + JSON.stringify({
+      state: await readBidProjectState(workspace), errors: adapter.errors,
+      notices: agent.session.events.filter(event => event.type === 'bid.run.notice').map(event => event.data),
+      tools: agent.session.events.filter(event => event.type === 'tool/result').slice(-3).map(event => event.data.message.content),
+    }))
   }
   await settle()
   if (fault === 'published_correction') {
@@ -845,7 +854,7 @@ export async function runMainTaskPlanningLoop(ctx: Context, root: string,
     await settle()
   }
   const state = await readBidProjectState(workspace)
-  if (state?.status !== restoreStatus) throw new Error('真实任务链路未完成：' + JSON.stringify({ state, errors: adapter.errors }))
+  if (state?.status !== 'ready') throw new Error('真实任务链路未结算：' + JSON.stringify({ state, errors: adapter.errors }))
   const outline = parseOutlineArtifact(JSON.parse(await readFile(join(workspace.projectRoot, 'outline/confirmed-outline.json'), 'utf8')))
   const children = outline.sections.filter(section => section.parent_id === 'S2.3')
   const locations = await readChapterLocations(workspace)
@@ -866,7 +875,9 @@ export async function runMainTaskPlanningLoop(ctx: Context, root: string,
   const source = capabilityTaskRequestSchema.parse(await readBidWorkRequest(workspace, start.data.run.work)).source_snapshot
   const checkpoint = capabilityTaskCheckpointSchema.parse(JSON.parse(await readFile(join(workspace.projectRoot, 'runs', start.data.run.work.workId,
     'task-checkpoint.json'), 'utf8')))
-  return { state: state?.status, source: text, children: children.map(section => section.title),
+  return { state: state.status,
+    taskCompleted: agent.session.events.findLast(event => event.type === 'bid.run.notice')?.data.kind === 'completed',
+    source: text, children: children.map(section => section.title),
     ...sixSparse ? { migrationSubmissions: adapter.inputs.filter(input => input.messages.some(message => message.content.some(block =>
       block.type === 'text' && block.text.includes('源正文完整 Markdown 块：')))).length,
     generatedDraftRepaired: bodies.every(body => body.includes('整改后的候选新增说明。') && !body.includes('需要整改的候选新增说明。')),
@@ -876,7 +887,7 @@ export async function runMainTaskPlanningLoop(ctx: Context, root: string,
     ...clarify === 'numeric' ? { unfoundedRestrictionRejected: adapter.unfoundedRestrictionRejected,
       noSuspension: !agent.session.events.some(event => event.type === 'bid.run.suspended'),
       verifiedCompletionNotice: agent.session.events.some(event => event.type === 'bid.run.notice'
-        && event.data.kind === 'completed' && event.data.message.includes('本次任务范围内目标已通过核验并正式发布，goal_met=true；')) } : {},
+        && event.data.kind === 'completed' && event.data.message === '任务已完成，结果已核验并保存。') } : {},
     ...selectedRoute ? { selectedRouteInherited: adapter.inputs.length > 0
       && adapter.inputs.slice(recoveryInputStart ?? 0)
         .every(input => input.provider === 'planning-selected' && input.model === 'selected-model') } : {},
@@ -921,7 +932,7 @@ export async function runMainTaskPlanningLoop(ctx: Context, root: string,
     publicationNotices: agent.session.events.filter(event => event.type === 'bid.run.notice' && event.data.kind === 'completed').length,
     correctionNoticeMatchesRun: agent.session.events.findLast(event => event.type === 'bid.run.notice')?.data.runId
       === agent.session.events.findLast(event => event.type === 'bid.run.started')?.data.run.runId } : {},
-    ...restoreStatus !== 'completed' ? { stagePreserved: state.stage === 'chapter_writing',
+    ...restoreStatus !== 'completed' ? { stagePreserved: state.workflow?.stage === 'chapter_writing',
       nativeStageRuns: agent.session.events.filter(event => event.type === 'bid.run.started'
         && event.data.run.work.kind === 'stage_execution').length } : {},
     executionParentModelTurns: adapter.inputs.filter(input => input.sessionId !== undefined

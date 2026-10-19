@@ -43,8 +43,8 @@ it('同一能力 Work 先更正招标理解再改目录，正式正文仅按实�
       input: { operations: [{ type: 'update_section' as const, section_id: 'SEC-3', title: '实施检查' }] } } },
   ] })
   const authorization = { session_id: String(session.id), message_id: String(message.id) }
-  const work = await persistCapabilityTaskRequest(workspace, session, 'chapter_writing', task, authorization,
-    BID_CAPABILITIES['tender.update'].requires, { stage: 'chapter_writing', status: 'completed', run: null })
+  const work = await persistCapabilityTaskRequest(workspace, session, task, authorization,
+    BID_CAPABILITIES['tender.update'].requires)
   const dispatcher = createBidCapabilityDispatcher({ modelStageRepairAttempts: 1,
     evidenceMappingMaxConcurrency: 1, chapterWritingMaxConcurrency: 1, webSearchEnabled: false })
   const agent = { id: 'deterministic-main' } as Parameters<typeof executeCapabilityTask>[3]
@@ -89,9 +89,9 @@ it('移动已有章节后保持身份和正文文件，导出按新目录顺序�
     scope: { kind: 'project' }, steps: [{ description: '执行已授权的测试步骤', scope: { source: 'task' },
       call: { capability: 'outline.update', input: { operations: [{ type: 'move_section',
         section_id: 'SEC-3', parent_id: 'GROUP-A', order: 1 }] } } }] })
-  const work = await persistCapabilityTaskRequest(workspace, session, 'chapter_writing', task,
+  const work = await persistCapabilityTaskRequest(workspace, session, task,
     { session_id: String(session.id), message_id: String(message.id) },
-    BID_CAPABILITIES['outline.update'].requires, { stage: 'chapter_writing', status: 'completed', run: null })
+    BID_CAPABILITIES['outline.update'].requires)
   const dispatcher = createBidCapabilityDispatcher({ modelStageRepairAttempts: 1,
     evidenceMappingMaxConcurrency: 1, chapterWritingMaxConcurrency: 1, webSearchEnabled: false })
   const agent = { id: 'deterministic-main' } as Parameters<typeof executeCapabilityTask>[3]
@@ -138,9 +138,8 @@ it('同一完成项目连续更正要求、移动合并章节和局部约束后�
     const task = bidCapabilityTaskSchema.parse({ goal, scope: { kind: 'project' }, steps: [{ description: '执行已授权的测试步骤',
       scope: { source: 'task' }, call: { capability, input },
     }] })
-    const work = await persistCapabilityTaskRequest(workspace, session, 'chapter_writing', task,
-      { session_id: String(session.id), message_id: String(message.id) }, BID_CAPABILITIES[capability].requires,
-      { stage: 'chapter_writing', status: 'completed', run: null })
+    const work = await persistCapabilityTaskRequest(workspace, session, task,
+      { session_id: String(session.id), message_id: String(message.id) }, BID_CAPABILITIES[capability].requires)
     return executeCapabilityTask(workspace, createTestBidRunContext({ work }), dispatcher, agent, session)
   }
   expect(await run('更正第三章要求的理解', 'tender.update', { operations: [{ type: 'update_requirement',
@@ -180,9 +179,9 @@ it('同一完成项目连续更正要求、移动合并章节和局部约束后�
             priority: 'required', evaluator: { kind: 'semantic' } }], update: [], delete: [] },
         }],
       } } }] })
-  const planWork = await persistCapabilityTaskRequest(workspace, session, 'chapter_writing', planTask,
+  const planWork = await persistCapabilityTaskRequest(workspace, session, planTask,
     { session_id: String(session.id), message_id: String(planMessage.id) },
-    BID_CAPABILITIES['writing.plan'].requires, { stage: 'chapter_writing', status: 'completed', run: null })
+    BID_CAPABILITIES['writing.plan'].requires)
   expect(await executeCapabilityTask(workspace, createTestBidRunContext({ work: planWork }), dispatcher, agent, session))
     .toMatchObject({ status: 'completed' })
   const updatedPlan = parseWritingPlan(JSON.parse(await readFile(planPath, 'utf8')))

@@ -154,6 +154,7 @@ export class BidRecoveryDriver {
     const confirmed = this.read(agent.session)
     if (this.available(agent.session) && confirmed !== undefined && (blocked || confirmed.eligible)
       && sameBidRecoveryTarget(confirmed.target, round.target) && confirmed.fingerprint === round.fingerprint
+      && JSON.stringify(confirmed.target) === JSON.stringify(round.target)
       && !this.received(agent, String(message.id))) agent.steer(message)
   }
 
@@ -196,7 +197,11 @@ export class BidRecoveryDriver {
       await this.append(session, prior)
     }
     if (prior?.state === 'blocked' && !notice.eligible) {
-      await this.notify(agent, prior, notice)
+      if (JSON.stringify(prior.target) !== JSON.stringify(notice.target) || prior.fingerprint !== notice.fingerprint) {
+        const { messageId: _messageId, dispatchAttempts: _dispatchAttempts, nextAt: _nextAt, ...retained } = prior
+        await this.notify(agent, { ...retained, target: notice.target, fingerprint: notice.fingerprint,
+          reason: notice.reason }, notice)
+      } else await this.notify(agent, prior, notice)
       return
     }
     if (prior?.state === 'notified') {

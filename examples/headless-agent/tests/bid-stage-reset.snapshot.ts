@@ -17,7 +17,7 @@ it('源码 Loader 的 /bid-reset-s1 清空项目资料与 Word 配置，保留�
     inspect: async (cwd) => {
       const project = join(cwd, '.bid-harness')
       expect(JSON.parse(await readFile(join(project, 'project-state.json'), 'utf8'))).toMatchObject({
-        schema_version: 4, stage: 'file_intake', status: 'waiting_user', run: null,
+        schema_version: 4, workflow: { kind: 'full_bid', stage: 'file_intake' }, status: 'waiting_user', run: null,
       })
       expect(await readFile(join(cwd, 'tender.md'), 'utf8')).toBe('技术要求：必须按期交付，技术方案得 10 分。')
       expect(await readFile(join(cwd, 'layout.docx'))).toEqual(
@@ -31,7 +31,7 @@ it('源码 Loader 的 /bid-reset-s1 清空项目资料与 Word 配置，保留�
       const logs = await Promise.all(paths.map(path => readFile(join(store, path), 'utf8')))
       const log = logs.find(value => (JSON.parse(value.split('\n')[0]!) as SessionHeader).id === 'bid-reset-s1')!
       const events = log.trimEnd().split('\n').slice(1).map(line => JSON.parse(line) as SessionEvent)
-      expect(events.reduce(reduceBidTaskState, BID_INITIAL_TASK_STATE)).toEqual({ stage: 'file_intake', status: 'waiting_user', run: null })
+      expect(events.reduce(reduceBidTaskState, BID_INITIAL_TASK_STATE)).toEqual({ workflow: { kind: 'full_bid', stage: 'file_intake' }, status: 'waiting_user', run: null })
       const commands = events.filter(event => event.type === 'command/run' || event.type === 'command/done')
       expect(commands.map(event => event.type)).toEqual(['command/run', 'command/done'])
       expect(commands[0]).toMatchObject({ data: { name: 'bid-reset-s1', args: '' } })

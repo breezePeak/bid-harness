@@ -3,7 +3,7 @@
  * narrow RpcRequest<P> and echoes request.rpcId on the RpcResponse<T>.
  */
 
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { mkdir, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { dirname } from 'node:path'
@@ -112,6 +112,7 @@ import {
 } from '@deepseek-ai/dsh-api-remotes'
 import { canOpenNativePath, openNativePath, openNativeTextFile } from './native-path-opener.ts'
 import type {} from './prompt-admission.ts'
+import { messageFileRefSchema, promptFilesText } from './api/files.ts'
 
 /** Page size when history is called without maxMessages. */
 const DEFAULT_MAX_MESSAGES = 50
@@ -2361,7 +2362,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
       },
 
       async prompt(request) {
-        const { sessionId, mode, content, clientSubmissionId, clientTimeZone } = request.payload
+        const { sessionId, mode, content, clientSubmissionId, clientTimeZone, fileRefs } = request.payload
         const canonicalTimeZone = clientTimeZone === undefined
           ? undefined
           : canonicalClientTimeZone(clientTimeZone)
@@ -2375,28 +2376,39 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
         const resolved = await turnAgentFor<{ accepted: true }>(request, sessionId)
         if ('refused' in resolved) return resolved.refused
         const agent = resolved.agent
-        const rejected = await ctx.root.serial('session/prompt-admission', {
-          session: agent.session,
-          mode,
-          content,
-        })
-        if (rejected !== undefined) {
-          return err(request, {
-            code: 'prompt-admission-rejected',
-            message: rejected.message,
-            details: { reason: rejected.reason },
-          })
-        }
-        // Request identity and optional browser zone ride the exact durable user message.
-        const source: MessageSource = {
-          kind: 'user',
-          rpcId: request.rpcId,
-          ...(clientSubmissionId === undefined ? {} : { clientSubmissionId }),
-          ...(canonicalTimeZone === undefined ? {} : { clientTimeZone: canonicalTimeZone }),
-        }
         const hasImage = content.some(part => part.type === 'image')
         const admit = async (): Promise<RpcResponse<{ accepted: true }>> => {
           try {
+            const submissionFingerprint = createHash('sha256').update(JSON.stringify({ mode, content, fileRefs: fileRefs ?? [] })).digest('hex')
+            if (clientSubmissionId !== undefined) {
+              const accepted = [...agent.inbox.nextTurn, ...agent.inbox.nextStep,
+                ...agent.session.events.flatMap(event => event.type === 'user/message' ? [event.data]
+                  : event.type === 'agent/inbox/spliced' ? event.data.inserted : [])]
+                .find(message => message.source.kind === 'user' && 'clientSubmissionId' in message.source
+                  && message.source.clientSubmissionId === clientSubmissionId)
+              if (accepted !== undefined) {
+                if (!('submissionFingerprint' in accepted.source) || accepted.source.submissionFingerprint !== submissionFingerprint) {
+                  return err(request, { code: 'prompt-admission-rejected', message: '同一次提交的正文或附件已改变，请作为新消息发送。',
+                    details: { reason: 'SUBMISSION_CONFLICT' } })
+                }
+                await ctx.sessions.flush(agent.session)
+                return ok(request, { accepted: true })
+              }
+            }
+            const rejected = await ctx.root.serial('session/prompt-admission', {
+              session: agent.session, mode, content, ...(fileRefs === undefined ? {} : { fileRefs }),
+            })
+            if (rejected !== undefined) return err(request, { code: 'prompt-admission-rejected',
+              message: rejected.message, details: { reason: rejected.reason } })
+            const files = fileRefs === undefined ? [] : zod.array(messageFileRefSchema).max(20).parse(
+              await ctx.root.serial('session/prompt-files', { session: agent.session, refs: fileRefs }))
+            if (content.length === 0 && files.length === 0) return err(request, { code: 'prompt-admission-rejected',
+              message: '请提供文字或附件。', details: { reason: 'EMPTY_PROMPT' } })
+            const source: MessageSource = { kind: 'user', rpcId: request.rpcId,
+              ...(clientSubmissionId === undefined ? {} : { clientSubmissionId, submissionFingerprint }),
+              ...(canonicalTimeZone === undefined ? {} : { clientTimeZone: canonicalTimeZone }),
+              ...(files.length === 0 ? {} : { fileRefs: files }),
+            }
             if (hasImage) {
               const current = selectionFor(agent).current
               const modelInfo = await ctx.llm.resolveModelInfo(current.provider, current.model)
@@ -2409,9 +2421,11 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
               }
             }
             const durable = await durablePromptContent(ctx, content)
+            if (files.length > 0) durable.push({ type: 'text', text: promptFilesText(files) })
             const message: UserMessage = createUserMessage({ content: durable, source })
             if (mode === 'steer') agent.steer(message)
             else agent.followup(message)
+            await ctx.sessions.flush(agent.session)
           } catch (error: unknown) {
             if (error instanceof AttachmentError) {
               return err(request, {
@@ -2428,7 +2442,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
           }
           return ok(request, { accepted: true as const })
         }
-        return hasImage ? serializeImageAdmission(agent, admit) : admit()
+        return serializeImageAdmission(agent, admit)
       },
 
       async attachment(request) {
@@ -2522,7 +2536,12 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
           }))
         }
         if (action.kind === 'edit') {
-          agent.inbox.replace(itemId, freezeMessage({ ...message, content: action.content }))
+          const files = message.source.kind === 'user' && 'fileRefs' in message.source
+            ? zod.array(messageFileRefSchema).max(20).parse(message.source.fileRefs) : []
+          agent.inbox.replace(itemId, freezeMessage({ ...message, content: [
+            ...message.content.filter(block => block.type === 'image'), ...action.content,
+            ...files.length === 0 ? [] : [{ type: 'text' as const, text: promptFilesText(files) }],
+          ] }))
         } else {
           agent.inbox.remove(itemId)
           if (action.kind === 'steer') agent.steer(message)

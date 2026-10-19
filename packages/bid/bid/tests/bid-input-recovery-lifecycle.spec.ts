@@ -98,9 +98,9 @@ async function suspend(workspace: BidWorkspace) {
       throw error
     }
   }))
-  const work = await persistBidWorkRequest(workspace, 'stage_execution', stage, payload, { stage, inputs, payload })
+  const work = await persistBidWorkRequest(workspace, { kind: 'stage_execution', stage: stage }, payload, { stage, inputs, payload })
   const run = { runId: 'input-original-run', epoch: 1, baseProjectRevision: 0, work, cause: 'user_stop' as const, startedAt: 1, updatedAt: 2 }
-  await checkpointBidProjectState(workspace, { stage, status: 'suspended', run })
+  await checkpointBidProjectState(workspace, { workflow: { kind: 'full_bid' as const, stage: stage }, status: 'suspended', run })
   return run
 }
 
@@ -127,11 +127,11 @@ it('整阶段正文缺口自动提问，答案落盘后重启直接续行原 Wor
       throw error
     }
   }))
-  const work = await persistBidWorkRequest(first.workspace, 'stage_execution', stage, payload, { stage, inputs, payload })
+  const work = await persistBidWorkRequest(first.workspace, { kind: 'stage_execution', stage: stage }, payload, { stage, inputs, payload })
   const run = { runId: 'stage-input-run', epoch: 1, baseProjectRevision: 1, work, cause: 'awaiting_input' as const,
     startedAt: 1, updatedAt: 2, error: { message: '正文编写需要输入',
       issues: [{ code: 'CHAPTER_WRITING_INPUT_REQUIRED', artifact: 'SEC-2', message: '在线演示资料未提供，需明确写作方式。' }] } }
-  await checkpointBidProjectState(first.workspace, { stage, status: 'suspended', run })
+  await checkpointBidProjectState(first.workspace, { workflow: { kind: 'full_bid' as const, stage: stage }, status: 'suspended', run })
   const retained = await readFile(join(first.workspace.projectRoot, 'chapters/sections/0001.md'), 'utf8')
   const asked = vi.fn(async ({ questions }: Parameters<typeof first.ctx.userQuestions.ask>[0]) => ({ answers: [{
     id: questions[0]!.id, selected: [], custom: '可以先生成几张图就行，后续演示这种再说了',
@@ -171,7 +171,7 @@ it('整阶段正文缺口自动提问，答案落盘后重启直接续行原 Wor
 it('旧正文 waiting_user 缺口在重启后恢复原阶段问题，已消费的写作计划不阻止提问', async () => {
   const first = await fixture()
   await seedProjectArtifacts(first.workspace)
-  await checkpointBidProjectState(first.workspace, { stage: 'chapter_writing', status: 'completed', run: null })
+  await checkpointBidProjectState(first.workspace, { workflow: { kind: 'full_bid' as const, stage: 'chapter_writing' }, status: 'completed', run: null })
   const agent = await first.fresh()
   const plan = JSON.parse(await readFile(join(first.workspace.projectRoot, 'chapters/writing-plan.json'), 'utf8')) as {
     confirmed_outline_sha256: string
@@ -194,11 +194,11 @@ it('旧正文 waiting_user 缺口在重启后恢复原阶段问题，已消费�
       throw error
     }
   }))
-  const work = await persistBidWorkRequest(first.workspace, 'stage_execution', stage, payload, { stage, inputs, payload })
+  const work = await persistBidWorkRequest(first.workspace, { kind: 'stage_execution', stage: stage }, payload, { stage, inputs, payload })
   const run = { runId: 'legacy-stage-input', epoch: 1, baseProjectRevision: 1, work, startedAt: 1, updatedAt: 2 }
   agent.session.append('bid.run.started', { run })
   agent.session.append('bid.run.completed', { run })
-  const state = { stage, status: 'waiting_user' as const, run: null, reason: '缺少演示资料',
+  const state = { workflow: { kind: 'full_bid' as const, stage: stage }, status: 'waiting_user' as const, run: null, reason: '缺少演示资料',
     issues: [{ code: 'CHAPTER_WRITING_INPUT_REQUIRED', artifact: 'SEC-2', message: '缺少演示资料' }] }
   agent.session.append('bid.task.changed', { state })
   await checkpointBidProjectState(first.workspace, state)

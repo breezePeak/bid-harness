@@ -176,7 +176,7 @@ describe.skipIf(!process.env.DEEPSEEK_API_KEY && !process.env.DSH_BID_EVAL_PROVI
       await ctx.plugin(UserQuestionService)
       const workspace = new BidWorkspace(root)
       await seedCapabilityProject(workspace, 'complete')
-      await checkpointBidProjectState(workspace, { stage: 'evidence_mapping', status: 'completed', run: null })
+      await checkpointBidProjectState(workspace, { workflow: { kind: 'full_bid', stage: 'evidence_mapping' }, status: 'completed', run: null })
       await ctx.plugin(BidHostRuntime)
       const { agent } = await ctx.agentLoop.createAgent(ctx, {
         sessionId: SessionId('capability-routing'),

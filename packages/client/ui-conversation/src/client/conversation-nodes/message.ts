@@ -7,13 +7,18 @@ import {
 } from '@deepseek-ai/dsh-client-runtime/client'
 import type { InboxState } from './inbox.ts'
 import { chatNode } from './common.ts'
+import { messageFileRefSchema, promptFilesText, type MessageFileRef } from '@deepseek-ai/dsh-host-apiproxy/api/files'
 
 interface ReferencedUserMessageNode extends UserMessageNode {
+  /** 消息接纳时保存的不可变文件事实。 */
+  readonly files?: readonly MessageFileRef[]
   /** Labels cited by the immediately following session-reference context. */
   readonly referenceLabels?: readonly string[]
 }
 
 interface ReferencedSteeringMessageNode extends SteeringMessageNode {
+  /** 消息接纳时保存的不可变文件事实。 */
+  readonly files?: readonly MessageFileRef[]
   /** Labels cited by the immediately following session-reference context. */
   readonly referenceLabels?: readonly string[]
 }
@@ -61,20 +66,28 @@ export const messageDefinition: ConversationNodeDefinition<MessageNode> = {
       }
     }
     const claimed = reader.previous<InboxState>('inbox-next-step')?.state.claimed.has(String(event.data.id)) === true
+    const files = 'fileRefs' in event.data.source
+      ? messageFileRefSchema.array().max(20).parse(event.data.source.fileRefs) : []
+    const summary = files.length === 0 ? undefined : promptFilesText(files)
+    const content = event.data.content.filter((block, position) => position !== event.data.content.length - 1
+      || block.type !== 'text' || block.text !== summary)
+    const attachments = files.length === 0 ? {} : { files }
     return claimed
       ? {
         kind: 'steering',
         messageId: event.data.id,
         seq: event.seq,
         time: event.time,
-        content: event.data.content,
+        content,
+        ...attachments,
         source: event.data.source,
       }
       : {
         kind: 'user',
         seq: event.seq,
         time: event.time,
-        content: event.data.content,
+        content,
+        ...attachments,
         source: event.data.source,
       }
   },

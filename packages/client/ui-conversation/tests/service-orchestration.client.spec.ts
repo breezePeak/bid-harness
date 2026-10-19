@@ -15,7 +15,7 @@ import { InputHub } from '../src/client/input/hub.ts'
 import { ConversationController, UnsupportedImageMediaTypeError } from '../src/client/service.ts'
 import { zh } from '../src/client/locales.ts'
 
-async function bench(readAttachment?: SessionFace['readAttachment']) {
+async function bench(readAttachment?: SessionFace['readAttachment'], uploadFile?: SessionFace['uploadFile']) {
   const runtime = await SlotTestRuntime.create()
   const prompt = vi.fn(() => Promise.resolve({ ok: true as const, value: { accepted: true as const } }))
   const beginOutgoing = vi.fn()
@@ -33,6 +33,7 @@ async function bench(readAttachment?: SessionFace['readAttachment']) {
       cancel,
       loadOlder,
       ...(readAttachment === undefined ? {} : { readAttachment }),
+      ...(uploadFile === undefined ? {} : { uploadFile }),
     },
   })
   // config.input is required (the apply shares its hub with the inject
@@ -53,6 +54,41 @@ async function bench(readAttachment?: SessionFace['readAttachment']) {
 }
 
 describe('ConversationController', () => {
+  it('文件单独发送复用草稿和提交，上传成功后发送失败重试不再上传', async () => {
+    const ref = { attachmentId: AttachmentId('file:' + 'a'.repeat(64)), version: 'b'.repeat(64) }
+    const upload = vi.fn(async () => ref)
+    const b = await bench(undefined, upload)
+    const descriptors = b.root.createDraftImages([new File(['原件'], '方案.txt', { type: 'text/plain' })])
+    const ids = descriptors.map(file => file.id)
+    b.root.input.for(b.runtime.sessions.scope('s1')!).addImages(ids)
+    b.prompt.mockResolvedValueOnce({ ok: false, error: { code: 'agent-busy', message: '连接中断', details: {} } } as never)
+    b.shell.submit()
+    await vi.waitFor(() => { expect(b.prompt).toHaveBeenCalledOnce() })
+    await vi.waitFor(() => { expect(b.shell.snapshot.phase).toBe('plain') })
+    expect(b.root.draftImages(ids)).toHaveLength(1)
+    const firstSubmission = b.prompt.mock.calls[0]
+    b.shell.submit()
+    await vi.waitFor(() => { expect(b.prompt).toHaveBeenCalledTimes(2) })
+    expect(upload).toHaveBeenCalledOnce()
+    expect(firstSubmission).toEqual([[], 'queue', expect.any(AbortSignal), expect.any(String), [ref]])
+    await vi.waitFor(() => { expect(b.root.draftImages(ids)).toHaveLength(0) })
+    await b.runtime.dispose()
+  })
+
+  it('文档上传失败保留草稿，重试与移除沿用同一附件身份', async () => {
+    const upload = vi.fn<SessionFace['uploadFile']>().mockRejectedValueOnce(new Error('上传中断'))
+    const b = await bench(undefined, upload)
+    const descriptors = b.root.createDraftImages([new File(['原件'], '方案.txt', { type: 'text/plain' })])
+    const ids = descriptors.map(file => file.id)
+    b.root.input.for(b.runtime.sessions.scope('s1')!).addImages(ids)
+    b.shell.submit()
+    await vi.waitFor(() => { expect(b.shell.notices.getSnapshot()?.text).toContain('上传中断') })
+    expect(b.prompt).not.toHaveBeenCalled()
+    expect(b.root.draftImages(ids)).toEqual(descriptors)
+    b.root.releaseDraftImages(descriptors)
+    expect(b.root.draftImages(ids)).toEqual([])
+    await b.runtime.dispose()
+  })
   it('keeps immediate submit policy scoped to the addressed session', async () => {
     const b = await bench()
     expect(b.scoped.resolveSubmitModeOverride(true, true)).toBeUndefined()

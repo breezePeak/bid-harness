@@ -59,10 +59,10 @@ try {
       throw error
     }
   }))
-  const work = await persistBidWorkRequest(workspace, 'stage_execution', 'chapter_writing', payload,
+  const work = await persistBidWorkRequest(workspace, { kind: 'stage_execution', stage: 'chapter_writing' }, payload,
     { stage: 'chapter_writing', inputs, payload })
   await checkpointBidProjectState(workspace, {
-    stage: 'chapter_writing', status: 'suspended',
+    workflow: { kind: 'full_bid', stage: 'chapter_writing' }, status: 'suspended',
     run: {
       runId: 'snapshot-s5-run', epoch: 1, baseProjectRevision: 0, work,
       startedAt: 0, updatedAt: 0, cause: 'executor_error', error: { message: '等待恢复' },

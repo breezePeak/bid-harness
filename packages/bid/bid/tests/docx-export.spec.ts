@@ -239,7 +239,7 @@ describe('Bid DOCX export', () => {
     const requestHash = hash('实际图片请求')
     const image = bidChapterImageSchema.parse({
       id: `IMG-${hash(requestHash + contentHash)}`, section_id: 'source-image-section',
-      path: `chapters/images/${contentHash}.png`, content_sha256: contentHash, request_sha256: requestHash,
+      path: `assets/images/${contentHash}.png`, content_sha256: contentHash, request_sha256: requestHash,
       width: 24, height: 16, title: '设备布局示意', purpose: '说明方案，非现场事实证据', prompt: '设备布局鸟瞰',
       style_sha256: hash(prompt), model: 'test-image-model', visual_status: 'accepted', visual_reason: '布局与项目配色符合方案。',
     })
@@ -249,9 +249,9 @@ describe('Bid DOCX export', () => {
     const ledgerPath = join(workspace.projectRoot, chapterImageLedgerPath(image.section_id))
     const ledger = JSON.stringify({ schema_version: 1, section_id: image.section_id, images: [image] })
     try {
-      await mkdir(join(workspace.projectRoot, 'chapters/images'), { recursive: true })
+      await mkdir(join(workspace.projectRoot, 'assets/images'), { recursive: true })
       await writeFile(join(workspace.projectRoot, image.path), png)
-      await writeFile(join(workspace.projectRoot, 'chapters/image-style.json'), JSON.stringify({
+      await writeFile(join(workspace.projectRoot, 'assets/image-style.json'), JSON.stringify({
         schema_version: 2, prompt, sha256: hash(prompt), model: image.model,
       }))
       await writeFile(ledgerPath, ledger)
@@ -279,7 +279,7 @@ describe('Bid DOCX export', () => {
         issues: [expect.objectContaining({ code: 'DOCX_EXPORT_IMAGE_INVALID' })],
       })
       await writeFile(join(workspace.projectRoot, 'chapters/sections/0001.md'),
-        `# 资源配置\n\n![设备](${image.path.replace('chapters/images/', 'chapters/%69mages/')})\n`)
+        `# 资源配置\n\n![设备](${image.path.replace('assets/images/', 'assets/%69mages/')})\n`)
       await expect(executeDocxExport(workspace)).rejects.toMatchObject({
         issues: [expect.objectContaining({ code: 'DOCX_EXPORT_IMAGE_INVALID' })],
       })

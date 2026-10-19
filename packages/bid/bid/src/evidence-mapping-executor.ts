@@ -5954,7 +5954,7 @@ async function executeEvidenceMappingRun(
           executed = { outline: repaired.outline, tasks: [...executed.tasks, ...repaired.tasks] }
         }
         let initialResults = currentCompletedTaskResults(executed.outline, executed.tasks)
-        const reviewRequest = [options.remap?.reason, options.recovery?.instruction]
+        const reviewRequest = [options.remap?.reason, options.recovery?.modelContext?.text ?? options.recovery?.instruction]
           .filter(value => value !== undefined).join('\n') || undefined
         let initialMerged = mergeEvidenceMappingPartialResults(initialResults.map(item => item.result))
         for (const mapping of initialMerged.section_mappings) acceptedMappings.set(mapping.section_id, mapping)

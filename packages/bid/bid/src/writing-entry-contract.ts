@@ -100,3 +100,14 @@ export const writingEntryViewSchema = z.object({
  * 已校验的写作入口展示状态。
  */
 export type WritingEntryView = z.infer<typeof writingEntryViewSchema>
+
+declare module '@deepseek-ai/dsh-session-projection/types' {
+  interface SessionProjectionMap {
+    /** 写作入口的客户端视图。 */
+    [BID_WRITING_ENTRY_PROJECTION_KEY]: WritingEntryView | null
+  }
+  interface SessionProjectionStateMap {
+    /** 从会话事件恢复的写作入口。 */
+    [BID_WRITING_ENTRY_PROJECTION_KEY]: WritingEntryView | null
+  }
+}

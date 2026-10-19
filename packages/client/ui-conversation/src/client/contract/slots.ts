@@ -24,13 +24,11 @@ import type { ComposerSubmitGesture, InputSubmitMode } from './composer-submissi
 import type { ChatNode, ChatNodeKind } from './chat-nodes.ts'
 import type { CallId, SelectionTarget, ViewTab } from './views.ts'
 
-/** Browser-owned image that has not crossed the durable host boundary. */
-export interface ComposerAttachment {
-  kind: 'image'
+/** 复用草稿身份与顺序；原件引用只由 Host 上传回执提供。 */
+export type ComposerAttachment = {
   id: DraftAttachmentId
   file: File
-  previewUrl: string
-}
+} & ({ kind: 'image'; previewUrl: string } | { kind: 'file'; uploaded?: import('@deepseek-ai/dsh-api-remotes/client').PromptFileRef })
 
 /** Input state handed to the optional attachment presentation plugin. */
 export interface ComposerAttachmentsOwnerProps {
@@ -38,6 +36,8 @@ export interface ComposerAttachmentsOwnerProps {
   attachments: readonly ComposerAttachment[]
   /** Whether a document-level file drop may add images now. */
   canAcceptDrop: boolean
+  /** 复用输入机的发送阶段，文件上传属于同一次提交。 */
+  submitting?: boolean
   /** Add one dropped batch through the composer's validation path. */
   onAddImages: (files: readonly File[]) => void
   /** Remove one draft image through the conversation service. */

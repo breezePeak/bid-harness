@@ -17,8 +17,7 @@ describe('Bid Work Descriptor', () => {
     const workspace = await fixture()
     const descriptor = await persistBidWorkRequest(
       workspace,
-      'outline_regeneration',
-      'evidence_mapping',
+      { kind: 'outline_regeneration', stage: 'evidence_mapping' },
       { feedback: '拆分实施与验收' },
       { outline_sha256: 'a'.repeat(64) },
       'regenerate-1',
@@ -38,8 +37,7 @@ describe('Bid Work Descriptor', () => {
     await writeFile(canonical, 'canonical')
     const descriptor = await persistBidWorkRequest(
       workspace,
-      'evidence_remap',
-      'evidence_mapping',
+      { kind: 'evidence_remap', stage: 'evidence_mapping' },
       { section_ids: ['SEC-1'] },
       { outline_sha256: 'b'.repeat(64) },
       'remap-1',
@@ -65,9 +63,9 @@ describe('Bid Work Descriptor', () => {
 
   it('重置阶段时枚举请求、私有工作树及后续阶段，不误删上游工作', async () => {
     const workspace = await fixture()
-    const upstream = await persistBidWorkRequest(workspace, 'outline_regeneration', 'outline_generation', {}, {}, 'upstream')
-    const target = await persistBidWorkRequest(workspace, 'stage_execution', 'evidence_mapping', {}, {}, 'target')
-    const downstream = await persistBidWorkRequest(workspace, 'chapter_revision', 'chapter_writing', {}, {}, 'downstream')
+    const upstream = await persistBidWorkRequest(workspace, { kind: 'outline_regeneration', stage: 'outline_generation' }, {}, {}, 'upstream')
+    const target = await persistBidWorkRequest(workspace, { kind: 'stage_execution', stage: 'evidence_mapping' }, {}, {}, 'target')
+    const downstream = await persistBidWorkRequest(workspace, { kind: 'chapter_revision', stage: 'chapter_writing' }, {}, {}, 'downstream')
     await mkdir(join(workspace.projectRoot, 'requests', target.workId), { recursive: true })
     await mkdir(join(workspace.projectRoot, 'runs', target.workId, 'work'), { recursive: true })
     await writeFile(join(workspace.projectRoot, 'runs', target.workId, 'work', 'work-identity.json'), `${JSON.stringify(target)}\n`)
@@ -89,7 +87,7 @@ describe('Bid Work Descriptor', () => {
 
   it('请求附属目录缺少同名 JSON 时按工作树身份确认归属', async () => {
     const workspace = await fixture()
-    const descriptor = await persistBidWorkRequest(workspace, 'stage_execution', 'evidence_mapping', {}, {}, 'orphan-payload')
+    const descriptor = await persistBidWorkRequest(workspace, { kind: 'stage_execution', stage: 'evidence_mapping' }, {}, {}, 'orphan-payload')
     await mkdir(join(workspace.projectRoot, 'requests', descriptor.workId), { recursive: true })
     await mkdir(join(workspace.projectRoot, 'runs', descriptor.workId, 'work'), { recursive: true })
     await writeFile(join(workspace.projectRoot, 'runs', descriptor.workId, 'work', 'work-identity.json'), `${JSON.stringify(descriptor)}\n`)
@@ -119,7 +117,7 @@ describe('Bid Work Descriptor', () => {
 
   it('请求元信息与工作树身份矛盾时报告身份文件路径', async () => {
     const workspace = await fixture()
-    const descriptor = await persistBidWorkRequest(workspace, 'stage_execution', 'evidence_mapping', {}, {}, 'mismatch')
+    const descriptor = await persistBidWorkRequest(workspace, { kind: 'stage_execution', stage: 'evidence_mapping' }, {}, {}, 'mismatch')
     await mkdir(join(workspace.projectRoot, 'runs', descriptor.workId, 'work'), { recursive: true })
     const marker = join(workspace.projectRoot, 'runs', descriptor.workId, 'work', 'work-identity.json')
     await writeFile(marker, `${JSON.stringify({ ...descriptor, stage: 'chapter_writing' })}\n`)
@@ -128,29 +126,29 @@ describe('Bid Work Descriptor', () => {
       .rejects.toThrow(`BID_RESET_WORK_IDENTITY_MISMATCH:${marker}`)
   })
 
-  it('request schema_version 为 999 时 readBidWorkRequest 仍正常 resume', async () => {
+  it.each([1, 999])('拒绝不支持的 Work 格式 %s 并保留原件', async (version) => {
     const workspace = await fixture()
     const descriptor = await persistBidWorkRequest(
       workspace,
-      'outline_regeneration',
-      'evidence_mapping',
+      { kind: 'outline_regeneration', stage: 'evidence_mapping' },
       { feedback: '测试 payload' },
       { outline_sha256: 'a'.repeat(64) },
       'resume-v999',
     )
     const requestPath = join(workspace.projectRoot, descriptor.requestRef)
     const raw = JSON.parse(await readFile(requestPath, 'utf8')) as Record<string, unknown>
-    raw.schema_version = 999
+    raw.schema_version = version
     const updatedBytes = `${JSON.stringify(raw, null, 2)}\n`
     await writeFile(requestPath, updatedBytes)
     const updatedSha256 = createHash('sha256').update(updatedBytes).digest('hex')
     const updatedDescriptor = { ...descriptor, requestSha256: updatedSha256 }
 
     await expect(readBidWorkRequest(workspace, updatedDescriptor))
-      .resolves.toEqual({ feedback: '测试 payload' })
+      .rejects.toThrow()
+    expect(await readFile(requestPath, 'utf8')).toBe(updatedBytes)
   })
 
-  it('requests 中 schema_version 为 999 时 bidResetWorkPaths 仍正常重置不抛 READ_FAILED', async () => {
+  it('重置遇到未知请求格式时拒绝清理并保留原件', async () => {
     const workspace = await fixture()
     const workId = 'reset-v999'
     const requestsDir = join(workspace.projectRoot, 'requests')
@@ -165,7 +163,8 @@ describe('Bid Work Descriptor', () => {
       payload: {},
     }, null, 2)}\n`)
 
-    const paths = await bidResetWorkPaths(workspace, 'evidence_mapping')
-    expect(paths).toContain(requestPath)
+    const before = await readFile(requestPath, 'utf8')
+    await expect(bidResetWorkPaths(workspace, 'evidence_mapping')).rejects.toThrow('BID_RESET_REQUEST_READ_FAILED')
+    expect(await readFile(requestPath, 'utf8')).toBe(before)
   })
 })

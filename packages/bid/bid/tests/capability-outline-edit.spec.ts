@@ -9,7 +9,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { BidWorkspace } from '../src/index.ts'
 import type { BidCapabilityExecutionContext } from '../src/bid-capability-contract.ts'
 import { bidCapabilityInputSchema, bidCapabilityTaskSchema } from '../src/bid-capability-contract.ts'
-import { persistCapabilityTaskRequest,
+import { capabilityTaskRequestSchema, persistCapabilityTaskRequest,
   type CapabilityTaskDispatcher } from '../src/bid-capability-task.ts'
 import { executeTestCapabilityTask as executeCapabilityTask } from './fixtures/task-verifier.ts'
 import { validateCapabilityResult } from '../src/bid-capability-registry.ts'
@@ -21,6 +21,7 @@ import { executeCapabilityChapterReorganize, executeCapabilityOutlineUpdate,
   outlineReassignmentSchema } from '../src/outline-capability-update.ts'
 import { createTestBidRunContext } from '../src/run-coordinator.ts'
 import { prepareBidWorkingTree } from '../src/working-tree.ts'
+import { readBidWorkRequest } from '../src/work-descriptor.ts'
 import { outlineArtifactSha256, parseOutlineConfirmationArtifact, parseOutlineDraft } from '../src/outline-confirmation-artifacts.ts'
 import { parseOutlineArtifact } from '../src/outline-generation-artifacts.ts'
 import { parseChapterExecutionPlan, parseOrMigrateChapterExecutionLog } from '../src/chapter-writing-plan-artifacts.ts'
@@ -634,16 +635,15 @@ describe('目录能力候选', () => {
         ] })
       const authorization = { session_id: String(session.id), message_id: String(message.id) }
       const formalBeforeAdmission = await readJson(workspace, 'outline/confirmed-outline.json')
-      const admission = persistCapabilityTaskRequest(workspace, session, 'chapter_writing', task,
-        authorization, ['outline/confirmed-outline.json', 'analysis/requirements.json'],
-        { stage: 'chapter_writing', status: 'completed', run: null })
+      const admission = persistCapabilityTaskRequest(workspace, session, task,
+        authorization, ['outline/confirmed-outline.json', 'analysis/requirements.json'])
       if (interrupt === 'missing_followup') {
         await expect(admission).rejects.toThrow('BID_CAPABILITY_CONTENT_FOLLOWUP_REQUIRED')
         expect(await readJson(workspace, 'outline/confirmed-outline.json')).toEqual(formalBeforeAdmission)
         return
       }
       const descriptor = await admission
-      const firstStepId = `step-${createHash('sha256').update(descriptor.workId).digest('hex').slice(0, 24)}-0001`
+      const firstStepId = capabilityTaskRequestSchema.parse(await readBidWorkRequest(workspace, descriptor)).step_ids[0]!
       const prefix = createHash('sha256').update(firstStepId).digest('hex').slice(0, 12)
       const children = [1, 2].map(index => `SEC-${prefix}-${String(index)}`)
       const original = await readFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), 'utf8')
@@ -736,8 +736,8 @@ describe('目录能力候选', () => {
       const seeds = chapterReuseSeedsSchema.parse(await readJson(workspace, 'chapters/reuse-seeds.json'))
       expect((await Promise.all(seeds.seeds.map(seed => readFile(join(workspace.projectRoot, seed.content_path), 'utf8')))).join(''))
         .toBe(original)
-      expect(outcome.status === 'completed' ? outcome.receipt.files.every(file => !file.path.includes('sections/0002.md')) : false)
-        .toBe(true)
+      expect(outcome.status === 'completed' ? outcome.receipt.files.map(file => file.path) : [])
+        .not.toContain('chapters/sections/0002.md')
     } finally { await ctx.fiber.dispose() }
   }, 30_000)
 })

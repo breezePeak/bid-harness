@@ -4,7 +4,7 @@ import { writeFileAtomic } from '@deepseek-ai/dsh-atomic-write'
 import type { BidWorkDescriptor } from './control-plane-contract.ts'
 import { reconcileBidPublications } from './publication-batch.ts'
 import type { BidCommitLease, BidRunContext } from './run-coordinator.ts'
-import { bidWorkRoot } from './work-descriptor.ts'
+import { bidWorkRoot, bidWorkDescriptorSchema } from './work-descriptor.ts'
 import { assertNoLinkedPath, within } from './workspace-path.ts'
 
 interface WorkspacePaths {
@@ -55,7 +55,7 @@ export async function prepareBidWorkingTree(
   await assertNoLinkedPath(workspace.root, root)
   try {
     const saved = JSON.parse(await readFile(markerPath, 'utf8')) as unknown
-    if (JSON.stringify(saved) !== JSON.stringify(descriptor)) throw new Error('BID_WORKING_TREE_IDENTITY_MISMATCH')
+    if (JSON.stringify(bidWorkDescriptorSchema.parse(saved)) !== JSON.stringify(bidWorkDescriptorSchema.parse(descriptor))) throw new Error('BID_WORKING_TREE_IDENTITY_MISMATCH')
     if (!options.reset) {
       await reconcileBidPublications(root, projectRoot)
       return { root, projectRoot }
@@ -158,6 +158,6 @@ export async function readExistingBidWorkingTree(
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null
     throw error
   }
-  if (JSON.stringify(JSON.parse(raw)) !== JSON.stringify(descriptor)) throw new Error('BID_WORKING_TREE_IDENTITY_MISMATCH')
+  if (JSON.stringify(bidWorkDescriptorSchema.parse(JSON.parse(raw))) !== JSON.stringify(bidWorkDescriptorSchema.parse(descriptor))) throw new Error('BID_WORKING_TREE_IDENTITY_MISMATCH')
   return { root, projectRoot: resolve(root, relativeProjectRoot(workspace)) }
 }

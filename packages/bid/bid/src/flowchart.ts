@@ -260,7 +260,7 @@ export interface FlowchartLayout {
   readonly height: number
 }
 
-/** Compute deterministic positions without assuming the graph is acyclic.
+/** 去除 DFS 回边后按最长前向路径分层，汇合节点排在所有前驱之后。
  * @param spec Validated flowchart specification.
  * @returns Node positions and the canvas size in CSS pixels.
  */
@@ -271,23 +271,22 @@ function flowchartLevels(spec: FlowchartSpec): Map<string, number> {
     incoming.set(edge.to, (incoming.get(edge.to) ?? 0) + 1)
     outgoing.get(edge.from)?.push(edge.to)
   }
-  const levels = new Map<string, number>()
-  const queue = spec.nodes.filter(node => (incoming.get(node.id) ?? 0) === 0).map(node => node.id)
-  if (queue.length === 0 && spec.nodes[0] !== undefined) queue.push(spec.nodes[0].id)
-  const queued = new Set(queue)
-  while (queue.length > 0) {
-    const id = queue.shift()
-    if (id === undefined) continue
-    for (const next of outgoing.get(id) ?? []) {
-      if (levels.has(next)) continue
-      levels.set(next, (levels.get(id) ?? 0) + 1)
-      if (!queued.has(next)) {
-        queued.add(next)
-        queue.push(next)
-      }
-    }
+  const visited = new Set<string>()
+  const order: string[] = []
+  const visit = (id: string): void => {
+    if (visited.has(id)) return
+    visited.add(id)
+    for (const next of outgoing.get(id) ?? []) visit(next)
+    order.push(id)
   }
-  for (const node of spec.nodes) if (!levels.has(node.id)) levels.set(node.id, 0)
+  for (const node of spec.nodes) if (incoming.get(node.id) === 0) visit(node.id)
+  for (const node of spec.nodes) visit(node.id)
+  order.reverse()
+  const ranks = new Map(order.map((id, index) => [id, index]))
+  const levels = new Map(spec.nodes.map(node => [node.id, 0]))
+  for (const [rank, id] of order.entries()) for (const next of outgoing.get(id) ?? []) {
+    if ((ranks.get(next) ?? -1) > rank) levels.set(next, Math.max(levels.get(next) ?? 0, (levels.get(id) ?? 0) + 1))
+  }
   return levels
 }
 
@@ -344,6 +343,7 @@ function routeAround(
   to: FlowchartBox,
   bounds: { width: number; height: number },
   direction: FlowchartDirection,
+  sideExit: boolean,
 ): FlowchartPoint[] {
   const lane = 18
   const exit = 24
@@ -354,6 +354,8 @@ function routeAround(
     const x = side === 'left' ? Math.min(from.x, to.x) - lane : Math.max(from.x + from.width, to.x + to.width) + lane
     const start = { x: from.x + from.width / 2, y: from.y + from.height }
     const end = { x: to.x + to.width / 2, y: to.y }
+    if (sideExit) return [{ x: side === 'left' ? from.x : from.x + from.width, y: from.y + from.height / 2 },
+      { x, y: from.y + from.height / 2 }, { x, y: end.y - exit }, { x: end.x, y: end.y - exit }, end]
     return [start, { x: start.x, y: start.y + exit }, { x, y: start.y + exit }, { x, y: end.y - exit }, { x: end.x, y: end.y - exit }, end]
   }
   const fromSide = from.y + from.height / 2 <= bounds.height / 2 ? 'top' : 'bottom'
@@ -362,6 +364,8 @@ function routeAround(
   const y = side === 'top' ? Math.min(from.y, to.y) - lane : Math.max(from.y + from.height, to.y + to.height) + lane
   const start = { x: from.x + from.width, y: from.y + from.height / 2 }
   const end = { x: to.x, y: to.y + to.height / 2 }
+  if (sideExit) return [{ x: from.x + from.width / 2, y: side === 'top' ? from.y : from.y + from.height },
+    { x: from.x + from.width / 2, y }, { x: end.x - exit, y }, { x: end.x - exit, y: end.y }, end]
   return [start, { x: start.x + exit, y: start.y }, { x: start.x + exit, y }, { x: end.x - exit, y }, { x: end.x - exit, y: end.y }, end]
 }
 
@@ -376,7 +380,7 @@ function shortenEnd(points: FlowchartPoint[], marker: number): FlowchartPoint[] 
   return [...points.slice(0, -1), { x: end.x - dx / length * marker, y: end.y - dy / length * marker }]
 }
 
-function labelPlacement(points: FlowchartPoint[]): FlowchartPoint & { anchor: 'start' | 'middle' } {
+function labelPlacement(points: FlowchartPoint[]): FlowchartPoint & { anchor: 'start' | 'middle' | 'end' } {
   let longest = 0
   let segment = { from: points[0] ?? { x: 0, y: 0 }, to: points[1] ?? points[0] ?? { x: 0, y: 0 } }
   for (const [index, from] of points.entries()) {
@@ -391,7 +395,9 @@ function labelPlacement(points: FlowchartPoint[]): FlowchartPoint & { anchor: 's
   if (segment.from.y === segment.to.y) {
     return { x: Math.min(segment.from.x, segment.to.x) + 8, y: segment.from.y - 8, anchor: 'start' }
   }
-  return { x: (segment.from.x + segment.to.x) / 2, y: (segment.from.y + segment.to.y) / 2 - 8, anchor: 'middle' }
+  const outsideLeft = segment.from.x < Math.min(points[0]?.x ?? segment.from.x, points.at(-1)?.x ?? segment.to.x)
+  return { x: segment.from.x + (outsideLeft ? -8 : 8), y: (segment.from.y + segment.to.y) / 2 + 4,
+    anchor: outsideLeft ? 'end' : 'start' }
 }
 
 function edgeRoute(
@@ -401,10 +407,23 @@ function edgeRoute(
   bounds: { width: number; height: number },
   direction: FlowchartDirection,
   levels: ReadonlyMap<string, number>,
+  backLane: number,
 ): FlowchartPoint[] {
   const fromLevel = levels.get(edge.from) ?? 0
   const toLevel = levels.get(edge.to) ?? 0
-  if (toLevel <= fromLevel) return routeAround(from, to, bounds, direction)
+  if (toLevel < fromLevel) {
+    if (direction === 'TB') {
+      const x = bounds.width + backLane
+      const start = { x: from.x + from.width, y: from.y + from.height / 2 }
+      const end = { x: to.x + to.width, y: to.y + to.height / 2 }
+      return [start, { x, y: start.y }, { x, y: end.y }, end]
+    }
+    const y = bounds.height + backLane
+    const start = { x: from.x + from.width / 2, y: from.y + from.height }
+    const end = { x: to.x + to.width / 2, y: to.y + to.height }
+    return [start, { x: start.x, y }, { x: end.x, y }, end]
+  }
+  if (toLevel === fromLevel || toLevel > fromLevel + 1) return routeAround(from, to, bounds, direction, toLevel > fromLevel + 1)
   if (direction === 'TB') {
     const start = { x: from.x + from.width / 2, y: from.y + from.height }
     const end = { x: to.x + to.width / 2, y: to.y }
@@ -604,12 +623,21 @@ export function renderFlowchartSvg(spec: FlowchartSpec): FlowchartSvg {
   if (issues.length > 0) throw new Error(`Flowchart 无法渲染：${issues.join('；')}`)
   const { positions, width, height } = layoutFlowchart(spec)
   const levels = flowchartLevels(spec)
+  let backLane = 0
   const routes = spec.edges.map((edge) => {
     const from = positions.get(edge.from), to = positions.get(edge.to)
     if (from === undefined || to === undefined) throw new Error('Flowchart 布局缺少连线节点。')
-    return { edge, points: edgeRoute(edge, from, to, { width, height }, spec.direction, levels) }
+    if ((levels.get(edge.to) ?? 0) < (levels.get(edge.from) ?? 0)) backLane += 24
+    return { edge, points: edgeRoute(edge, from, to, { width, height }, spec.direction, levels, backLane) }
   })
-  const canvas = routes.flatMap(route => route.points).reduce((bounds, point) => ({
+  const labelBounds = routes.flatMap(({ edge, points }) => {
+    if (edge.label === undefined) return []
+    const label = labelPlacement(shortenEnd(points, 8))
+    const labelWidth = Array.from(edge.label).reduce((sum, character) => sum + (character.charCodeAt(0) > 127 ? 12 : 7), 0)
+    const left = label.x - (label.anchor === 'end' ? labelWidth : label.anchor === 'middle' ? labelWidth / 2 : 0)
+    return [{ x: left, y: label.y - 14 }, { x: left + labelWidth, y: label.y + 4 }]
+  })
+  const canvas = [...routes.flatMap(route => route.points), ...labelBounds].reduce((bounds, point) => ({
     left: Math.min(bounds.left, point.x), top: Math.min(bounds.top, point.y),
     right: Math.max(bounds.right, point.x), bottom: Math.max(bounds.bottom, point.y),
   }), { left: 0, top: 0, right: width, bottom: height })

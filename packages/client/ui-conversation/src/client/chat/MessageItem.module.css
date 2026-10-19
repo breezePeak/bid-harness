@@ -33,6 +33,30 @@
   font-size: 12px;
   line-height: 18px;
 }
+
+.fileCards {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.fileCards li {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-width: 260px;
+  overflow-wrap: anywhere;
+  padding: 10px 14px;
+  border: 1px solid var(--dsw-alias-border-main);
+  border-radius: 12px;
+}
+
+.fileCards small {
+  color: var(--dsw-alias-label-tertiary);
+}
 .contextRow {
   padding: 2px 0;
 }

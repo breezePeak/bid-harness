@@ -105,14 +105,16 @@ function runTurn(sessionId: string): void {
     })
   }
   if (env.FAKE_BID_RECOVERY !== undefined) {
-    event(sessionId, 'bid.task.changed', { state: { stage: 'chapter_writing', status: 'failed', run: null,
+    event(sessionId, 'bid.task.changed', { state: { workflow: { kind: 'full_bid', stage: 'chapter_writing' }, status: 'failed', run: null,
       failure: { code: 'BID_TASK_RESULT_UNMET', message: '当前章节尚需修复。' } } })
     event(sessionId, 'bid.run.notice', { noticeId: 'run:run-1:failed', supersedesTurn: null, runId: 'run-1',
       stage: 'chapter_writing', kind: 'interrupted', severity: 'error', message: '当前章节尚需修复。' })
     event(sessionId, 'bid.recovery.requested', {
       ownerSessionId: sessionId, target: { kind: 'run', workId: 'work-1', runId: 'run-1' },
-      unit: 'outline/outline.json', instruction: '核对原文并修正当前章节。', progressFingerprint: 'a'.repeat(64),
+      unit: 'outline/outline.json', instruction: '核对原文并修正当前章节。', progressFingerprint: 'a'.repeat(64), sourceMessageId: 'answer-1',
     })
+    event(sessionId, 'bid.user_input.recorded', { messageId: 'answer-1', questionKey: 'question-1',
+      work: { workId: 'work-1', requestSha256: 'b'.repeat(64) } })
     event(sessionId, 'bid.recovery.round', {
       ownerSessionId: sessionId, target: { kind: 'run', workId: 'work-1', runId: 'run-1' },
       fingerprint: 'a'.repeat(64), round: 1, budget: 3, dispatchAttempts: 1, state: 'notified',

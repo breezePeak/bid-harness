@@ -31,6 +31,7 @@ it('S6 表格视觉审核定位真实页面并记录正常跨页约束', async (
       "imageCount": 3,
       "kind": "table",
       "loggedRequest": true,
+      "maxTokens": 8192,
       "pageCount": 5,
       "pages": [
         3,
@@ -42,6 +43,9 @@ it('S6 表格视觉审核定位真实页面并记录正常跨页约束', async (
     允许调整：{"fontScale":0.6..1}。
     目标表定位片段：复核关闭、首接与分、响应处理、项目内容、一般协调、驻场登记、升级路径、内容。表格允许正常跨页延续和重复表头；分页边缘的行在相邻页继续不属于裁切。只检查目标表，不因相邻页的其他图表要求调整。
     只返回 JSON：通过时 {"status":"pass"}；需调整时 {"status":"adjust","reason":"简短原因","adjustment":{...}}。",
+      "recoveredTransientFailure": true,
+      "selectedModelUsed": true,
+      "unsupportedRejected": true,
     }
   `)
 }, LOADER_SMOKE_TEST_TIMEOUT_MS + 15_000)

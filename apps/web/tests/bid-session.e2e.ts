@@ -42,22 +42,16 @@ const CONFIRMATION_MODE_EXPECTED = join(SNAPSHOT_DIR, 'confirmation-mode.expecte
 const WORD_TEMPLATE_EXPECTED = join(SNAPSHOT_DIR, 'word-template.expected.md')
 const MODE = webSnapshotMode()
 
-interface AnalysisManifestFile {
-  id: string
-  role: string
-  parseStatus: string
-  chunksPath: string | null
-  chunkIndexPath: string | null
-}
-
 interface AnalysisSource {
-  file_ref: string
-  chunk: string
+  file_position: number
+  chunk_position: number
   anchor_text: string
 }
 
 /** Deterministic model that drives S2 through the real Agent tool loop. */
 class BidAnalysisAdapter extends LlmAdapter {
+  startWorkflow = false
+  resumeWorkflow = false
   readonly toolNames: string[] = []
   private call = 0
   private failFirstAnalysis = false
@@ -100,9 +94,7 @@ class BidAnalysisAdapter extends LlmAdapter {
     const session = this.session
     if (session === undefined) throw new Error('Bid analysis adapter has no Session')
     const projectRoot = join(session.cwd, '.bid-harness')
-    const manifest = JSON.parse(await readFile(join(projectRoot, 'manifest.json'), 'utf8')) as {
-      files: AnalysisManifestFile[]
-    }
+    const manifest = await new BidWorkspace(session.cwd).readManifest()
     const tenderIndex = manifest.files.findIndex(file => file.role === 'tender' && file.parseStatus === 'success')
     const tender = manifest.files[tenderIndex]
     if (tender === undefined || tender.chunksPath === null || tender.chunkIndexPath === null) {
@@ -117,11 +109,21 @@ class BidAnalysisAdapter extends LlmAdapter {
     const lines = content.replace(/<!--[\s\S]*?-->/gu, '').split('\n')
     const anchorText = lines.find(line => line.trim().length > 0)?.trim()
     if (anchorText === undefined) throw new Error('Tender chunk has no source text')
-    this.source = { file_ref: `T${String(tenderIndex + 1)}`, chunk: chunk.id, anchor_text: anchorText }
+    this.source = { file_position: tenderIndex, chunk_position: 0, anchor_text: anchorText }
     return this.source
   }
 
   override async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+    if (this.resumeWorkflow && options.tools?.some(tool => tool.name === 'bid_resume_current_run')) {
+      this.resumeWorkflow = false
+      yield* this.toolCalls([{ name: 'bid_resume_current_run', args: {} }])
+      return
+    }
+    if (this.startWorkflow && options.tools?.some(tool => tool.name === 'bid_start_workflow')) {
+      this.startWorkflow = false
+      yield* this.toolCalls([{ name: 'bid_start_workflow', args: {} }])
+      return
+    }
     if (options.system?.includes('你只解释给定 DOCX 模板')) {
       const text = this.failNextWordFormat
         ? '{"rules":[{"key":"heading.font","value":"宋体","evidence":"旧模板正文"}],"mapping":{}}'
@@ -133,7 +135,10 @@ class BidAnalysisAdapter extends LlmAdapter {
       return
     }
     const session = this.session
-    if (session === undefined) throw new Error('Bid analysis adapter has no Session')
+    if (session === undefined) {
+      yield { type: 'finish', reason: { kind: 'stop' } }
+      return
+    }
     if (!options.tools?.some(tool => tool.name === 'submit_tender_analysis')) {
       yield { type: 'finish', reason: { kind: 'stop' } }
       return
@@ -145,11 +150,12 @@ class BidAnalysisAdapter extends LlmAdapter {
       return
     }
     if (phase === 1) {
-      yield* this.toolCalls([{ name: 'grep', args: { pattern: '交付|评分|必须', path: `${base}/corpus` } }])
+      yield* this.toolCalls([{ name: 'grep', args: { pattern: '交付|评分|必须', path: `${base}/assets/parsed` } }])
       return
     }
     if (phase === 2) {
-      yield* this.toolCalls([{ name: 'read', args: { file_path: `${base}/corpus/${INTAKE_FILE_NAME}/chunks/index.json` } }])
+      const manifest = await new BidWorkspace(session.cwd).readManifest()
+      yield* this.toolCalls([{ name: 'read', args: { file_path: `${base}/${manifest.files[0]!.chunkIndexPath!}` } }])
       return
     }
     if (this.failFirstAnalysis) {
@@ -231,6 +237,13 @@ describe('web e2e: Bid file intake', () => {
   let analysisAdapter: BidAnalysisAdapter
   const consoleErrors: string[] = []
 
+  async function startFullBid() {
+    analysisAdapter.startWorkflow = true
+    await page.locator('[data-composer-card] textarea').fill('我要从招标资料开始完整编写标书。')
+    await page.getByRole('button', { name: '发送消息', exact: true }).click()
+    await page.getByRole('region', { name: '技术标生成' }).waitFor({ timeout: 20_000 })
+  }
+
   beforeAll(async () => {
     browser = await chromium.launch()
   }, 120_000)
@@ -277,6 +290,7 @@ describe('web e2e: Bid file intake', () => {
     if (bidAgent === undefined) throw new Error(`Bid session ${bid.sessionId} has no live Agent`)
     const bidCwd = bidAgent.session.header.cwd
     if (bidCwd === undefined) throw new Error('Bid session has no workspace cwd')
+    await startFullBid()
     analysisAdapter.setSession(bidCwd, bid.sessionId)
 
     const panel = page.getByRole('region', { name: '技术标生成' })
@@ -346,7 +360,7 @@ describe('web e2e: Bid file intake', () => {
       { type: 'bid.stage.completed', stage: 'file_intake', status: 'completed' },
     ])
     expect(agent.session.events.some(event => (
-      event.type === 'bid.run.started' && event.data.run.work.stage === 'tender_analysis'
+      event.type === 'bid.run.started' && (event.data.run.work.kind === 'capability_task' ? null : event.data.run.work.stage) === 'tender_analysis'
     ))).toBe(true)
 
     const sessionCwd = agent.session.header.cwd
@@ -354,19 +368,8 @@ describe('web e2e: Bid file intake', () => {
     const projectRoot = join(sessionCwd, '.bid-harness')
     const manifestPath = join(projectRoot, 'manifest.json')
     expect((await stat(manifestPath)).isFile()).toBe(true)
-    const manifest = JSON.parse(await readFile(manifestPath, 'utf8')) as {
-      version: number
-      files: Array<{
-        originalName: string
-        inputPath: string
-        documentPath: string | null
-        chunksPath: string | null
-        chunkIndexPath: string | null
-        parseStatus: string
-        role: string
-      }>
-    }
-    expect(manifest.version).toBe(4)
+    expect(JSON.parse(await readFile(manifestPath, 'utf8')) as unknown).toMatchObject({ version: 5 })
+    const manifest = await new BidWorkspace(sessionCwd).readManifest()
     expect(manifest.files).toHaveLength(1)
     const imported = manifest.files[0]
     const documentPath = imported?.documentPath
@@ -384,7 +387,7 @@ describe('web e2e: Bid file intake', () => {
     expect(imported).toMatchObject({
       originalName: INTAKE_FILE_NAME,
       role: 'tender',
-      inputPath: `input/${INTAKE_FILE_NAME}`,
+      inputPath: expect.stringMatching(/^assets\/originals\//u) as unknown,
       parseStatus: 'success',
     })
     const fixtureBytes = await readFile(INTAKE_FIXTURE)
@@ -411,7 +414,7 @@ describe('web e2e: Bid file intake', () => {
       { type: 'bid.stage.completed', stage: 'file_intake', status: 'completed' },
     ])
     expect(persisted.events.some(event => (
-      event.type === 'bid.run.started' && event.data.run.work.stage === 'tender_analysis'
+      event.type === 'bid.run.started' && (event.data.run.work.kind === 'capability_task' ? null : event.data.run.work.stage) === 'tender_analysis'
     ))).toBe(true)
 
     const warningStart = tripwire.warnings.length
@@ -440,7 +443,8 @@ describe('web e2e: Bid file intake', () => {
     if (agent === undefined) throw new Error('Bid Session has no live Agent')
     const cwd = agent.session.header.cwd
     if (cwd === undefined) throw new Error('Bid Session has no workspace cwd')
-    if ((await readBidProjectState(new BidWorkspace(cwd)))?.stage === 'file_intake') {
+    if ((await readBidProjectState(new BidWorkspace(cwd)))?.workflow == null) await startFullBid()
+    if ((await readBidProjectState(new BidWorkspace(cwd)))?.workflow?.stage === 'file_intake') {
       analysisAdapter.setSession(cwd, bid.sessionId)
       const tenderBytes = await readFile(INTAKE_FIXTURE)
       const intake = await fetch(`${scaffold.baseUrl}/api/bid-upload`, {
@@ -608,7 +612,7 @@ describe('web e2e: Bid file intake', () => {
     expect(fallback.modelInterpreted.values).toEqual({})
   }, 60_000)
 
-  it('shows a suspended S2 Run and resumes its exact identity without a retry RPC', async () => {
+  it('失败 S2 由新用户消息继续原 Work，不调用重试 RPC', async () => {
     onTestFailed(() => saveFailureShot(page, 'web-e2e-bid-session-retry'))
     const existingIds = new Set((await listedSessions(scaffold.baseUrl)).map(session => session.sessionId))
     await connectFreshWorkspaceZh(page, scaffold.workspaceCwd, 'suspended-run')
@@ -620,9 +624,10 @@ describe('web e2e: Bid file intake', () => {
     const bidCwd = agent.session.header.cwd
     if (bidCwd === undefined) throw new Error('Bid session has no workspace cwd')
     const workspace = new BidWorkspace(bidCwd)
+    await startFullBid()
     analysisAdapter.setSession(bidCwd, bid.sessionId, true)
     const startedRunsBefore = agent.session.events.filter(event => (
-      event.type === 'bid.run.started' && event.data.run.work.stage === 'tender_analysis'
+      event.type === 'bid.run.started' && (event.data.run.work.kind === 'capability_task' ? null : event.data.run.work.stage) === 'tender_analysis'
     )).length
 
     let promptPosts = 0
@@ -641,22 +646,30 @@ describe('web e2e: Bid file intake', () => {
     await (await chooserReady).setFiles(INTAKE_FIXTURE)
     await page.getByRole('button', { name: '上传并解析' }).click()
     await panel.getByText('招标分析', { exact: true }).waitFor({ timeout: 30_000 })
-    await panel.getByText('已挂起', { exact: true }).waitFor({ timeout: 15_000 })
+    await panel.getByText('处理失败', { exact: true }).waitFor({ timeout: 15_000 })
     expect(await panel.getByRole('button', { name: '重试' }).count()).toBe(0)
 
     const saved = await readBidProjectState(workspace)
-    if (saved?.status !== 'suspended') throw new Error('S2 failure did not persist a suspended Run')
+    if (saved?.status !== 'failed') throw new Error('S2 failure did not persist a failed task')
+    const failedRun = agent.session.events.findLast(event => event.type === 'bid.run.started')
+    if (failedRun?.type !== 'bid.run.started') throw new Error('缺少原 S2 Run')
+    await agent.whenIdle()
     analysisAdapter.setSession(bidCwd, bid.sessionId)
-    await scaffold.ctx.bid.resumeCurrentRun(agent.session, saved.run.runId, saved.revision)
+    analysisAdapter.resumeWorkflow = true
+    await page.locator('[data-composer-card] textarea').fill('请继续刚才失败的招标分析，补齐必要分析结果。')
+    await page.getByRole('button', { name: '发送消息', exact: true }).click()
     await panel.getByText('等待用户确认', { exact: true }).waitFor({ timeout: 30_000 })
     await page.getByRole('button', { name: '确认技术标分析' }).waitFor({ timeout: 15_000 })
 
-    expect(promptPosts).toBe(0)
+    expect(promptPosts).toBe(1)
     expect(retryPosts).toBe(0)
     expect(agent.session.events.filter(event => (
-      event.type === 'bid.run.started' && event.data.run.work.stage === 'tender_analysis'
+      event.type === 'bid.run.started' && (event.data.run.work.kind === 'capability_task' ? null : event.data.run.work.stage) === 'tender_analysis'
     ))).toHaveLength(startedRunsBefore + 2)
-    expect(agent.session.events.some(event => event.type === 'bid.run.suspended' && event.data.run.work.stage === 'tender_analysis')).toBe(true)
+    const resumedRun = agent.session.events.findLast(event => event.type === 'bid.run.started')
+    if (resumedRun?.type !== 'bid.run.started') throw new Error('缺少继续后的 S2 Run')
+    expect(resumedRun.data.run.runId).not.toBe(failedRun.data.run.runId)
+    expect(resumedRun.data.run.work).toEqual(failedRun.data.run.work)
     expect(bidStageLifecycle(agent.session.events)
       .some(event => event.stage === 'outline_generation' && event.type === 'bid.stage.started')).toBe(false)
   }, 120_000)
@@ -691,6 +704,7 @@ describe('web e2e: Bid file intake', () => {
       && session.sessionId !== firstBid.sessionId)
     expect(freshBid?.sessionId).not.toBe(firstBid.sessionId)
     expect(sessions.find(session => session.sessionId === firstBid.sessionId)?.agentPreset).toBe('bid')
-    await page.getByRole('region', { name: '技术标生成' }).waitFor({ timeout: 15_000 })
+    await page.locator('[data-composer-card] textarea').waitFor()
+    expect(await page.getByRole('region', { name: '技术标生成' }).count()).toBe(0)
   }, 120_000)
 })

@@ -15,6 +15,7 @@ it.each(['ready', 'waiting_user', 'completed'] as const)('原阶段 %s：已发�
   })
   const facts = JSON.parse(result.stdout) as {
     state: string
+    taskCompleted: boolean
     workIds: string[]
     planPatchCount: number
     priorPublicationPreserved: boolean
@@ -28,7 +29,8 @@ it.each(['ready', 'waiting_user', 'completed'] as const)('原阶段 %s：已发�
     nativeStageRuns?: number
   }
   expect(facts.workIds).toHaveLength(1)
-  expect(facts.state).toBe(status)
+  expect(facts.state).toBe('ready')
+  expect(facts.taskCompleted).toBe(true)
   expect({ sameWork: facts.workIds.length === 1, planPatchCount: facts.planPatchCount,
     priorPublicationPreserved: facts.priorPublicationPreserved, publicationNotices: facts.publicationNotices,
     correctionNoticeMatchesRun: facts.correctionNoticeMatchesRun, outsidePreserved: facts.outsidePreserved,

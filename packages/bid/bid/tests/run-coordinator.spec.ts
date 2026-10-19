@@ -46,7 +46,7 @@ describe('BidRunCoordinator', () => {
     const run = await runs.start(work('tender_analysis'))
 
     expect(session.events.find(event => event.type === 'bid.run.progress')).toMatchObject({
-      data: { runId: run.runId, epoch: run.epoch, stage: 'tender_analysis', progress: { phase: 'starting' } },
+      data: { runId: run.runId, epoch: run.epoch, progress: { phase: 'starting' } },
     })
     run.reportProgress({
       phase: 'collecting',
@@ -120,7 +120,7 @@ describe('BidRunCoordinator', () => {
     expect(run.signal.aborted).toBe(true)
     expect(session.events.some(event => event.type === 'bid.run.suspended')).toBe(false)
     expect(session.events.findLast(event => event.type === 'bid.task.changed')?.data.state)
-      .toMatchObject({ stage: 'tender_analysis', status: 'failed', failure: { code: 'PROVIDER_ERROR' } })
+      .toMatchObject({ workflow: null, status: 'failed', failure: { code: 'PROVIDER_ERROR' } })
   })
 
   it('retires commit authority before abort and rejects late completion', async () => {

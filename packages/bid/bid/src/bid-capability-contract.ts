@@ -12,7 +12,13 @@ import { writingPlanInputSchema, type WritingMessageSession } from './writing-re
 import { chapterBlockAssignmentSchema } from './chapter-content-reuse.ts'
 import type { BidTaskSourceSnapshot } from './bid-task-source.ts'
 import { revisionBatchTaskInputSchema } from './chapter-revision-batch.ts'
-import { outlineBusinessBindingSchema } from './outline-confirmation-edits.ts'
+import { outlineBusinessBindingSchema } from './outline-confirmation-browser.ts'
+import { flowchartModelDraftSchema } from './flowchart.ts'
+import { bidFigureRefSchema } from './figure-assets.ts'
+import { bidTaskImageRefSchema } from './bid-object-refs.ts'
+import { promptFileRefSchema } from '@deepseek-ai/dsh-host-apiproxy/api/files'
+import { docxBlockRefSchema } from './docx-document-index.ts'
+import { bidDocumentRefSchema, bidDocumentPatchInputSchema, bidDocumentLayoutInputSchema } from './document-contract.ts'
 
 const sectionIds = z.array(z.string().trim().min(1)).min(1).refine(
   ids => new Set(ids).size === ids.length, 'section_ids must be unique',
@@ -27,6 +33,9 @@ export const bidCapabilityScopeSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('project') }).strict(),
   z.object({ kind: z.literal('sections'), section_ids: sectionIds }).strict(),
   z.object({ kind: z.literal('paragraphs'), reference: chapterRevisionReferenceSchema.options[1] }).strict(),
+  z.object({ kind: z.literal('files'), file_refs: z.array(promptFileRefSchema).min(1).max(20) }).strict(),
+  z.object({ kind: z.literal('document_blocks'), block_refs: z.array(docxBlockRefSchema).min(1) }).strict(),
+  z.object({ kind: z.literal('figures'), figure_refs: z.array(bidFigureRefSchema).min(1) }).strict(),
 ])
 
 /** 步骤范围只能由任务、前一步真实结果或明确 ID 得到。 */
@@ -38,6 +47,20 @@ export const bidCapabilityStepScopeSchema = z.discriminatedUnion('source', [
 
 /** 静态能力 ID，业务参数随 ID 分支校验。 */
 export const bidCapabilityInputSchema = z.discriminatedUnion('capability', [
+  z.object({ capability: z.literal('document.patch'), input: bidDocumentPatchInputSchema }).strict()
+    .describe('对原 Word 的真实节点应用局部补丁，保留原件和范围外结构；插图后须继续页面检查。'),
+  z.object({ capability: z.literal('document.layout_review'), input: bidDocumentLayoutInputSchema }).strict()
+    .describe('渲染指定 Word 版本并检查实际页面。inspect 只检查，repair 仅修复本任务新增图文的局部排版。'),
+  z.object({ capability: z.literal('flowchart.create'), input: flowchartModelDraftSchema }).strict()
+    .describe('独立流程图：只需流程语义；程序绑定节点和连线、渲染结构源/SVG/PNG，并检查实际图像。'),
+  z.object({ capability: z.literal('project_image.create'), input: z.object({
+    title: z.string().trim().min(1).max(200), purpose: instruction, prompt: instruction,
+    style: instruction, size: z.enum(['1024x1024', '1536x1024', '1024x1536']),
+    image_ref: bidTaskImageRefSchema.optional().describe('需要保留的用户内容参考；单图接口只接受一张真实参考。'),
+    figure_ref: bidFigureRefSchema.optional().describe('本会话此前交付的图，可作为修改时的内容参考；与 image_position 不能同时选择。'),
+  }).strict().refine(value => value.image_ref === undefined || value.figure_ref === undefined,
+    '单图接口只能选择 image_position 或 figure_position 中的一张内容参考。') }).strict()
+    .describe('独立项目示意或效果图，复用已配置图片模型；实际发送选定内容参考，不能宣称工程精度或真实现场。'),
   z.object({ capability: z.literal('tender.analyze'), input: z.object({}).strict() }).strict(),
   z.object({ capability: z.literal('tender.update'), input: z.object({
     operations: z.array(tenderAnalysisEditOperationSchema).default([]),
@@ -109,9 +132,14 @@ export const bidCapabilityTaskSchema = z.object({
 }, 'BID_CAPABILITY_PARAGRAPH_PLAN_INVALID').refine(task => task.steps.every(step =>
   step.call.capability !== 'document.review' || task.scope.kind === 'project' && step.scope.source === 'task'),
 'BID_DOCUMENT_REVIEW_PROJECT_SCOPE_REQUIRED')
+  .refine(task => isBidChapterScope(task.scope) || task.steps.every(step => step.scope.source === 'task'
+    && ['flowchart.create', 'project_image.create', 'document.patch', 'document.layout_review'].includes(step.call.capability)), 'BID_CAPABILITY_OBJECT_SCOPE_INVALID')
+  .refine(task => task.steps.every(step => !['document.patch', 'document.layout_review'].includes(step.call.capability)
+    || task.scope.kind === 'files' || task.scope.kind === 'document_blocks'), 'BID_DOCUMENT_TARGET_SCOPE_REQUIRED')
 
 /** Host 核对过产物后形成的步骤结果。 */
 export const bidCapabilityResultSchema = z.object({
+  outputs: z.array(z.discriminatedUnion('kind', [bidFigureRefSchema, bidDocumentRefSchema])).optional(),
   target_section_ids: z.array(z.string().min(1)),
   changed_artifacts: z.array(z.string().min(1)),
   change_summary: z.string().trim().min(1).max(2_000),
@@ -137,6 +165,10 @@ export interface BidCapabilityExecutionContext {
   readonly originalSectionIds?: ReadonlySet<string>
   /** 已通过授权核验的原要求；能力步骤说明不能替代它们。 */
   readonly originalTaskRequirements?: readonly string[]
+  /** 原目标范围；文档派生版本只能继承其中的真实修改权限。 */
+  readonly taskScope?: BidCapabilityScope
+  /** 稳定步骤绑定已解析的前序结果，键为接纳时的语义位置。 */
+  readonly stepOutputs?: ReadonlyMap<number, readonly NonNullable<BidCapabilityResult['outputs']>[number][]>
   readonly run: BidRunContext
   readonly recovery?: ModelStageExecutionOptions['recovery']
   readonly sectionIds: ReadonlySet<string> | null
@@ -161,6 +193,14 @@ export interface BidCapabilityExecutionContext {
 export type BidCapabilityId = z.infer<typeof bidCapabilityInputSchema>['capability']
 /** 用户任务允许修改的项目或章节范围。 */
 export type BidCapabilityScope = z.infer<typeof bidCapabilityScopeSchema>
+/**
+ * 判断范围是否由专业目录和正文解释。
+ * @param scope 已解析的任务根范围。
+ * @returns 仅项目、章节和内部正文段落使用专业目录身份。
+ */
+export function isBidChapterScope(scope: BidCapabilityScope): scope is Extract<BidCapabilityScope, { kind: 'project' | 'sections' | 'paragraphs' }> {
+  return scope.kind === 'project' || scope.kind === 'sections' || scope.kind === 'paragraphs'
+}
 /** 步骤从任务范围或前一步结果解析出的实际范围。 */
 export type BidCapabilityStepScope = z.infer<typeof bidCapabilityStepScopeSchema>
 /** 单次能力调用的标识与输入。 */

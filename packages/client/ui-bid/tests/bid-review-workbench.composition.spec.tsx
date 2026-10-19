@@ -28,7 +28,7 @@ const pageBasis = {
   template: { id: 'a'.repeat(64) as DocxTemplateId, name: '模版.docx', revision: 1 },
 }
 
-const activeTask: BidTaskState = { stage: 'chapter_writing', status: 'running', run: {
+const activeTask: BidTaskState = { workflow: { kind: 'full_bid', stage: 'chapter_writing' }, status: 'running', run: {
   runId: 'composition-run', epoch: 1, baseProjectRevision: 1, startedAt: 1, updatedAt: 1,
   work: { kind: 'stage_execution', workId: 'composition-work', stage: 'chapter_writing',
     requestRef: 'requests/composition-work.json', requestSha256: 'a'.repeat(64), inputFingerprint: 'b'.repeat(64) },

@@ -94,6 +94,7 @@ export interface IConversation {
 
 /** Create one browser-only draft descriptor; only its id enters input state. */
 function browserDraftAttachment(file: File): ComposerAttachment {
+  if (!file.type.startsWith('image/')) return { kind: 'file', id: crypto.randomUUID() as DraftAttachmentId, file }
   return {
     kind: 'image',
     id: crypto.randomUUID() as DraftAttachmentId,
@@ -346,9 +347,15 @@ export class ConversationController extends Service implements IConversation {
       if (attachments.length !== imageIds.length) {
         throw new Error('conversation.sendSession: one or more draft images are no longer available')
       }
-      const uploaded = await this.serializeImages(attachments.map(attachment => attachment.file))
+      const uploaded = await this.serializeImages(attachments.filter(attachment => attachment.kind === 'image').map(attachment => attachment.file))
+      const fileRefs = []
+      for (const attachment of attachments) {
+        if (attachment.kind !== 'file') continue
+        attachment.uploaded ??= await session.uploadFile(attachment.file, signal)
+        fileRefs.push(attachment.uploaded)
+      }
       const content = [...uploaded, ...(text === '' ? [] : [{ type: 'text' as const, text }])]
-      const result = await session.prompt(content, mode, signal, submissionId)
+      const result = await session.prompt(content, mode, signal, submissionId, ...fileRefs.length === 0 ? [] : [fileRefs])
       if (!result.ok) return { kind: 'error' }
       this.releaseDraftImages(attachments)
       return { kind: 'success' }
@@ -365,11 +372,14 @@ export class ConversationController extends Service implements IConversation {
    * @returns ordered draft descriptors.
    */
   createDraftImages(files: readonly File[]): readonly ComposerAttachment[] {
-    for (const file of files) imageMediaType(file.type)
+    for (const file of files) {
+      if (file.type.startsWith('image/')) imageMediaType(file.type)
+      else if (!/\.(docx?|pdf|xlsx?|txt|md)$/iu.test(file.name)) throw new Error('支持 Word、PDF、表格、文本和图片附件。')
+    }
     return files.map((file) => {
       const attachment = browserDraftAttachment(file)
       this.draftAttachments.set(attachment.id, attachment)
-      this.createdImageUrls.add(attachment.previewUrl)
+      if (attachment.kind === 'image') this.createdImageUrls.add(attachment.previewUrl)
       return attachment
     })
   }
@@ -400,6 +410,7 @@ export class ConversationController extends Service implements IConversation {
     if (attachments.length !== imageIds.length) {
       throw new Error('conversation.serializeDraftImages: one or more draft images are no longer available')
     }
+    if (attachments.some(attachment => attachment.kind === 'file')) throw new Error('此命令只支持图片附件；请通过普通消息提交文档。')
     return Promise.all(attachments.map(attachment => this.encodeImage(attachment.file)))
   }
 
@@ -411,8 +422,10 @@ export class ConversationController extends Service implements IConversation {
     const attachment = this.draftAttachments.get(id)
     if (attachment === undefined) return
     this.draftAttachments.delete(id)
-    this.createdImageUrls.delete(attachment.previewUrl)
-    revokePreview(attachment.previewUrl)
+    if (attachment.kind === 'image') {
+      this.createdImageUrls.delete(attachment.previewUrl)
+      revokePreview(attachment.previewUrl)
+    }
   }
 
   /**

@@ -32,6 +32,8 @@ export interface ModelStageExecutionOptions {
     readonly requestSeq?: number
     readonly unit: string
     readonly instruction: string
+    /** 从原任务输入重建的模型上下文；不参与授权身份比较。 */
+    readonly modelContext?: { readonly text: string; readonly inputs: readonly string[] }
     readonly issues: readonly StageValidationIssue[]
   }
 }

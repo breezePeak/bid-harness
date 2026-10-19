@@ -25,7 +25,7 @@ it('父章节和嵌套父章节显示概述，刷新保留选择，叶章节继�
     const errors = watchConsole(page)
     await page.goto(scaffold.baseUrl, { waitUntil: 'load' })
     await connectFreshWorkspaceZh(page, scaffold.workspaceCwd)
-    await page.getByRole('region', { name: '技术标生成' }).waitFor()
+    await expect.poll(() => scaffold.ctx.agents.list().some(candidate => resolveSessionPreset(candidate.session) === 'bid'), { timeout: 20_000 }).toBe(true)
     const agent = scaffold.ctx.agents.list().find(candidate => resolveSessionPreset(candidate.session) === 'bid')
     if (agent === undefined) throw new Error('缺少标书会话')
     seedConversation(agent.session)
@@ -52,7 +52,7 @@ it('父章节和嵌套父章节显示概述，刷新保留选择，叶章节继�
       artifact.confirmed_outline_sha256 = outlineArtifactSha256(outline)
       await writeFile(absolute, `${JSON.stringify(artifact)}\n`)
     }
-    const state = await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'completed', run: null })
+    const state = await checkpointBidProjectState(workspace, { workflow: { kind: 'full_bid' as const, stage: 'chapter_writing' }, status: 'completed', run: null })
     agent.session.append('bid.project.resumed', { revision: state.revision, state: bidProjectTaskState(state) })
     await scaffold.ctx.sessions.flush(agent.session)
 

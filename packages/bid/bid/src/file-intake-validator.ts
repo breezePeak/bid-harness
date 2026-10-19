@@ -270,7 +270,7 @@ export async function validateFileIntake(
   const manifest = await readRequiredManifest(workspace, issues)
   if (manifest !== null) {
     for (const imported of batch) {
-      const record = manifest.files.find(file => file.inputPath === imported.inputPath)
+      const record = manifest.files.find(file => file.id === imported.id && file.role === imported.role)
       if (record === undefined) {
         reject(issues, 'FILE_INTAKE_MANIFEST_RECORD_MISSING', 'The current import is not recorded exactly in manifest.json.', imported.inputPath)
         continue

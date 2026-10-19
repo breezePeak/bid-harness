@@ -1,6 +1,6 @@
 import { z } from 'zod'
 import type { SessionProjectionRegistry } from '@deepseek-ai/dsh-session-projection'
-import type { BidClientProjection, BidTaskState } from './control-plane-contract.ts'
+import type { BidClientProjection } from './control-plane-contract.ts'
 import { BID_CLIENT_ACTIONS, BID_RUNTIME_PROJECTION_KEY } from './control-plane-contract.ts'
 import {
   BID_INITIAL_TASK_STATE,
@@ -13,28 +13,7 @@ import {
   writingEntryViewSchema,
   type WritingEntryView,
 } from './writing-entry-contract.ts'
-import { BID_DOCX_EXPORT_PROJECTION_KEY, docxExportOperationSchema, reduceDocxExportOperation, type DocxExportOperation } from './docx-export-operation.ts'
-
-declare module '@deepseek-ai/dsh-session-projection/types' {
-  interface SessionProjectionMap {
-    /** Client-visible Bid runtime projection. */
-    [BID_RUNTIME_PROJECTION_KEY]: BidClientProjection
-    /** Client-visible S5 writing entry view. */
-    [BID_WRITING_ENTRY_PROJECTION_KEY]: WritingEntryView | null
-    /** Latest independent Word export. */
-    [BID_DOCX_EXPORT_PROJECTION_KEY]: DocxExportOperation | null
-  }
-
-  interface SessionProjectionStateMap {
-    /** Replayable Bid state derived from the shared session log. */
-    [BID_RUNTIME_PROJECTION_KEY]: BidTaskState
-    /** Replayable S5 writing entry view derived from bid.writing_entry.changed events. */
-    [BID_WRITING_ENTRY_PROJECTION_KEY]: WritingEntryView | null
-    /** Replayable independent Word export. */
-    [BID_DOCX_EXPORT_PROJECTION_KEY]: DocxExportOperation | null
-  }
-
-}
+import { BID_DOCX_EXPORT_PROJECTION_KEY, docxExportOperationSchema, reduceDocxExportOperation } from './docx-export-operation.ts'
 /**
  * 注册可从 Session 日志恢复的独立 Word 导出投影。
  * @param registry 持有事件驱动和客户端投递的投影注册表。

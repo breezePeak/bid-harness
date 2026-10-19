@@ -106,6 +106,10 @@ describe('LlmRuntime', () => {
     expect(isRetryableServerError('An error occurred while processing your request. You can retry your request, or contact us.')).toBe(true)
     expect(isRetryableServerError('An error occurred while processing your request.')).toBe(false)
     expect(isRetryableServerError('Invalid request. You can retry your request.')).toBe(false)
+    expect(isRetryableServerError('Our servers are currently overloaded. Please try again later.')).toBe(true)
+    expect(isRetryableServerError('The server is overloaded; please retry.')).toBe(true)
+    expect(isRetryableServerError('Our servers are currently overloaded.')).toBe(false)
+    expect(isRetryableServerError('Invalid request; please try again later.')).toBe(false)
   })
   it('recognizes structured and model-capacity context-window overflow details', () => {
     expect(isContextWindowExceededError('context_length_exceeded maximum context length')).toBe(true)

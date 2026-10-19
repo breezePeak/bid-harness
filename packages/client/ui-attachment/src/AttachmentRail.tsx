@@ -13,7 +13,7 @@ export interface AttachmentRailItem {
   /** Stable identity for the React key. */
   id: string
   /** Object or data URL rendered as the thumbnail. */
-  previewUrl: string
+  previewUrl?: string | undefined
   /** Image alt text (display name with the owner's fallback applied). */
   alt: string
   /** Accessible label of the item's remove control. */
@@ -172,7 +172,7 @@ export function AttachmentRail<T extends AttachmentRailItem>({ items, labels, on
               title={labels.open}
               onClick={() => { onOpen(item) }}
             >
-              <img src={item.previewUrl} alt={item.alt} />
+              {item.previewUrl === undefined ? <span>{item.alt}</span> : <img src={item.previewUrl} alt={item.alt} />}
             </button>
             <button
               type="button"

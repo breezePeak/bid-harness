@@ -19,6 +19,17 @@ function subprocessEnvironment(): NodeJS.ProcessEnv {
  * @returns LibreOffice 生成的 PDF 字节。
  */
 export async function renderDocxPdf(docx: Buffer): Promise<Uint8Array> {
+  return (await renderDocxPdfWithInfo(docx)).pdf
+}
+
+/**
+ * 使用已安装的 LibreOffice 渲染，保留实际后端版本并响应所属 Run 的取消。
+ * @param docx 完整 DOCX 字节。
+ * @param signal 当前任务的取消信号。
+ * @returns 真实 PDF 和用于绑定页面检查缓存的后端身份。
+ */
+export async function renderDocxPdfWithInfo(docx: Buffer, signal?: AbortSignal): Promise<{ pdf: Uint8Array; renderer: string }> {
+  signal?.throwIfAborted()
   const root = await mkdtemp(join(tmpdir(), 'dsh-bid-pages-'))
   const input = join(root, 'estimate.docx')
   const output = join(root, 'estimate.pdf')
@@ -32,16 +43,22 @@ export async function renderDocxPdf(docx: Buffer): Promise<Uint8Array> {
       : ['soffice', 'libreoffice']
     let unavailable: unknown
     for (const executable of candidates) {
+      let version: { stdout: string }
       try {
-        await execFileAsync(executable, [
-          `-env:UserInstallation=${pathToFileURL(profile).href}`,
-          '--headless', '--convert-to', 'pdf', '--outdir', root, input,
-        ], { cwd: root, env: subprocessEnvironment(), timeout: 120_000, maxBuffer: 1024 * 1024, windowsHide: true })
-        return await readFile(output)
+        version = await execFileAsync(executable, ['--version'], { env: subprocessEnvironment(), timeout: 10_000,
+          maxBuffer: 1024 * 1024, windowsHide: true, ...(signal === undefined ? {} : { signal }) })
       } catch (error) {
         unavailable = error
         if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+        continue
       }
+      await execFileAsync(executable, [
+        `-env:UserInstallation=${pathToFileURL(profile).href}`,
+        '--headless', '--convert-to', 'pdf', '--outdir', root, input,
+      ], { cwd: root, env: subprocessEnvironment(), timeout: 120_000, maxBuffer: 1024 * 1024, windowsHide: true,
+        ...(signal === undefined ? {} : { signal }) })
+      signal?.throwIfAborted()
+      return { pdf: await readFile(output), renderer: version.stdout.trim() }
     }
     throw unavailable instanceof Error ? unavailable : new Error('LibreOffice 不可用。')
   } finally {

@@ -6,6 +6,7 @@
  */
 
 import { z } from 'zod'
+import { promptFileRefSchema } from './files.ts'
 import type { SessionEvent, SessionId } from '@deepseek-ai/dsh-session/types'
 import type { MessageId } from '@deepseek-ai/dsh-llm/brand'
 import type { RequestPayload, ResponseValue } from './rpc-map.ts'
@@ -290,9 +291,10 @@ export const sessionPromptRequestSchema = z.object({
   sessionId: sessionIdSchema,
   mode: z.union([z.literal('queue'), z.literal('steer')]),
   content: z.array(promptContentPartSchema),
+  fileRefs: z.array(promptFileRefSchema).min(1).max(20).optional(),
   clientSubmissionId: z.string().min(1).optional(),
   clientTimeZone: z.string().optional(),
-}) as unknown as z.ZodType<RequestPayload<'session.prompt'>>
+}).strict() as unknown as z.ZodType<RequestPayload<'session.prompt'>>
 
 /** session.prompt response value (the command slot appears only when the prompt dispatched a slash command). */
 export const sessionPromptValueSchema = z.object({

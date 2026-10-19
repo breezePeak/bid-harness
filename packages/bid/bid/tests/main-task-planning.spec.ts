@@ -35,6 +35,21 @@ it('真实模型验收初始章节具有完整采购条款、评分来源及当�
 })
 afterEach(async () => { for (const dispose of disposals.splice(0)) await dispose() })
 
+it.each(['new_children', 'completed_content', 'preserve_migrated_content'] as const)('独立图和原 Word 的核验不接纳章节标志 %s', async (flag) => {
+  const { workspace, session, message } = await fixture()
+  const task = bidCapabilityTaskSchema.parse({ goal: '审核已授权对象', scope: { kind: 'sections', section_ids: ['SEC-1'] },
+    steps: [{ description: '审核本章', scope: { source: 'task' }, call: { capability: 'chapter.review', input: { reason: '审核本章' } } }] })
+  const source = await freezeBidTaskSource(workspace, session, task,
+    { session_id: String(session.id), message_id: String(message.id) })
+  const input = { phase: 'plan' as const, source, task, evidence: [] }
+  const decision = await executorTestVerifier(input, {} as Parameters<BidTaskVerifier>[1], new AbortController().signal)
+  for (const object of ['figure', 'document'] as const) {
+    await expect(validateBidTaskVerification(input, { ...decision,
+      requirements: decision.requirements.map(requirement => ({ ...requirement, object, [flag]: true })) }, workspace, workspace))
+      .rejects.toThrow('独立图和原 Word 要求不能使用章节新增、正文写作或章节迁移标志')
+  }
+})
+
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), 'bid-main-task-'))
   const ctx = new Context()
@@ -66,9 +81,8 @@ it('冻结真实意见原话及选区，目标摘要不能替代来源', async (
   const task = bidCapabilityTaskSchema.parse({ goal: '将阶段改为分项说明', issue_ids: [issue.issue_id],
     scope: { kind: 'paragraphs', reference }, steps: [{ description: '改写阶段分项', scope: { source: 'task' },
       call: { capability: 'chapter.revise', input: { instruction: '改写阶段分项', reference } } }] })
-  const work = await persistCapabilityTaskRequest(workspace, session, 'chapter_writing', task,
-    { session_id: String(session.id), message_id: String(message.id) }, [],
-    { stage: 'chapter_writing', status: 'completed', run: null })
+  const work = await persistCapabilityTaskRequest(workspace, session, task,
+    { session_id: String(session.id), message_id: String(message.id) }, [])
   expect(await readBidWorkRequest(workspace, work)).toMatchObject({ source_snapshot: {
     message: { text: '开始处理当前全部待处理审批意见。' }, issues: [{ instruction: issue.instruction,
       scope: 'paragraphs', reference: issue.reference }],
@@ -103,8 +117,8 @@ it.each(['bid.run.started', 'bid.run.completed'] as const)('澄清上下文不�
   const { workspace, session, message } = await fixture()
   const task = bidCapabilityTaskSchema.parse({ goal: '审核第一章', scope: { kind: 'sections', section_ids: ['SEC-1'] },
     steps: [{ description: '审核第一章', scope: { source: 'task' }, call: { capability: 'chapter.review', input: { reason: '审核第一章' } } }] })
-  const work = await persistCapabilityTaskRequest(workspace, session, 'chapter_writing', task,
-    { session_id: String(session.id), message_id: String(message.id) }, [], { stage: 'chapter_writing', status: 'completed', run: null })
+  const work = await persistCapabilityTaskRequest(workspace, session, task,
+    { session_id: String(session.id), message_id: String(message.id) }, [])
   const run: BidRunData = { runId: 'previous-run', epoch: 1, baseProjectRevision: 1, work, startedAt: 1, updatedAt: 2 }
   session.append(type, { run })
   const request = createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: '第5章也需要小章节。' }] })
@@ -189,8 +203,8 @@ it('恢复不复用缺少原话证明的授权要求，也不把旧拒绝摘要�
   const { workspace, session, message } = await fixture()
   const task = bidCapabilityTaskSchema.parse({ goal: '审核第一章', scope: { kind: 'sections', section_ids: ['SEC-1'] },
     steps: [{ description: '审核第一章', scope: { source: 'task' }, call: { capability: 'chapter.review', input: { reason: '审核第一章' } } }] })
-  const work = await persistCapabilityTaskRequest(workspace, session, 'chapter_writing', task,
-    { session_id: String(session.id), message_id: String(message.id) }, [], { stage: 'chapter_writing', status: 'completed', run: null })
+  const work = await persistCapabilityTaskRequest(workspace, session, task,
+    { session_id: String(session.id), message_id: String(message.id) }, [])
   const request = capabilityTaskRequestSchema.parse(await readBidWorkRequest(workspace, work))
   const source = bindBidTaskSourceContext(session, request.source_snapshot!)
   const working = new BidWorkspace((await prepareBidWorkingTree(workspace, work)).root, workspace.config)
@@ -199,9 +213,9 @@ it('恢复不复用缺少原话证明的授权要求，也不把旧拒绝摘要�
   const verified = await validateBidTaskVerification(input, decision, workspace, workspace)
   const legacy = { ...verified, requirements: verified.requirements.map(({ source_quote: _quote, ...requirement }) =>
     ({ ...requirement, description: '仅改目录，不允许审核正文。' })) }
-  const checkpoint = capabilityTaskCheckpointSchema.parse({ schema_version: 1, work_id: work.workId,
+  const checkpoint = capabilityTaskCheckpointSchema.parse({ schema_version: 2, work_id: work.workId,
     request_sha256: work.requestSha256, plan_patches: [], steps: [{ step_id: 'step-1', step: task.steps[0], status: 'pending',
-      authorization: { session_id: String(session.id), message_id: String(message.id) } }],
+      authorization: { session_id: String(session.id), message_id: String(message.id) }, output_sources: [] }],
     verifications: [legacy, { ...legacy, unmet: ['错误认定不授权审核'], goal_met: false }] })
   const refreshed = await collectCapabilityTaskVerificationInput(workspace, working, source, request, checkpoint, 'plan')
   expect(refreshed.requirements).toBeUndefined()
@@ -219,9 +233,8 @@ it('范围外核验读取真实基线和候选摘要，并拒绝核验器忽略�
   const { workspace, session, message } = await fixture()
   const task = bidCapabilityTaskSchema.parse({ goal: '审核第一章', scope: { kind: 'sections', section_ids: ['SEC-1'] },
     steps: [{ description: '审核第一章', scope: { source: 'task' }, call: { capability: 'chapter.review', input: { reason: '审核第一章' } } }] })
-  const work = await persistCapabilityTaskRequest(workspace, session, 'chapter_writing', task,
-    { session_id: String(session.id), message_id: String(message.id) }, [],
-    { stage: 'chapter_writing', status: 'completed', run: null })
+  const work = await persistCapabilityTaskRequest(workspace, session, task,
+    { session_id: String(session.id), message_id: String(message.id) }, [])
   const request = capabilityTaskRequestSchema.parse(await readBidWorkRequest(workspace, work))
   const working = new BidWorkspace((await prepareBidWorkingTree(workspace, work)).root, workspace.config)
   const unchanged = await collectBidTaskScopeEvidence(workspace, working, task)
@@ -277,8 +290,8 @@ it('恢复与执行核验共享输入身份，原计划不变时区分真实候�
   const { workspace, session, message } = await fixture()
   const task = bidCapabilityTaskSchema.parse({ goal: '审核第一章', scope: { kind: 'sections', section_ids: ['SEC-1'] },
     steps: [{ description: '审核第一章', scope: { source: 'task' }, call: { capability: 'chapter.review', input: { reason: '审核第一章' } } }] })
-  const work = await persistCapabilityTaskRequest(workspace, session, 'chapter_writing', task,
-    { session_id: String(session.id), message_id: String(message.id) }, [], { stage: 'chapter_writing', status: 'completed', run: null })
+  const work = await persistCapabilityTaskRequest(workspace, session, task,
+    { session_id: String(session.id), message_id: String(message.id) }, [])
   const agent = {} as Parameters<typeof executeCapabilityTask>[3]
   await expect(executeCapabilityTask(workspace, createTestBidRunContext({ work }), {
     allowedWrites: async () => new Set(),
@@ -334,8 +347,8 @@ it.each(['表1 校验产物', '流程一：收集输入。', '流程图定义', 
   session.append('user/message', message, { surfaceOp: 'append' })
   const task = bidCapabilityTaskSchema.parse({ goal: '核验原文保留', scope: { kind: 'sections', section_ids: ['SEC-1'] },
     steps: [{ description: '核验原文保留', scope: { source: 'task' }, call: { capability: 'chapter.review', input: { reason: '原文保留事实测试' } } }] })
-  const work = await persistCapabilityTaskRequest(workspace, session, 'chapter_writing', task,
-    { session_id: String(session.id), message_id: String(message.id) }, [], { stage: 'chapter_writing', status: 'completed', run: null })
+  const work = await persistCapabilityTaskRequest(workspace, session, task,
+    { session_id: String(session.id), message_id: String(message.id) }, [])
   const source = capabilityTaskRequestSchema.parse(await readBidWorkRequest(workspace, work)).source_snapshot!
   const working = new BidWorkspace((await prepareBidWorkingTree(workspace, work)).root, workspace.config)
   const verify = async () => {
@@ -368,9 +381,8 @@ it('历史段落小章节意见即使核验器给 satisfied 也不越权、不�
   const task = bidCapabilityTaskSchema.parse({ goal: '分项说明', issue_ids: [issue.issue_id],
     scope: { kind: 'paragraphs', reference }, steps: [{ description: '分项说明',
       scope: { source: 'task' }, call: { capability: 'chapter.revise', input: { instruction: '分项说明', reference } } }] })
-  const work = await persistCapabilityTaskRequest(workspace, session, 'chapter_writing', task,
-    { session_id: String(session.id), message_id: String(message.id) }, [],
-    { stage: 'chapter_writing', status: 'completed', run: null })
+  const work = await persistCapabilityTaskRequest(workspace, session, task,
+    { session_id: String(session.id), message_id: String(message.id) }, [])
   const execute = vi.fn()
   await expect(executeCapabilityTask(workspace, createTestBidRunContext({ work }), {
     verifyTask: structureVerifier, allowedWrites: async () => new Set(), execute, validate: async () => {},
@@ -391,9 +403,8 @@ it('结构计划全步骤成功但无真实子节点时拒绝正式 publication�
     steps: [{ description: '修改目录', scope: { source: 'task' }, call: { capability: 'outline.update', input: {
       operations: [{ type: 'update_section', section_id: 'SEC-1', title: '阶段分项' }],
     } } }] })
-  const work = await persistCapabilityTaskRequest(workspace, session, 'chapter_writing', task,
-    { session_id: String(session.id), message_id: String(message.id) }, [],
-    { stage: 'chapter_writing', status: 'completed', run: null })
+  const work = await persistCapabilityTaskRequest(workspace, session, task,
+    { session_id: String(session.id), message_id: String(message.id) }, [])
   await expect(executeCapabilityTask(workspace, createTestBidRunContext({ work }), {
     verifyTask: structureVerifier, allowedWrites: async () => new Set(),
     execute: async () => ({ result: { target_section_ids: ['SEC-1'], changed_artifacts: [],
@@ -414,8 +425,7 @@ it('任务产物漏项可在同一 Work 末尾追加，不重跑完成前缀，�
   const task = bidCapabilityTaskSchema.parse({ goal: '审核章节和整书', scope: { kind: 'project' },
     steps: [{ description: '审核章节', scope: { source: 'task' }, call: { capability: 'chapter.review', input: { reason: '审核章节' } } }] })
   const authorization = { session_id: String(session.id), message_id: String(message.id) }
-  const work = await persistCapabilityTaskRequest(workspace, session, 'chapter_writing', task, authorization, [],
-    { stage: 'chapter_writing', status: 'completed', run: null })
+  const work = await persistCapabilityTaskRequest(workspace, session, task, authorization, [])
   const verifier: BidTaskVerifier = async (...args) => {
     const decision = await executorTestVerifier(...args)
     if (args[0].phase === 'result' && args[0].task.steps.length === 1) {
@@ -437,7 +447,7 @@ it('任务产物漏项可在同一 Work 末尾追加，不重跑完成前缀，�
   expect(await executeCapabilityTask(workspace, createTestBidRunContext({ work }), dispatcher, agent, session))
     .toMatchObject({ status: 'completed', receipt: { goal_met: true } })
   expect(execute).toHaveBeenCalledTimes(2)
-  await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'completed', run: null })
+  await checkpointBidProjectState(workspace, { workflow: { kind: 'full_bid', stage: 'chapter_writing' }, status: 'completed', run: null })
   expect(await inspectBidProject(workspace, { object: 'task', work_id: work.workId })).toMatchObject({
     available: true, data: { capability_task: { work_id: work.workId, goal_met: true, completed_prefix: 2 } },
   })
@@ -448,9 +458,8 @@ it('生产路径缺少隔离核验服务不能静默成功', async () => {
   const task = bidCapabilityTaskSchema.parse({ goal: '审核', scope: { kind: 'project' }, steps: [{
     description: '审核', scope: { source: 'task' }, call: { capability: 'chapter.review', input: { reason: '审核' } },
   }] })
-  const work = await persistCapabilityTaskRequest(workspace, session, 'chapter_writing', task,
-    { session_id: String(session.id), message_id: String(message.id) }, [],
-    { stage: 'chapter_writing', status: 'completed', run: null })
+  const work = await persistCapabilityTaskRequest(workspace, session, task,
+    { session_id: String(session.id), message_id: String(message.id) }, [])
   const execute = vi.fn()
   await expect(executeCapabilityTask(workspace, createTestBidRunContext({ work }), {
     allowedWrites: async () => new Set(), execute, validate: async () => {},
@@ -464,9 +473,8 @@ it.each(['新增意见', '修改来源'] as const)('已核验任务发布对最�
   const task = bidCapabilityTaskSchema.parse({ goal: '发布已核验结果', issue_ids: [issue.issue_id],
     scope: { kind: 'project' }, steps: [{ description: '审核意见对应正文', scope: { source: 'task' },
       call: { capability: 'chapter.review', input: { reason: '发布层受控核验夹具' } } }] })
-  const work = await persistCapabilityTaskRequest(workspace, session, 'chapter_writing', task,
-    { session_id: String(session.id), message_id: String(message.id) }, [],
-    { stage: 'chapter_writing', status: 'completed', run: null })
+  const work = await persistCapabilityTaskRequest(workspace, session, task,
+    { session_id: String(session.id), message_id: String(message.id) }, [])
   const source = capabilityTaskRequestSchema.parse(await readBidWorkRequest(workspace, work)).source_snapshot!
   const input = { phase: 'result' as const, source, task, evidence: await collectBidTaskEvidence(workspace, task, []) }
   const agent = {} as Parameters<BidTaskVerifier>[1]
@@ -507,9 +515,8 @@ it.each(['plan', 'result'] as const)('混合任务 %s 允许正文批次覆盖�
         task_id: 'first', section_id: 'SEC-1', issue_ids: [issue.issue_id], depends_on: [],
       }] } } }, { description: '结构意见使用目录能力', scope: { source: 'task' },
       call: { capability: 'outline.update', input: { operations: [{ type: 'update_section', section_id: 'SEC-2', title: '结构目标' }] } } }] })
-  const work = await persistCapabilityTaskRequest(workspace, session, 'chapter_writing', task,
-    { session_id: String(session.id), message_id: String(message.id) }, [],
-    { stage: 'chapter_writing', status: 'completed', run: null })
+  const work = await persistCapabilityTaskRequest(workspace, session, task,
+    { session_id: String(session.id), message_id: String(message.id) }, [])
   const source = capabilityTaskRequestSchema.parse(await readBidWorkRequest(workspace, work)).source_snapshot!
   const input = { phase, source, task, evidence: await collectBidTaskEvidence(workspace, task, []) }
   const decision = await executorTestVerifier(input, {} as Parameters<BidTaskVerifier>[1], new AbortController().signal)
@@ -530,9 +537,8 @@ it.each(['plan', 'result'] as const)('导出要求在 %s 核验时必须有唯�
   const task = bidCapabilityTaskSchema.parse({ goal: '审核并导出', scope: { kind: 'project' }, steps: [{
     description: '审核', scope: { source: 'task' }, call: { capability: 'chapter.review', input: { reason: '审核' } },
   }] })
-  const work = await persistCapabilityTaskRequest(workspace, session, 'chapter_writing', task,
-    { session_id: String(session.id), message_id: String(message.id) }, [],
-    { stage: 'chapter_writing', status: 'completed', run: null })
+  const work = await persistCapabilityTaskRequest(workspace, session, task,
+    { session_id: String(session.id), message_id: String(message.id) }, [])
   const source = capabilityTaskRequestSchema.parse(await readBidWorkRequest(workspace, work)).source_snapshot!
   const input = { phase, source, task, evidence: await collectBidTaskEvidence(workspace, task, []) }
   const decision = await executorTestVerifier(input, {} as Parameters<BidTaskVerifier>[1], new AbortController().signal)
@@ -579,9 +585,8 @@ it('局部合并保留原文与退役来源意见，当前目标解析为合并�
     return { ...result, requirements: result.requirements.map(item => ({ ...item, preserve_migrated_content: true,
       section_ids: item.source_id === selected.issue_id ? ['SEC-2'] : ['SEC-1', 'SEC-2'] })) }
   }
-  const work = await persistCapabilityTaskRequest(workspace, session, 'chapter_writing', task,
-    { session_id: String(session.id), message_id: String(message.id) }, [],
-    { stage: 'chapter_writing', status: 'completed', run: null })
+  const work = await persistCapabilityTaskRequest(workspace, session, task,
+    { session_id: String(session.id), message_id: String(message.id) }, [])
   const outcome = await executeCapabilityTask(workspace, createTestBidRunContext({ work }), {
     verifyTask: verifier,
     allowedWrites: (call, ids, working, stepId) => call.capability === 'outline.update'

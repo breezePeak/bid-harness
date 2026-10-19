@@ -1,16 +1,14 @@
 # @deepseek-ai/dsh-client-ui-bid
 
-English | [中文](README.zh.md)
-
-Bid Session 浏览器 UI。插件向 Conversation 声明的 `conversation.input.dock` 列表注册 `BidStagePanel`，只在 Host 解析的 Session preset 为 `bid` 且存在 `bid.runtime` 投影时渲染。运行中的阶段把当前 `run.progress.phase` 映射为 S1–S6 有序计划并使用共享 `PlanListPanel`；独立 Word 导出的 S6 计划只在导出运行时显示。S5 完成后隐藏阶段状态行，审核与修订控件仍可用；挂起、失败和等待状态保留阶段状态行及适用控件。客户端不折叠 Bid 事件、不推进阶段、不推导权限，也不保存本地阶段或状态。
+Bid Session 浏览器 UI。空会话提供普通输入框和附件，不显示专业阶段。插件向 Conversation 的 `conversation.input.dock` 注册 `BidStagePanel`，只在当前 Bid 主会话有实际能力任务或完整标书路线时显示。能力计划读取 Host 的真实步骤，专业阶段使用共享 `PlanListPanel` 显示 S1–S6 进度；客户端不推进状态或推导权限。
 
 S4 进度读取暂不可用时保留同一工作已读到的统计；首次读取由计划表头显示同步状态，后续轮询继续重试。阶段面板不另行显示进度同步提示。
 
-能力任务计划从 Host 的 `getCapabilityTaskPlan` 读取实际步骤：主 Agent 的具体说明为主行，能力、状态及结果或阻断原因为详情，长文本自动换行。重规划同步替换未完成后缀；排队、挂起、等待输入和失败时保留计划，完成后从当前面板收起。读取失败时保留同会话上次结果并标明未同步、停止运行动画；首次读取失败且同会话没有可用结果时不显示额外提示，切换会话不会显示原会话计划。阶段计划仍用于默认生成路线，不按阶段标签推断局部步骤，也不另存工作项清单。
+能力任务计划从 Host 的 `getCapabilityTaskPlan` 读取实际步骤：主 Agent 的具体说明为主行，能力、状态及结果或阻断原因为详情，长文本自动换行。重规划同步替换未完成后缀；排队、挂起、等待输入和失败时保留计划，完成后从当前面板收起。读取失败时保留同会话上次结果并标明未同步、停止运行动画；首次读取失败且同会话没有可用结果时不显示额外提示，切换会话不会显示原会话计划。阶段计划用于显式开启的完整标书路线，不按阶段标签推断局部步骤，也不另存工作项清单。
 
 正文与目录入口依据正式产物显示，拆章后按 `section_id` 重新定位正文。独立 Word 导出运行时显示专用计划；完成或失败事件在发起导出的会话聊天时间线生成可重放的结果，成功时显示文件绝对路径，失败时显示原因。既有事件缺少绝对路径时，显示相对项目数据目录的路径并提供导出页入口。
 
-`projection.allowedActions` controls upload, retry, outline-confirmation, and Word-export controls, while the Host-projected file limits configure the picker and its rule text. File selection keeps browser `File` objects locally until the user explicitly uploads the batch. These actions use dedicated Bid Host entry points and never call `session.prompt()`.
+普通消息附件复用 Composer 上传及 `session.prompt()` 接纳链，文件卡片保留名称、大小和上传状态，失败后可保留草稿重试。专业路线中的角色绑定、确认和导出由 `projection.allowedActions` 限定；上传原件本身不触发阶段执行。独立任务完成后，聊天结果通过 Host 发布凭据显示预览和下载链接；读取失败提供重试，切换会话后丢弃旧请求结果。
 
 面板把 `projection.composer.enabled` 及稳定原因码投影到同一 Session 的 `ctx.conversation.blocks`。正文工作台在 S5 运行、失败和完成后都保留章节与 Reviewer 状态；手动切换章节的读取不受目录状态轮询的迟到结果影响。缺少企业资质、证书等项目资料的章节显示黄色状态灯且标为“待补项目资料”，正文修复问题及其他审核结果按高、中、低风险展示，不把审核未通过呈现为导出阻断。Word 按完整目录导出当前已保存正文，执行和审核状态不影响收录；缺失正文保留标题并标注，页面显示后端返回的内容范围。既有 `docx_export/completed` 项目仍保留审核、修订和导出能力。非 Bid preset 或缺失投影会清除 block 并隐藏面板，不影响普通会话的输入框和附件路径。
 
@@ -18,7 +16,7 @@ S4 进度读取暂不可用时保留同一工作已读到的统计；首次读�
 
 批量审核历史中的已完成意见可打开对应 task 的 Markdown 前后快照，固定左侧显示修改后、右侧显示修改前。顶层 Markdown block 组成共享双列行，新增或删除的缺失侧保留自然等高空单元格；两列共用正文阅读区的单一垂直滚动位置。旧记录缺少快照时只提示无法还原，章节标题仍提供普通正文定位。
 
-S1 重置清空项目资料、Word 模板与格式配置以及后续阶段产物，回到空白上传入口。面板在重置命令成功后清空已选文件、模板和旧反馈，并重新读取模板库与能力计划；旧上传请求的迟到响应和进度不会恢复模板或继续上传上一批资料。同处 S1 的任务投影更新也会刷新模板库，普通任务完成或重连保留尚未上传的选择。S2–S4 重置清空后续产物，发布 `ready` 并在同一 Host 操作中重新执行所选阶段。S5 重置发布 `waiting_user` 后，空写作入口在两种确认模式下均直接生成默认计划并启动正文。
+S1 重置清空专业资料角色、Word 模板与格式配置以及后续阶段产物，回到专业资料入口；原件和无依赖的独立图资产保留。面板在重置命令成功后清空已选文件、模板和旧反馈，并重新读取模板库与能力计划；旧上传请求的迟到响应和进度不会恢复模板或继续上传上一批资料。同处 S1 的任务投影更新也会刷新模板库，普通任务完成或重连保留尚未上传的选择。S2–S4 重置清空后续产物，发布 `ready` 并在同一 Host 操作中重新执行所选阶段。S5 重置发布 `waiting_user` 后，空写作入口在两种确认模式下均直接生成默认计划并启动正文。
 
 输入框左侧工具栏为每个 Bid Session 提供“手动确认 / 自动确认”选择，默认手动且不写入项目状态。自动确认模式在 S2 使用审核页当前编辑结果确认；S3/S4 等待 Draft 保存后，按阶段、revision 和 SHA-256 最多提交一次确认；S4 确认后由 Host 直接保存默认 Writing Plan 并启动 S5，不再询问整体写作意见；两种确认模式的 S5 启动行为相同。自动操作失败不循环重试，`failed` 与 `suspended` 始终保留人工处理。
 
@@ -38,5 +36,5 @@ Rendering Bid projections, selecting local files, and choosing confirmation mode
 
 ## Known Limitations and Deferred Work
 
-- **File intake uses one JSON/base64 request** — browser and Host memory include the encoded batch within the configured limits.
+- 上传使用原始二进制请求，浏览器和 Host 仍需在配置上限内缓冲完整文件。
 - **一个 phase 只标识当前阶段步骤** — 计划可把有序前置步骤标为完成，但 Host 报告后续 phase 后不保留分支历史。

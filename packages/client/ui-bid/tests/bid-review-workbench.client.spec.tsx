@@ -53,10 +53,10 @@ function props(patch: Partial<BidReviewWorkbenchProps> = {}): BidReviewWorkbench
 
 describe('BidReviewWorkbench', () => {
   it('仅按 Host 资产身份读取图片，保留行内图文和原文段落位置', async () => {
-    const source = '# 1.1 实施方案\n\n前文 ![部署示意](./chapters/images/%61pproved.png) 后文。\n\n![未知图片](chapters/images/unknown.png)\n\n![引用图][approved]\n\n![点段](chapters/tmp/../images/approved.png)\n\n[approved]: ./CHAPTERS%2FIMAGES/%61PPROVED.PNG'
+    const source = '# 1.1 实施方案\n\n前文 ![部署示意](./assets/images/%61pproved.png) 后文。\n\n![未知图片](assets/images/unknown.png)\n\n![引用图][approved]\n\n![点段](assets/tmp/../images/approved.png)\n\n[approved]: ./ASSETS%2FIMAGES/%61PPROVED.PNG'
     const getImage = vi.fn<NonNullable<BidReviewWorkbenchProps['getImage']>>(async () => ({ base64: 'verified', mimeType: 'image/png' }))
     const { container } = render(<BidReviewWorkbench {...props({ getImage,
-      getChapter: async () => ({ ...chapter, markdown: source, images: [{ id: imageId, title: '部署示意', path: 'chapters/images/approved.png', sha256: 'b'.repeat(64), width: 800, height: 600 }] }) })} />)
+      getChapter: async () => ({ ...chapter, markdown: source, images: [{ id: imageId, title: '部署示意', path: 'assets/images/approved.png', sha256: 'b'.repeat(64), width: 800, height: 600 }] }) })} />)
     await waitFor(() => { expect(screen.getAllByRole('img', { name: '部署示意' })).toHaveLength(3) })
     expect(getImage).toHaveBeenCalledTimes(3)
     expect(getImage.mock.calls.every(args => args[0] === imageId)).toBe(true)
@@ -69,9 +69,9 @@ describe('BidReviewWorkbench', () => {
   })
 
   it('远程同路径和项目外路径不获得本地图授权', async () => {
-    const path = 'chapters/images/approved.png'
+    const path = 'assets/images/approved.png'
     const remote = `https://example.com/${path}`
-    const source = `![本地图](${path})\n\n![外部图片](${remote})\n\n![外部权威](//example.com/${path})\n\n![编码协议](https%3A%2F%2Fexample.com%2F${path})\n\n![项目外](../${path})\n\n![绝对路径](%2F${path})\n\n![无效编码](chapters/images/%zz.png)`
+    const source = `![本地图](${path})\n\n![外部图片](${remote})\n\n![外部权威](//example.com/${path})\n\n![编码协议](https%3A%2F%2Fexample.com%2F${path})\n\n![项目外](../${path})\n\n![绝对路径](%2F${path})\n\n![无效编码](assets/images/%zz.png)`
     const getImage = vi.fn<NonNullable<BidReviewWorkbenchProps['getImage']>>(async () => ({ base64: 'verified', mimeType: 'image/png' }))
     render(<BidReviewWorkbench {...props({ getImage,
       getChapter: async () => ({ ...chapter, markdown: source, images: [{ id: imageId, title: '部署示意', path, sha256: 'b'.repeat(64), width: 800, height: 600 }] }) })} />)

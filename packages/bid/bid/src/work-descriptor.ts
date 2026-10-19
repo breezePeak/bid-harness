@@ -5,35 +5,38 @@ import { writeFileAtomic } from '@deepseek-ai/dsh-atomic-write'
 import { z } from 'zod'
 import { BID_STAGES, BID_WORK_KINDS, type BidStage, type BidWorkDescriptor, type BidWorkKind } from './control-plane-contract.ts'
 import { assertNoLinkedPath, within } from './workspace-path.ts'
-import { recordOnlySchemaVersion } from './schema-version.ts'
 
 const sha256Schema = z.string().regex(/^[a-f0-9]{64}$/u)
 const workIdSchema = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u)
 
-/** Strict persisted Work Descriptor schema. */
-export const bidWorkDescriptorSchema = z.object({
-  kind: z.enum(BID_WORK_KINDS),
+const stageWorkKindSchema = z.enum(BID_WORK_KINDS).exclude(['capability_task'])
+const workIdentitySchema = z.object({
   workId: workIdSchema,
-  stage: z.enum(BID_STAGES),
   requestRef: z.string().min(1),
   requestSha256: sha256Schema,
   inputFingerprint: sha256Schema,
 }).strict()
 
-const bidWorkRequestSchema = z.object({
-  schema_version: recordOnlySchemaVersion(1),
-  kind: z.enum(BID_WORK_KINDS),
+/** 按实际执行类型校验持久 Work 身份；独立能力没有专业阶段。 */
+export const bidWorkDescriptorSchema = z.discriminatedUnion('kind', [
+  workIdentitySchema.extend({ kind: z.literal('capability_task') }).strict(),
+  workIdentitySchema.extend({ kind: stageWorkKindSchema, stage: z.enum(BID_STAGES) }).strict(),
+])
+
+const workRequestFields = {
+  schema_version: z.literal(2),
   work_id: workIdSchema,
-  stage: z.enum(BID_STAGES),
   input_fingerprint: sha256Schema,
   payload: z.unknown(),
-}).strict()
+}
+const bidWorkRequestSchema = z.discriminatedUnion('kind', [
+  z.object({ ...workRequestFields, kind: z.literal('capability_task') }).strict(),
+  z.object({ ...workRequestFields, kind: stageWorkKindSchema, stage: z.enum(BID_STAGES) }).strict(),
+])
 
 type WorkWorkspace = { readonly root: string; readonly projectRoot: string }
 
-const resetRequestMetaSchema = z.object({
-  schema_version: recordOnlySchemaVersion(1), kind: z.enum(BID_WORK_KINDS), work_id: workIdSchema, stage: z.enum(BID_STAGES),
-}).loose()
+const resetRequestMetaSchema = bidWorkRequestSchema
 
 /**
  * Find only request and private-run roots owned by the selected stage or a later stage.
@@ -65,10 +68,10 @@ export async function bidResetWorkPaths(workspace: WorkWorkspace, stage: BidStag
     catch (error: unknown) { throw new Error(`BID_RESET_REQUEST_READ_FAILED:${path}`, { cause: error }) }
     if (entry !== `${meta.work_id}.json`) throw new Error(`BID_RESET_REQUEST_IDENTITY_MISMATCH:${path}`)
     requests.set(meta.work_id, meta)
-    if (BID_STAGES.indexOf(meta.stage) >= stageIndex) paths.push(path)
+    if (meta.kind !== 'capability_task' && BID_STAGES.indexOf(meta.stage) >= stageIndex) paths.push(path)
   }
 
-  const runStages = new Map<string, BidStage>()
+  const runStages = new Map<string, BidStage | null>()
   const runEntries = await readDirectoryIfPresent(runsRoot)
   for (const entry of runEntries) {
     const runRoot = join(runsRoot, entry)
@@ -85,10 +88,12 @@ export async function bidResetWorkPaths(workspace: WorkWorkspace, stage: BidStag
     if (descriptor !== undefined && descriptor.workId !== entry) throw new Error(`BID_RESET_WORK_IDENTITY_MISMATCH:${marker}`)
     const request = requests.get(entry)
     if (descriptor !== undefined && request !== undefined
-      && (descriptor.stage !== request.stage || descriptor.kind !== request.kind)) {
+      && (descriptor.kind !== request.kind || descriptor.kind !== 'capability_task' && request.kind !== 'capability_task'
+        && descriptor.stage !== request.stage)) {
       throw new Error(`BID_RESET_WORK_IDENTITY_MISMATCH:${marker}`)
     }
-    const workStage = descriptor?.stage ?? request?.stage
+    const workStage = descriptor?.kind === 'capability_task' || request?.kind === 'capability_task' ? null
+      : descriptor?.stage ?? request?.stage
     if (workStage === undefined) {
       const entries = await readDirectoryIfPresent(runRoot)
       if (!z.uuid().safeParse(entry).success || entries.length === 0
@@ -104,17 +109,18 @@ export async function bidResetWorkPaths(workspace: WorkWorkspace, stage: BidStag
       continue
     }
     runStages.set(entry, workStage)
-    if (BID_STAGES.indexOf(workStage) >= stageIndex) paths.push(runRoot)
+    if (workStage !== null && BID_STAGES.indexOf(workStage) >= stageIndex) paths.push(runRoot)
   }
   for (const directory of requestDirectories) {
-    const requestStage = requests.get(directory.workId)?.stage
+    const request = requests.get(directory.workId)
+    const requestStage = request?.kind === 'capability_task' ? null : request?.stage
     const runStage = runStages.get(directory.workId)
     if (requestStage !== undefined && runStage !== undefined && requestStage !== runStage) {
       throw new Error(`BID_RESET_REQUEST_IDENTITY_MISMATCH:${directory.path}`)
     }
-    const workStage = requestStage ?? runStage
+    const workStage = requestStage === undefined ? runStage : requestStage
     if (workStage === undefined) throw new Error(`BID_RESET_REQUEST_DIRECTORY_UNRESOLVED:${directory.path}`)
-    if (BID_STAGES.indexOf(workStage) >= stageIndex) paths.push(directory.path)
+    if (workStage !== null && BID_STAGES.indexOf(workStage) >= stageIndex) paths.push(directory.path)
   }
   return [...new Set(paths)]
 }
@@ -142,8 +148,7 @@ export function bidInputFingerprint(value: unknown): string {
 /**
  * Persist a Long Run request before any Run identity is created.
  * @param workspace - Workspace that owns the request artifact.
- * @param kind - Resume adapter category.
- * @param stage - Workflow stage associated with the work.
+ * @param context 实际 Work 类型及专业阶段；通用能力不携带阶段。
  * @param payload - Exact request payload required by resume.
  * @param inputIdentity - Inputs whose change invalidates exact resume.
  * @param workId - Stable work identity, generated when omitted.
@@ -151,8 +156,7 @@ export function bidInputFingerprint(value: unknown): string {
  */
 export async function persistBidWorkRequest(
   workspace: WorkWorkspace,
-  kind: BidWorkKind,
-  stage: BidStage,
+  context: { kind: 'capability_task' } | { kind: Exclude<BidWorkKind, 'capability_task'>; stage: BidStage },
   payload: unknown,
   inputIdentity: unknown,
   workId: string = randomUUID(),
@@ -160,10 +164,9 @@ export async function persistBidWorkRequest(
   const inputFingerprint = bidInputFingerprint(inputIdentity)
   const requestRef = `requests/${workId}.json`
   const request = bidWorkRequestSchema.parse({
-    schema_version: 1,
-    kind,
+    schema_version: 2,
+    ...context,
     work_id: workId,
-    stage,
     input_fingerprint: inputFingerprint,
     payload,
   })
@@ -172,7 +175,7 @@ export async function persistBidWorkRequest(
   const path = within(workspace.projectRoot, requestRef)
   await assertNoLinkedPath(workspace.root, path)
   await writeFileAtomic(path, bytes, { mode: 0o600, dirMode: 0o700 })
-  return { kind, workId, stage, requestRef, requestSha256, inputFingerprint }
+  return { ...context, workId, requestRef, requestSha256, inputFingerprint }
 }
 
 /**
@@ -194,7 +197,8 @@ export async function readBidWorkRequest(
     throw new Error('BID_WORK_REQUEST_IDENTITY_MISMATCH')
   }
   const request = bidWorkRequestSchema.parse(JSON.parse(bytes))
-  if (request.kind !== descriptor.kind || request.work_id !== descriptor.workId || request.stage !== descriptor.stage
+  if (request.kind !== descriptor.kind || request.work_id !== descriptor.workId
+    || request.kind !== 'capability_task' && descriptor.kind !== 'capability_task' && request.stage !== descriptor.stage
     || request.input_fingerprint !== descriptor.inputFingerprint) throw new Error('BID_WORK_REQUEST_IDENTITY_MISMATCH')
   return request.payload
 }
@@ -228,6 +232,6 @@ export async function readBidWorkDescriptor(workspace: WorkWorkspace, workId: st
   }
   const record = bidWorkRequestSchema.parse(JSON.parse(raw))
   if (record.work_id !== workId) throw new Error('BID_WORK_REQUEST_IDENTITY_MISMATCH')
-  return { kind: record.kind, workId, stage: record.stage, requestRef,
+  return { ...(record.kind === 'capability_task' ? { kind: record.kind } : { kind: record.kind, stage: record.stage }), workId, requestRef,
     requestSha256: createHash('sha256').update(raw).digest('hex'), inputFingerprint: record.input_fingerprint }
 }

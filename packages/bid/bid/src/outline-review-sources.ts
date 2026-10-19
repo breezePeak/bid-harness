@@ -1,6 +1,6 @@
 /** 从 S2 引用装载目录审核原文，保留采购文件归属并拒绝不完整证据。 */
 import { readFile } from 'node:fs/promises'
-import { basename, join, relative, resolve } from 'node:path'
+import { join, relative, resolve } from 'node:path'
 import { BidStageExecutionError } from './control-plane-contract.ts'
 import { evidenceChunkId, parseDocumentChunkIndex } from './document-chunk.ts'
 import type { BidWorkspace } from './index.ts'
@@ -26,16 +26,16 @@ export function outlineReviewSourceKey(ref: TenderSourceRef): string {
  */
 export async function loadOutlineReviewSources(workspace: BidWorkspace, refs: readonly TenderSourceRef[]): Promise<OutlineReviewSource[]> {
   const sources = new Map<string, OutlineReviewSource>()
-  const manifest = await workspace.readManifest()
-  const fileIds = new Set(refs.map(ref => ref.file_id))
-  const files = manifest.files.filter(file => fileIds.has(file.id))
   const load = async (): Promise<void> => {
+    const manifest = await workspace.readManifest()
+    const fileIds = new Set(refs.map(ref => ref.file_id))
+    const files = manifest.files.filter(file => fileIds.has(file.id))
     for (const fileId of fileIds) {
       const file = files.find(item => item.id === fileId)
       if (file === undefined || file.role !== 'tender' || file.parseStatus !== 'success') throw new Error(`来源文件 ${fileId} 不是已解析的本项目采购文件`)
       if (file.corpusPath === null || file.chunksPath === null || file.chunkIndexPath === null || file.documentPath === null) throw new Error(`来源文件 ${fileId} 缺少 Corpus 路径`)
       const corpus = within(workspace.projectRoot, file.corpusPath)
-      if (relative(join(workspace.corpusRoot, basename(file.inputPath)), corpus) !== '') throw new Error(`来源文件 ${fileId} 的 Corpus 不属于该上传文件`)
+      within(workspace.corpusRoot, relative(workspace.corpusRoot, corpus))
       const chunks = within(workspace.projectRoot, file.chunksPath)
       const indexPath = within(workspace.projectRoot, file.chunkIndexPath)
       if (relative(join(corpus, 'chunks'), chunks) !== '' || relative(join(chunks, 'index.json'), indexPath) !== '') throw new Error(`来源文件 ${fileId} 的 chunks/index 不属于该 Corpus`)

@@ -16,6 +16,7 @@ import { CompactionItem } from './CompactionItem.tsx'
 import { ContextInjectionRow } from './ContextInjectionRow.tsx'
 import { MessageIconActions } from './MessageIconActions.tsx'
 import css from './MessageItem.module.css'
+import type { MessageFileRef } from '@deepseek-ai/dsh-host-apiproxy/api/files'
 
 type UserImage = Extract<UserMessageNode['content'][number], { type: 'image' }>
 
@@ -237,7 +238,7 @@ function projectUserText(text: string, sessionLabels: readonly string[]): ReactN
 
 /** Right-aligned bubble shared by user and steering rows. */
 function UserStyleBubble({
-  content, renderMessageImages, actions, pending = false, pendingOutgoing = false, error, referenceLabels = [], t,
+  content, renderMessageImages, actions, pending = false, pendingOutgoing = false, error, referenceLabels = [], files = [], t,
 }: {
   content: readonly unknown[]
   renderMessageImages: ChatNodeOwnerProps['renderMessageImages']
@@ -251,6 +252,8 @@ function UserStyleBubble({
   error?: string
   /** Exact session mention labels associated by the adjacent recall node. */
   referenceLabels?: readonly string[]
+  /** Host 已接纳的原件元数据。 */
+  files?: readonly MessageFileRef[]
   t: ChatViewSlotProps['t']
 }): ReactNode {
   const { text, images, rest } = contentParts(content)
@@ -265,6 +268,11 @@ function UserStyleBubble({
     >
       <div className={css.userStack}>
         {renderMessageImages({ images, align: 'end' })}
+        {files.length > 0 && <ul className={css.fileCards} aria-label="消息附件">
+          {files.map(file => <li key={`${file.attachmentId}:${file.version}`}>
+            <span>{file.name}</span><small>{Math.ceil(file.bytes / 1024)} KB</small>
+          </li>)}
+        </ul>}
         {showBubble && <div className={css.bubble}>
           {projectUserText(text, referenceLabels)}
           {rest.map((block, i) => <JsonBlock key={i} label={t('message.extraBlock')} payload={block} truncatedLabel={truncated} />)}
@@ -342,6 +350,7 @@ export const UserMessageNodeView = memo(function UserMessageNodeView({
       content={data.content}
       renderMessageImages={renderMessageImages}
       {...data.referenceLabels === undefined ? {} : { referenceLabels: data.referenceLabels }}
+      {...data.files === undefined ? {} : { files: data.files }}
       t={t}
       actions={text => (
         <MessageIconActions

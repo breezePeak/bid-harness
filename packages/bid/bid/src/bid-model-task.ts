@@ -22,6 +22,12 @@ import { bidProjectInspectSchema } from './bid-project-inspect.ts'
 import { readBidWorkDescriptor, readBidWorkRequest } from './work-descriptor.ts'
 import { readBidProjectState } from './project-state.ts'
 import { requireWritableSectionAnswers } from './chapter-object-positions.ts'
+import { bidMessageFiles, resolveBidFile } from './file-assets.ts'
+import { indexDocxDocument } from './docx-document-index.ts'
+import { listBidFigures } from './published-figures.ts'
+import type { PromptFileRef } from '@deepseek-ai/dsh-host-apiproxy/api/files'
+import { bidWorkflowFilesSchema } from './file-manifest.ts'
+import type { inspectCandidateDocument } from './document-candidate.ts'
 
 const position = z.number().int().nonnegative()
 const revisionTaskId = (sectionId: string): string => 'revision-' + createHash('sha256').update(sectionId).digest('hex').slice(0, 16)
@@ -40,6 +46,13 @@ const fields = {
   user_message_refs: ['user_message_positions', 'messages'], add_user_message_refs: ['add_user_message_positions', 'messages'],
   criterion_id: ['criterion_position', 'criteria'], delete: ['delete_criterion_positions', 'criteria'],
   work_id: ['work_position', 'works'],
+  file_ref: ['file_position', 'files'],
+  file_refs: ['file_positions', 'files'],
+  image_ref: ['image_position', 'images'],
+  block_ref: ['block_position', 'document_blocks'],
+  block_refs: ['block_positions', 'document_blocks'],
+  candidate_block_ref: ['candidate_block_position', 'candidate_blocks'],
+  figure_ref: ['figure_position', 'figures'], figure_refs: ['figure_positions', 'figures'],
 } as const
 type CatalogKind = typeof fields[keyof typeof fields][1]
 const fieldMap: ReadonlyMap<string, readonly [string, CatalogKind]> = new Map(Object.entries(fields))
@@ -73,16 +86,20 @@ async function optionalText(workspace: BidWorkspace, path: string): Promise<stri
  * 从查询来源的真实对象生成模型选择表，正文选区由程序计算偏移。
  * @param workspace 本次查询的正式或候选项目。
  * @param session 提供真实用户消息及当前原生写作请求的 Main 会话。
+ * @param document 当前 inspect 明确选择的原 Word 版本；其他文件不预先解析。
+ * @param candidate 同 Work 已完成并核验的候选文档，使用独立节点表。
  * @returns 可冻结在工具结果中的对象及选区身份。
  */
-export async function collectBidModelTaskCatalog(workspace: BidWorkspace, session?: Session): Promise<BidModelTaskCatalog> {
+export async function collectBidModelTaskCatalog(workspace: BidWorkspace, session?: Session,
+  document?: PromptFileRef, candidate?: Awaited<ReturnType<typeof inspectCandidateDocument>>): Promise<BidModelTaskCatalog> {
   const hasOutline = (await Promise.all(['outline/confirmed-outline.json', 'outline/draft.json', 'outline/outline.json']
     .map(path => optionalText(workspace, path)))).some(text => text !== undefined)
   const baseline = hasOutline ? await readCapabilityOutlineBaseline(workspace) : undefined
   const sections = baseline?.outline.sections ?? []
   const outlineSource = await optionalText(workspace, 'outline/outline.json')
   const state = await readBidProjectState(workspace)
-  const nativeDraft = state?.status === 'waiting_user' && ['outline_generation', 'evidence_mapping'].includes(state.stage)
+  const nativeDraft = state?.status === 'waiting_user'
+    && (state.workflow?.stage === 'outline_generation' || state.workflow?.stage === 'evidence_mapping')
   const draft = nativeDraft && outlineSource !== undefined ? await getOrCreateOutlineDraft(workspace) : baseline
   const requirements = await optionalText(workspace, 'analysis/requirements.json')
   const scoring = await optionalText(workspace, 'analysis/scoring.json')
@@ -104,7 +121,8 @@ export async function collectBidModelTaskCatalog(workspace: BidWorkspace, sessio
     if (work === null) continue
     const request = await readBidWorkRequest(workspace, work)
     const goal = z.object({ task: z.object({ goal: z.string() }) }).safeParse(request)
-    works.push({ id: work.workId, label: goal.success ? goal.data.task.goal : work.stage + ' / ' + work.kind })
+    works.push({ id: work.workId, label: goal.success ? goal.data.task.goal
+      : work.kind === 'capability_task' ? '能力任务' : work.stage + ' / ' + work.kind })
   }
   const writingPlanText = await optionalText(workspace, 'chapters/writing-plan.json')
   const writingPlan = writingPlanText === undefined ? undefined : parseWritingPlan(JSON.parse(writingPlanText))
@@ -112,6 +130,18 @@ export async function collectBidModelTaskCatalog(workspace: BidWorkspace, sessio
   const writingRequest = writingRequestText === undefined ? undefined : writingRequestSchema.parse(JSON.parse(writingRequestText))
   const bodies = new Map<string, string>()
   const paragraphs = new Map<string, Array<{ start: number; end: number; text: string }>>()
+  const documentBlocks: CatalogEntry[] = []
+  if (document !== undefined) {
+    if (session === undefined) throw new Error('BID_FILE_SESSION_REQUIRED')
+    const file = await resolveBidFile(workspace, session, document)
+    if (!file.ref.name.toLowerCase().endsWith('.docx')) throw new Error('BID_DOCX_REQUIRED')
+    const indexed = await indexDocxDocument(file.bytes, document)
+    documentBlocks.push(...indexed.blocks.map(block => ({ id: JSON.stringify(block.ref), label: JSON.stringify({
+      kind: block.kind, heading_path: block.heading_path, text: block.text, context: block.context,
+      location: block.location, style: block.style, writable: block.writable, limitations: block.limitations,
+      available_width_twips: block.available_width_twips,
+    }) })))
+  }
   for (const [id, location] of await readChapterLocations(workspace)) {
     const body = await optionalText(workspace, location.contentPath)
     if (body === undefined) continue
@@ -156,6 +186,23 @@ export async function collectBidModelTaskCatalog(workspace: BidWorkspace, sessio
         ...writingPlan.sections.flatMap(section => section.acceptance_criteria)].map(criterion => ({ id: criterion.id,
         label: criterion.description })),
       works,
+      files: session === undefined ? [] : bidMessageFiles(session).map(file => ({
+        id: JSON.stringify({ attachmentId: file.attachmentId, version: file.version }),
+        label: `${file.name}（${file.mediaType}，${String(file.bytes)} 字节；当前会话已引用的原件）`,
+      })),
+      document_blocks: documentBlocks,
+      candidate_blocks: candidate?.blocks.flatMap(({ block, target }) => target === undefined ? [] : [{
+        id: JSON.stringify(target), label: JSON.stringify({ kind: block.kind, heading_path: block.heading_path,
+          text: block.text, context: block.context, location: block.location, style: block.style,
+          writable: block.writable, limitations: block.limitations, available_width_twips: block.available_width_twips }),
+      }]) ?? [],
+      figures: (await listBidFigures(workspace, session)).map(record => ({ id: JSON.stringify(record.ref),
+        label: `${record.title}（${record.kind}；${record.purpose}；内容检查已通过）` })),
+      images: session?.events.flatMap(event => event.type !== 'user/message' || event.data.source.kind !== 'user' ? []
+        : event.data.content.flatMap((block, block_position) => block.type !== 'image' ? [] : [{
+          id: JSON.stringify({ message_id: String(event.data.id), block_position, attachment: block.attachment }),
+          label: `${block.attachment.name ?? '用户图片'}（消息序号 ${String(event.seq)}，图片块 ${String(block_position)}，${String(block.attachment.width)} × ${String(block.attachment.height)}）`,
+        }])) ?? [],
     } }
 }
 
@@ -249,12 +296,12 @@ export function bidModelTaskJsonSchema(schema: JsonSchemaNode): JsonSchemaNode {
 function bindModelObjects(value: unknown, catalog: BidModelTaskCatalog): unknown {
   const select = (kind: CatalogKind, choice: unknown): string => {
     const entry = catalog.objects[kind][position.parse(choice)]
-    if (entry === undefined) throw new Error('BID_MODEL_TASK_OBJECT_UNKNOWN')
+    if (entry === undefined) throw new Error(`BID_MODEL_TASK_OBJECT_UNKNOWN: objects.${kind} 不包含位置 ${String(choice)}；先用 bid_project_inspect 查询对应对象，再选择返回的位置。原稿节点需 query.object=document，候选节点需 candidate_document。`)
     return entry.id
   }
   const selectValue = (kind: CatalogKind, choice: unknown): unknown => {
     const selected = select(kind, choice)
-    return kind === 'messages' ? JSON.parse(selected) as unknown : selected
+    return ['messages', 'files', 'images', 'document_blocks', 'candidate_blocks', 'figures'].includes(kind) ? JSON.parse(selected) as unknown : selected
   }
   const visit = (node: unknown): unknown => {
     if (Array.isArray(node)) return node.map(visit)
@@ -331,8 +378,12 @@ function bindModelObjects(value: unknown, catalog: BidModelTaskCatalog): unknown
  * @returns 原 Host 执行器接受的 canonical 任务。
  */
 export function bindBidModelTask(value: unknown, catalog: BidModelTaskCatalog): BidCapabilityTask {
+  return parseBoundTask(bindModelObjects(value, catalog))
+}
+
+function parseBoundTask(value: unknown): BidCapabilityTask {
   let task: BidCapabilityTask
-  try { task = bidCapabilityTaskSchema.parse(bindModelObjects(value, catalog)) } catch (error) {
+  try { task = bidCapabilityTaskSchema.parse(value) } catch (error) {
     if (!(error instanceof z.ZodError)) throw error
     throw new z.ZodError(error.issues.map(issue => ({ ...issue, path: issue.path.map(key =>
       typeof key === 'string' ? fieldMap.get(key)?.[0] ?? key : key) })))
@@ -351,8 +402,18 @@ export function bindBidModelTask(value: unknown, catalog: BidModelTaskCatalog): 
  * @param catalog 最近一次真实 inspect 的对象表。
  * @returns 严格解析的 Host 项目读取请求。
  */
-export function bindBidModelProjectQuery(value: unknown, catalog: BidModelTaskCatalog): z.input<typeof bidProjectInspectSchema> {
+export function bindBidModelProjectQuery(value: unknown, catalog: BidModelTaskCatalog): z.output<typeof bidProjectInspectSchema> {
   return bidProjectInspectSchema.parse(bindModelObjects(value, catalog))
+}
+
+/**
+ * 将已提交附件的位置绑定为专业用途选择，拒绝模型提供身份或路径。
+ * @param value 文件位置及专业角色。
+ * @param catalog 最近 inspect 保存的文件对象表。
+ * @returns 可在 Host 重新核对会话权限的资料选择。
+ */
+export function bindBidModelWorkflowFiles(value: unknown, catalog: BidModelTaskCatalog): z.infer<typeof bidWorkflowFilesSchema> {
+  return bidWorkflowFilesSchema.parse(bindModelObjects(value, catalog))
 }
 
 /**
@@ -379,11 +440,12 @@ export function bindBidModelReference(value: unknown, catalog: BidModelTaskCatal
  * 将同一 Work 的后续语义步骤绑定为既有执行器参数。
  * @param value 模型选择的后续步骤。
  * @param catalog 当前 inspect 的真实对象表。
+ * @param scope 原 Work 请求中冻结的范围，不接受模型重写。
  * @returns 保留 Host 身份的业务步骤；原 Work 范围由补丁入口继续核对。
  */
-export function bindBidModelSteps(value: unknown, catalog: BidModelTaskCatalog): BidCapabilityStep[] {
+export function bindBidModelSteps(value: unknown, catalog: BidModelTaskCatalog, scope: BidCapabilityTask['scope']): BidCapabilityStep[] {
   if (z.array(z.unknown()).parse(value).length === 0) return []
-  return bindBidModelTask({ goal: '继续完成原任务', scope: { kind: 'project' }, steps: value }, catalog).steps
+  return parseBoundTask({ goal: '继续完成原任务', scope, steps: bindModelObjects(value, catalog) }).steps
 }
 
 /**

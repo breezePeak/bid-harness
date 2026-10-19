@@ -80,7 +80,7 @@ it.each(['assignment-conflict', 'corrupt-format', 'saved-TIMEOUT', 'saved-TRANSP
     bodyPreservedAfterSettlement: true, manifestPreservedAfterSettlement: true })
   if (scenario === 'assignment-conflict') expect(summary).toMatchObject({
     initial: { failure: { issues: [{ code: 'CHAPTER_WRITING_ASSIGNMENT_CONFLICT' }], recovery: { kind: 'repair' } } },
-    finalStatus: 'completed', startedRuns: 2, sameWork: true, resumedOriginal: true,
+    finalStatus: 'ready', startedRuns: 2, sameWork: true, resumedOriginal: true,
     rounds: [[1, 'scheduled'], [1, 'notified'], [1, 'no_effect'], [2, 'scheduled'], [2, 'notified'], [2, 'executing'], [2, 'recovered']],
     recoveryRequests: 1, completedNotices: 1, calls: ['bid_stage_inspect', 'bid_recover_task'], revisionStatuses: ['completed'],
   })

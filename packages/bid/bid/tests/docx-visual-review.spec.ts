@@ -52,6 +52,25 @@ const flowchart = (id: string, title: string) => `\`\`\`flowchart\n${JSON.string
 })}\n\`\`\``
 
 describe('S6 视觉敏感块审核缓存', () => {
+  it('后续块复核中断仍保存已通过页面，重试只复核未完成块', async () => {
+    const workspace = await fixture()
+    const markdown = `# 方案\n\n${flowchart('FLOW-A', '流程 A')}\n\n${flowchart('FLOW-B', '流程 B')}`
+    const first = { imageLimits: limits, review: vi.fn<VisualReviewModel['review']>()
+      .mockResolvedValueOnce({ status: 'pass' }).mockRejectedValueOnce(new Error('模型输出被截断')) }
+    await expect(reviewDocxVisualBlocks(workspace, markdown, values, 'template-a', first, render(), signal, {
+      renderPdf: pdf, renderPages: pages,
+    })).rejects.toThrow('模型输出被截断')
+    const saved = JSON.parse(await readFile(join(workspace.projectRoot, DOCX_VISUAL_REVIEW_CACHE_PATH), 'utf8')) as { entries: VisualReviewState[] }
+    expect(saved.entries.map(entry => [entry.blockId, entry.status])).toEqual([['flowchart_FLOW-A', 'passed']])
+    const second = reviewer({ status: 'pass' })
+    const result = await reviewDocxVisualBlocks(workspace, markdown, values, 'template-a', second, render(), signal, {
+      renderPdf: pdf, renderPages: pages,
+    })
+    expect(second.review).toHaveBeenCalledOnce()
+    expect(second.review.mock.calls[0]?.[0].block.blockId).toBe('flowchart_FLOW-B')
+    expect(result.reviews.map(entry => entry.documentHash)).toEqual([result.outputHash, result.outputHash])
+  })
+
   it('普通文字只渲染 Word，不进入页面或模型审核', async () => {
     const workspace = await fixture()
     const model = reviewer()

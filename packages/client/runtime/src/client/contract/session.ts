@@ -9,7 +9,7 @@
  */
 import type { AttachmentIdType, ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import type {
-  MessageId, PromptContentPart, QueueAction, RpcResult, SessionId,
+  MessageId, PromptContentPart, PromptFileRef, QueueAction, RpcResult, SessionId,
 } from '@deepseek-ai/dsh-api-remotes/client'
 import type { RemoteResult } from '@deepseek-ai/dsh-typert-protocol'
 import type { ConversationSnapshot } from '../sessions/conversation.ts'
@@ -43,7 +43,10 @@ export interface ISession {
     mode: 'queue' | 'steer',
     signal?: AbortSignal,
     clientSubmissionId?: string,
+    fileRefs?: PromptFileRef[],
   ): Promise<RpcResult<{ accepted: true }>>
+  /** 上传主会话的不可变原件，返回 Host 引用；子代理窗口在发送字节前拒绝。 */
+  uploadFile(file: File, signal?: AbortSignal): Promise<PromptFileRef>
   /**
    * Resolve one durable image referenced by this session.
    * @param attachmentId - opaque id found in the folded session log.

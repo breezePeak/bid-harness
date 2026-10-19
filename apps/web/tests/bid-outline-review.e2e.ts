@@ -68,9 +68,9 @@ class OutlineFinalCheckAdapter extends LlmAdapter {
 }
 
 function publishedTask({ stage, status }: PublishedTask): BidTaskState {
-  if (status !== 'running') return { stage, status, run: null }
+  if (status !== 'running') return { workflow: { kind: 'full_bid', stage }, status, run: null }
   return {
-    stage,
+    workflow: { kind: 'full_bid', stage },
     status,
     run: {
       runId: `web-${stage}`, epoch: 1, baseProjectRevision: 0,
@@ -113,7 +113,7 @@ it('S3/S4 真实目录拖拽保存、基线对比和刷新恢复', async () => {
   try {
     await page.goto(scaffold.baseUrl)
     await connectFreshWorkspaceZh(page, scaffold.workspaceCwd)
-    await page.getByRole('region', { name: '技术标生成' }).waitFor()
+    await expect.poll(() => scaffold.ctx.agents.list().some(candidate => resolveSessionPreset(candidate.session) === 'bid'), { timeout: 20_000 }).toBe(true)
     const agent = scaffold.ctx.agents.list().find(candidate => resolveSessionPreset(candidate.session) === 'bid')
     if (agent?.session.header.cwd === undefined) throw new Error('Missing Bid agent workspace')
     agent.session.append('turn/start', { turn: 1 })
@@ -323,7 +323,7 @@ it('S5 运行中可打开 Word 导出并提示仅导出已保存章节', async (
   try {
     await page.goto(scaffold.baseUrl)
     await connectFreshWorkspaceZh(page, scaffold.workspaceCwd)
-    await page.getByRole('region', { name: '技术标生成' }).waitFor()
+    await expect.poll(() => scaffold.ctx.agents.list().some(candidate => resolveSessionPreset(candidate.session) === 'bid'), { timeout: 20_000 }).toBe(true)
     const agent = scaffold.ctx.agents.list().find(candidate => resolveSessionPreset(candidate.session) === 'bid')
     if (agent?.session.header.cwd === undefined) throw new Error('Missing Bid agent workspace')
     const workspace = new BidWorkspace(agent.session.header.cwd)
@@ -361,7 +361,7 @@ it('S4 经真实确认进入 S5 后，BidDetails 从持久化最终版本恢复�
   try {
     await page.goto(scaffold.baseUrl)
     await connectFreshWorkspaceZh(page, scaffold.workspaceCwd)
-    await page.getByRole('region', { name: '技术标生成' }).waitFor()
+    await expect.poll(() => scaffold.ctx.agents.list().some(candidate => resolveSessionPreset(candidate.session) === 'bid'), { timeout: 20_000 }).toBe(true)
     const agent = scaffold.ctx.agents.list().find(candidate => resolveSessionPreset(candidate.session) === 'bid')
     if (agent?.session.header.cwd === undefined) throw new Error('Missing Bid agent workspace')
     const workspace = new BidWorkspace(agent.session.header.cwd)

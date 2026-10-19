@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { messageFileRefSchema, promptFilesText } from '@deepseek-ai/dsh-host-apiproxy/api/files'
 import type {
   ChatConversationViewNode, ChatSnapshot, ConversationEventInput,
   ConversationNodeDefinition, ConversationViewDefinition,
@@ -118,6 +119,18 @@ function toolResult(callId: string, text: string) {
 }
 
 describe('built-in conversation node Definitions', () => {
+  it('从持久消息恢复文件卡片，保留用户原话并只移除程序附件清单', () => {
+    const file = messageFileRefSchema.parse({ attachmentId: `file:${'a'.repeat(64)}`, version: 'b'.repeat(64),
+      name: '成稿.docx', mediaType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      bytes: 4096, sha256: 'b'.repeat(64) })
+    const message = { ...textMessage('with-file', '只检查排版'), source: { kind: 'user', fileRefs: [file] },
+      content: [{ type: 'text', text: '只检查排版' }, { type: 'text', text: promptFilesText([file]) }] }
+    const events = [at(1, 'user/message', message, { surfaceOp: 'append' })]
+    for (const value of [assembler(events), assembler(events)]) {
+      expect(node(snapshot(value), 'user')?.data).toMatchObject({ files: [file], content: [{ type: 'text', text: '只检查排版' }] })
+    }
+    expect(message.content).toHaveLength(2)
+  })
   it('keeps one keyed Assistant node while streaming settles and materializes interruption from Location', () => {
     const value = assembler([
       at(1, 'turn/start', { turn: 1 }),

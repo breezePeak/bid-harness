@@ -44,7 +44,7 @@ async function fixture() {
   }
   const scoring = { schema_version: 1 as const, scoring_items: [] }
   const artifacts: Record<string, unknown> = {
-    'manifest.json': { version: 4, files: [] },
+    'manifest.json': { version: 5, files: [] },
     'analysis/project.json': { schema_version: 1, project_name: '测试项目', tender_name: null, purchaser: null, owner: null,
       project_background: [], project_objectives: [], project_scope: [], technical_scope: [], delivery_scope: [],
       implementation_constraints: [], key_technical_points: [], source_refs: [], analyzed_tender_files: [] },
@@ -69,7 +69,7 @@ async function fixture() {
   }
   session.append('bid.stage.started', { stage: 'evidence_mapping', status: 'running' })
   session.append('bid.user_confirmation.required', { stage: 'evidence_mapping', status: 'waiting_user' })
-  await checkpointBidProjectState(workspace, { stage: 'evidence_mapping', status: 'waiting_user', run: null })
+  await checkpointBidProjectState(workspace, { workflow: { kind: 'full_bid' as const, stage: 'evidence_mapping' }, status: 'waiting_user', run: null })
   const followup = vi.fn((message: UserMessage) => {
     session.append('user/message', message, { surfaceOp: 'append' })
   })
@@ -153,7 +153,7 @@ describe('S4 Draft 最终确认', () => {
       await expect(f.host.regenerateOutline(f.session, { ...identity(draft), feedback: '明确方案标题' }))
         .resolves.toMatchObject({ ok: false, error: { code: 'BID_REGENERATE_FAILED' } })
       expect(executeOutlineGeneration).toHaveBeenCalledOnce()
-      expect(await readBidProjectState(f.workspace)).toMatchObject({ stage: 'evidence_mapping', status: 'failed',
+      expect(await readBidProjectState(f.workspace)).toMatchObject({ workflow: { kind: 'full_bid' as const, stage: 'evidence_mapping' }, status: 'failed',
         run: null, failure: { recovery: { kind: 'repair' } } })
       expect(f.session.events.some(event => event.type === 'bid.run.suspended')).toBe(false)
       expect(f.session.events.some(event => event.type === 'bid.user_confirmation.received')).toBe(false)
@@ -215,7 +215,7 @@ describe('S4 Draft 最终确认', () => {
       }))
       const confirmedResult = await f.host.confirmOutline(f.session, identity(second.value))
       if (!confirmedResult.ok) throw new Error(JSON.stringify(confirmedResult.error))
-      expect(confirmedResult.value).toEqual({ stage: 'chapter_writing', status: 'ready', run: null })
+      expect(confirmedResult.value).toEqual({ workflow: { kind: 'full_bid' as const, stage: 'chapter_writing' }, status: 'ready', run: null })
       expect(f.followup).not.toHaveBeenCalled()
       await expect(f.read('chapters/writing-request.json')).rejects.toMatchObject({ code: 'ENOENT' })
       expect(JSON.stringify(f.session.events)).toContain('S4 旧资料与错误 Section-Z')
@@ -266,7 +266,7 @@ describe('S4 Draft 最终确认', () => {
       const result = await f.host.confirmOutline(f.session, identity(draft))
 
       if (!result.ok) throw new Error(JSON.stringify(result.error))
-      expect(result).toMatchObject({ ok: true, value: { stage: 'chapter_writing', status: 'completed' } })
+      expect(result).toMatchObject({ ok: true, value: { workflow: { kind: 'full_bid' as const, stage: 'chapter_writing' }, status: 'completed' } })
       expect(f.followup).not.toHaveBeenCalled()
       expect(JSON.parse(await f.read('chapters/writing-plan.json'))).toMatchObject({
         schema_version: 3,
@@ -287,7 +287,7 @@ describe('S4 Draft 最终确认', () => {
         && event.data.stage === 'chapter_writing')).toBe(false)
       await expect(f.read('chapters/writing-request.json')).rejects.toMatchObject({ code: 'ENOENT' })
       expect(f.session.events.some(event => event.type === 'bid.run.started'
-        && event.data.run.work.stage === 'chapter_writing')).toBe(true)
+        && (event.data.run.work.kind === 'capability_task' ? null : event.data.run.work.stage) === 'chapter_writing')).toBe(true)
     } finally { await f.ctx.fiber.dispose() }
   })
 

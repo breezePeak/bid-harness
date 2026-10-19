@@ -43,7 +43,7 @@ try {
   if (snapshot) ctx.effect(() => ctx.llm.registerAdapter([provider], new FormatAdapter()))
   const workspace = new BidWorkspace(process.cwd())
   await seedProjectArtifacts(workspace)
-  await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'completed', run: null })
+  await checkpointBidProjectState(workspace, { workflow: { kind: 'full_bid', stage: 'chapter_writing' }, status: 'completed', run: null })
   const ready = Promise.withResolvers<undefined>()
   const off = ctx.on('session/event', (session, event) => { if (session.id === 'word-format' && event.type === 'bid.project.resumed') ready.resolve(undefined) }, { global: true })
   const handle = await ctx.agentLoop.createAgent(ctx, { sessionId: SessionId('word-format'), agentOptions: { provider, model }, meta: { cwd: process.cwd(), agentPreset: 'bid' } })

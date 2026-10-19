@@ -56,13 +56,13 @@ describe('Bid client projection', () => {
     const unsubscribe = ctx.sessionProjections.onChanged(listener)
     try {
       const session = ctx.sessions.create()
-      const waiting: BidTaskState = { stage: 'evidence_mapping', status: 'waiting_user', run: null }
+      const waiting: BidTaskState = { workflow: { kind: 'full_bid' as const, stage: 'evidence_mapping' }, status: 'waiting_user', run: null }
       session.append('bid.project.resumed', { state: waiting, revision: 1 })
       session.append('bid.project.resumed', { state: waiting, revision: 2 })
       expect(listener).toHaveBeenCalledTimes(1)
 
       session.append('bid.task.changed', {
-        state: { stage: 'chapter_writing', status: 'failed', run: null,
+        state: { workflow: { kind: 'full_bid' as const, stage: 'chapter_writing' }, status: 'failed', run: null,
           failure: { message: '章节缺少资料。', issues: [{ code: 'MISSING_EVIDENCE', message: '缺少施工参数。' }] } },
       })
       const view = ctx.sessionProjections.snapshot(session).values[BID_RUNTIME_PROJECTION_KEY]
@@ -78,23 +78,23 @@ describe('Bid client projection', () => {
   })
 
   it('从 task 状态生成 Host 准入动作', () => {
-    expect(getBidClientProjection({ stage: 'file_intake', status: 'waiting_user', run: null }).allowedActions)
+    expect(getBidClientProjection({ workflow: { kind: 'full_bid' as const, stage: 'file_intake' }, status: 'waiting_user', run: null }).allowedActions)
       .toEqual(['upload_files', 'send_message'])
-    expect(getBidClientProjection({ stage: 'file_intake', status: 'failed', run: null,
+    expect(getBidClientProjection({ workflow: { kind: 'full_bid' as const, stage: 'file_intake' }, status: 'failed', run: null,
       failure: { message: '资料解析失败。' } }).allowedActions).toEqual(['upload_files', 'send_message'])
-    expect(getBidClientProjection({ stage: 'tender_analysis', status: 'failed', run: null,
+    expect(getBidClientProjection({ workflow: { kind: 'full_bid' as const, stage: 'tender_analysis' }, status: 'failed', run: null,
       failure: { message: '招标分析失败。' } }).allowedActions).toEqual(['send_message'])
-    expect(getBidClientProjection({ stage: 'evidence_mapping', status: 'waiting_user', run: null }).allowedActions)
+    expect(getBidClientProjection({ workflow: { kind: 'full_bid' as const, stage: 'evidence_mapping' }, status: 'waiting_user', run: null }).allowedActions)
       .toEqual(['confirm_outline', 'regenerate_outline', 'send_message'])
-    expect(getBidClientProjection({ stage: 'chapter_writing', status: 'running', run: { ...run,
-      work: { ...run.work, stage: 'chapter_writing' } } }).allowedActions)
+    expect(getBidClientProjection({ workflow: { kind: 'full_bid' as const, stage: 'chapter_writing' }, status: 'running', run: { ...run,
+      work: { ...run.work, kind: 'stage_execution', stage: 'chapter_writing' } } }).allowedActions)
       .toEqual(['send_message', 'export_docx'])
-    expect(getBidClientProjection({ stage: 'evidence_mapping', status: 'suspended', run: {
+    expect(getBidClientProjection({ workflow: { kind: 'full_bid' as const, stage: 'evidence_mapping' }, status: 'suspended', run: {
       ...run, cause: 'retry_exhausted', error: { message: '模型修复次数已用尽。' },
     } }).allowedActions).toEqual(['send_message'])
   })
 
-  it('继续结构化读取旧 resumed payload，但输出单一 task', async () => {
+  it('重放可空路线的唯一任务状态', async () => {
     const ctx = new Context()
     const sessions = await ctx.plugin(SessionStore)
     const projections = await ctx.plugin(SessionProjectionRegistry)
@@ -102,10 +102,10 @@ describe('Bid client projection', () => {
     try {
       const session = ctx.sessions.create()
       session.append('bid.project.resumed', {
-        runtime: { stage: 'outline_generation', status: 'waiting_start' }, revision: 3,
+        state: { workflow: null, status: 'ready', run: null }, revision: 3,
       })
       expect(ctx.sessionProjections.snapshot(session).values[BID_RUNTIME_PROJECTION_KEY]?.task)
-        .toEqual({ stage: 'outline_generation', status: 'ready', run: null })
+        .toEqual({ workflow: null, status: 'ready', run: null })
     } finally {
       disposeProjection()
       await projections.dispose()
@@ -113,7 +113,7 @@ describe('Bid client projection', () => {
     }
   })
 
-  it('注册后的空日志以 S1 waiting_user 为初始状态', async () => {
+  it('注册后的空日志允许聊天且没有专业路线', async () => {
     const ctx = new Context()
     const sessions = await ctx.plugin(SessionStore)
     const projections = await ctx.plugin(SessionProjectionRegistry)
@@ -121,8 +121,8 @@ describe('Bid client projection', () => {
     try {
       const session = ctx.sessions.create()
       expect(ctx.sessionProjections.snapshot(session).values[BID_RUNTIME_PROJECTION_KEY]).toMatchObject({
-        task: { stage: 'file_intake', status: 'waiting_user', run: null },
-        allowedActions: ['upload_files', 'send_message'],
+        task: { workflow: null, status: 'ready', run: null },
+        allowedActions: ['send_message'],
       })
     } finally {
       disposeProjection()

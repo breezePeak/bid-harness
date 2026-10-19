@@ -20,7 +20,7 @@ import { readChapterLocation } from './chapter-storage.ts'
 import { validateChapterParagraphReference } from './chapter-revision.ts'
 import { outlineSectionScope } from './section-evidence-context.ts'
 import { assertNoLinkedPath, within } from './workspace-path.ts'
-import { bidCapabilityResultSchema, type BidCapabilityId, type BidCapabilityResult,
+import { bidCapabilityResultSchema, isBidChapterScope, type BidCapabilityId, type BidCapabilityResult,
   type BidCapabilityScope, type BidCapabilityStepScope, type BidCapabilityExecutionContext } from './bid-capability-contract.ts'
 
 /** 静态前提只描述实际需要的项目对象，不推导隐藏的能力调用。 */
@@ -29,6 +29,10 @@ export const BID_CAPABILITIES: Readonly<Record<BidCapabilityId, {
   readonly optionalInputs?: readonly string[]
   readonly result: 'artifacts' | 'review' | 'export'
 }>> = {
+  'flowchart.create': { requires: [], result: 'artifacts' },
+  'project_image.create': { requires: [], result: 'artifacts' },
+  'document.patch': { requires: [], result: 'artifacts' },
+  'document.layout_review': { requires: [], result: 'review' },
   'tender.analyze': { requires: ['manifest.json'], result: 'artifacts' },
   'tender.update': { requires: ['analysis/project.json', 'analysis/requirements.json',
     'analysis/scoring-origin.json', 'analysis/compliance.json'], result: 'artifacts' },
@@ -165,6 +169,7 @@ export async function verifyCapabilityTaskScope(
   workspace: BidWorkspace, scope: BidCapabilityScope, outline: OutlineArtifact,
 ): Promise<void> {
   if (scope.kind === 'project') return
+  if (!isBidChapterScope(scope)) throw new Error('BID_CAPABILITY_OBJECT_SCOPE_REQUIRED')
   if (scope.kind === 'sections') { outlineSectionScope(outline, scope.section_ids); return }
   if (!outline.sections.some(section => section.id === scope.reference.section_id && section.writable)) {
     throw new Error('BID_SECTION_SCOPE_INVALID')
@@ -191,6 +196,10 @@ export function resolveCapabilityStepScope(
   outline: OutlineArtifact,
   previous?: { readonly status: 'completed' | 'pending' | 'failed'; readonly result?: BidCapabilityResult },
 ): ResolvedCapabilityScope {
+  if (!isBidChapterScope(taskScope)) {
+    if (stepScope.source !== 'task') throw new Error('BID_CAPABILITY_CHAPTER_SCOPE_INVALID')
+    return { sectionIds: new Set(), paragraphs: null }
+  }
   const known = new Set(outline.sections.map(section => section.id))
   if (taskScope.kind === 'paragraphs' && !known.has(taskScope.reference.section_id)) {
     throw new Error('BID_SECTION_SCOPE_INVALID')

@@ -4,7 +4,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { AttachmentIdType, ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import type { SessionEvent } from '@deepseek-ai/dsh-session/types'
 import type {
-  HistoryEntry, IApiClient, MessageId, MuxFrame, PromptContentPart, QueueAction, RpcError,
+  HistoryEntry, IApiClient, MessageId, MuxFrame, PromptContentPart, PromptFileRef, QueueAction, RpcError,
   RpcId, RpcResponse, RpcResult, SessionId, SubagentAddress, ToolEventView,
 } from '@deepseek-ai/dsh-api-remotes/client'
 // Value import from the inline-safe wire layer (not the connection plugin):
@@ -196,6 +196,7 @@ export class Session implements SessionFace {
     mode: 'queue' | 'steer',
     signal?: AbortSignal,
     clientSubmissionId?: string,
+    fileRefs?: PromptFileRef[],
   ): Promise<RpcResult<{ accepted: true }>> {
     this.promptError = null
     this.lastAgentError = null
@@ -217,6 +218,7 @@ export class Session implements SessionFace {
           mode,
           content,
           clientSubmissionId: submissionId,
+          ...(fileRefs === undefined ? {} : { fileRefs }),
           clientTimeZone: resolvedClientTimeZone(),
         }, signal)).result
       } else if (this.address.mode === 'one-shot') {
@@ -229,12 +231,12 @@ export class Session implements SessionFace {
           },
         }
       } else {
-        if (content.some(part => part.type === 'image')) {
+        if (content.some(part => part.type === 'image') || (fileRefs?.length ?? 0) > 0) {
           result = {
             ok: false,
             error: {
               code: 'attachment-error',
-              message: 'Image input is unavailable for subagent continuations.',
+              message: '子代理窗口暂不支持直接提交附件，请在主会话中提供。',
               details: { reason: 'SUBAGENT_IMAGE_UNSUPPORTED' },
             },
           }
@@ -275,6 +277,32 @@ export class Session implements SessionFace {
     this.outgoing.update(submissionId, mode === 'queue' ? 'queued' : 'delivering')
     this.notifier.markDirty()
     return result
+  }
+
+  /**
+   * 将原始文件字节接入当前主会话，返回不可变引用。
+   * @param file 浏览器选择的原件。
+   * @param signal 上传取消信号。
+   * @returns Host 生成的身份和版本。
+   */
+  async uploadFile(file: File, signal?: AbortSignal): Promise<PromptFileRef> {
+    if (this.address !== undefined) throw new Error('子代理窗口暂不支持直接上传文件，请在主会话中提供。')
+    const response = await fetch(new URL('/api/bid/attachments', window.location.href), {
+      method: 'POST', body: file, ...(signal === undefined ? {} : { signal }), headers: {
+        'content-type': 'application/octet-stream', 'x-dsh-bid-session-id': String(this.sessionId),
+        'x-dsh-file-name': encodeURIComponent(file.name), 'x-dsh-file-size': String(file.size),
+      },
+    })
+    const payload: unknown = await response.json()
+    if (typeof payload !== 'object' || payload === null || !('ok' in payload) || payload.ok !== true || !('ref' in payload)) {
+      throw new Error(typeof payload === 'object' && payload !== null && 'error' in payload && typeof payload.error === 'string'
+        ? payload.error : '文件上传失败，请重试。')
+    }
+    const ref = payload.ref
+    if (typeof ref !== 'object' || ref === null || !('attachmentId' in ref) || !('version' in ref)
+      || typeof ref.attachmentId !== 'string' || !/^file:[a-f0-9]{64}$/u.test(ref.attachmentId)
+      || typeof ref.version !== 'string' || !/^[a-f0-9]{64}$/u.test(ref.version)) throw new Error('文件上传回执无效。')
+    return { attachmentId: ref.attachmentId as PromptFileRef['attachmentId'], version: ref.version }
   }
 
   /**

@@ -131,9 +131,9 @@ describe('S5 真正插图工具与资产', () => {
     expect(referenceRebound.markdown).toContain('图 方案示意图')
     expect(referenceRebound.metadata.images).toEqual(images)
     const withParagraph = { ...candidate!, markdown: candidate!.markdown.replace('图 方案示意图', '图 方案示意图 的方案说明') }
-    expect(projectChapterWriterCandidate(withParagraph, restored)).toMatchObject({ markdown: expect.stringContaining('图 方案示意图 的方案说明') })
+    expect(projectChapterWriterCandidate(withParagraph, restored)).toMatchObject({ markdown: expect.stringContaining('图 方案示意图 的方案说明') as unknown })
     expect(projectChapterWriterCandidate({ ...candidate!, markdown: candidate!.markdown + '\n方案延续说明。' }, restored))
-      .toMatchObject({ markdown: expect.stringContaining('图 方案示意图\n方案延续说明。') })
+      .toMatchObject({ markdown: expect.stringContaining('图 方案示意图\n方案延续说明。') as unknown })
     expect(() => projectChapterWriterCandidate({ ...candidate!,
       markdown: candidate!.markdown + `\n\n![另一图题](${images[0]!.path})`,
     }, restored)).toThrow('同一图片的多处展示须使用相同图题')
@@ -220,17 +220,17 @@ describe('S5 真正插图工具与资产', () => {
     expect(await readBidImageBytes(workspace, images[0]!.id)).toEqual(await readFile(join(workspace.projectRoot, images[0]!.path)))
     expect(await validateChapterImages(workspace, candidate.metadata.images!, candidate.markdown)).toEqual([])
     expect(chapterImagePaths(referenced)).toEqual([images[0]!.path])
-    expect(chapterImagePaths(referenced.replace('chapters/images/', 'chapters/%69mages/'))).toEqual([images[0]!.path])
+    expect(chapterImagePaths(referenced.replace('assets/images/', 'assets/%69mages/'))).toEqual([images[0]!.path])
     expect(chapterImagePaths(referenced.replace(images[0]!.path, images[0]!.path.toUpperCase()))).toEqual([images[0]!.path])
     expect(await validateChapterImages(workspace, candidate.metadata.images!, referenced)).toEqual([])
     expect(await validateChapterImages(workspace, candidate.metadata.images!,
-      referenced.replace('chapters/images/', 'chapters/%69mages/'))).toEqual([])
+      referenced.replace('assets/images/', 'assets/%69mages/'))).toEqual([])
     expect(await validateChapterImages(workspace, [], referenced)).not.toEqual([])
     expect(chapterImagePaths('```md\n' + referenced + '\n```')).toEqual([])
     await expect(bindChapterWriterInput(workspace, manifest, context, refs,
       { markdown: `# ${context.section.title}\n\n${referenced}`, metadata: modelInput.metadata }, [])).rejects.toThrow('图片文件路径')
     await expect(bindChapterWriterInput(workspace, manifest, context, refs,
-      { markdown: `# ${context.section.title}\n\n${referenced.replace('chapters/images/', 'chapters/%69mages/')}`,
+      { markdown: `# ${context.section.title}\n\n${referenced.replace('assets/images/', 'assets/%69mages/')}`,
         metadata: modelInput.metadata }, [])).rejects.toThrow('图片文件路径')
     await expect(bindChapterWriterInput(workspace, manifest, context, refs,
       { markdown: `# ${context.section.title}\n\n${referenced.replace(images[0]!.path, images[0]!.path.toUpperCase())}`,
@@ -238,7 +238,7 @@ describe('S5 真正插图工具与资产', () => {
     expect(await readBidImageStyle(workspace)).toMatchObject({ reference_image: { id: images[0]!.id } })
     const paths = await allowedWritingCapabilitySourceWrites(workspace)
     expect(paths.has(images[0]!.path)).toBe(true)
-    expect(paths.has('chapters/image-style.json')).toBe(true)
+    expect(paths.has('assets/image-style.json')).toBe(true)
     await call('generate_bid_image', request)
     expect(generate).toHaveBeenCalledOnce()
     runtime.dispose()
@@ -261,7 +261,7 @@ describe('S5 真正插图工具与资产', () => {
 
   it('项目风格只保存模型和语义，旧格式及磁盘连接字段不能经真实工具恢复', async () => {
     const { agent, workspace, commits, call, project, generate } = await fixture()
-    const path = join(workspace.projectRoot, 'chapters/image-style.json')
+    const path = join(workspace.projectRoot, 'assets/image-style.json')
     const style = await readBidImageStyle(workspace)
     expect(style).toMatchObject({ schema_version: 2, model: connection.model })
     expect(style).not.toHaveProperty('connection')

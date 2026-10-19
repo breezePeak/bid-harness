@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { Browser, Page } from 'playwright'
 import { chromium } from 'playwright'
-import { afterAll, beforeAll, describe, expect, it, onTestFailed } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it, onTestFailed, vi } from 'vitest'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import {
   BidWorkspace,
@@ -53,8 +53,7 @@ describe('web e2e: S5 直接开始写作', () => {
     await page.waitForSelector('[class*="frame"]', { timeout: 30_000 })
     await connectFreshWorkspaceZh(page, scaffold.workspaceCwd)
 
-    // 等待 Bid 面板就绪并获取 agent
-    await page.getByRole('region', { name: '技术标生成' }).waitFor({ timeout: 20_000 })
+    await vi.waitFor(() => { expect(scaffold.ctx.agents.list().some(candidate => resolveSessionPreset(candidate.session) === 'bid')).toBe(true) }, { timeout: 20_000 })
     const foundAgent = scaffold.ctx.agents.list().find(candidate => resolveSessionPreset(candidate.session) === 'bid' && candidate.session.header.cwd !== undefined)
     const workspaceCwd = foundAgent?.session.header.cwd
     if (foundAgent === undefined || workspaceCwd === undefined) throw new Error('Missing Bid agent workspace')
@@ -89,7 +88,7 @@ describe('web e2e: S5 直接开始写作', () => {
   it('默认手动确认模式直接保存计划并启动 S5，不询问用户意见', async () => {
     onTestFailed(() => saveFailureShot(page, 's5-direct-writing'))
 
-    const state = await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'waiting_user', run: null })
+    const state = await checkpointBidProjectState(workspace, { workflow: { kind: 'full_bid' as const, stage: 'chapter_writing' }, status: 'waiting_user', run: null })
     agent.session.append('bid.project.resumed', {
       state: bidProjectTaskState(state),
       revision: state.revision,
@@ -99,7 +98,7 @@ describe('web e2e: S5 直接开始写作', () => {
     }).publishWritingEntryView(agent.session)
 
     await expect.poll(() => agent.session.events.some(event =>
-      event.type === 'bid.run.started' && event.data.run.work.stage === 'chapter_writing'),
+      event.type === 'bid.run.started' && (event.data.run.work.kind === 'capability_task' ? null : event.data.run.work.stage) === 'chapter_writing'),
     { timeout: 20_000 }).toBe(true)
     const plan = JSON.parse(await readFile(join(workspace.projectRoot, 'chapters/writing-plan.json'), 'utf8')) as WritingPlan
     expect(plan).toMatchObject({ confirmed: true, user_requirements: [], user_message_refs: [] })

@@ -8,7 +8,7 @@ import { type ObjectJsonSchema } from '@deepseek-ai/dsh-tools'
 import { z } from 'zod'
 import { zodJsonSchema } from './zod-json-schema.ts'
 import { applyOutlineEdits, outlineBusinessBindingSchema,
-  type OutlineBusinessBinding, type OutlineEditOperation } from './outline-confirmation-edits.ts'
+  type OutlineBusinessBinding, type OutlineEditOperation } from './outline-confirmation-browser.ts'
 import { outlineArtifactSha256, parseOutlineDraft, type OutlineDraftView } from './outline-confirmation-artifacts.ts'
 import { buildWritableSectionWorklist, outlineSectionScope } from './section-evidence-context.ts'
 import { outlineRegenerationChanges, parseOutlineRegenerationChangeSet } from './outline-regeneration-artifacts.ts'

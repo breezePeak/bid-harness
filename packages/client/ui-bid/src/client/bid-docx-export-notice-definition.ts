@@ -1,5 +1,4 @@
 /** 将独立 Word 导出的终态事件投影到聊天时间线，不进入模型上下文。 */
-import type {} from '@deepseek-ai/dsh-bid'
 import type { DocxExportOperation } from '@deepseek-ai/dsh-bid/control-plane'
 import type {
   ChatConversationViewNode, ConversationNodeDefinition,

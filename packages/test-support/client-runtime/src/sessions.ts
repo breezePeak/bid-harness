@@ -90,6 +90,14 @@ export class FixtureSession implements SessionFace {
   }
 
   /**
+   * 测试必须显式提供文件上传行为。
+   * @returns 调用时总是抛错。
+   */
+  uploadFile(): never {
+    throw new Error(`test session "${this.sessionId}": uploadFile is not stubbed — supply it on the fixture's session face`)
+  }
+
+  /**
    * Fail-loud stub; supply `readAttachment` on the fixture's session face to exercise it.
    * @param _attachmentId - opaque durable attachment id.
    * @returns never — always throws.

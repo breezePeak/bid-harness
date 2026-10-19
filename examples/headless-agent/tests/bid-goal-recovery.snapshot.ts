@@ -58,6 +58,7 @@ it('自动预算耗尽后用户说继续，通过真实工具启动原 S2，保�
   expect(JSON.parse(result.stdout)).toEqual({
     startedRuns: 2, sameWork: true, resumeOfOriginal: true, automaticEligible: false, attempts: 1,
     automaticRound: 3, automaticBudget: 3,
+    currentRunReportedOnce: true,
     calls: ['bid_stage_inspect', 'bid_resume_current_run'], userMessages: ['继续'],
     continuationGuidance: '先用 bid_stage_inspect(view=recovery) 核对失败、原目标和检查点。新的直接用户消息明确要求继续或重试原任务时，调用 bid_resume_current_run 实际执行；即使自动恢复预算已耗尽，也可按这次新授权继续一次。保留原 Work、已保存候选和正式校验，不重置自动预算；普通问答不启动恢复。',
   })
@@ -73,6 +74,7 @@ it('自动预算耗尽后的原生回答直接授权原任务续行，无需再�
   })
   expect(JSON.parse(result.stdout)).toMatchObject({ startedRuns: 2, sameWork: true, resumeOfOriginal: true,
     automaticEligible: false, attempts: 1, automaticBudget: 3, questionCount: 1, nativeAnswerAccepted: true,
+    currentRunReportedOnce: true,
     calls: ['ask_user_question', 'bid_stage_inspect', 'bid_resume_current_run'],
     userMessages: ['问题：在线演示还没准备好，本次标书先怎样处理？\n用户回答：可以先生成几张图就行，后续演示这种再说了'],
   })

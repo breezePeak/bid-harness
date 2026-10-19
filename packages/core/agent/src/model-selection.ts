@@ -24,6 +24,18 @@ export interface ModelSelectionRef {
   assembled: ModelSelection | undefined
 }
 
+const selections = new WeakMap<Context, ModelSelectionRef>()
+
+/**
+ * 读取当前 Agent 已选择的模型，不等待下一次对话组装。
+ * @param agentCtx 安装模型选择的 Agent 上下文。
+ * @returns 当前选择的副本；未安装或未选择时为 undefined。
+ */
+export function currentModelSelection(agentCtx: Context): ModelSelection | undefined {
+  const selected = selections.get(agentCtx)?.current
+  return selected === undefined ? undefined : { ...selected }
+}
+
 /**
  * Couple one mutable selection to Agent-scoped prompt assembly and request routing.
  * Prompt assembly snapshots the selected model before delegating, then applies
@@ -34,9 +46,16 @@ export interface ModelSelectionRef {
  *
  * @param agentCtx - The selected Agent's scoped context.
  * @param selection - Mutable selection owned by the calling entry point.
- * @returns Disposer for both scoped waterfall listeners.
+ * @returns 卸载当前选择记录及两个作用域监听器的函数。
  */
 export function installModelSelection(agentCtx: Context, selection: ModelSelectionRef): () => void {
+  const disposeSelection = () => {
+    if (selections.get(agentCtx) === selection) selections.delete(agentCtx)
+  }
+  agentCtx.effect(() => {
+    selections.set(agentCtx, selection)
+    return disposeSelection
+  })
   const disposeAssembly = agentCtx.on('system-prompt/assemble', async (_assembly, _context, next) => {
     const selected = selection.current
     const assembled = await next()
@@ -69,6 +88,7 @@ export function installModelSelection(agentCtx: Context, selection: ModelSelecti
     },
   )
   return () => {
+    disposeSelection()
     disposeAssembly()
     disposeRequest()
   }

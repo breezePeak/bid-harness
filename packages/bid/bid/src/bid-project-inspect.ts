@@ -20,6 +20,8 @@ import { parseTenderScoringSelection } from './tender-analysis-confirmation.ts'
 import { parseWritingPlan } from './writing-requirements.ts'
 import { assertNoLinkedPath, within } from './workspace-path.ts'
 import type { BidWorkDescriptor } from './control-plane-contract.ts'
+import { promptFileRefSchema } from '@deepseek-ai/dsh-host-apiproxy/api/files'
+import { bidStepOutputSelectionSchema } from './document-contract.ts'
 
 const page = { page: z.number().int().nonnegative().default(0), page_size: z.number().int().min(1).max(50).default(20) }
 const source = { source: z.enum(['committed', 'candidate']).default('committed') }
@@ -27,6 +29,14 @@ const sectionIds = z.array(z.string().min(1)).min(1)
 
 /** 面向主 Agent 的明确读取请求。 */
 export const bidProjectInspectSchema = z.discriminatedUnion('object', [
+  z.object({ object: z.literal('files'), ...page, source: z.literal('committed').default('committed') }).strict(),
+  z.object({ object: z.literal('file'), file_ref: promptFileRefSchema,
+    offset: z.number().int().nonnegative().default(0), max_chars: z.number().int().min(1).max(12_000).default(6_000),
+    source: z.literal('committed').default('committed') }).strict(),
+  z.object({ object: z.literal('document'), file_ref: promptFileRefSchema, ...page,
+    source: z.literal('committed').default('committed') }).strict(),
+  z.object({ object: z.literal('candidate_document'), work_id: z.string().min(1), document: bidStepOutputSelectionSchema,
+    ...page, source: z.literal('candidate').default('candidate') }).strict(),
   z.object({ object: z.literal('tender'), part: z.enum(['project', 'requirements', 'scoring', 'scoring_origin',
     'selection', 'compliance', 'impact']), ...page, ...source }).strict(),
   z.object({ object: z.literal('outline'), ...page, ...source }).strict(),
@@ -88,7 +98,7 @@ export async function resolveBidProjectInspectWorkspace(
   let workspace = request.source === 'candidate' ? candidate : canonical
   if (request.source === 'candidate' && (workspace === undefined || workspace.root === canonical.root)) {
     const state = await readBidProjectState(canonical)
-    const work = request.object === 'task' && request.work_id !== undefined
+    const work = (request.object === 'task' || request.object === 'candidate_document') && request.work_id !== undefined
       ? await readBidWorkDescriptor(canonical, request.work_id) : state?.run?.work ?? (state?.status === 'failed' ? recoveryWork : undefined)
     const paths = work == null ? null : await readExistingBidWorkingTree(canonical, work)
     workspace = paths === null ? undefined : new BidWorkspace(paths.root, canonical.config)
@@ -108,6 +118,7 @@ export async function inspectBidProject(
   canonical: BidWorkspace, input: BidProjectInspectRequest, candidate?: BidWorkspace, recoveryWork?: BidWorkDescriptor,
 ): Promise<BidProjectInspectResult> {
   const request = bidProjectInspectSchema.parse(input)
+  if (request.object === 'files' || request.object === 'file' || request.object === 'document' || request.object === 'candidate_document') throw new Error('BID_FILE_SESSION_REQUIRED')
   const workspace = await resolveBidProjectInspectWorkspace(canonical, request, candidate, recoveryWork)
   const tenderArtifact = request.object === 'tender' ? `analysis/${request.part === 'scoring_origin' ? 'scoring-origin'
     : request.part === 'selection' ? 'tender-analysis-selection'
@@ -169,7 +180,7 @@ export async function inspectBidProject(
       }
     }
     return { ...base, available: true, data: request.object === 'task'
-      ? { stage: state.stage, status: state.status, run: state.run, revision: state.revision,
+      ? { stage: state.workflow?.stage ?? null, status: state.status, run: state.run, revision: state.revision,
         ...(capabilityTask === undefined ? {} : { capability_task: capabilityTask }) }
       : { status: state.status, run: state.run,
         ...(capabilityTask === undefined ? {} : { capability_task: capabilityTask }),

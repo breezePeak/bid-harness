@@ -43,14 +43,14 @@ it('同 Workspace fresh Session 通过源码 Loader 仅恢复 Bid 项目状态',
       expect(JSON.parse(await readFile(join(cwd, '.bid-harness/project-state.json'), 'utf8'))).toMatchObject({
         schema_version: 4,
         revision: 1,
-        stage: 'evidence_mapping',
+        workflow: { kind: 'full_bid', stage: 'evidence_mapping' },
         status: 'waiting_user',
         run: null,
       })
       const exported = join(cwd, 'export-project/.bid-harness')
       expect(JSON.parse(await readFile(join(exported, 'project-state.json'), 'utf8'))).toMatchObject({
         schema_version: 4,
-        stage: 'docx_export',
+        workflow: { kind: 'full_bid', stage: 'docx_export' },
         status: 'ready',
         run: null,
       })
@@ -145,7 +145,7 @@ it('源码 Loader 将损坏 DOCX 上传结算为 S1 失败并接受下一批上�
     mode: 'src', tsconfigPath: fileURLToPath(new URL('../../../tsconfig.json', import.meta.url)),
     inspect: async (cwd) => {
       const state: unknown = JSON.parse(await readFile(join(cwd, '.bid-harness/project-state.json'), 'utf8'))
-      expect(state).toMatchObject({ stage: 'file_intake', status: 'failed', run: null,
+      expect(state).toMatchObject({ workflow: { kind: 'full_bid', stage: 'file_intake' }, status: 'failed', run: null,
         failure: { code: 'BID_STAGE_VALIDATION_FAILED', issues: [{ code: 'FILE_INTAKE_NO_SUCCESSFUL_TENDER' }] } })
       const store = join(cwd, '.session-store')
       const paths = (await readdir(store, { recursive: true })).filter(path => path.endsWith('.jsonl'))
@@ -155,7 +155,7 @@ it('源码 Loader 将损坏 DOCX 上传结算为 S1 失败并接受下一批上�
       expect(events.filter(event => event.type === 'bid.run.started')).toHaveLength(2)
       expect(events.filter(event => event.type === 'bid.task.changed' && event.data.state.status === 'failed')).toHaveLength(2)
       expect(events.reduce(reduceBidTaskState, BID_INITIAL_TASK_STATE)).toMatchObject({
-        stage: 'file_intake', status: 'failed', run: null,
+        workflow: { kind: 'full_bid', stage: 'file_intake' }, status: 'failed', run: null,
       })
       expect(await readFile(join(cwd, '.bid-harness/input/broken.docx'), 'utf8')).toBe('not a zip archive')
       expect(await readFile(join(cwd, '.bid-harness/input/retry.docx'), 'utf8')).toBe('not a zip archive')

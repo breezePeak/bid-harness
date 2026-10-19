@@ -70,7 +70,7 @@ describe('file-intake validator', () => {
       .toContain('FILE_INTAKE_MANIFEST_VERSION_UNSUPPORTED')
 
     const incomplete = await textBatch('unrecorded.txt')
-    await writeFile(incomplete.workspace.manifestPath, JSON.stringify({ version: 4, files: [] }))
+    await writeFile(incomplete.workspace.manifestPath, JSON.stringify({ version: 5, files: [] }))
     expect(issueCodes(await validateFileIntake(incomplete.workspace, incomplete.imported, 'file_intake', [...artifact])))
       .toContain('FILE_INTAKE_MANIFEST_RECORD_MISSING')
     expect(issueCodes(await validateFileIntake(incomplete.workspace, [], 'file_intake', [...artifact])))
@@ -81,7 +81,7 @@ describe('file-intake validator', () => {
     changedManifest.files[0]!.corpusPath = 'corpus/another-file'
     await writeFile(changed.workspace.manifestPath, JSON.stringify(changedManifest))
     expect(issueCodes(await validateFileIntake(changed.workspace, changed.imported, 'file_intake', [...artifact])))
-      .toContain('FILE_INTAKE_MANIFEST_RECORD_MISSING')
+      .toContain('FILE_INTAKE_MANIFEST_INVALID')
   })
 
   it('rejects missing documents, indexes, chunk files, and invalid chunk indexes', async () => {

@@ -30,11 +30,11 @@ it('招标分析任务接纳时登记真实 Manifest 输入', async () => {
     const message = createUserMessage({ content: [{ type: 'text', text: '分析招标文件' }], source: { kind: 'user' } })
     session.append('turn/start', { turn: 1 })
     session.append('user/message', message, { surfaceOp: 'append' })
-    const work = await persistCapabilityTaskRequest(workspace, session, 'tender_analysis', {
+    const work = await persistCapabilityTaskRequest(workspace, session, {
       goal: '分析招标文件', scope: { kind: 'project' }, steps: [{ description: '执行已授权的测试步骤', scope: { source: 'task' },
         call: { capability: 'tender.analyze', input: {} } }],
     }, { session_id: String(session.id), message_id: String(message.id) },
-    BID_CAPABILITIES['tender.analyze'].requires, { stage: 'tender_analysis', status: 'completed', run: null })
+    BID_CAPABILITIES['tender.analyze'].requires)
     const request = JSON.parse(await readFile(join(workspace.projectRoot, work.requestRef), 'utf8')) as {
       payload: { input_sources: Array<{ path: string; sha256: string }> }
     }

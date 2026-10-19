@@ -35,7 +35,7 @@ async function resetStage(
     const state = await ctx.bid.resetStage(invocation.agent, stage)
     return {
       kind: 'success',
-      text: `${label}阶段重置已应用。当前状态：${state.stage} / ${state.status}。`,
+      text: `${label}阶段重置已应用。当前状态：${state.workflow?.stage} / ${state.status}。`,
     }
   } catch (error: unknown) {
     if (error instanceof BidOrchestratorError) {

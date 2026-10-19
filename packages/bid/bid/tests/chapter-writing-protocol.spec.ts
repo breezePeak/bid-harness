@@ -282,9 +282,9 @@ describe('S5 Reviewer 分批记录', () => {
     })) })).value).toMatchObject({ recorded: missing.missing_item_positions, rejected: [] })
     const criterion = { criterion_position: missing.missing_criterion_positions[0], status: 'met', reason: '已检查全文。' }
     expect((await execute('review_acceptance_criteria', { items: [criterion] })).value)
-      .toMatchObject({ recorded: [], rejected: [{ index: 0, issue: expect.stringContaining('evidence_quote_positions: 字段必填，无需引句时填 []') }] })
+      .toMatchObject({ recorded: [], rejected: [{ index: 0, issue: expect.stringContaining('evidence_quote_positions: 字段必填，无需引句时填 []') as unknown }] })
     expect((await execute('review_acceptance_criteria', { items: [{ ...criterion, evidence_quote_positions: [1] }] })).value)
-      .toMatchObject({ recorded: [], rejected: [{ index: 0, issue: expect.stringContaining('未知对象位置') }] })
+      .toMatchObject({ recorded: [], rejected: [{ index: 0, issue: expect.stringContaining('未知对象位置') as unknown }] })
     expect((await execute('review_acceptance_criteria', { items: [{ ...criterion, evidence_quote_positions: [] }] })).value)
       .toMatchObject({ recorded: missing.missing_criterion_positions, rejected: [] })
     await execute('review_global_constraints', { items: missing.missing_compliance_positions.map(compliance_position => ({

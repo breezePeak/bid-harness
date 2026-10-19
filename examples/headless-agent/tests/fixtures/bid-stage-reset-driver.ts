@@ -52,7 +52,7 @@ try {
     await mkdir(join(workspace.projectRoot, path), { recursive: true })
     await writeFile(join(workspace.projectRoot, path, 'prior-artifact.txt'), '重置前产物\n')
   }
-  await checkpointBidProjectState(workspace, { stage: 'evidence_mapping', status: 'waiting_user', run: null })
+  await checkpointBidProjectState(workspace, { workflow: { kind: 'full_bid', stage: 'evidence_mapping' }, status: 'waiting_user', run: null })
   let executionAgents = 0
   ctx.on('agent/created', ({ agent }) => {
     if (agent.session.header.origin === 'subagent') executionAgents++
@@ -95,7 +95,7 @@ try {
   const commandEvents = agent.session.events.filter(event => event.type === 'command/run' || event.type === 'command/done')
   process.stdout.write(`${JSON.stringify({
     listed, result: command.result, task, restoredTask,
-    durableTask: saved === undefined ? null : { stage: saved.stage, status: saved.status, run: saved.run },
+    durableTask: saved === undefined ? null : { workflow: saved.workflow, status: saved.status, run: saved.run },
     allowedActions: getBidClientProjection(task).allowedActions,
     emptyManifest: (await workspace.readManifest()).files,
     preserved: {

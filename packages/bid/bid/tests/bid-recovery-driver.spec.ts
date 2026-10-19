@@ -79,7 +79,7 @@ async function fixture(options: { root?: string; budget?: number; resume?: boole
   if (options.resume !== true) {
     await mkdir(join(workspace.projectRoot, 'chapters/sections'), { recursive: true })
     await writeFile(bodyPath, '# 正式正文\n\n已核验的章节内容。\n')
-    agent.session.append('bid.task.changed', { state: { stage: 'chapter_writing', status: 'ready', run: null } })
+    agent.session.append('bid.task.changed', { state: { workflow: { kind: 'full_bid', stage: 'chapter_writing' }, status: 'ready', run: null } })
     await checkpointBidProjectState(workspace, state())
   }
   let revision = (await readBidProjectState(workspace))!.revision
@@ -105,9 +105,38 @@ async function fixture(options: { root?: string; budget?: number; resume?: boole
 }
 
 describe('BidRecoveryDriver 的持久化与运行时协议', () => {
+  it.each(['EIO', 'ETIMEDOUT'])('预算耗尽后同 Work 新 Run 的终态独立唤醒空闲 Main：%s', async (code) => {
+    const f = await fixture({ budget: 1 })
+    const original = await f.fail()
+    await f.driver.request(f.agent)
+    await f.agent.whenIdle()
+    await f.driver.request(f.agent)
+    await f.agent.whenIdle()
+    const old = f.rounds().at(-1)!
+    expect(old).toMatchObject({ state: 'blocked', round: 1, budget: 1 })
+    const count = f.adapter.requests.length
+    const resumed = await f.fail(code, original.run.runId)
+    await f.driver.request(f.agent)
+    await f.agent.whenIdle()
+    const latest = f.rounds().at(-1)!
+    expect(latest).toMatchObject({ state: 'blocked', round: 1, budget: 1, target: { runId: resumed.run.runId } })
+    expect(latest.messageId).not.toBe(old.messageId)
+    expect(f.adapter.requests).toHaveLength(count + 1)
+    await f.driver.request(f.agent)
+    expect(f.adapter.requests).toHaveLength(count + 1)
+    await f.ctx.sessions.flush(f.agent.session)
+    await f.ctx.fiber.dispose()
+    const restored = await fixture({ root: f.root, budget: 1, resume: true })
+    await restored.driver.request(restored.agent)
+    await restored.agent.whenIdle()
+    expect(restored.adapter.requests).toHaveLength(0)
+    expect(restored.rounds().at(-1)?.messageId).toBe(latest.messageId)
+  })
+
   it('已接受旧预算恢复后的新失败按剩余轮数派发，不重复旧 blocked 终止报告', async () => {
     const f = await fixture()
     const work = { ...f.work, stage: 'evidence_mapping' as const }
+    f.agent.session.append('bid.task.changed', { state: { workflow: { kind: 'full_bid', stage: 'evidence_mapping' }, status: 'ready', run: null } })
     const reason = '目录审查对象超过输入预算：位置 0，估算 15496 token，预算 12000 token。'
     const originalRuns = f.coordinator()
     const original = await originalRuns.start(work)

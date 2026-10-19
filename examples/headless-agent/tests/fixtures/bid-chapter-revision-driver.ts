@@ -42,7 +42,7 @@ try {
   assert.ok(writerId)
   await agent.whenIdle()
   const initialRequestCount = requests.length
-  await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'completed', run: null })
+  await checkpointBidProjectState(workspace, { workflow: { kind: 'full_bid', stage: 'chapter_writing' }, status: 'completed', run: null })
   const interaction = await ctx.agentLoop.createAgent(ctx, {
     sessionId: SessionId('revision-user'), agentOptions: { provider: 'mock', model: 'mock' },
     meta: { cwd: process.cwd(), agentPreset: 'bid' },

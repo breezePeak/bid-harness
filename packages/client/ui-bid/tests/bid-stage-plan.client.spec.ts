@@ -7,7 +7,7 @@ const t = (key: keyof typeof zh): string => zh[key]
 
 function projection(stage: BidStage, phase?: string): Pick<BidClientProjection, 'task'> {
   return {
-    task: { stage, status: 'running', run: {
+    task: { workflow: { kind: 'full_bid', stage: stage }, status: 'running', run: {
       runId: 'run', epoch: 1, baseProjectRevision: 1,
       work: {
         kind: 'stage_execution', workId: 'work', stage,

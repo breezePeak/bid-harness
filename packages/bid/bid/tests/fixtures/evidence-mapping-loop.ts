@@ -698,6 +698,7 @@ export async function runEvidenceMappingLoop(ctx: Context, root: string, repair:
   const host = ctx.get('bid') as unknown as { inFlight: ReadonlyMap<unknown, { session: Session; done: Promise<void> }> } | undefined
   await [...host?.inFlight.values() ?? []].find(operation => operation.session === agent.session)?.done
   if (fault?.resume !== true) {
+    agent.session.append('bid.workflow.started', { source: { session_id: String(agent.session.id), message_id: 'fixture-start', content_sha256: 'a'.repeat(64) } })
     agent.session.append('bid.stage.started', { stage: 'file_intake', status: 'running' })
     agent.session.append('bid.stage.completed', { stage: 'file_intake', status: 'completed', artifacts: [] })
     agent.session.append('bid.stage.started', { stage: 'tender_analysis', status: 'running' })
@@ -720,7 +721,7 @@ export async function runEvidenceMappingLoop(ctx: Context, root: string, repair:
       const inputs = await Promise.all(buildBidStageTask(stage).inputs.map(async path => ({ path,
         sha256: createHash('sha256').update(await readFile(join(workspace.projectRoot, path))).digest('hex'),
       })))
-      return persistBidWorkRequest(workspace, 'stage_execution', stage, payload, { stage, inputs, payload }, `snapshot-${sessionId}-structure`)
+      return persistBidWorkRequest(workspace, { kind: 'stage_execution', stage: stage }, payload, { stage, inputs, payload }, `snapshot-${sessionId}-structure`)
     } : undefined,
   )
 
@@ -738,10 +739,14 @@ export async function runEvidenceMappingLoop(ctx: Context, root: string, repair:
  * @param ctx 包含 Bid Host 的真实 Loader 装配。
  * @param root 临时项目目录。
  * @param scenario 原失败类型。
+ * @param prepareRecovery 在真实失败后准备用户补充输入，返回本次继续要求。
+ * @param continuation 通过具体补修或用户继续入口恢复。
  * @returns 原失败结果、恢复后状态及真实请求；恢复未完成时抛错。
  */
 export async function runEvidenceMappingRecoveryLoop(ctx: Context, root: string,
-  scenario: 'structure' | 'legacy' | 'legacy-output' | 'server' | 'server-takeover' | 'transport-takeover' = 'structure') {
+  scenario: 'structure' | 'legacy' | 'legacy-output' | 'server' | 'server-takeover' | 'transport-takeover' = 'structure',
+  prepareRecovery?: (result: Awaited<ReturnType<typeof runEvidenceMappingLoop>>) => string | Promise<string>,
+  continuation: 'repair' | 'resume' = 'repair') {
   const takeover = scenario === 'server-takeover' || scenario === 'transport-takeover'
   const structure = scenario === 'structure' || takeover
   const result = await runEvidenceMappingLoop(ctx, root, false, true, undefined, 'local', structure,
@@ -778,9 +783,9 @@ export async function runEvidenceMappingRecoveryLoop(ctx: Context, root: string,
   const saved = await checkpointBidProjectState(result.workspace, result.outcome)
   result.agent.session.append('bid.project.resumed', { state: result.outcome, revision: saved.revision })
   await result.agent.whenIdle()
-  const instruction = structure ? '保留已研究资料，明确授权岗位核验与审计岗位追溯责任，只补修失败章节后重新复核。'
+  const instruction = await prepareRecovery?.(result) ?? (structure ? '保留已研究资料，明确授权岗位核验与审计岗位追溯责任，只补修失败章节后重新复核。'
     : scenario === 'server' ? '继续原 S4，有限重试服务端处理失败，保留已完成研究及正式确认。'
-      : '继续原 S4，按当前模型预算重新组织审核，保留已完成研究及正式确认。'
+      : '继续原 S4，按当前模型预算重新组织审核，保留已完成研究及正式确认。')
   for (let round = 0; round < (scenario === 'legacy-output' ? 2 : 1); round++) {
     const recoveryInstruction = round === 0 ? instruction : '提高目录复核输出预算，保留原 S4 的目录和已完成研究，只继续审核与最终检查。'
     if (round === 1) result.adapter.outlineReview!.defaultMaxTokens = 8_192
@@ -789,7 +794,9 @@ export async function runEvidenceMappingRecoveryLoop(ctx: Context, root: string,
       toolCall('accept-new-goal', 'bid_run_task', { supersede: true, task: { goal: instruction, scope: { kind: 'project' },
         steps: [{ description: '补修目录并重新复核', scope: { source: 'task' }, call: { capability: 'outline.refine', input: { feedback: instruction } } }] } }),
     ] : [toolCall(round === 0 ? 'inspect-structure-recovery' : 'inspect-output-recovery', 'bid_stage_inspect', { view: 'recovery' }),
-      toolCall(round === 0 ? 'accept-structure-recovery' : 'accept-output-recovery', 'bid_recover_task', { target: 'run', instruction: recoveryInstruction })],
+      toolCall(round === 0 ? 'accept-structure-recovery' : 'accept-output-recovery',
+        continuation === 'resume' ? 'bid_resume_current_run' : 'bid_recover_task',
+        continuation === 'resume' ? {} : { target: 'run', instruction: recoveryInstruction })],
     finalText('已接纳定向补修，等待实际修改及复核结果。'))
     const done = Promise.withResolvers<undefined>()
     const off = ctx.on('session/event', (session, event) => {
@@ -1110,6 +1117,7 @@ export async function runOutlineGenerationLoop(ctx: Context, root: string,
   ctx.effect(() => ctx.llm.registerAdapter(['mock'], adapter))
   registerIntegrationTools(ctx, root, [])
   const agent = ctx.agentLoop.create(sessionId, { provider: 'mock', model: 'mock' }, { cwd: root })
+  agent.session.append('bid.workflow.started', { source: { session_id: String(agent.session.id), message_id: 'fixture-start', content_sha256: 'a'.repeat(64) } })
   for (const stage of ['file_intake', 'tender_analysis'] as const) {
     agent.session.append('bid.stage.started', { stage, status: 'running' })
     agent.session.append('bid.stage.completed', { stage, status: 'completed', artifacts: [] })

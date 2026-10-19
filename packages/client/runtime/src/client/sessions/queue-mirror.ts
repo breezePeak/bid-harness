@@ -14,8 +14,8 @@ function previewOf(content: readonly ContentBlock[]): string {
 }
 
 function textOf(content: readonly ContentBlock[]): string | null {
-  if (!content.every(block => block.type === 'text')) return null
-  return content.map(block => block.text).join('')
+  if (content.some(block => block.type !== 'text' && block.type !== 'image')) return null
+  return content.flatMap(block => block.type === 'text' ? [block.text] : []).join('')
 }
 
 type QueueItems = Extract<MuxFrame, { type: 'session/queue' }>['items']
@@ -60,7 +60,8 @@ export class SessionQueueMirror {
         placement: item.placement,
         content: item.message.content,
         preview: previewOf(item.message.content),
-        text: textOf(item.message.content),
+        text: textOf(source.kind === 'user' && 'fileRefs' in source
+          ? item.message.content.slice(0, -1) : item.message.content),
       }
     })
   }

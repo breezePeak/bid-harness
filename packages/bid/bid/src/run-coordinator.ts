@@ -7,7 +7,7 @@ import type {
   BidRunSuspensionCause, BidTaskFailure, BidWorkDescriptor,
 } from './control-plane-contract.ts'
 import { publishBidBatch, type BidPublicationLease } from './publication-batch.ts'
-import { bidRunProgressSchema } from './runtime-state.ts'
+import { bidRunProgressSchema, BID_INITIAL_TASK_STATE, reduceBidTaskState } from './runtime-state.ts'
 import { sanitizeBidErrorText } from './safe-error.ts'
 import { classifyBidRecovery } from './bid-recovery.ts'
 import { assertNoLinkedPath, within } from './workspace-path.ts'
@@ -352,7 +352,7 @@ export class BidRunCoordinator {
         },
       }
       this.active = { snapshot, context, controller, eventStart, mainAgents, activities }
-      context.reportProgress({ phase: 'starting', summary: `正在开始 ${work.stage} 阶段` })
+      context.reportProgress({ phase: 'starting', summary: work.kind === 'capability_task' ? '正在执行任务' : `正在开始 ${work.stage} 阶段` })
       this.onAdmitted?.(context)
       return context
     } catch (error) {
@@ -378,7 +378,6 @@ export class BidRunCoordinator {
     this.session.append('bid.run.progress', {
       runId: context.runId,
       epoch: context.epoch,
-      stage: context.work.stage,
       progress,
     })
   }
@@ -432,7 +431,6 @@ export class BidRunCoordinator {
     this.session.append('bid.run.cancelling', {
       runId: active.snapshot.runId,
       epoch: active.snapshot.epoch,
-      stage: active.snapshot.work.stage,
     })
     await this.checkpoint?.()
     for (const scope of mainAgents) scope.discardOwnedInbox()
@@ -461,7 +459,7 @@ export class BidRunCoordinator {
     const terminal = cause === 'executor_error' || cause === 'retry_exhausted'
     if (terminal) {
       this.session.append('bid.task.changed', {
-        state: { stage: snapshot.work.stage, status: 'failed', run: null,
+        state: { workflow: this.session.events.reduce(reduceBidTaskState, BID_INITIAL_TASK_STATE).workflow, status: 'failed', run: null,
           failure: observedError ?? { message: '执行器失败。' } },
       })
     } else {
@@ -473,7 +471,7 @@ export class BidRunCoordinator {
       noticeId: `run:${snapshot.runId}:${terminal ? 'failed' : 'suspended'}`,
       supersedesTurn: superseded?.type === 'turn/end' ? superseded.data.turn : null,
       runId: snapshot.runId,
-      stage: snapshot.work.stage,
+      stage: snapshot.work.kind === 'capability_task' ? null : snapshot.work.stage,
       kind: cause === 'user_stop' || cause === 'awaiting_input' ? 'stopped' : 'interrupted',
       severity: cause === 'user_stop' || cause === 'awaiting_input' ? 'info' : 'error',
       message: cause === 'user_stop' || cause === 'awaiting_input'
@@ -493,7 +491,7 @@ export class BidRunCoordinator {
   private async candidateFingerprint(work: BidWorkDescriptor, error: BidTaskFailure): Promise<string | undefined> {
     if (this.publication === undefined) return undefined
     const artifacts = error.issues?.flatMap(issue => issue.artifact === undefined ? [] : [issue.artifact]).slice(0, 5) ?? []
-    const candidates = artifacts.flatMap(artifact => work.stage === 'outline_generation'
+    const candidates = artifacts.flatMap(artifact => work.kind !== 'capability_task' && work.stage === 'outline_generation'
       ? [artifact, `outline/diagnostics/${work.workId}-${createHash('sha256').update(artifact).digest('hex').slice(0, 8)}.json`]
       : [artifact])
     const hashes: Array<[string, string]> = []

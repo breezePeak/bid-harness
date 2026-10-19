@@ -44,6 +44,7 @@ export interface ApiProxy {
 }
 
 // ---- Domain interfaces and payload entities ----
+export type { PromptFileRef, MessageFileRef } from './files.ts'
 export type {
   HistoryEntry, ModelCatalogFailure, ModelCatalogModel, ModelProviderGroup, ModelReasoning,
   ModelReasoningEffort, ModelSelection, PromptContentPart, QueueAction, SessionModels,

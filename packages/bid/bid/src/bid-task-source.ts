@@ -1,16 +1,34 @@
 /** Host 冻结真实消息及审批队列；模型摘要不构成任务来源或授权。 */
 import { z } from 'zod'
+import { createHash } from 'node:crypto'
 import type { Session } from '@deepseek-ai/dsh-session'
+import type { UserMessage } from '@deepseek-ai/dsh-llm'
+import { messageFileRefSchema } from '@deepseek-ai/dsh-host-apiproxy/api/files'
+import { imageAttachmentRefSchema } from '@deepseek-ai/dsh-host-apiproxy/api/sessions.schema'
 import type { BidWorkspace } from './index.ts'
 import { bidCapabilityScopeSchema, type BidCapabilityTask } from './bid-capability-contract.ts'
 import { readRevisionQueue, revisionIssueSchema } from './chapter-revision-queue.ts'
+import { bidTaskImageRefSchema, type BidTaskImageRef } from './bid-object-refs.ts'
 
 const sourceMessageSchema = z.object({ session_id: z.string().min(1), message_id: z.string().min(1),
-  text: z.string(), seq: z.number().int().nonnegative() }).strict()
+  text: z.string(), seq: z.number().int().nonnegative(),
+  content_sha256: z.string().regex(/^[a-f0-9]{64}$/u), file_refs: z.array(messageFileRefSchema).max(20),
+  images: z.array(z.object({ block_position: z.number().int().nonnegative(), attachment: imageAttachmentRefSchema }).strict()),
+}).strict()
+
+function sourceMessage(session: Session, message: UserMessage, seq: number) {
+  return sourceMessageSchema.parse({ session_id: String(session.id), message_id: String(message.id), seq,
+    text: message.content.flatMap(block => block.type === 'text' ? [block.text] : []).join('\n'),
+    content_sha256: createHash('sha256').update(JSON.stringify({ content: message.content, source: message.source })).digest('hex'),
+    file_refs: message.source.kind === 'user' && 'fileRefs' in message.source ? message.source.fileRefs : [],
+    images: message.content.flatMap((block, block_position) => block.type === 'image' ? [{ block_position, attachment: block.attachment }] : []),
+  })
+}
 
 /** 接纳时的来源及队列事实；未绑定意见也保留供覆盖核验。 */
 export const bidTaskSourceSnapshotSchema = z.object({
   message: sourceMessageSchema,
+  amendments: z.array(sourceMessageSchema).optional(),
   context_messages: z.array(sourceMessageSchema).optional(),
   clarification_dialogue: z.array(z.object({ role: z.enum(['user', 'assistant']),
     text: z.string(), seq: z.number().int().nonnegative() }).strict()).optional(),
@@ -18,10 +36,20 @@ export const bidTaskSourceSnapshotSchema = z.object({
   observed_issues: z.array(revisionIssueSchema),
   queue_revision: z.number().int().nonnegative(),
   root_scope: bidCapabilityScopeSchema,
+  referenced_images: z.array(bidTaskImageRefSchema).optional(),
 }).strict()
 
 /** 不可变任务来源。 */
 export type BidTaskSourceSnapshot = z.infer<typeof bidTaskSourceSnapshotSchema>
+
+function verifyImageSource(session: Session, ref: BidTaskImageRef, before: number): void {
+  const event = session.events.find(event => event.type === 'user/message' && String(event.data.id) === ref.message_id)
+  const block = event?.type === 'user/message' ? event.data.content[ref.block_position] : undefined
+  if (event?.type !== 'user/message' || event.data.source.kind !== 'user' || event.seq > before
+    || block?.type !== 'image' || JSON.stringify(imageAttachmentRefSchema.parse(block.attachment)) !== JSON.stringify(ref.attachment)) {
+    throw new Error('BID_TASK_IMAGE_SOURCE_INVALID')
+  }
+}
 
 /**
  * 从原消息之前、上次 Run 接纳或完成之后绑定真实用户消息及助手公开澄清文本。
@@ -30,11 +58,21 @@ export type BidTaskSourceSnapshot = z.infer<typeof bidTaskSourceSnapshotSchema>
  * @returns 带持久消息身份及澄清对话的来源；助手文本不授予权限，不改变原消息或意见。
  */
 export function bindBidTaskSourceContext(session: Session, source: BidTaskSourceSnapshot): BidTaskSourceSnapshot {
+  const message = session.events.find(event => event.type === 'user/message' && String(event.data.id) === source.message.message_id)
+  if (message?.type !== 'user/message' || JSON.stringify(sourceMessage(session, message.data, message.seq))
+    !== JSON.stringify(sourceMessageSchema.parse(source.message))) throw new Error('BID_TASK_VERIFICATION_SOURCE_INVALID')
+  for (const ref of source.referenced_images ?? []) verifyImageSource(session, ref, source.message.seq)
+  let previous = source.message.seq
+  for (const amendment of source.amendments ?? []) {
+    const event = session.events.find(event => event.type === 'user/message' && String(event.data.id) === amendment.message_id)
+    if (event?.type !== 'user/message' || event.seq <= previous || !['user', 'goal'].includes(event.data.source.kind)
+      || JSON.stringify(sourceMessage(session, event.data, event.seq)) !== JSON.stringify(amendment)) throw new Error('BID_TASK_VERIFICATION_SOURCE_INVALID')
+    previous = event.seq
+  }
   const prior = session.events.filter(event => event.seq < source.message.seq)
   const boundary = prior.findLast(event => event.type === 'bid.run.started' || event.type === 'bid.run.completed')?.seq ?? -1
   const context = prior.flatMap(event => event.seq > boundary && event.type === 'user/message'
-    && event.data.source.kind === 'user' ? [{ session_id: String(session.id), message_id: String(event.data.id),
-      text: event.data.content.flatMap(block => block.type === 'text' ? [block.text] : []).join('\n'), seq: event.seq }] : [])
+    && event.data.source.kind === 'user' ? [sourceMessage(session, event.data, event.seq)] : [])
   const dialogue = prior.flatMap<NonNullable<BidTaskSourceSnapshot['clarification_dialogue']>[number]>((event) => {
     if (event.seq <= boundary) return []
     if (event.type === 'user/message' && event.data.source.kind === 'user') {
@@ -70,6 +108,9 @@ export async function freezeBidTaskSource(
   if (authorization.session_id !== String(session.id) || event?.type !== 'user/message'
     || !['user', 'goal'].includes(event.data.source.kind)) throw new Error('BID_CAPABILITY_USER_MESSAGE_REQUIRED')
   const queue = await readRevisionQueue(workspace)
+  const referencedImages = task.steps.flatMap(step => step.call.capability === 'project_image.create'
+    && step.call.input.image_ref !== undefined ? [step.call.input.image_ref] : [])
+  for (const ref of referencedImages) verifyImageSource(session, ref, event.seq)
   const issues = [...new Set(task.issue_ids ?? task.steps.flatMap(step => step.call.capability === 'chapter.revision_batch'
     ? step.call.input.issue_ids : []))].map((id) => {
     const issue = queue.issues.find(item => item.issue_id === id)
@@ -77,9 +118,9 @@ export async function freezeBidTaskSource(
     return issue
   })
   return bindBidTaskSourceContext(session, bidTaskSourceSnapshotSchema.parse({
-    message: { ...authorization, seq: event.seq,
-      text: event.data.content.flatMap(block => block.type === 'text' ? [block.text] : []).join('\n') },
+    message: sourceMessage(session, event.data, event.seq),
     issues, observed_issues: queue.issues.filter(issue => issue.status === 'pending'),
+    ...(referencedImages.length === 0 ? {} : { referenced_images: referencedImages }),
     queue_revision: queue.revision, root_scope: task.scope,
   }))
 }

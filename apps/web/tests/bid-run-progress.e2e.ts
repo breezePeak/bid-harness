@@ -3,7 +3,7 @@ import { mkdir, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { Browser, Page } from 'playwright'
 import { chromium } from 'playwright'
-import { afterAll, beforeAll, describe, expect, it, onTestFailed } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it, onTestFailed, vi } from 'vitest'
 import { resolveSessionPreset } from '@deepseek-ai/dsh-agent-presets'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { createUserMessage, LlmAdapter, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
@@ -61,10 +61,10 @@ describe('web e2e: Bid 后台 Run 进度', () => {
       })),
     }))
     run = { ...run, runId: 'web-s4-progress', epoch: run.epoch + 1,
-      work: { ...run.work, stage: 'evidence_mapping', workId: 'web-s4-work' },
+      work: { ...run.work, kind: 'stage_execution', stage: 'evidence_mapping', workId: 'web-s4-work' },
       progress: { phase: 'mapping', summary: '逐章节资料研究与映射', updatedAt: 4 },
     }
-    const active = await checkpointBidProjectState(workspace, { stage: 'evidence_mapping', status: 'running', run })
+    const active = await checkpointBidProjectState(workspace, { workflow: { kind: 'full_bid' as const, stage: 'evidence_mapping' }, status: 'running', run })
     agent.session.append('bid.project.resumed', { revision: active.revision, state: bidProjectTaskState(active) })
     return workspace
   }
@@ -90,7 +90,7 @@ describe('web e2e: Bid 后台 Run 进度', () => {
     await page.goto(scaffold.baseUrl, { waitUntil: 'load' })
     await page.waitForSelector('[class*="frame"]', { timeout: 30_000 })
     await connectFreshWorkspaceZh(page, scaffold.workspaceCwd)
-    await page.getByRole('region', { name: '技术标生成' }).waitFor({ timeout: 20_000 })
+    await vi.waitFor(() => { expect(scaffold.ctx.agents.list().some(candidate => resolveSessionPreset(candidate.session) === 'bid')).toBe(true) }, { timeout: 20_000 })
     const found = scaffold.ctx.agents.list().find(candidate => resolveSessionPreset(candidate.session) === 'bid')
     if (found === undefined || found.session.header.cwd === undefined) throw new Error('Missing Bid agent workspace')
     agent = found
@@ -106,7 +106,7 @@ describe('web e2e: Bid 后台 Run 进度', () => {
       },
       startedAt: 1, updatedAt: 1,
     }
-    const state = await checkpointBidProjectState(workspace, { stage: 'tender_analysis', status: 'running', run })
+    const state = await checkpointBidProjectState(workspace, { workflow: { kind: 'full_bid' as const, stage: 'tender_analysis' }, status: 'running', run })
     agent.session.append('bid.project.resumed', { revision: state.revision, state: bidProjectTaskState(state) })
   }, 120_000)
 
@@ -120,7 +120,7 @@ describe('web e2e: Bid 后台 Run 进度', () => {
     onTestFailed(() => saveFailureShot(page, 'web-e2e-bid-run-progress'))
     agent.session.append('bid.run.started', { run })
     agent.session.append('bid.run.progress', {
-      runId: 'web-progress', epoch: 1, stage: 'tender_analysis',
+      runId: 'web-progress', epoch: 1,
       progress: { phase: 'collecting', summary: '正在提取招标信息与原文依据', completed: 2, total: 5, updatedAt: 2 },
     })
 
@@ -146,11 +146,11 @@ describe('web e2e: Bid 后台 Run 进度', () => {
       ...run,
       runId: 'web-s3-progress',
       epoch: 2,
-      work: { ...run.work, stage: 'outline_generation', workId: 'web-s3-work' },
+      work: { ...run.work, kind: 'stage_execution', stage: 'outline_generation', workId: 'web-s3-work' },
       progress: { phase: 'reviewing', summary: '目录质量复核', updatedAt: 3 },
     }
     const workspace = new BidWorkspace(workspaceCwd)
-    const state = await checkpointBidProjectState(workspace, { stage: 'outline_generation', status: 'running', run })
+    const state = await checkpointBidProjectState(workspace, { workflow: { kind: 'full_bid' as const, stage: 'outline_generation' }, status: 'running', run })
     agent.session.append('bid.project.resumed', { revision: state.revision, state: bidProjectTaskState(state) })
 
     const plan = page.getByRole('region', { name: '计划 · S3 初步目录生成' })
@@ -226,7 +226,7 @@ describe('web e2e: Bid 后台 Run 进度', () => {
     await page.setViewportSize({ width: 1440, height: 900 })
 
     const stopped = await checkpointBidProjectState(workspace, {
-      stage: 'evidence_mapping', status: 'suspended', run: { ...run, cause: 'user_stop' },
+      workflow: { kind: 'full_bid' as const, stage: 'evidence_mapping' }, status: 'suspended', run: { ...run, cause: 'user_stop' },
     })
     agent.session.append('bid.project.resumed', { revision: stopped.revision, state: bidProjectTaskState(stopped) })
     await expect.poll(() => plan.count()).toBe(0)

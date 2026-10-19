@@ -617,7 +617,17 @@ async function mergeNumbering(
   targetZip.file('word/numbering.xml', js2xml(target, { compact: false }))
 }
 
-async function mergeBodyRelationships(
+/**
+ * 合并新增正文节点实际引用的关系与媒体，不改动原正文节点。
+ * @param targetZip 目标原稿包。
+ * @param sourceZip 新增内容包。
+ * @param targetRelationships 目标正文关系。
+ * @param sourceRelationships 新增内容关系。
+ * @param targetContentTypes 目标部件类型。
+ * @param sourceContentTypes 新增部件类型。
+ * @param inserted 需要重新绑定关系的新增节点。
+ */
+export async function mergeBodyRelationships(
   targetZip: JSZip,
   sourceZip: JSZip,
   targetRelationships: XmlNode,
@@ -652,7 +662,14 @@ async function mergeBodyRelationships(
         const bytes = await sourceZip.file(sourcePath)?.async('nodebuffer')
         if (bytes === undefined) throw new Error(`DOCX 正文关系部件不存在：${sourceTarget}`)
         const extension = sourceTarget.slice(sourceTarget.lastIndexOf('.') + 1).toLowerCase()
-        const targetName = `media/dsh-${createHash('sha256').update(bytes).digest('hex').slice(0, 16)}.${extension}`
+        const base = `media/dsh-${createHash('sha256').update(bytes).digest('hex')}`
+        let targetName = `${base}.${extension}`
+        let suffix = 0
+        let existing = targetZip.file(`word/${targetName}`)
+        while (existing !== null && !(await existing.async('nodebuffer')).equals(bytes)) {
+          targetName = `${base}-${String(++suffix)}.${extension}`
+          existing = targetZip.file(`word/${targetName}`)
+        }
         targetZip.file(`word/${targetName}`, bytes)
         const targetKey = Object.keys(copied.attributes ?? {}).find(name => local(name) === 'Target') ?? 'Target'
         copied.attributes[targetKey] = targetName

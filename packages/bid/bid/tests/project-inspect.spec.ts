@@ -41,7 +41,7 @@ describe('项目级只读检查', () => {
       { section_id: 'SEC-1', available: true }, { section_id: 'SEC-3', available: false },
     ] })
     for (const stage of ['outline_generation', 'evidence_mapping', 'chapter_writing', 'docx_export'] as const) {
-      await checkpointBidProjectState(workspace, { stage, status: 'completed', run: null })
+      await checkpointBidProjectState(workspace, { workflow: { kind: 'full_bid', stage: stage }, status: 'completed', run: null })
       const before = await hashes(workspace.projectRoot)
       expect(await inspectBidProject(workspace, { object: 'outline', page: 0, page_size: 2 })).toEqual(outline)
       expect(await inspectBidProject(workspace, { object: 'chapters', section_ids: ['SEC-1', 'SEC-3'] })).toEqual(chapter)
@@ -85,7 +85,7 @@ describe('项目级只读检查', () => {
 it('候选任务检查使用正式状态文件所属根，候选产物仍检查候选根', async () => {
   const canonical = await project()
   const candidate = await project()
-  await checkpointBidProjectState(canonical, { stage: 'chapter_writing', status: 'completed', run: null })
+  await checkpointBidProjectState(canonical, { workflow: { kind: 'full_bid', stage: 'chapter_writing' }, status: 'completed', run: null })
   expect(await inspectBidProject(canonical, { object: 'task', source: 'candidate' }, candidate))
     .toMatchObject({ available: true, source: 'candidate', data: { status: 'completed' } })
   expect(await inspectBidProject(canonical, { object: 'task', source: 'candidate' }))

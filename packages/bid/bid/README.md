@@ -1,10 +1,14 @@
 # `@deepseek-ai/dsh-bid`
 
-English | [中文](README.zh.md)
+本包提供任务入口、项目资料和投标专业路线。新项目处于 `workflow: null`、`ready`，主 Agent 根据真实用户请求选择能力。只有 `bid_start_workflow` 接纳用户要求完整标书的授权后才进入 S1；上传附件、普通询问和独立能力完成都不启动专业路线。
 
-Workspace-local intake and shared bid control-plane types for the bid-writing profile. `BidWorkspace` saves supported PDF, DOCX, DOC, XLSX, XLS, TXT, and Markdown files below `.bid-harness/`. Every imported file receives `corpus/<stored-name>/document.md`; PDF, DOCX, and DOC additionally receive `structure.json` and `metadata.json` from `extractDocument()`. Manifest version 3 records the corpus and artifact paths. The caller persists `messageInventory()` with the user's request, so the agent sees workspace-relative source, document, chunk, and structure paths and can use its normal `grep` and `read` tools.
+独立任务的 `bid_project_inspect(object="task")` 返回 `stage: null`，刷新可选 Work，同时保留已查询的文档节点位置表。原稿图位通过 `object="document"` 与文件位置查询；页面审核不提供原稿节点位置。缺少能力步骤时须由恢复状态中列出的 `bid_plan_task` 保存实际计划，`bid_recover_task` 的文字建议不会替换步骤。隔离语义核验只读取冻结来源、真实计划和候选证据，不读取执行者的恢复建议。
 
-PDF, DOCX, and DOC share one parser entry:
+普通 Composer 同时接收图片与 PDF、DOCX、DOC、XLSX、XLS、TXT、Markdown 文件。文件通过 `/api/bid/attachments` 原样保存为 `assets/originals/<内容摘要>/<安全文件名>`，Host 发放不可变引用，消息提交后保存其名称、大小、类型和版本。上传不解析、不启动 Work。重复提交复用同一接纳消息；相同提交身份携带不同内容或附件时拒绝。队列编辑保留附件，派生会话只获得已复制消息前缀实际引用的文件。
+
+主 Agent 从已记录的 inspect 对象表选择文件位置，读取时按需解析；完整标书通过 `bid_use_files` 给已有附件绑定专业角色。`manifest.json` 的 v5 格式仅保存文件引用、角色和解析缓存键。原件、解析状态及路径由唯一资产记录和按内容、原件名称及解析配置派生的 `assets/parsed/<解析键>` 提供；解析失败保留原件并允许重试，重置专业路线保留原件及可复用缓存。同名新内容是新版本，不覆盖已接纳任务的来源。
+
+PDF、DOCX 和 DOC 共用解析入口：
 
 ```ts
 import { extractDocument } from '@deepseek-ai/dsh-bid'
@@ -15,9 +19,19 @@ await extractDocument({
 })
 ```
 
-PDF extraction uses text positions to retain physical lines and emits `<!-- page: N -->` comments. Text-free PDFs write their corpus with `needs_ocr`; this package does not run OCR. DOCX extraction retains Word headings, lists, and tables without inventing page numbers. DOC extraction uses the pure-JavaScript `word-extractor` parser, so Windows, macOS, and Linux require no Word, LibreOffice, `antiword`, or other system executable. DOC text retains paragraphs and tab-separated table cells, but the binary format does not expose dependable Markdown heading levels or page numbers through this parser.
+PDF 按文字坐标保留物理行并标注真实页号；无文字 PDF 标记 `needs_ocr`，本包不执行 OCR。DOCX 保留标题、列表和表格，不生成页号。DOC 使用纯 JavaScript 的 `word-extractor`，保留段落和表格单元格文字，但不提供可靠的标题层级或页号。空文件、非法名称、不支持格式、数量或体积超限在接入时拒绝；缓存与原件的身份、摘要和路径在消费前复验。
 
-Import rejects empty, unsafe, unsupported, oversized, and over-count uploads. A parse failure retains the original file and records the stable extraction error in `manifest.json`. Reusing an extraction output directory atomically replaces the three complete corpus files through `dsh-atomic-write`. `exportDocx()` accepts only project-local Markdown and writes under the project output directory.
+## 独立作图与原 Word 局部处理
+
+`flowchart.create` 接收节点、分支、循环及连线语义，由现有布局器生成 PNG、SVG、可编辑定义和视觉记录。`project_image.create` 接收场景描述及可选已授权参考图，复用已配置的 Images API 和项目风格，保存 PNG、元数据与视觉记录；不要求招标文件、目录或写作计划。两类图片均先验证真实图片内容，未通过的候选不能作为正式文档插图。付费请求在发送前保存请求记录；中断后先核对已有回执，结果不明时停止并要求用户决定，不能自动重复扣费。
+
+`bid_project_inspect(object="document")` 读取已提交 DOCX 的正文、标题、表格、图片及分节位置。`document.patch` 在只读原件的副本上插入或替换图片、添加题注，以及修改已授权的普通段落；程序绑定原件版本、XML 部件与节点位置，保留范围外内容和未修改的 ZIP 部件。模型通过当前对象表的位置选择目标，通过前序步骤位置绑定图片或文档产物，不能提交路径、哈希或自造身份。题注只提交语义内容，程序沿用原稿前缀并生成序号。已完成候选有独立位置表；补丁追加要求与已完成步骤保存在同一个 Work 检查点。
+
+任务结果核验读取当前 DOCX 的实际 XML 文字，包含正文、题注和页眉页脚，证据绑定文件摘要；不能只凭补丁计划推断文字已写入。图像内容和排版仍由真实视觉记录核验，不将二进制 Word 按 UTF-8 解码。
+
+`document.layout_review(mode="repair")` 使用 LibreOffice 将候选 DOCX 转成 PDF，检查实际目标页及相邻页，并允许缩放本任务新增或替换的图片、调整其题注相邻关系；每次修改后重新渲染核验。视觉输入中的图片身份表区分原稿保留图片和本次可调整图片，防止把原图缺少题注误认为新图分页错误。输出 schema 由正式校验器生成；无效字段、页面或对象位置按 `modelStageRepairAttempts` 上限反馈给视觉模型重试，耗尽后保留候选并拒绝发布。只有真实页面检查通过才发布图文版 Word。缺少渲染器、视觉模型或检查失败时保留候选和诊断；不声称最终版完成。复杂字段、修订、受保护结构和页眉页脚不开放任意修改，PDF 不提供原件编辑，未验证 Word/WPS 的交互式重排效果。
+
+交付列表由当前会话授权和正式发布凭据导出，提供友好名称、图片及 PDF 预览和 Word 下载。`/api/bid/artifacts` 只接受程序发放的 Work、凭据和文件位置，逐项复验路径与字节摘要，拒绝其他会话、未发布候选和任意路径。重启后从同一发布凭据恢复下载。
 
 ## Word 导出
 
@@ -27,7 +41,7 @@ S5 的预览、快速页数、Writer 候选、父节点汇总和验收使用同�
 
 输出章节的 `title` 只保存名称，模型绑定、新增、拆分、合并及显式标题编辑清理明确的章节前缀；目录树派生导航编号，Word 使用模板原生编号。历史目录在展示、模型语义投影、正文根标题和导出组合时净化名称，不重写正式文件、hash 或确认关系；未触及章节、业务数字和来源标题路径保持原文。连续同章根标题仅在正文开头合并，叶节额外目录标题仍拒绝。
 
-S6 只对流程图、表格和图片执行最终页面视觉审核；标题、正文、编号和普通列表不创建审核请求。`word-export/visual-review-cache.json` 以稳定块 ID 和联合 `inputHash` 保存 PASS、`outputHash` 与白名单调整，联合摘要包含当前块内容、原始模板摘要、页面尺寸和页边距、块样式、Renderer 版本及 Review 版本。命中相同 PASS 时直接应用历史调整并跳过模型；未命中时把完成模板合成、原生流程图嵌入和 Word 字段刷新后的 DOCX 经现有 LibreOffice 链路转换为 PDF，只把目标页及相邻页交给当前会话视觉模型。模型只能缩放流程图或图片、缩小表格字体；每次调整后重新生成并复核，最多两轮调整。
+S6 只对流程图、表格和图片执行最终页面视觉审核；标题、正文、编号和普通列表不创建审核请求。`word-export/visual-review-cache.json` 以稳定块 ID 和联合 `inputHash` 保存 PASS、`outputHash` 与白名单调整，联合摘要包含当前块内容、原始模板摘要、页面尺寸和页边距、块样式、Renderer 版本及 Review 版本。每次导出都把完成模板合成、原生流程图嵌入和 Word 字段刷新后的 DOCX 经现有 LibreOffice 链路转换为 PDF；仅在当前目标页及相邻页的摘要、输入摘要和调整均匹配 PASS 时跳过模型。未命中时读取当前会话所选模型及添加模型时保存的图片输入能力，只有已配置支持视觉时才发送这些页面；切换模型无需先发起对话。输出预算沿用显式会话设置或当前模型默认值，两者均缺省时为 4096。视觉请求按服务商 `retryPolicy` 重试，等待可取消且受单块请求时限约束；终止错误保留脱敏后的服务商原因。模型只能缩放流程图或图片、缩小表格字体；每次调整后重新生成并复核，最多两轮调整。每块通过后持久化缓存，中断后重试仍核对实际页面；全部通过后才发布 Word。
 
 ## Control plane types
 
@@ -41,7 +55,7 @@ S6 只对流程图、表格和图片执行最终页面视觉审核；标题、�
 
 ## Control plane runtime
 
-`project-state.json` 使用 v4 扁平结构保存 Workspace 级项目进度；结构合法的 v3 会在读取时归一。新 Session 通过 `bid.project.resumed` 初始化当前控制面，不复制旧聊天。`BidOrchestrator` 在执行所用 Session 中通过 `reduceBidTaskState()` 归约已同步状态，详见[项目生命周期](README.zh.md#控制面-runtime)。
+`project-state.json` 使用 v5 保存 Workspace 级项目进度，旧格式拒读并保留原文件。`workflow` 只表达完整标书路线；能力 Work 不附带专业阶段。新 Session 通过 `bid.project.resumed` 初始化项目事实，不复制旧聊天。插入局部任务时，Host 保存原专业路线的会话、Work 和请求版本，等待其停止后接纳局部任务；局部任务完成不自动恢复旧路线，显式继续时复验原检查点。
 
 `registerBidRuntimeProjection()` 把相同归约器注册为 `bid.runtime` DSH Session Projection。`BidClientProjection` 以 `task` 直接暴露唯一状态，并附带 Host 准入 action、composer capability 和文件限制；S6 DOCX 仍是独立的按需操作。
 
@@ -58,6 +72,8 @@ S6 只对流程图、表格和图片执行最终页面视觉审核；标题、�
 S4 执行日志保存首次基础设施重试预算和每次失败的模型或 Web 通道；检查点恢复从日志还原已消耗次数。重启、换 Provider 或提高配置均不扩大原预算，已完成章节继续复用原检查点。
 
 后台 Execution Agent 的 `ask_user_question` 由 Host 在原 Main 会话的原生问题空间展示，真实回答返回原工具调用；普通澄清不终止 Run，也不消耗失败恢复预算。Main 的工具提问与后台转交提问均在问题、选项、当前任务和取消状态核对后，把问题及真实回答保存为程序生成的用户消息，供当前授权和不可变任务来源使用。旧问题、空答案及其他任务的回答不授予新执行权限。
+
+Main 独立问题只绑定原会话与实际工具调用，不随后台阶段推进失效；Execution 问题绑定实际 Work 请求版本与当前 Run。`bid.user_input.recorded` 关联真实回答消息及原问题，同一问题重投复用原消息，不能覆盖已保存答案。恢复授权始终保留接纳指令原文，模型上下文单独按当前要求、本 Work 最新回答、原请求及旧方案排序；超过上下文预算的完整输入由执行 Agent 及所属子任务通过 `bid_read_recovery_input` 分页读取。预算仍按 Work 累计，各 Run 的终态通知分别派发和去重。
 
 整阶段正文的资料缺口保存为原 Run 的 `awaiting_input`，Host 自动提出原生问题；答案与应用状态落盘后恢复原 Work，已完成章节仍按原检查点核验复用。重启复用已保存答案，选择稍后补充则保持等待。新的继续请求把本任务已有用户原话及先前方案送入执行器；重复问题以输入、失败单元和错误项识别，候选内容与普通进度变化不清除相同问题的记录。
 

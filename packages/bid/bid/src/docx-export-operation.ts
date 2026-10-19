@@ -25,6 +25,28 @@ export const docxExportOperationSchema = z.discriminatedUnion('status', [
 /** 最近一次 Word 导出的唯一状态、步骤和终态结果。 */
 export type DocxExportOperation = z.infer<typeof docxExportOperationSchema>
 
+declare module '@deepseek-ai/dsh-session-projection/types' {
+  interface SessionProjectionMap {
+    /** 最近一次独立 Word 导出的客户端视图。 */
+    [BID_DOCX_EXPORT_PROJECTION_KEY]: DocxExportOperation | null
+  }
+  interface SessionProjectionStateMap {
+    /** 从会话事件恢复的独立 Word 导出。 */
+    [BID_DOCX_EXPORT_PROJECTION_KEY]: DocxExportOperation | null
+  }
+}
+
+declare module '@deepseek-ai/dsh-session/types' {
+  interface SessionEventMap {
+    /**
+     * 独立 Word 导出进度，仅保存有界任务信息。
+     * @param operation 与主 Bid 任务分离的最新导出状态。
+     * @dshScopeScan unsupported
+     */
+    'bid.docx_export.changed': { operation: DocxExportOperation }
+  }
+}
+
 /**
  * 从 Session 事件还原最近一次独立导出，不改变 Bid 主任务。
  * @param state 上一条导出任务，空日志为 null。

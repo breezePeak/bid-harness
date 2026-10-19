@@ -238,14 +238,14 @@ describe('tender-analysis complete submission runtime', () => {
     value.runtime.dispose()
   })
 
-  it('重复上传保留全部文件位置，提交引用最后一份副本并按唯一身份通过覆盖校验', async () => {
+  it('同字节不同名原件保留独立身份与定位，来源绑定选中的原件', async () => {
     const value = await fixture(true)
     const manifest = await value.workspace.readManifest()
     const [first, second, copy] = value.runtime.locators
     expect(value.runtime.locators.map(locator => [locator.file_ref, locator.name])).toEqual([
       ['T1', 'main-tender.md'], ['T2', 'second-tender.md'], ['T3', 'main-tender-copy.md'],
     ])
-    expect(copy!.file_id).toBe(first!.file_id)
+    expect(copy!.file_id).not.toBe(first!.file_id)
     expect(second!.file_id).not.toBe(first!.file_id)
     expect(copy!.chunks.get('chunk_0001')!.artifactPath).not.toBe(first!.chunks.get('chunk_0001')!.artifactPath)
 
@@ -260,7 +260,7 @@ describe('tender-analysis complete submission runtime', () => {
       readFile(join(value.workspace.projectRoot, 'analysis/scoring-origin.json'), 'utf8').then(JSON.parse).then(parseTenderScoringArtifact),
       readFile(join(value.workspace.projectRoot, 'analysis/compliance.json'), 'utf8').then(JSON.parse).then(parseTenderComplianceArtifact),
     ])
-    expect(project.analyzed_tender_files).toEqual([first!.file_id, second!.file_id])
+    expect(project.analyzed_tender_files).toEqual([first!.file_id, second!.file_id, copy!.file_id])
     for (const [refs, chunkId] of [
       [project.source_refs, 'chunk_0001'],
       [requirements.requirements[0]!.source_refs, 'chunk_0002'],

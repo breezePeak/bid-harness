@@ -38,27 +38,27 @@ it.each(['PI_AI_ERROR', 'TRANSPORT', 'SERVER', 'TIMEOUT'])('S4 的 %s 开放新�
   session.append('bid.run.started', { run: original })
   session.append('bid.run.notice', { runId: original.runId, stage: s4.stage, kind: 'interrupted', severity: 'error',
     noticeId: `run:${original.runId}:failed`, supersedesTurn: null, message })
-  session.append('bid.task.changed', { state: { stage: s4.stage, status: 'failed', run: null, failure } })
+  session.append('bid.task.changed', { state: { workflow: { kind: 'full_bid' as const, stage: s4.stage }, status: 'failed', run: null, failure } })
   if (code === 'PI_AI_ERROR') session.append('bid.recovery.round', { ownerSessionId: String(session.id), target,
     fingerprint: 'old-server', round: 0, budget: 3, state: 'blocked', reason: message })
   expect(bidRunRecoveryEligibility(session)).toMatchObject({ eligible: true, attempts: 0, target })
   expect(await inspectBidStage(undefined, session, undefined, 'recovery'))
     .toMatchObject({ eligible: true, available_actions: ['bid_recover_task', 'bid_resume_current_run', 'bid_run_task(supersede=true)'], failure: { cause: { code } } })
   for (const code of ['AUTH', 'QUOTA', 'INVALID_REQUEST', 'INPUT_CHANGED', 'EACCES', 'PI_AI_ERROR']) {
-    session.append('bid.task.changed', { state: { stage: s4.stage, status: 'failed', run: null,
+    session.append('bid.task.changed', { state: { workflow: { kind: 'full_bid' as const, stage: s4.stage }, status: 'failed', run: null,
       failure: safeRecoverableBidFailure(s4, error, [...failure.issues!, { code, message: '真实阻断' }]) } })
     expect(bidRunRecoveryEligibility(session).eligible).toBe(false)
     expect(bidEvidenceMappingTakeoverRun(session, session.events.findLast(event => event.type === 'bid.task.changed')!.data.state)).toBeUndefined()
     expect((await inspectBidStage(undefined, session, undefined, 'recovery')).available_actions).not.toContain('bid_resume_current_run')
   }
-  session.append('bid.task.changed', { state: { stage: s4.stage, status: 'failed', run: null, failure } })
+  session.append('bid.task.changed', { state: { workflow: { kind: 'full_bid' as const, stage: s4.stage }, status: 'failed', run: null, failure } })
   session.append('bid.recovery.round', { ownerSessionId: String(session.id), target,
     fingerprint: 'old-server', round: 0, budget: 3, state: 'blocked', reason: 'BID_RECOVERY_DISPATCH_BUDGET_EXHAUSTED' })
   expect(bidRunRecoveryEligibility(session).eligible).toBe(false)
   session.append('bid.recovery.round', { ownerSessionId: String(session.id), target,
     fingerprint: 'old-server', round: 3, budget: 3, state: 'blocked', reason: message })
   expect(bidRunRecoveryEligibility(session).eligible).toBe(false)
-  expect(bidEvidenceMappingTakeoverRun(session, { stage: s4.stage, status: 'failed', run: null, failure })).toMatchObject({ work: s4 })
+  expect(bidEvidenceMappingTakeoverRun(session, { workflow: { kind: 'full_bid' as const, stage: s4.stage }, status: 'failed', run: null, failure })).toMatchObject({ work: s4 })
 })
 
 it('旧 S4 本地预算 blocked 重算资格但保留有限恢复历史和其他故障边界', async () => {
@@ -73,7 +73,7 @@ it('旧 S4 本地预算 blocked 重算资格但保留有限恢复历史和其他
   session.append('bid.run.started', { run: original })
   session.append('bid.run.notice', { runId: original.runId, stage: s4.stage, kind: 'interrupted', severity: 'error',
     noticeId: `run:${original.runId}:failed`, supersedesTurn: null, message: issue.message })
-  session.append('bid.task.changed', { state: { stage: s4.stage, status: 'failed', run: null, failure } })
+  session.append('bid.task.changed', { state: { workflow: { kind: 'full_bid' as const, stage: s4.stage }, status: 'failed', run: null, failure } })
   const target = { kind: 'run' as const, runId: original.runId, workId: s4.workId }
   session.append('bid.recovery.round', { ownerSessionId: String(session.id), target,
     fingerprint: 'old', round: 0, budget: 3, state: 'blocked', reason: issue.message })
@@ -117,16 +117,16 @@ it.each(['budget', 'server'])('已接纳旧 blocked 恢复后，新的输出超�
     code: 'OUTLINE_REFINEMENT_REVIEW_STOP_REASON_INVALID', artifact: 'outline/quality-report.json',
     message: '目录复核 Subagent 未正常完成：max-tokens。',
   }]))
-  session.append('bid.task.changed', { state: { stage: s4.stage, status: 'failed', run: null, failure } })
+  session.append('bid.task.changed', { state: { workflow: { kind: 'full_bid' as const, stage: s4.stage }, status: 'failed', run: null, failure } })
   expect(bidRunRecoveryEligibility(session)).toMatchObject({ eligible: true, attempts: 1, target: { runId: current.runId } })
   expect(await inspectBidStage(undefined, session, undefined, 'recovery'))
     .toMatchObject({ eligible: true, available_actions: ['bid_recover_task', 'bid_resume_current_run', 'bid_run_task(supersede=true)'] })
   for (const code of ['AUTH', 'EACCES', 'INPUT_CHANGED', 'FILE_CORRUPT']) {
-    session.append('bid.task.changed', { state: { stage: s4.stage, status: 'failed', run: null,
+    session.append('bid.task.changed', { state: { workflow: { kind: 'full_bid' as const, stage: s4.stage }, status: 'failed', run: null,
       failure: safeRecoverableBidFailure(s4, new BidStageExecutionError([{ code, message: '真实阻断' }])) } })
     expect(bidRunRecoveryEligibility(session).eligible).toBe(false)
   }
-  session.append('bid.task.changed', { state: { stage: s4.stage, status: 'failed', run: null, failure } })
+  session.append('bid.task.changed', { state: { workflow: { kind: 'full_bid' as const, stage: s4.stage }, status: 'failed', run: null, failure } })
   session.append('bid.recovery.round', { ownerSessionId: String(session.id), target,
     fingerprint: 'old', round: 3, budget: 3, state: 'blocked', reason })
   expect(bidRunRecoveryEligibility(session).eligible).toBe(false)
@@ -246,12 +246,12 @@ it('旧版候选指纹从原 Run 失败重算，同一缺项和相同策略在�
     { code: 'OUTLINE_SHARED_COMPLIANCE_MISSING', artifact: 'outline/outline.json', message: '缺少在线演示合规要求' },
   ]))
   session.append('bid.run.started', { run: run('old-run') })
-  session.append('bid.task.changed', { state: { stage: work.stage, status: 'failed', run: null, failure } })
+  session.append('bid.task.changed', { state: { workflow: { kind: 'full_bid' as const, stage: work.stage }, status: 'failed', run: null, failure } })
   session.append('bid.recovery.requested', { ownerSessionId: String(session.id),
     target: { kind: 'run', workId: work.workId, runId: 'old-run' }, unit: 'outline/outline.json',
     instruction: '保留演示要求并先写方案', progressFingerprint: '旧版包含候选 Hash 的指纹' })
   session.append('bid.run.started', { run: run('new-run') })
-  session.append('bid.task.changed', { state: { stage: work.stage, status: 'suspended', run: {
+  session.append('bid.task.changed', { state: { workflow: { kind: 'full_bid' as const, stage: work.stage }, status: 'suspended', run: {
     ...run('new-run'), cause: 'retry_exhausted', error: { ...failure,
       recovery: { ...failure.recovery!, candidateSha256: 'c'.repeat(64) } },
     progress: { phase: 'executing', summary: '其他章节已修复', completed: 5, total: 6, updatedAt: 3 },
@@ -271,7 +271,7 @@ it.each(['EVIDENCE_MAPPING_OUTLINE_SCOPE_STALE', 'EVIDENCE_MAPPING_DEPENDENCY_ST
 })
 
 it('保留能力步骤的 Mapping 模型错误码，允许主 Agent 定向修复', () => {
-  const capabilityWork: BidWorkDescriptor = { ...work, kind: 'capability_task', stage: 'evidence_mapping' }
+  const capabilityWork: BidWorkDescriptor = { kind: 'capability_task', workId: work.workId, requestRef: work.requestRef, requestSha256: work.requestSha256, inputFingerprint: work.inputFingerprint }
   const issues = [{ code: 'EVIDENCE_MAPPING_SUBAGENT_STRUCTURED_MISSING', artifact: 'MAP-REPAIR-S2.1',
     message: 'Mapping Subagent 未成功调用 finish_mapping_task 完成当前任务。' }]
   const failure = safeRecoverableBidFailure(capabilityWork, new BidStageExecutionError(issues))
@@ -296,7 +296,7 @@ it('可修复执行器问题保留原 Work 和诊断，自动修复无需挂起�
   cleanup.push(() => ctx.fiber.dispose())
   await ctx.plugin(SessionStore)
   const session = ctx.sessions.create()
-  session.append('bid.task.changed', { state: { stage: 'outline_generation', status: 'ready', run: null } })
+  session.append('bid.task.changed', { state: { workflow: { kind: 'full_bid' as const, stage: 'outline_generation' }, status: 'ready', run: null } })
   const coordinator = new BidRunCoordinator(session,
     { paused: () => false, close: () => {}, waitUntilRunnable: async () => {} },
     { drain: async () => {} }, () => 0)
@@ -329,8 +329,8 @@ it.each(['awaiting_input', 'user_stop', 'host_restart'] as const)(
     cleanup.push(() => ctx.fiber.dispose())
     await ctx.plugin(SessionStore)
     const session = ctx.sessions.create()
-    session.append('bid.task.changed', { state: { stage: 'chapter_writing', status: 'suspended',
-      run: { ...run('run-input'), work: { ...work, kind: 'capability_task', stage: 'chapter_writing' },
+    session.append('bid.task.changed', { state: { workflow: { kind: 'full_bid' as const, stage: 'chapter_writing' }, status: 'suspended',
+      run: { ...run('run-input'), work: { kind: 'capability_task', workId: work.workId, requestRef: work.requestRef, requestSha256: work.requestSha256, inputFingerprint: work.inputFingerprint },
         cause, error: { message: '需要补充资料', recovery: { kind: 'retry', unit: 'step-one', reason: '需要补充资料' } } } } })
     expect(bidRunRecoveryEligibility(session)).toMatchObject({ eligible: false, attempts: 0,
       reason: '用户停止、Host 重启或等待输入由各自边界处理。' })
@@ -349,7 +349,7 @@ it('目录损坏与重复校验错误保留主 Agent 的继续修复权限', asy
   const failure = safeRecoverableBidFailure(work, new Error('bad candidate'), [{
     code: 'OUTLINE_GENERATION_CANDIDATE_INVALID', artifact: 'outline/outline.json', message: 'missing sections',
   }])
-  session.append('bid.task.changed', { state: { stage: 'outline_generation', status: 'suspended',
+  session.append('bid.task.changed', { state: { workflow: { kind: 'full_bid' as const, stage: 'outline_generation' }, status: 'suspended',
     run: { ...run('run-one'), cause: 'retry_exhausted', error: failure } } })
   const inspected = await inspectBidStage(workspace, session, undefined, 'recovery')
   expect(inspected).toMatchObject({ eligible: true, target: { kind: 'run', runId: 'run-one', workId: 's3-work' },
@@ -361,7 +361,7 @@ it('目录损坏与重复校验错误保留主 Agent 的继续修复权限', asy
     target: { kind: 'run', workId: 's3-work', runId: 'run-one' },
     unit: 'outline/outline.json', instruction: '修正 sections 结构', progressFingerprint: first.fingerprint!,
   })
-  session.append('bid.task.changed', { state: { stage: 'outline_generation', status: 'suspended',
+  session.append('bid.task.changed', { state: { workflow: { kind: 'full_bid' as const, stage: 'outline_generation' }, status: 'suspended',
     run: { ...run('run-two'), cause: 'retry_exhausted', error: failure } } })
   expect(bidRunRecoveryEligibility(session)).toMatchObject({ eligible: true, attempts: 1 })
 })
@@ -376,7 +376,7 @@ it.each(['repair', 'retry'] as const)('%s 不因两次自动接管耗尽权限',
   }])
   const failureA = { ...base, recovery: { ...base.recovery!, kind, candidateSha256: 'a'.repeat(64) } }
   const failureB = { ...base, recovery: { ...base.recovery!, kind, candidateSha256: 'b'.repeat(64) } }
-  session.append('bid.task.changed', { state: { stage: 'outline_generation', status: 'suspended',
+  session.append('bid.task.changed', { state: { workflow: { kind: 'full_bid' as const, stage: 'outline_generation' }, status: 'suspended',
     run: { ...run('run-one'), cause: 'retry_exhausted', error: failureA } } })
   const first = bidRunRecoveryEligibility(session)
   expect(first.eligible).toBe(true)
@@ -384,7 +384,7 @@ it.each(['repair', 'retry'] as const)('%s 不因两次自动接管耗尽权限',
     ownerSessionId: String(session.id), target: { kind: 'run', workId: work.workId, runId: 'run-one' },
     unit: 'outline/outline.json', instruction: '修正章节', progressFingerprint: first.fingerprint!,
   })
-  session.append('bid.task.changed', { state: { stage: 'outline_generation', status: 'suspended',
+  session.append('bid.task.changed', { state: { workflow: { kind: 'full_bid' as const, stage: 'outline_generation' }, status: 'suspended',
     run: { ...run('run-two'), cause: 'retry_exhausted', error: failureB } } })
   const second = bidRunRecoveryEligibility(session)
   expect(second).toMatchObject({ eligible: true, attempts: 1 })
@@ -394,7 +394,7 @@ it.each(['repair', 'retry'] as const)('%s 不因两次自动接管耗尽权限',
     ownerSessionId: String(session.id), target: { kind: 'run', workId: work.workId, runId: 'run-two' },
     unit: 'outline/outline.json', instruction: '补全目录', progressFingerprint: second.fingerprint!,
   })
-  session.append('bid.task.changed', { state: { stage: 'outline_generation', status: 'suspended',
+  session.append('bid.task.changed', { state: { workflow: { kind: 'full_bid' as const, stage: 'outline_generation' }, status: 'suspended',
     run: { ...run('run-three'), cause: 'retry_exhausted', error: { ...failureB, recovery: { ...failureB.recovery, candidateSha256: 'c'.repeat(64) } } } } })
   expect(bidRunRecoveryEligibility(session)).toMatchObject({ eligible: true, attempts: 2 })
 })
@@ -413,7 +413,7 @@ it('相同检查点连续出现时执行恢复预算耗尽并保留已尝试策�
   await ctx.plugin(SessionStore)
   const session = ctx.sessions.create()
   const failure = safeRecoverableBidFailure(work, new Error('candidate rejected'), [{ code: 'OUTLINE_SHARED_WRITABLE_NOT_LEAF', message: '父节不可写' }])
-  session.append('bid.task.changed', { state: { stage: 'outline_generation', status: 'suspended',
+  session.append('bid.task.changed', { state: { workflow: { kind: 'full_bid' as const, stage: 'outline_generation' }, status: 'suspended',
     run: { ...run('run-one'), cause: 'retry_exhausted', error: failure } } })
   const fingerprint = bidRunRecoveryEligibility(session).fingerprint!
   for (let index = 0; index < 3; index++) session.append('bid.recovery.requested', {
@@ -431,7 +431,7 @@ it('恢复工具复用持久预算，配置增长不重置原 Work 上限', asyn
   await ctx.plugin(SessionStore)
   const session = ctx.sessions.create()
   const failure = safeRecoverableBidFailure(work, new Error('candidate rejected'))
-  session.append('bid.task.changed', { state: { stage: work.stage, status: 'suspended',
+  session.append('bid.task.changed', { state: { workflow: { kind: 'full_bid' as const, stage: work.stage }, status: 'suspended',
     run: { ...run('run-budget'), cause: 'retry_exhausted', error: failure } } })
   for (let index = 0; index < 3; index++) session.append('bid.recovery.requested', {
     ownerSessionId: String(session.id), target: { kind: 'run', workId: work.workId, runId: `run-${index}` },

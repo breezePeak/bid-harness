@@ -7,19 +7,19 @@ import type {
   BidRunDecision,
   BidRunDecisionType,
   BidRunProgress,
-  BidRunNotice,
   BidStage,
   BidTaskFailure,
   BidTaskState,
+  BidWorkDescriptor,
   StageArtifact,
   StageValidationIssue,
 } from './control-plane-contract.ts'
-import type { LegacyBidControlState, LegacyBidRuntimeState } from './runtime-state.ts'
 import type { WritingEntryView } from './writing-entry-contract.ts'
-import type { DocxExportOperation } from './docx-export-operation.ts'
+import type {} from './docx-export-operation.ts'
 import { createHash } from 'node:crypto'
 import { AttachmentId, type ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import { z } from 'zod'
+import { bidFigureRefSchema } from './figure-assets.ts'
 import { bidImageConnectionSpecSchema } from './bid-image-config.ts'
 import { BidImageId } from './control-plane-contract.ts'
 
@@ -38,19 +38,26 @@ const requestAttachmentSchema = z.object({
 
 /** 作图模型的完整非敏感输入；参考图由不可变附件重建。 */
 export const bidImageRequestedSchema = z.object({
-  section_id: z.string().min(1).max(8000), request_sha256: imageHash, style_sha256: imageHash,
+  owner: z.discriminatedUnion('kind', [
+    z.object({ kind: z.literal('chapter'), section_id: z.string().min(1).max(8000) }).strict(),
+    z.object({ kind: z.literal('task'), work_id: z.string().min(1), step_id: z.string().min(1) }).strict(),
+  ]), request_sha256: imageHash, style_sha256: imageHash,
   prompt: z.string().min(1).max(25_000),
   size: z.enum(['1024x1024', '1536x1024', '1024x1536']),
   model: z.string().min(1).max(200), base_url: bidImageConnectionSpecSchema.shape.baseURL,
-  reference: z.object({
+  reference: z.union([z.object({
+    kind: z.literal('style'),
     id: z.string().regex(/^IMG-[a-f0-9]{64}$/u).transform(BidImageId),
-    path: z.string().regex(/^chapters\/images\/[a-f0-9]{64}\.png$/u),
+    path: z.string().regex(/^assets\/images\/[a-f0-9]{64}\.png$/u),
     content_sha256: imageHash, request_sha256: imageHash,
     width: z.number().int().positive(), height: z.number().int().positive(),
     attachment: requestAttachmentSchema,
-  }).strict().refine(reference => reference.path === `chapters/images/${reference.content_sha256}.png`
+  }).strict().refine(reference => reference.path === `assets/images/${reference.content_sha256}.png`
     && reference.id === `IMG-${createHash('sha256').update(reference.request_sha256 + reference.content_sha256).digest('hex')}`,
-  '参考图身份与来源摘要不一致。').optional(),
+  '参考图身份与来源摘要不一致。'), z.object({ kind: z.literal('content'),
+    content_sha256: imageHash, attachment: requestAttachmentSchema, figure_ref: bidFigureRefSchema.optional(),
+    conversion: z.literal('gif-first-frame-png').optional(),
+  }).strict()]).optional(),
 }).strict()
 
 /** 一次已记录的作图请求；密钥及凭据引用不进入模型请求事件。 */
@@ -69,6 +76,8 @@ export const BID_SESSION_EVENT_TYPES = [
   'bid.run.notice',
   'bid.run.completed',
   'bid.workflow.failed',
+  'bid.workflow.started',
+  'bid.workflow.continuation',
   'bid.stage.started',
   'bid.stage.completed',
   'bid.stage.attention_required',
@@ -85,6 +94,7 @@ export const BID_SESSION_EVENT_TYPES = [
   'bid.goal.recovery.requested',
   'bid.recovery.requested',
   'bid.recovery.round',
+  'bid.user_input.recorded',
   'bid.capability.input.required',
   'bid.capability.input.received',
 ] as const
@@ -160,7 +170,7 @@ declare module '@deepseek-ai/dsh-session/types' {
   interface SessionEventMap {
     /**
      * 付费作图调用前记录的完整输入；失败与取消仍保留，不进入聊天模型历史。
-     * @param section_id 当前 Writer 允许写入的完整章节身份。
+     * @param owner 当前章节或独立任务步骤的程序身份。
      * @param request_sha256 程序绑定的图片请求摘要。
      * @param style_sha256 项目冻结的风格描述摘要。
      * @param prompt 实际发送的完整作图提示。
@@ -176,29 +186,31 @@ declare module '@deepseek-ai/dsh-session/types' {
      * @param state 已持久化的项目任务状态。
      * @param revision 项目状态文件的修订号。
      */
-    'bid.project.resumed': (
-      | { state: BidTaskState }
-      | LegacyBidControlState
-      | { runtime: LegacyBidRuntimeState }
-    ) & { revision: number }
+    'bid.project.resumed': { state: BidTaskState; revision: number }
     /** One Host-owned transition of the authoritative task state. */
     'bid.task.changed': { state: BidTaskState }
     /** One exact stage execution attempt became active. */
     'bid.run.started': { run: BidRunData }
     /** Latest bounded milestone for the exact active Run identity. */
-    'bid.run.progress': { runId: string; epoch: number; stage: BidStage; progress: BidRunProgress }
+    'bid.run.progress': { runId: string; epoch: number; progress: BidRunProgress }
     /** The running-state checkpoint failed before execution authority was granted. */
     'bid.run.start_failed': { runId: string; epoch: number }
     /** One exact execution attempt is draining before it can become resumable. */
-    'bid.run.cancelling': { runId: string; epoch: number; stage: BidStage }
+    'bid.run.cancelling': { runId: string; epoch: number }
     /** One exact execution attempt stopped without changing business progress. */
     'bid.run.suspended': { run: BidRunData & { cause: import('./control-plane-contract.ts').BidRunSuspensionCause; error?: BidTaskFailure } }
-    /** Model-invisible terminal Run row for the conversation timeline. */
-    'bid.run.notice': BidRunNotice
     /** One exact execution attempt settled after committing its stage outcome. */
     'bid.run.completed': { run: BidRunData }
     /** Project progress cannot be continued or reconciled safely. */
     'bid.workflow.failed': { stage: BidStage; reason: string; issues?: StageValidationIssue[] }
+    /** 真实用户消息授权的完整路线接纳凭据。
+     * @param source 程序绑定的来源身份及接纳时内容摘要。
+     */
+    'bid.workflow.started': { source: { session_id: string; message_id: string; content_sha256: string } }
+    /** 当前路线让出的持久 Work 引用；恢复或重置后为 null。
+     * @param reference 原会话、Run 与请求的精确引用。
+     */
+    'bid.workflow.continuation': { reference: { schema_version: 1; owner_session_id: string; run_id: string; work: BidWorkDescriptor } | null }
     /** A stage began execution and is the control plane's current running stage. */
     'bid.stage.started': { stage: BidStage; status: 'running' }
     /** A stage passed validation; artifacts remain in the workspace at these references. */
@@ -224,7 +236,7 @@ declare module '@deepseek-ai/dsh-session/types' {
     /** Native DSH question required before a suspended Run can proceed; stage_start is legacy replay data. */
     'bid.run.decision.required': {
       decisionKey: string
-      stage: BidStage
+      stage: BidStage | null
       runId: string
       decisionType: BidRunDecisionType | 'stage_start'
       question: AskUserQuestionItem
@@ -232,7 +244,7 @@ declare module '@deepseek-ai/dsh-session/types' {
     /** The explicit option selected for one previously requested native question. */
     'bid.run.decision.received': {
       decisionKey: string
-      stage: BidStage
+      stage: BidStage | null
       runId: string
       decisionType: BidRunDecisionType | 'stage_start'
       decision: BidRunDecision
@@ -268,12 +280,6 @@ declare module '@deepseek-ai/dsh-session/types' {
       | { stage: 'outline_generation' | 'evidence_mapping'; confirmed: false; feedback: string }
     /** S5 写作入口状态变更；广播安全摘要，不包含答案原文。 */
     'bid.writing_entry.changed': { view: WritingEntryView }
-    /**
-     * 独立 Word 导出进度，仅保存有界任务信息。
-     * @param operation 与主 Bid 任务分离的最新导出状态。
-     * @dshScopeScan unsupported
-     */
-    'bid.docx_export.changed': { operation: DocxExportOperation }
     /** schema_version 诊断；不改变 stage、gate、run 或可用动作。 */
     'bid.schema.warning': BidSchemaWarning
     /**
@@ -283,6 +289,7 @@ declare module '@deepseek-ai/dsh-session/types' {
      * @param unit 当前失败单元。
      * @param instruction 主 Agent 提交的具体修复方案。
      * @param progressFingerprint 恢复前的问题与检查点摘要。
+     * @param sourceMessageId 接纳时的真实用户消息；自动纠正没有新用户消息时省略。
      */
     'bid.recovery.requested': {
       ownerSessionId: string
@@ -290,6 +297,19 @@ declare module '@deepseek-ai/dsh-session/types' {
       unit: string
       instruction: string
       progressFingerprint: string
+      sourceMessageId?: string
+    }
+    /**
+     * Host 将原生回答关联到真实提问任务；未绑定 Work 的 Main 问题只属于当前会话。
+     * @param messageId 保存真实回答的用户消息。
+     * @param questionKey Host 从实际工具调用或输入检查点取得的问题身份。
+     * @param work 原提问的 Work 与请求版本；普通 Main 问题为 null。
+     * @dshScopeScan unsupported
+     */
+    'bid.user_input.recorded': {
+      messageId: string
+      questionKey: string
+      work: { workId: string; requestSha256: string } | null
     }
     /**
      * Host 对一次失败纠正轮的持久结算；预算按原 Work 或已保存写作请求累计。
@@ -347,3 +367,27 @@ declare module '@deepseek-ai/dsh-session/types' {
 
 /** Bid-owned projection of the declaration-merged DSH session event map. */
 export type BidSessionEventMap = Pick<SessionEventMap, BidSessionEventType>
+
+declare module '@deepseek-ai/dsh-session/types' {
+  interface SessionEventMap {
+    /**
+     * 一次图内容或最终 Word 页面视觉审核请求；不进入正文对话上下文。
+     * @param blockId 被审核的稳定视觉块标识。
+     * @param inputHash 被审核输入的内容及版本摘要。
+     * @param messages 实际图片附件与本次审核约束。
+     * @param system 当前图内容或页面检查职责。
+     * @param provider 实际调用的服务商。
+     * @param model 实际调用的模型。
+     * @param maxTokens 输出上限。
+     */
+    'bid.visual-review.request': {
+      blockId: string
+      inputHash: string
+      messages: import('@deepseek-ai/dsh-llm').Message[]
+      system: string
+      provider: string
+      model: string
+      maxTokens: number
+    }
+  }
+}

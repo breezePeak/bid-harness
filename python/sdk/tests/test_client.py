@@ -61,7 +61,11 @@ for line in sys.stdin:
         print(json.dumps({"jsonrpc": "2.0", "method": "session.event", "params": {
             "sessionId": params["sessionId"], "event": {"type": "bid.recovery.requested", "data": {
                 "ownerSessionId": params["sessionId"], "target": {"kind": "run", "workId": "work-1", "runId": "run-1"},
-                "unit": "outline/outline.json", "instruction": "核对原文并修正当前章节。", "progressFingerprint": "a" * 64,
+                "unit": "outline/outline.json", "instruction": "核对原文并修正当前章节。", "progressFingerprint": "a" * 64, "sourceMessageId": "answer-1",
+            }}}}), flush=True)
+        print(json.dumps({"jsonrpc": "2.0", "method": "session.event", "params": {
+            "sessionId": params["sessionId"], "event": {"type": "bid.user_input.recorded", "data": {
+                "messageId": "answer-1", "questionKey": "question-1", "work": {"workId": "work-1", "requestSha256": "b" * 64},
             }}}}), flush=True)
         print(json.dumps({"jsonrpc": "2.0", "method": "session.event", "params": {
             "sessionId": params["sessionId"], "event": {"type": "bid.recovery.round", "data": {
@@ -151,7 +155,10 @@ for line in sys.stdin:
     assert next(event["data"] for event in result.events if event["type"] == "bid.run.notice")["noticeId"] == "run:run-1:failed"
     assert next(event["data"] for event in result.events if event["type"] == "bid.recovery.requested") == {
         "ownerSessionId": "main", "target": {"kind": "run", "workId": "work-1", "runId": "run-1"},
-        "unit": "outline/outline.json", "instruction": "核对原文并修正当前章节。", "progressFingerprint": "a" * 64,
+        "unit": "outline/outline.json", "instruction": "核对原文并修正当前章节。", "progressFingerprint": "a" * 64, "sourceMessageId": "answer-1",
+    }
+    assert next(event["data"] for event in result.events if event["type"] == "bid.user_input.recorded") == {
+        "messageId": "answer-1", "questionKey": "question-1", "work": {"workId": "work-1", "requestSha256": "b" * 64},
     }
     assert next(event["data"] for event in result.events if event["type"] == "bid.recovery.round") == {
         "ownerSessionId": "main", "target": {"kind": "run", "workId": "work-1", "runId": "run-1"},

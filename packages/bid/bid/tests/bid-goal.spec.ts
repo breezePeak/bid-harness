@@ -62,7 +62,7 @@ async function setup(stage: 'file_intake' | 'tender_analysis', withGoal = true, 
     await ctx.plugin(GoalRoundDriver)
   }
   const workspace = new BidWorkspace(root)
-  await checkpointBidProjectState(workspace, { stage, status: 'waiting_user', run: null })
+  await checkpointBidProjectState(workspace, { workflow: { kind: 'full_bid' as const, stage: stage }, status: 'waiting_user', run: null })
   // 配置加载的原始对象省略字段；Schemastery 在进入 Host 前补齐并校验默认值。
   await ctx.plugin(BidHostRuntime, BidHostRuntime.Config({ modelStageRepairAttempts } as Parameters<typeof BidHostRuntime.Config>[0]))
   const handle = await ctx.agentLoop.createAgent(ctx, {
@@ -75,7 +75,7 @@ async function setup(stage: 'file_intake' | 'tender_analysis', withGoal = true, 
   return { ctx, host, agent: handle.agent, workspace, clearAdapter }
 }
 
-function work(stage: 'file_intake' | 'tender_analysis'): BidWorkDescriptor {
+function work(stage: 'file_intake' | 'tender_analysis'): Exclude<BidWorkDescriptor, { kind: 'capability_task' }> {
   return {
     kind: stage === 'file_intake' ? 'file_intake' : 'stage_execution',
     stage, workId: `work-${stage}`, requestRef: 'requests/test.json',
@@ -118,7 +118,7 @@ it.each(['tender_analysis', 'outline_generation', 'evidence_mapping', 'chapter_w
     const descriptor = { ...work('tender_analysis'), stage }
     const interrupted = { runId: `interrupted-${stage}`, epoch: 1, baseProjectRevision: 1,
       work: descriptor, startedAt: 1, updatedAt: 1 }
-    await checkpointBidProjectState(workspace, { stage, status: 'running', run: interrupted })
+    await checkpointBidProjectState(workspace, { workflow: { kind: 'full_bid' as const, stage: stage }, status: 'running', run: interrupted })
     const resume = vi.spyOn(ctx.bid, 'resumeCurrentRun').mockResolvedValue(BID_INITIAL_TASK_STATE)
     const driver = host as unknown as { driveStartedSession(agent: Agent, cwd: string): Promise<void> }
     await driver.driveStartedSession(agent, workspace.root)
@@ -152,7 +152,7 @@ it('S5 完成不完成显式 Goal，旧绑定事件不参与调度', async () =>
   const gate = ctx.goalRoundDriver.registerGate(() => 'wait')
   const goal = ctx.goals.create(agent, { objective: '核对整体资料' })
   agent.session.append('bid.goal.bound', { goalId: goal.id, ownerSessionId: String(agent.id), initialS2WorkId: 'legacy' })
-  await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'ready', run: null })
+  await checkpointBidProjectState(workspace, { workflow: { kind: 'full_bid' as const, stage: 'chapter_writing' }, status: 'ready', run: null })
   const operation = host.beginOperation(agent.session)
   await host.prepareOperation(operation)
   const run = await operation.runs.start({ ...work('tender_analysis'), stage: 'chapter_writing' })
@@ -202,7 +202,7 @@ it('Busy Gate 在后台操作期间不消耗 Goal 轮次，结束后允许正常
   await vi.waitFor(() =>{  expect(ctx.goals.get(agent)?.phase).toBe('complete') })
   await agent.whenIdle()
   expect(seen[0]).toEqual(expect.arrayContaining(['bid_stage_inspect', 'bid_project_inspect', 'get_goal', 'update_goal']))
-  expect(seen[0]).not.toContain('bid_run_task')
+  expect(seen[0]).toContain('bid_run_task')
   expect(seen[0]).not.toContain('create_goal')
   expect(authorizations[0]).toMatchObject({ session_id: String(agent.session.id), message_id: expect.any(String) as string })
   expect(resolveBidToolAuthorization(agent)).toBeUndefined()
@@ -222,8 +222,8 @@ it('waiting_user 的显式 Goal 可读取和更新，普通消息不可创建 Go
 it('原生 Goal Round 通过 bid_run_task 发布能力结果，授权只保存会话和消息身份', async () => {
   const { ctx, agent, workspace, clearAdapter } = await setup('tender_analysis')
   await seedCapabilityProject(workspace, 'partial')
-  await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'completed', run: null })
-  agent.session.append('bid.task.changed', { state: { stage: 'chapter_writing', status: 'completed', run: null } })
+  await checkpointBidProjectState(workspace, { workflow: { kind: 'full_bid' as const, stage: 'chapter_writing' }, status: 'completed', run: null })
+  agent.session.append('bid.task.changed', { state: { workflow: { kind: 'full_bid' as const, stage: 'chapter_writing' }, status: 'completed', run: null } })
   let request = 0
   let authorization: ReturnType<typeof resolveBidToolAuthorization>
   clearAdapter()
@@ -251,8 +251,8 @@ it('原生 Goal Round 通过 bid_run_task 发布能力结果，授权只保存�
   const saved = capabilityTaskRequestSchema.parse(await readBidWorkRequest(workspace, work!))
   expect(saved.authorization).toEqual(authorization)
   expect(Object.keys(saved.authorization).sort()).toEqual(['message_id', 'session_id'])
-  await expect(persistCapabilityTaskRequest(workspace, agent.session, 'chapter_writing', saved.task,
-    saved.authorization, [], saved.return_state, agent)).rejects.toThrow('BID_CAPABILITY_USER_MESSAGE_REQUIRED')
+  await expect(persistCapabilityTaskRequest(workspace, agent.session, saved.task,
+    saved.authorization, [], agent)).rejects.toThrow('BID_CAPABILITY_USER_MESSAGE_REQUIRED')
 })
 
 it('后续合法 Goal 轮次可修改未执行步骤，旧轮次与伪造来源不能授权新修改', async () => {
@@ -270,12 +270,12 @@ it('后续合法 Goal 轮次可修改未执行步骤，旧轮次与伪造来源�
       const authorization = resolveBidToolAuthorization(agent)!
       if (round === 1) {
         firstAuthorization = authorization
-        work = await persistCapabilityTaskRequest(workspace, agent.session, 'chapter_writing', {
+        work = await persistCapabilityTaskRequest(workspace, agent.session, {
           goal: '审核章节和全书', scope: { kind: 'project' }, steps: [
             { description: '审核章节', scope: { source: 'task' }, call: { capability: 'chapter.review', input: { reason: '审核章节' } } },
             { description: '审核全书', scope: { source: 'task' }, call: { capability: 'document.review', input: { reason: '审核全书' } } },
           ],
-        }, authorization, ['chapters/execution-log.json'], { stage: 'chapter_writing', status: 'completed', run: null }, agent)
+        }, authorization, ['chapters/execution-log.json'], agent)
         saved = capabilityTaskRequestSchema.parse(await readBidWorkRequest(workspace, work))
         await expect(executeCapabilityTask(workspace, createTestBidRunContext({ work }), {
           allowedWrites: async (call) => {
@@ -323,7 +323,7 @@ it('无 Goal 时主 Agent 恢复原 Run；重复失败再次 steer，相同指�
   const steer = vi.spyOn(agent, 'steer')
   const payload = { stage: 'tender_analysis' }
   const inputs = buildBidStageTask('tender_analysis').inputs.map(path => ({ path, sha256: null }))
-  const descriptor = await persistBidWorkRequest(workspace, 'stage_execution', 'tender_analysis', payload,
+  const descriptor = await persistBidWorkRequest(workspace, { kind: 'stage_execution', stage: 'tender_analysis' }, payload,
     { stage: 'tender_analysis', inputs, payload })
   const operation = host.beginOperation(agent.session)
   await host.prepareOperation(operation)
@@ -405,7 +405,7 @@ it.each([0, 3])('自动纠正耗尽且已执行 %i 次时新消息可继续原 R
   message('开始')
   const payload = { stage: 'tender_analysis' }
   const inputs = buildBidStageTask('tender_analysis').inputs.map(path => ({ path, sha256: null }))
-  const descriptor = await persistBidWorkRequest(workspace, 'stage_execution', 'tender_analysis', payload,
+  const descriptor = await persistBidWorkRequest(workspace, { kind: 'stage_execution', stage: 'tender_analysis' }, payload,
     { stage: 'tender_analysis', inputs, payload })
   const failure = safeRecoverableBidFailure(descriptor, new Error('missing submission'))
   const operation = host.beginOperation(session)
@@ -477,8 +477,8 @@ it.each(['file_intake', 'outline_generation', 'evidence_mapping', 'chapter_writi
   '重置到 %s 不更新或清除显式 Goal', async (stage) => {
     const { ctx, host, agent, workspace } = await setup('tender_analysis')
     await seedCapabilityProject(workspace, 'partial')
-    await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'completed', run: null })
-    agent.session.append('bid.task.changed', { state: { stage: 'chapter_writing', status: 'completed', run: null } })
+    await checkpointBidProjectState(workspace, { workflow: { kind: 'full_bid' as const, stage: 'chapter_writing' }, status: 'completed', run: null })
+    agent.session.append('bid.task.changed', { state: { workflow: { kind: 'full_bid' as const, stage: 'chapter_writing' }, status: 'completed', run: null } })
     const disposeGate = ctx.goalRoundDriver.registerGate(() => 'wait')
     const goal = ctx.goals.create(agent, { objective: '核对资料' })
     await ctx.bid.resetStage(agent, stage)

@@ -150,12 +150,12 @@ it('资料任务登记后来源分块丢失时预检给出具体来源错误', a
   const message = createUserMessage({ content: [{ type: 'text', text: '仅补第三章资料' }], source: { kind: 'user' } })
   session.append('turn/start', { turn: 1 })
   session.append('user/message', message, { surfaceOp: 'append' })
-  const work = await persistCapabilityTaskRequest(workspace, session, 'chapter_writing', {
+  const work = await persistCapabilityTaskRequest(workspace, session, {
     goal: '仅补第三章资料', scope: { kind: 'sections', section_ids: ['SEC-3'] },
     steps: [{ description: '补充第三章资料', scope: { source: 'task' }, call: { capability: 'evidence.research',
       input: { mode: 'supplement', reason: '补充第三章资料', allow_outline_refinement: false } } }],
   }, { session_id: String(session.id), message_id: String(message.id) },
-  BID_CAPABILITIES['evidence.research'].requires, { stage: 'chapter_writing', status: 'completed', run: null })
+  BID_CAPABILITIES['evidence.research'].requires)
   const source = (await workspace.readManifest()).files.find(file => file.role === 'reference'
     && file.parseStatus === 'success')
   if (source?.chunksPath === null || source?.chunksPath === undefined
@@ -241,12 +241,12 @@ it('段落引用在接纳后变化时，恢复拒绝旧选区且不启动 Writer
   const message = createUserMessage({ content: [{ type: 'text', text: '缩短选中段落' }], source: { kind: 'user' } })
   session.append('turn/start', { turn: 1 })
   session.append('user/message', message, { surfaceOp: 'append' })
-  const work = await persistCapabilityTaskRequest(workspace, session, 'chapter_writing', {
+  const work = await persistCapabilityTaskRequest(workspace, session, {
     goal: '缩短选中段落', scope: { kind: 'paragraphs', reference },
     steps: [{ description: '缩短选中段落', scope: { source: 'task' }, call: { capability: 'chapter.revise',
       input: { instruction: '缩短选中段落', reference } } }],
   }, { session_id: String(session.id), message_id: String(message.id) },
-  BID_CAPABILITIES['chapter.revise'].requires, { stage: 'chapter_writing', status: 'completed', run: null })
+  BID_CAPABILITIES['chapter.revise'].requires)
   const revised = markdown.replace(text, '流程一：先收集输入。')
   await writeFile(path, revised)
   const runner = vi.fn()
@@ -272,7 +272,7 @@ it('接纳后目标章节被移除时，旧任务拒绝改写相邻章节', asyn
   const message = createUserMessage({ content: [{ type: 'text', text: '修改第一章标题' }], source: { kind: 'user' } })
   session.append('turn/start', { turn: 1 })
   session.append('user/message', message, { surfaceOp: 'append' })
-  const work = await persistCapabilityTaskRequest(workspace, session, 'chapter_writing', {
+  const work = await persistCapabilityTaskRequest(workspace, session, {
     goal: '修改第一章标题', scope: { kind: 'sections', section_ids: ['SEC-1'] },
     steps: [{ description: '执行已授权的测试步骤', scope: { source: 'task' }, call: { capability: 'outline.update', input: {
       operations: [{ type: 'update_section', section_id: 'SEC-1', title: '新标题' }],
@@ -280,7 +280,7 @@ it('接纳后目标章节被移除时，旧任务拒绝改写相邻章节', asyn
       defer_content_migration: false,
     } } }],
   }, { session_id: String(session.id), message_id: String(message.id) },
-  BID_CAPABILITIES['outline.update'].requires, { stage: 'chapter_writing', status: 'completed', run: null })
+  BID_CAPABILITIES['outline.update'].requires)
   const body = join(workspace.projectRoot, 'chapters/sections/0002.md')
   const before = await readFile(body, 'utf8')
   for (const name of ['outline/outline.json', 'outline/confirmed-outline.json']) {

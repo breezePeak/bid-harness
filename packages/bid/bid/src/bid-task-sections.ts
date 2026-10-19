@@ -1,7 +1,7 @@
 /** 原目录授权身份到本 Work 当前章节的解析；退役记录不能扩大原任务范围。 */
 import { readFile } from 'node:fs/promises'
 import type { BidWorkspace } from './index.ts'
-import type { BidCapabilityTask } from './bid-capability-contract.ts'
+import { isBidChapterScope, type BidCapabilityTask } from './bid-capability-contract.ts'
 import { readCapabilityOutlineBaseline } from './outline-draft-store.ts'
 import { outlineReassignmentSchema } from './outline-capability-update.ts'
 import { outlineArtifactSha256 } from './outline-confirmation-artifacts.ts'
@@ -18,6 +18,7 @@ import { assertNoLinkedPath, within } from './workspace-path.ts'
  */
 export async function resolveBidTaskSections(canonical: BidWorkspace, working: BidWorkspace,
   task: BidCapabilityTask, roots: readonly string[]): Promise<Set<string>> {
+  if (!isBidChapterScope(task.scope)) throw new Error('BID_CAPABILITY_CHAPTER_SCOPE_INVALID')
   const before = (await readCapabilityOutlineBaseline(canonical)).outline
   const after = (await readCapabilityOutlineBaseline(working)).outline
   const beforeIds = new Set(before.sections.map(section => section.id))

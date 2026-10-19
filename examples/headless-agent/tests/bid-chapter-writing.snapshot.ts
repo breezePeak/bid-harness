@@ -125,7 +125,7 @@ it('S5 通过真实 Loader 在 Writer 补搜后重研 Evidence 并审核最终�
   expect(JSON.parse(result.stdout)).toEqual({
     evidence_synced: true,
     askedForRequirements: false,
-    runtime: { stage: 'chapter_writing', status: 'completed', run: null },
+    runtime: { workflow: { kind: 'full_bid', stage: 'chapter_writing' }, status: 'completed', run: null },
     allowed_actions: ['send_message', 'export_docx', 'revise_chapter'],
     artifacts: [
       { stage: 'chapter_writing', type: 'chapter_execution_plan', path: 'chapters/execution-plan.json' },
@@ -177,7 +177,7 @@ it('S5 真实 Loader 按需生图、拒绝未确认图片并保存统一风格�
       const document = await readDocxXml(await readFile(join(projectRoot, 'output/bid.docx')))
       expect(JSON.stringify(document['word/document.xml'])).toContain('w:drawing')
       expect(JSON.stringify(document['word/document.xml'])).toContain('访问控制实施场景示意图')
-      const payload = { style: JSON.parse(await readFile(join(projectRoot, 'chapters/image-style.json'), 'utf8')) as unknown,
+      const payload = { style: JSON.parse(await readFile(join(projectRoot, 'assets/image-style.json'), 'utf8')) as unknown,
         images: metadata.images, markdown: await readFile(join(projectRoot, 'output/bid.md'), 'utf8') }
       expect(payload.markdown).toContain(`![访问控制实施场景示意图](${metadata.images![0]!.path})\n\n图 访问控制实施场景示意图`)
       expect(payload.markdown.match(/访问控制实施场景示意图/gu)).toHaveLength(2)

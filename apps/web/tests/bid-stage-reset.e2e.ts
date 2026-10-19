@@ -37,7 +37,7 @@ it('同 S1 重置清空资料、模板及失败反馈，重连不清除新选择
     await page.goto(scaffold.baseUrl, { waitUntil: 'load' })
     await connectFreshWorkspaceZh(page, scaffold.workspaceCwd)
     const panel = page.getByRole('region', { name: '技术标生成' })
-    await panel.waitFor()
+    await expect.poll(() => scaffold.ctx.agents.list().some(candidate => resolveSessionPreset(candidate.session) === 'bid')).toBe(true)
     const agent = scaffold.ctx.agents.list().find(candidate => resolveSessionPreset(candidate.session) === 'bid')
     if (agent?.session.header.cwd === undefined) throw new Error('缺少标书会话工作区')
     const workspace = new BidWorkspace(agent.session.header.cwd)
@@ -54,7 +54,7 @@ it('同 S1 重置清空资料、模板及失败反馈，重连不清除新选择
       revision: template.state.revision, userConfirmed: { 'body.size': 14 },
     })
     await scaffold.ctx.bid.saveDocxFormat(agent.session, null, { revision: 0, userConfirmed: { 'page.left': 25 } })
-    const initial = await checkpointBidProjectState(workspace, { stage: 'file_intake', status: 'waiting_user', run: null })
+    const initial = await checkpointBidProjectState(workspace, { workflow: { kind: 'full_bid' as const, stage: 'file_intake' }, status: 'waiting_user', run: null })
     agent.session.append('bid.project.resumed', { revision: initial.revision, state: bidProjectTaskState(initial) })
     seedConversation(agent.session)
     await scaffold.ctx.sessions.flush(agent.session)
@@ -91,8 +91,12 @@ it('同 S1 重置清空资料、模板及失败反馈，重连不清除新选择
     expect(await panel.getByText('正在解析 Word 模板…', { exact: true }).count()).toBe(0)
     expect(await panel.getByText('请添加本项目资料', { exact: true }).count()).toBe(1)
     expect(await panel.getByRole('button', { name: '上传并解析', exact: true }).isDisabled()).toBe(true)
-    for (const path of ['input', 'corpus', 'manifest.json', 'word-export', 'analysis', 'outline', 'chapters', 'flowcharts', 'output']) {
+    for (const path of ['input', 'corpus', 'manifest.json', 'word-export', 'analysis', 'outline', 'chapters']) {
       await expect(access(join(workspace.projectRoot, path))).rejects.toMatchObject({ code: 'ENOENT' })
+    }
+    expect((await workspace.readManifest()).files.every(file => file.role === null)).toBe(true)
+    for (const path of ['flowcharts', 'output']) {
+      expect(await readFile(join(workspace.projectRoot, path, 'previous.txt'), 'utf8')).toBe('旧项目产物')
     }
     expect((await scaffold.ctx.bid.getDocxTemplateLibrary(agent.session)).templates).toEqual([])
     expect((await scaffold.ctx.bid.getDocxFormat(agent.session, null)).state.userConfirmed).toEqual({})

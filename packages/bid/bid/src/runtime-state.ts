@@ -2,7 +2,6 @@ import type { SessionEvent } from '@deepseek-ai/dsh-session/types'
 import { z } from 'zod'
 import {
   BID_STAGES,
-  BID_WORK_KINDS,
   type BidStage,
 } from './control-plane-contract.ts'
 import type {
@@ -15,6 +14,7 @@ import type {
   BidTaskState,
   StageValidationIssue,
 } from './control-plane-contract.ts'
+import { bidWorkDescriptorSchema } from './work-descriptor.ts'
 import { defaultBidNextStage, defaultBidUserGate } from './default-route.ts'
 
 const stageValidationIssueSchema = z.object({
@@ -53,14 +53,7 @@ export const bidRunDataSchema = z.object({
   epoch: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
   baseProjectRevision: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
   controlRevision: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional(),
-  work: z.object({
-    kind: z.enum(BID_WORK_KINDS),
-    workId: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u),
-    stage: z.enum(BID_STAGES),
-    requestRef: z.string().min(1),
-    requestSha256: z.string().regex(/^[a-f0-9]{64}$/u),
-    inputFingerprint: z.string().regex(/^[a-f0-9]{64}$/u),
-  }).strict(),
+  work: bidWorkDescriptorSchema,
   resumeOf: z.object({
     runId: z.string().min(1),
     cause: z.enum(['user_stop', 'retry_exhausted', 'executor_error', 'host_restart', 'awaiting_input']),
@@ -70,69 +63,38 @@ export const bidRunDataSchema = z.object({
   updatedAt: z.number().int().nonnegative(),
 }).strict()
 
+/** 专业路线只保存业务位置。 */
+export const bidWorkflowContextSchema = z.object({ kind: z.literal('full_bid'), stage: z.enum(BID_STAGES) }).strict().nullable()
+
 /** Authoritative task schema; impossible Run combinations fail at the persistence and wire boundaries. */
 export const bidTaskStateSchema: z.ZodType<BidTaskState> = z.discriminatedUnion('status', [
-  z.object({ stage: z.enum(BID_STAGES), status: z.literal('ready'), run: z.null() }).strict(),
-  z.object({ stage: z.enum(BID_STAGES), status: z.literal('running'), run: bidRunDataSchema }).strict(),
+  z.object({ workflow: bidWorkflowContextSchema, status: z.literal('ready'), run: z.null() }).strict(),
+  z.object({ workflow: bidWorkflowContextSchema, status: z.literal('running'), run: bidRunDataSchema }).strict(),
   z.object({
-    stage: z.enum(BID_STAGES), status: z.literal('waiting_user'), run: z.null(),
+    workflow: bidWorkflowContextSchema, status: z.literal('waiting_user'), run: z.null(),
     reason: z.string().optional(), issues: z.array(stageValidationIssueSchema).readonly().optional(),
   }).strict(),
   z.object({
-    stage: z.enum(BID_STAGES), status: z.literal('suspended'),
+    workflow: bidWorkflowContextSchema, status: z.literal('suspended'),
     run: bidRunDataSchema.extend({
       cause: z.enum(['user_stop', 'retry_exhausted', 'executor_error', 'host_restart', 'awaiting_input']),
       error: bidTaskFailureSchema.optional(),
     }),
   }).strict(),
   z.object({
-    stage: z.enum(BID_STAGES), status: z.literal('failed'), run: z.null(), failure: bidTaskFailureSchema,
+    workflow: bidWorkflowContextSchema, status: z.literal('failed'), run: z.null(), failure: bidTaskFailureSchema,
   }).strict(),
-  z.object({ stage: z.enum(BID_STAGES), status: z.literal('completed'), run: z.null() }).strict(),
+  z.object({ workflow: bidWorkflowContextSchema, status: z.literal('completed'), run: z.null() }).strict(),
 ]).superRefine((task, context) => {
-  if ((task.status === 'running' || task.status === 'suspended') && task.run.work.stage !== task.stage) {
+  if ((task.status === 'running' || task.status === 'suspended') && task.run.work.kind !== 'capability_task' && task.run.work.stage !== task.workflow?.stage) {
     context.addIssue({ code: 'custom', path: ['run', 'work', 'stage'], message: 'run work stage must match task stage' })
   }
 })
 
 /** Task state produced by an empty Bid Session log. */
 export const BID_INITIAL_TASK_STATE: BidTaskState = Object.freeze({
-  stage: 'file_intake', status: 'waiting_user', run: null,
+  workflow: null, status: 'ready', run: null,
 })
-
-/** 重放旧版项目与 Session 记录时接纳的运行态结构。 @deprecated 仅用于 v3 兼容读取。 */
-export const legacyBidRuntimeSchema = z.object({
-  stage: z.enum(BID_STAGES),
-  status: z.enum(['pending', 'waiting_start', 'running', 'waiting_user', 'suspended', 'attention_required', 'failed', 'completed']),
-  failureReason: z.string().optional(),
-  failureIssues: z.array(stageValidationIssueSchema).readonly().optional(),
-}).strict()
-
-const legacyBidRunSchema = bidRunDataSchema.extend({
-  stage: z.enum(BID_STAGES),
-  status: z.enum(['running', 'cancelling', 'suspended', 'completed']),
-  cause: z.enum(['user_stop', 'retry_exhausted', 'executor_error', 'host_restart', 'awaiting_input']).optional(),
-  error: bidTaskFailureSchema.optional(),
-}).strict()
-
-/** 旧版项目控制记录的读取结构。 @deprecated 仅用于 v3 兼容读取。 */
-export const legacyBidControlStateSchema = z.object({
-  workflow: z.object({
-    stage: z.enum(BID_STAGES),
-    gate: z.enum(['ready', 'waiting_start', 'waiting_user', 'attention_required', 'completed', 'failed']),
-    failureReason: z.string().optional(),
-    failureIssues: z.array(stageValidationIssueSchema).readonly().optional(),
-  }).strict(),
-  run: legacyBidRunSchema.nullable(),
-  lastRun: legacyBidRunSchema.nullable(),
-}).strict()
-
-/** 旧版 Session 投影中的阶段运行态，仅供兼容读取。 */
-// oxlint-disable-next-line typescript/no-deprecated -- 此类型描述旧版持久化结构。
-export type LegacyBidRuntimeState = z.infer<typeof legacyBidRuntimeSchema>
-/** 旧版项目控制记录，仅供兼容读取。 */
-// oxlint-disable-next-line typescript/no-deprecated -- 此类型描述旧版持久化结构。
-export type LegacyBidControlState = z.infer<typeof legacyBidControlStateSchema>
 
 const POLICIES: { readonly [K in BidStage]: Readonly<BidStagePolicy> } = {
   file_intake: {
@@ -284,87 +246,9 @@ export function cloneBidTaskState(task: BidTaskState): BidTaskState {
 export function suspendForHostRestart(task: BidTaskState, updatedAt = Date.now()): BidTaskState {
   if (task.status !== 'running') return task
   return {
-    stage: task.stage,
+    workflow: task.workflow,
     status: 'suspended',
     run: { ...task.run, cause: 'host_restart', updatedAt },
-  }
-}
-
-function placeholderRun(stage: BidStage): BidRunData {
-  return {
-    runId: `legacy-${stage}`,
-    epoch: 0,
-    baseProjectRevision: 0,
-    work: {
-      kind: 'stage_execution', workId: `legacy-${stage}`, stage,
-      requestRef: `requests/legacy-${stage}.json`, requestSha256: '0'.repeat(64), inputFingerprint: '0'.repeat(64),
-    },
-    startedAt: 0,
-    updatedAt: 0,
-  }
-}
-
-function legacyFailure(reason: string | undefined, issues: readonly StageValidationIssue[] | undefined): BidTaskFailure {
-  return {
-    message: reason ?? '旧项目记录的当前阶段失败。',
-    ...issues === undefined ? {} : { issues: issues.map(cloneIssue) },
-  }
-}
-
-function runDataFromLegacy(run: NonNullable<LegacyBidControlState['run']>): BidRunData {
-  return cloneRun({
-    runId: run.runId,
-    ...run.interactionSessionId === undefined ? {} : { interactionSessionId: run.interactionSessionId },
-    ...run.executionSessionId === undefined ? {} : { executionSessionId: run.executionSessionId },
-    epoch: run.epoch,
-    baseProjectRevision: run.baseProjectRevision,
-    ...run.controlRevision === undefined ? {} : { controlRevision: run.controlRevision },
-    work: { ...run.work },
-    ...run.resumeOf === undefined ? {} : { resumeOf: { ...run.resumeOf } },
-    ...run.progress === undefined ? {} : { progress: { ...run.progress } },
-    startedAt: run.startedAt,
-    updatedAt: run.updatedAt,
-  })
-}
-
-/** 将旧版扁平 Session 投影归一为当前任务状态。
- * @param runtime 旧版阶段运行态。
- * @returns 当前结构的任务状态。
- */
-export function normalizeLegacyBidRuntime(runtime: LegacyBidRuntimeState): BidTaskState {
-  const failure = legacyFailure(runtime.failureReason, runtime.failureIssues)
-  switch (runtime.status) {
-    case 'running': return startRun(markReady(runtime.stage), placeholderRun(runtime.stage))
-    case 'suspended': return suspendRun(markReady(runtime.stage), placeholderRun(runtime.stage), 'host_restart', failure)
-    case 'failed': return markFailed(runtime.stage, failure)
-    case 'pending':
-    case 'waiting_start': return markReady(runtime.stage)
-    case 'waiting_user': return waitForUser(runtime.stage)
-    case 'attention_required': return waitForUser(runtime.stage, runtime.failureReason, runtime.failureIssues)
-    case 'completed': return markCompleted(runtime.stage)
-  }
-}
-
-/** 将旧版 v3 项目控制记录归一为单一任务状态。
- * @param legacy 旧版控制记录。
- * @returns 当前结构的任务状态。
- */
-export function normalizeLegacyBidControlState(legacy: LegacyBidControlState): BidTaskState {
-  const { workflow, run } = legacy
-  if (run?.status === 'running') return startRun(markReady(workflow.stage), runDataFromLegacy(run))
-  if (run?.status === 'cancelling') {
-    return suspendRun(markReady(workflow.stage), runDataFromLegacy(run), 'host_restart', run.error)
-  }
-  if (run?.status === 'suspended') {
-    return suspendRun(markReady(workflow.stage), runDataFromLegacy(run), run.cause ?? 'host_restart', run.error)
-  }
-  switch (workflow.gate) {
-    case 'ready':
-    case 'waiting_start': return markReady(workflow.stage)
-    case 'waiting_user': return waitForUser(workflow.stage)
-    case 'attention_required': return waitForUser(workflow.stage, workflow.failureReason, workflow.failureIssues)
-    case 'failed': return markFailed(workflow.stage, legacyFailure(workflow.failureReason, workflow.failureIssues))
-    case 'completed': return markCompleted(workflow.stage)
   }
 }
 
@@ -373,7 +257,7 @@ export function normalizeLegacyBidControlState(legacy: LegacyBidControlState): B
  * @returns 没有关联 Run 的就绪状态。
  */
 export function markReady(stage: BidStage): BidTaskState {
-  return { stage, status: 'ready', run: null }
+  return { workflow: { kind: 'full_bid', stage: stage }, status: 'ready', run: null }
 }
 
 /** 启动 Work 所属阶段与当前阶段一致的 Run。
@@ -382,8 +266,8 @@ export function markReady(stage: BidStage): BidTaskState {
  * @returns 包含独立 Run 数据的运行中状态。
  */
 export function startRun(state: BidTaskState, run: BidRunData): BidTaskState {
-  if (run.work.stage !== state.stage) throw new Error('BID_RUN_STAGE_MISMATCH')
-  return { stage: state.stage, status: 'running', run: cloneRun(run) }
+  if (run.work.kind !== 'capability_task' && run.work.stage !== state.workflow?.stage) throw new Error('BID_RUN_STAGE_MISMATCH')
+  return { workflow: state.workflow, status: 'running', run: cloneRun(run) }
 }
 
 /** 在 Run 完全收敛后记录可恢复的挂起状态。
@@ -399,9 +283,9 @@ export function suspendRun(
   cause: import('./control-plane-contract.ts').BidRunSuspensionCause,
   error?: BidTaskFailure,
 ): BidTaskState {
-  if (run.work.stage !== state.stage) throw new Error('BID_RUN_STAGE_MISMATCH')
+  if (run.work.kind !== 'capability_task' && run.work.stage !== state.workflow?.stage) throw new Error('BID_RUN_STAGE_MISMATCH')
   return {
-    stage: state.stage,
+    workflow: state.workflow,
     status: 'suspended',
     run: { ...cloneRun(run), cause, ...error === undefined ? {} : { error: cloneFailure(error) } },
   }
@@ -419,7 +303,7 @@ export function waitForUser(
   issues?: readonly StageValidationIssue[],
 ): BidTaskState {
   return {
-    stage, status: 'waiting_user', run: null,
+    workflow: { kind: 'full_bid', stage: stage }, status: 'waiting_user', run: null,
     ...reason === undefined ? {} : { reason },
     ...issues === undefined ? {} : { issues: issues.map(cloneIssue) },
   }
@@ -431,7 +315,7 @@ export function waitForUser(
  * @returns 带独立失败诊断的终止状态。
  */
 export function markFailed(stage: BidStage, failure: BidTaskFailure): BidTaskState {
-  return { stage, status: 'failed', run: null, failure: cloneFailure(failure) }
+  return { workflow: { kind: 'full_bid', stage: stage }, status: 'failed', run: null, failure: cloneFailure(failure) }
 }
 
 /** 记录不再保留 Run 的最终完成状态。
@@ -439,7 +323,7 @@ export function markFailed(stage: BidStage, failure: BidTaskFailure): BidTaskSta
  * @returns 完成状态。
  */
 export function markCompleted(stage: BidStage): BidTaskState {
-  return { stage, status: 'completed', run: null }
+  return { workflow: { kind: 'full_bid', stage: stage }, status: 'completed', run: null }
 }
 
 /** 将已完成阶段推进到下一自动阶段的就绪检查点。
@@ -459,23 +343,20 @@ export function advanceStage(_current: BidTaskState, next: BidStage): BidTaskSta
  */
 export function reduceBidTaskState(state: BidTaskState, event: SessionEvent): BidTaskState {
   switch (event.type) {
+    case 'bid.workflow.started':
+      return state.workflow === null ? waitForUser('file_intake') : state
     case 'bid.project.resumed': {
-      const resumed = 'state' in event.data
-        ? cloneBidTaskState(event.data.state)
-        : 'workflow' in event.data
-          ? normalizeLegacyBidControlState(event.data)
-          : normalizeLegacyBidRuntime(event.data.runtime)
+      const resumed = cloneBidTaskState(event.data.state)
       return JSON.stringify(state) === JSON.stringify(resumed) ? state : resumed
     }
     case 'bid.task.changed':
       return cloneBidTaskState(event.data.state)
     case 'bid.run.started':
-      return event.data.run.work.stage === state.stage ? startRun(state, event.data.run) : state
+      return event.data.run.work.kind === 'capability_task' || event.data.run.work.stage === state.workflow?.stage ? startRun(state, event.data.run) : state
     case 'bid.run.progress': {
       if ((state.status !== 'running' && state.status !== 'suspended')
         || state.run.runId !== event.data.runId
-        || state.run.epoch !== event.data.epoch
-        || state.stage !== event.data.stage) return state
+        || state.run.epoch !== event.data.epoch) return state
       const progress = {
         ...event.data.progress,
         ...event.data.progress.details === undefined ? {} : { details: [...event.data.progress.details] },
@@ -489,7 +370,7 @@ export function reduceBidTaskState(state: BidTaskState, event: SessionEvent): Bi
     }
     case 'bid.run.start_failed':
       return state.status === 'running' && state.run.runId === event.data.runId && state.run.epoch === event.data.epoch
-        ? markReady(state.stage)
+        ? { workflow: state.workflow, status: 'ready', run: null }
         : state
     case 'bid.run.cancelling':
       return state
@@ -499,36 +380,32 @@ export function reduceBidTaskState(state: BidTaskState, event: SessionEvent): Bi
         : state
     case 'bid.run.completed':
       return state
-    // Legacy events remain readable without retaining their parallel status vocabulary.
-    case 'bid.stage.started': {
-      return event.data.stage === state.stage ? startRun(state, placeholderRun(event.data.stage)) : state
-    }
     case 'bid.stage.attention_required':
-      return event.data.stage === state.stage ? waitForUser(event.data.stage, event.data.reason, event.data.issues) : state
+      return event.data.stage === state.workflow?.stage ? waitForUser(event.data.stage, event.data.reason, event.data.issues) : state
     case 'bid.workflow.failed':
     case 'bid.stage.failed':
-      return event.data.stage === state.stage
+      return event.data.stage === state.workflow?.stage
         ? markFailed(event.data.stage, {
           message: event.data.reason,
           ...event.data.issues === undefined ? {} : { issues: event.data.issues },
         })
         : state
     case 'bid.stage.reset':
-      return BID_STAGES.indexOf(event.data.stage) <= BID_STAGES.indexOf(state.stage)
+      return state.workflow !== null && BID_STAGES.indexOf(event.data.stage) <= BID_STAGES.indexOf(state.workflow.stage)
         ? event.data.stage === 'file_intake' || event.data.stage === 'chapter_writing'
           ? waitForUser(event.data.stage)
           : markReady(event.data.stage)
         : state
     case 'bid.user_confirmation.required':
-      return event.data.stage === state.stage && getBidStagePolicy(state.stage).userGate !== 'none'
-        ? waitForUser(state.stage)
+      return event.data.stage === state.workflow?.stage && getBidStagePolicy(state.workflow.stage).userGate !== 'none'
+        ? waitForUser(state.workflow.stage)
         : state
     case 'bid.user_confirmation.received':
-      return event.data.stage === state.stage && state.status === 'waiting_user'
-        ? markReady(state.stage)
+      return event.data.stage === state.workflow?.stage && state.status === 'waiting_user'
+        ? markReady(state.workflow.stage)
         : state
     case 'bid.stage.completed': {
-      if (event.data.stage !== state.stage) return state
+      if (event.data.stage !== state.workflow?.stage) return state
       const next = getBidStagePolicy(event.data.stage).nextStage
       return next === null ? markCompleted(event.data.stage) : advanceStage(state, next)
     }
@@ -551,37 +428,38 @@ export function getBidClientProjection(
     : { ...fileLimits, allowedExtensions: [...fileLimits.allowedExtensions] }
   if (task.status === 'suspended') return {
     ...base,
-    allowedActions: task.stage === 'chapter_writing'
+    allowedActions: task.workflow?.stage === 'chapter_writing'
       ? ['send_message', 'export_docx', 'revise_chapter'] : ['send_message'],
     composer: { enabled: true },
     ...fileView,
   }
-  if (task.stage === 'docx_export' && task.status !== 'running' && task.status !== 'completed') return { ...base, allowedActions: ['send_message', 'export_docx'], composer: { enabled: true }, ...fileView }
+  if (task.workflow?.stage === 'docx_export' && task.status !== 'running' && task.status !== 'completed') return { ...base, allowedActions: ['send_message', 'export_docx'], composer: { enabled: true }, ...fileView }
   if (task.status === 'failed') return {
     ...base,
-    allowedActions: task.stage === 'file_intake' ? ['upload_files', 'send_message'] : ['send_message'],
+    allowedActions: task.workflow?.stage === 'file_intake' ? ['upload_files', 'send_message'] : ['send_message'],
     composer: { enabled: true },
     ...fileView,
   }
-  if (task.status === 'ready') return { ...base, allowedActions: ['send_message'], composer: { enabled: true }, ...fileView }
+  if (task.status === 'ready') return { ...base, allowedActions: task.workflow?.stage === 'chapter_writing'
+    ? ['send_message', 'export_docx'] : ['send_message'], composer: { enabled: true }, ...fileView }
   if (task.status === 'running') return {
     ...base,
-    allowedActions: task.stage === 'chapter_writing'
+    allowedActions: task.workflow?.stage === 'chapter_writing'
       ? ['send_message', 'export_docx'] : ['send_message'],
     composer: { enabled: true },
     ...fileView,
   }
   if (task.status === 'completed') return {
     ...base,
-    allowedActions: task.stage === 'chapter_writing' || task.stage === 'docx_export'
+    allowedActions: task.workflow?.stage === 'chapter_writing' || task.workflow?.stage === 'docx_export'
       ? ['send_message', 'export_docx', 'revise_chapter'] : ['send_message'],
     composer: { enabled: true },
     ...fileView,
   }
-  if (task.stage === 'file_intake') return { ...base, allowedActions: ['upload_files', 'send_message'], composer: { enabled: true }, ...fileView }
-  if (task.stage === 'tender_analysis') return { ...base, allowedActions: ['confirm_tender_analysis', 'send_message'], composer: { enabled: true }, ...fileView }
-  if (task.stage === 'outline_generation' || task.stage === 'evidence_mapping') return { ...base, allowedActions: ['confirm_outline', 'regenerate_outline', 'send_message'], composer: { enabled: true }, ...fileView }
-  if (task.stage === 'chapter_writing') return {
+  if (task.workflow?.stage === 'file_intake') return { ...base, allowedActions: ['upload_files', 'send_message'], composer: { enabled: true }, ...fileView }
+  if (task.workflow?.stage === 'tender_analysis') return { ...base, allowedActions: ['confirm_tender_analysis', 'send_message'], composer: { enabled: true }, ...fileView }
+  if (task.workflow?.stage === 'outline_generation' || task.workflow?.stage === 'evidence_mapping') return { ...base, allowedActions: ['confirm_outline', 'regenerate_outline', 'send_message'], composer: { enabled: true }, ...fileView }
+  if (task.workflow?.stage === 'chapter_writing') return {
     ...base,
     allowedActions: ['request_writing_requirements', 'auto_start_chapter_writing', 'send_message'],
     composer: { enabled: true },

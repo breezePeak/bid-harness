@@ -97,7 +97,7 @@ describe('公共能力契约', () => {
   })
 
   it('能力目录闭合，业务输入拒绝任意对象和模型指定路径', () => {
-    expect(Object.keys(BID_CAPABILITIES)).toHaveLength(14)
+    expect(Object.keys(BID_CAPABILITIES)).toHaveLength(18)
     expect(bidCapabilityInputSchema.parse({ capability: 'outline.refine', input: { feedback: '细化 A' } }).capability)
       .toBe('outline.refine')
     expect(() => bidCapabilityInputSchema.parse({ capability: 'outline.refine', input: { feedback: '细化 A', path: '../x' } })).toThrow()

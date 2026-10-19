@@ -56,6 +56,7 @@ describe('bid control-plane public contract', () => {
     expect(BID_TASK_STATUSES).toEqual(['ready', 'running', 'waiting_user', 'suspended', 'failed', 'completed'])
     expect(BID_SESSION_EVENT_TYPES).toEqual([
       'bid.project.resumed',
+      'bid.image.requested',
       'bid.task.changed',
       'bid.run.started',
       'bid.run.progress',
@@ -65,6 +66,8 @@ describe('bid control-plane public contract', () => {
       'bid.run.notice',
       'bid.run.completed',
       'bid.workflow.failed',
+      'bid.workflow.started',
+      'bid.workflow.continuation',
       'bid.stage.started',
       'bid.stage.completed',
       'bid.stage.attention_required',
@@ -81,6 +84,7 @@ describe('bid control-plane public contract', () => {
       'bid.goal.recovery.requested',
       'bid.recovery.requested',
       'bid.recovery.round',
+      'bid.user_input.recorded',
       'bid.capability.input.required',
       'bid.capability.input.received',
     ])
@@ -97,14 +101,14 @@ describe('bid control-plane public contract', () => {
     }
     const started = reduceBidTaskState(BID_INITIAL_TASK_STATE, {
       type: 'bid.project.resumed',
-      data: { state: { stage: 'tender_analysis', status: 'running', run }, revision: 4 },
+      data: { state: { workflow: { kind: 'full_bid', stage: 'tender_analysis' }, status: 'running', run }, revision: 4 },
     } as SessionEvent)
     const progress = { phase: 'collecting', summary: '已整理技术要求。', completed: 28, total: 35, updatedAt: 20 }
     const current = reduceBidTaskState(started, {
       type: 'bid.run.progress', data: { runId: run.runId, epoch: run.epoch, stage: run.work.stage, progress },
     } as SessionEvent)
 
-    expect(current.stage).toBe('tender_analysis')
+    expect(current.workflow?.stage).toBe('tender_analysis')
     expect(current.run?.progress).toEqual(progress)
     expect(reduceBidTaskState(current, {
       type: 'bid.run.progress', data: { runId: 'stale', epoch: run.epoch, stage: run.work.stage,
@@ -113,10 +117,6 @@ describe('bid control-plane public contract', () => {
     expect(reduceBidTaskState(current, {
       type: 'bid.run.progress', data: { runId: run.runId, epoch: 2, stage: run.work.stage,
         progress: { ...progress, summary: '旧 epoch' } },
-    } as SessionEvent)).toBe(current)
-    expect(reduceBidTaskState(current, {
-      type: 'bid.run.progress', data: { runId: run.runId, epoch: run.epoch, stage: 'outline_generation',
-        progress: { ...progress, summary: '旧阶段' } },
     } as SessionEvent)).toBe(current)
 
     const suspended = reduceBidTaskState(current, {
@@ -136,7 +136,7 @@ describe('bid control-plane public contract', () => {
   it('把遗留 running 确定性转换为 host_restart 挂起', () => {
     const running = reduceBidTaskState(BID_INITIAL_TASK_STATE, {
       type: 'bid.task.changed',
-      data: { state: { stage: 'evidence_mapping', status: 'ready', run: null } },
+      data: { state: { workflow: { kind: 'full_bid', stage: 'evidence_mapping' }, status: 'ready', run: null } },
     } as SessionEvent)
     const active = reduceBidTaskState(running, {
       type: 'bid.run.started',
@@ -149,7 +149,7 @@ describe('bid control-plane public contract', () => {
     } as SessionEvent)
 
     expect(suspendForHostRestart(active, 20)).toMatchObject({
-      stage: 'evidence_mapping', status: 'suspended',
+      workflow: { kind: 'full_bid', stage: 'evidence_mapping' }, status: 'suspended',
       run: { runId: 'run-restart', cause: 'host_restart', updatedAt: 20 },
     })
   })
@@ -236,7 +236,7 @@ describe('bid control-plane public contract', () => {
       readonly noticeId: string
       readonly supersedesTurn: number | null
       readonly runId: string
-      readonly stage: typeof BID_STAGES[number]
+      readonly stage: typeof BID_STAGES[number] | null
       readonly kind: 'stopped' | 'interrupted' | 'completed'
       readonly severity: 'info' | 'error'
       readonly message: string

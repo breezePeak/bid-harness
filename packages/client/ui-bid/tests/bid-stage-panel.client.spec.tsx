@@ -101,10 +101,10 @@ function fixtureTask(patch: ProjectionFixturePatch): BidTaskState {
   const status = runtime.status === 'pending' || runtime.status === 'waiting_start'
     ? 'ready'
     : runtime.status === 'attention_required' ? 'failed' : runtime.status
-  if (status === 'running') return { stage: runtime.stage, status, run: fixtureRun(runtime.stage, patch.run) }
+  if (status === 'running') return { workflow: { kind: 'full_bid', stage: runtime.stage }, status, run: fixtureRun(runtime.stage, patch.run) }
   if (status === 'suspended') {
     return {
-      stage: runtime.stage,
+      workflow: { kind: 'full_bid', stage: runtime.stage },
       status,
       run: {
         ...fixtureRun(runtime.stage, patch.run),
@@ -117,7 +117,7 @@ function fixtureTask(patch: ProjectionFixturePatch): BidTaskState {
   }
   if (status === 'failed') {
     return {
-      stage: runtime.stage,
+      workflow: { kind: 'full_bid', stage: runtime.stage },
       status,
       run: null,
       failure: {
@@ -126,7 +126,7 @@ function fixtureTask(patch: ProjectionFixturePatch): BidTaskState {
       },
     }
   }
-  return { stage: runtime.stage, status, run: null }
+  return { workflow: { kind: 'full_bid', stage: runtime.stage }, status, run: null }
 }
 
 function projection(patch: ProjectionFixturePatch = {}): BidClientProjection {

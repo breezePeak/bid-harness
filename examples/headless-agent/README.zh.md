@@ -30,3 +30,13 @@ pnpm exec vitest run --config vitest.e2e.config.ts packages/e2b/e2b/tests/compos
 ## 高级配置
 
 [`advanced.cordis.yml`](advanced.cordis.yml) 在测试组装中添加 Code Mode 和 Cordis 工具。
+
+## 原 Word 自动配图实测
+
+[`bid-main-agent.e2e.ts`](tests/bid-main-agent.e2e.ts) 使用正式 Bid preset，从 HTTP 上传合成 DOCX 和自然语言请求开始，由真实主模型读取原稿、选图位并提交能力计划。计划、结果语义核验和页面视觉都调用真实模型；测试脚本只负责上传、等待、下载和原稿字节保留断言，不提供工具调用或核验答案。运行前设置 `DSH_BID_EVAL_PROVIDER` 和 `DSH_BID_EVAL_MODEL`，可用 `DSH_BID_EVAL_HOME` 指定已有模型与凭证配置目录、`BID_IMAGE_E2E_MODEL` 指定图片模型。
+
+```sh
+pnpm exec vitest run --config vitest.e2e.config.ts examples/headless-agent/tests/bid-main-agent.e2e.ts
+```
+
+该用例会产生真实模型和图片服务费用，需要可用的 Word 页面渲染器。成功或失败的会话、候选及请求保存在 `.artifacts/bid-main-agent-live/` 的独立运行目录；成功时同时保存下载的 Word、页面 PDF、审核报告及恢复后下载核对结果。测试数据由仓库夹具生成，不读取用户业务文档。

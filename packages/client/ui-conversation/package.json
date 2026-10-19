@@ -52,6 +52,7 @@
     "@deepseek-ai/schemastery": "workspace:^"
   },
   "peerDependencies": {
+    "@deepseek-ai/dsh-host-apiproxy": "workspace:^",
     "@deepseek-ai/cordis": "workspace:^",
     "@deepseek-ai/dsh-agent": "workspace:^",
     "@deepseek-ai/dsh-api-remotes": "workspace:^",
@@ -77,6 +78,7 @@
     "@deepseek-ai/dsh-tool-todo": "workspace:^"
   },
   "devDependencies": {
+    "@deepseek-ai/dsh-host-apiproxy": "workspace:^",
     "@deepseek-ai/cordis": "workspace:^",
     "@deepseek-ai/dsh-agent": "workspace:^",
     "@deepseek-ai/dsh-api-remotes": "workspace:^",

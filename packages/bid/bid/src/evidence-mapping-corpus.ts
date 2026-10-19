@@ -1,6 +1,6 @@
 /** S4 的 Corpus 预检、真实正文范围及受控资料工具授权。 */
 import { lstat, readFile } from 'node:fs/promises'
-import { basename, join, relative, resolve, sep } from 'node:path'
+import { join, relative, resolve, sep } from 'node:path'
 import type { ToolExecution } from '@deepseek-ai/dsh-tools'
 import { BidStageExecutionError } from './control-plane-contract.ts'
 import { parseDocumentChunkIndex } from './document-chunk.ts'
@@ -8,6 +8,7 @@ import type { BidManifest, BidWorkspace } from './index.ts'
 import { readDocumentOutlineHeadings, type DocumentOutlineHeading } from './outline-framework.ts'
 import { assertNoLinkedPath, within } from './workspace-path.ts'
 import { buildMappingSourceIndex, type MappingSourceIndex } from './evidence-mapping-sources.ts'
+import { readBidManifestBindings } from './file-manifest.ts'
 
 /** 已预检、可从 Child 任意 cwd 直接调用的绝对路径。 */
 export interface MappingCorpusLocation {
@@ -32,13 +33,15 @@ export interface MappingCorpusLocation {
  */
 export async function resolveMappingCorpusLocations(workspace: BidWorkspace, manifest: BidManifest): Promise<MappingCorpusLocation[]> {
   const locations: MappingCorpusLocation[] = []
+  const bindings = await readBidManifestBindings(workspace)
   for (const file of manifest.files) {
     if (file.parseStatus !== 'success' || (file.role !== 'reference' && file.role !== 'reference_bid')) continue
     try {
       if (file.chunksPath === null || file.chunkIndexPath === null || file.corpusPath === null) throw new Error('缺少 chunks 或 index 路径')
       const corpus = within(workspace.projectRoot, file.corpusPath)
       within(workspace.corpusRoot, relative(workspace.corpusRoot, corpus))
-      if (relative(join(workspace.corpusRoot, basename(file.inputPath)), corpus) !== '') throw new Error('Corpus 不属于该上传文件')
+      if (!bindings.files.some(binding => String(binding.ref.attachmentId) === file.id && binding.role === file.role
+        && file.corpusPath === `assets/parsed/${binding.parse_key}`)) throw new Error('Corpus 不属于该上传文件')
       const chunks = within(workspace.projectRoot, file.chunksPath)
       const indexPath = within(workspace.projectRoot, file.chunkIndexPath)
       if (relative(join(corpus, 'chunks'), chunks) !== '' || relative(join(chunks, 'index.json'), indexPath) !== '') throw new Error('chunks/index 不属于该文件的 Corpus')

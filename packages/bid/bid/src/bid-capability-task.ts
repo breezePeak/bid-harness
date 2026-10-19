@@ -1,5 +1,6 @@
 /** 同一 Work 的有序能力步骤、候选产物检查点和结果发布。 */
 import { createHash } from 'node:crypto'
+import assert from 'node:assert/strict'
 import { readFile, readdir } from 'node:fs/promises'
 import { z } from 'zod'
 import type { Agent } from '@deepseek-ai/dsh-agent'
@@ -11,7 +12,7 @@ import type { AskUserQuestionAnswerItem, AskUserQuestionItem } from '@deepseek-a
 import { BidWorkspace } from './index.ts'
 import {
   bidCapabilityResultSchema, bidCapabilityStepSchema, bidCapabilityTaskSchema,
-  validateCapabilityTaskContentFollowup,
+  validateCapabilityTaskContentFollowup, isBidChapterScope,
   type BidCapabilityCall, type BidCapabilityExecutionContext, type BidCapabilityResult,
   type BidCapabilityStep, type BidCapabilityTask,
 } from './bid-capability-contract.ts'
@@ -27,18 +28,19 @@ import { capabilityPublicationReceiptSchema, readCapabilityPublicationReceipt, r
   type CapabilityPublicationReceipt } from './bid-capability-changes.ts'
 import type { BidRunContext } from './run-coordinator.ts'
 import { bidInputFingerprint, bidWorkDescriptorSchema, bidWorkRoot, persistBidWorkRequest, readBidWorkRequest } from './work-descriptor.ts'
-import { BID_STAGES, type BidStage, type BidWorkDescriptor } from './control-plane-contract.ts'
-import { bidTaskStateSchema } from './runtime-state.ts'
+import { type BidWorkDescriptor } from './control-plane-contract.ts'
 import { prepareBidWorkingTree } from './working-tree.ts'
 import { reconcileBidPublications } from './publication-batch.ts'
 import { assertNoLinkedPath, within } from './workspace-path.ts'
-import { recordOnlySchemaVersion } from './schema-version.ts'
 import { bidTaskSourceSnapshotSchema, bindBidTaskSourceContext, freezeBidTaskSource, type BidTaskSourceSnapshot } from './bid-task-source.ts'
 import { bidTaskVerificationSchema, collectBidTaskEvidence, collectBidTaskScopeEvidence, collectBidTaskPreservationEvidence,
   modelBidTaskVerifier, validateBidTaskVerification,
   type BidTaskVerifier, type BidTaskVerification, type BidTaskVerificationInput } from './bid-task-verification.ts'
 import { readPendingChapterReorganization } from './outline-capability-update.ts'
 import { resolveBidTaskSections } from './bid-task-sections.ts'
+import { verifyBidTaskObjects } from './bid-task-objects.ts'
+import { bidPlanStepIds, bindBidStepOutputs, bidStepOutputBindingSchema } from './bid-step-outputs.ts'
+import { validateDocumentTaskTargets, validateDocumentTaskResult } from './document-capability.ts'
 
 const sha256Schema = z.string().regex(/^[a-f0-9]{64}$/u)
 const messageReferenceSchema = z.object({ session_id: z.string().min(1), message_id: z.string().min(1) }).strict()
@@ -72,15 +74,15 @@ export const capabilityTaskRequestSchema = z.object({
   complete_task: storedTaskSchema.optional(),
   authorization: messageReferenceSchema,
   input_sources: z.array(outputFileSchema),
-  return_state: bidTaskStateSchema.refine(state =>
-    state.status === 'ready' || state.status === 'waiting_user' || state.status === 'completed'),
+  step_ids: z.array(z.string().min(1)).min(1),
 }).strict()
-/** Work 接纳时冻结的计划、授权、输入和任务前状态。 */
+/** Work 接纳时冻结的计划、授权及输入。 */
 export type CapabilityTaskRequest = z.infer<typeof capabilityTaskRequestSchema>
 
 const pendingStepSchema = z.object({
   step_id: z.string().min(1), step: storedStepSchema, status: z.literal('pending'),
   authorization: messageReferenceSchema,
+  output_sources: z.array(bidStepOutputBindingSchema),
   answer_question_id: z.string().min(1).optional(),
   writing_resume_seed: writingResumeSeedSchema.optional(),
 }).strict()
@@ -101,14 +103,16 @@ const stepRecordSchema = z.discriminatedUnion('status', [pendingStepSchema, runn
   completedStepSchema, awaitingStepSchema])
 const planPatchSchema = z.object({
   from_index: z.number().int().nonnegative(), authorization: messageReferenceSchema,
+  source_snapshot: bidTaskSourceSnapshotSchema,
   steps: z.array(storedStepSchema),
+  step_ids: z.array(z.string().min(1)),
   writing_resume_seed: writingResumeSeedSchema.optional(),
   restart_pending: z.literal(true).optional(),
 }).strict()
 
 /** 同一 Work 的步骤记录；项目总状态仍只由 BidTaskState 表达。 */
 export const capabilityTaskCheckpointSchema = z.object({
-  schema_version: recordOnlySchemaVersion(1),
+  schema_version: z.literal(2),
   work_id: z.string().min(1),
   request_sha256: sha256Schema,
   steps: z.array(stepRecordSchema).min(1),
@@ -129,7 +133,7 @@ export interface CapabilityTaskDispatcher {
   allowedWrites(call: BidCapabilityCall, sectionIds: ReadonlySet<string> | null, working: BidWorkspace,
     stepId: string): Promise<ReadonlySet<string>>
   /** 对执行中生成的受账本约束文件补充精确路径；恢复时也从当前候选重算。 */
-  allowedWritesAfter?(call: BidCapabilityCall, working: BidWorkspace): Promise<ReadonlySet<string>>
+  allowedWritesAfter?(call: BidCapabilityCall, working: BidWorkspace, stepId: string): Promise<ReadonlySet<string>>
   /** 在候选项目执行一个业务能力；返回真实变更结果和精确删除文件。 */
   execute(call: BidCapabilityCall, context: BidCapabilityExecutionContext): Promise<{
     readonly result: BidCapabilityResult
@@ -319,7 +323,7 @@ async function verifyAwaitingCandidate(working: BidWorkspace, parent: BidWorkDes
   const candidate = stepCandidateWorkspace(working, parent, step.step_id, step.input_sha256)
   const marker = within(candidate.workspace.root, 'work-identity.json')
   await assertNoLinkedPath(working.root, marker)
-  if (JSON.stringify(JSON.parse(await readFile(marker, 'utf8'))) !== JSON.stringify(candidate.descriptor)) {
+  if (JSON.stringify(bidWorkDescriptorSchema.parse(JSON.parse(await readFile(marker, 'utf8')))) !== JSON.stringify(bidWorkDescriptorSchema.parse(candidate.descriptor))) {
     throw new Error('BID_CAPABILITY_AWAITING_CANDIDATE_IDENTITY_MISMATCH')
   }
   for (const file of step.candidate_files) if (await fileHash(candidate.workspace, file.path) !== file.sha256) {
@@ -331,16 +335,12 @@ async function verifyAwaitingCandidate(working: BidWorkspace, parent: BidWorkDes
   return candidate.workspace
 }
 
-function stepId(workId: string, index: number): string {
-  return `step-${hash(Buffer.from(workId)).slice(0, 24)}-${String(index + 1).padStart(4, '0')}`
-}
-
 async function verifyWritingResumeSeed(working: BidWorkspace, parent: BidWorkDescriptor,
   stepId: string, seed: z.infer<typeof writingResumeSeedSchema>): Promise<BidWorkspace> {
   const candidate = stepCandidateWorkspace(working, parent, seed.source_step_id ?? stepId, seed.input_sha256)
   const marker = within(candidate.workspace.root, 'work-identity.json')
   await assertNoLinkedPath(working.root, marker)
-  if (JSON.stringify(JSON.parse(await readFile(marker, 'utf8'))) !== JSON.stringify(candidate.descriptor)) {
+  if (JSON.stringify(bidWorkDescriptorSchema.parse(JSON.parse(await readFile(marker, 'utf8')))) !== JSON.stringify(bidWorkDescriptorSchema.parse(candidate.descriptor))) {
     throw new Error('BID_CAPABILITY_WRITING_RESUME_IDENTITY_MISMATCH')
   }
   if (new Set(seed.files.map(file => file.path)).size !== seed.files.length
@@ -410,21 +410,21 @@ async function fileHash(workspace: BidWorkspace, path: string): Promise<string |
  * 入库不可变任务及当时读取的正式输入摘要。
  * @param workspace 正式项目。
  * @param session 拥有真实授权消息的公开会话。
- * @param stage 任务接纳时的项目阶段。
  * @param task 用户目标、根范围及有序步骤。
  * @param authorization 真实用户消息身份。
  * @param inputPaths 本任务读取的正式文件路径。
- * @param returnState 完成后恢复的任务前状态。
  * @param agent 工具调用的 live Agent；延迟队列须已有匹配的持久请求。
  * @param completeTask 保留独立导出尾步骤的完整用户计划。
  * @returns 可由 Run 恢复的 Work 描述符。
  */
 export async function persistCapabilityTaskRequest(
-  workspace: BidWorkspace, session: Session, stage: BidStage, task: BidCapabilityTask,
+  workspace: BidWorkspace, session: Session, task: BidCapabilityTask,
   authorization: CapabilityTaskRequest['authorization'], inputPaths: readonly string[],
-  returnState: CapabilityTaskRequest['return_state'], agent?: Agent, completeTask?: BidCapabilityTask,
+  agent?: Agent, completeTask?: BidCapabilityTask,
 ): Promise<BidWorkDescriptor> {
-  bidCapabilityTaskSchema.parse(task)
+  task = bidCapabilityTaskSchema.parse(task)
+  if (completeTask !== undefined) completeTask = bidCapabilityTaskSchema.parse(completeTask)
+  validateDocumentTaskTargets(completeTask ?? task)
   const current = resolveBidToolAuthorization(agent ?? session) ?? resolveBidToolAuthorization(session)
   const matches = current?.session_id === authorization.session_id && current.message_id === authorization.message_id
   let queued = false
@@ -442,7 +442,8 @@ export async function persistCapabilityTaskRequest(
   if (!hasBidTaskAuthorization(session, authorization) || (!matches && !queued)) {
     throw new Error('BID_CAPABILITY_USER_MESSAGE_REQUIRED')
   }
-  if (task.scope.kind !== 'project') {
+  if (!isBidChapterScope(task.scope)) await verifyBidTaskObjects(workspace, session, task.scope)
+  else if (task.scope.kind !== 'project') {
     const outline = await readOutline(workspace)
     if (outline === undefined) throw new Error('BID_CAPABILITY_OUTLINE_REQUIRED')
     await verifyCapabilityTaskScope(workspace, task.scope, outline)
@@ -463,12 +464,13 @@ export async function persistCapabilityTaskRequest(
     if (digest === undefined) throw new Error(`BID_CAPABILITY_REQUIRED_INPUT_MISSING: ${path}`)
     return { path, sha256: digest }
   }))
-  if (returnState.stage !== stage) throw new Error('BID_CAPABILITY_RETURN_STATE_INVALID')
   const sourceSnapshot = queuedSource ?? await freezeBidTaskSource(workspace, session, task, authorization)
+  const stepIds = bidPlanStepIds((completeTask ?? task).steps, authorization)
+  bindBidStepOutputs((completeTask ?? task).steps, stepIds)
   const request = capabilityTaskRequestSchema.parse({ task, authorization, input_sources: inputSources,
-    source_snapshot: sourceSnapshot, ...(completeTask === undefined ? {} : { complete_task: completeTask }),
-    return_state: returnState })
-  return persistBidWorkRequest(workspace, 'capability_task', stage, request, inputSources)
+    step_ids: stepIds,
+    source_snapshot: sourceSnapshot, ...(completeTask === undefined ? {} : { complete_task: completeTask }) })
+  return persistBidWorkRequest(workspace, { kind: 'capability_task' }, request, inputSources)
 }
 
 /**
@@ -495,13 +497,12 @@ export async function findCapabilityTaskRequest(
     const parsed = JSON.parse(raw) as unknown
     if (typeof parsed !== 'object' || parsed === null || !('kind' in parsed) || parsed.kind !== 'capability_task') continue
     const record = z.object({ kind: z.literal('capability_task'), work_id: z.string().min(1),
-      stage: z.enum(BID_STAGES),
       input_fingerprint: sha256Schema, payload: capabilityTaskRequestSchema }).loose().parse(parsed)
     if (record.payload.authorization.session_id !== authorization.session_id
       || record.payload.authorization.message_id !== authorization.message_id) continue
     if (match !== null) throw new Error('BID_CAPABILITY_DUPLICATE_USER_MESSAGE_WORK')
     const descriptor: BidWorkDescriptor = { kind: 'capability_task', workId: record.work_id,
-      stage: record.stage, requestRef: `requests/${record.work_id}.json`, requestSha256: hash(Buffer.from(raw)),
+      requestRef: `requests/${record.work_id}.json`, requestSha256: hash(Buffer.from(raw)),
       inputFingerprint: record.input_fingerprint }
     await readBidWorkRequest(workspace, descriptor)
     match = descriptor
@@ -599,7 +600,8 @@ async function originalSectionIds(canonical: BidWorkspace, working: BidWorkspace
       }
       const marker = bidWorkDescriptorSchema.parse(JSON.parse(text))
       const candidate = stepCandidateWorkspace(working, work, first.step_id, marker.inputFingerprint)
-      if (marker.workId !== entry || bidInputFingerprint(marker) !== bidInputFingerprint(candidate.descriptor)) {
+      if (marker.workId !== entry
+        || bidInputFingerprint(marker) !== bidInputFingerprint(bidWorkDescriptorSchema.parse(candidate.descriptor))) {
         throw new Error('BID_WORKING_TREE_IDENTITY_MISMATCH')
       }
       const ids = await readMatching(candidate.workspace)
@@ -611,6 +613,7 @@ async function originalSectionIds(canonical: BidWorkspace, working: BidWorkspace
 
 async function hasScopedChapterContent(workspace: BidWorkspace, task: BidCapabilityTask,
   canonical: BidWorkspace = workspace): Promise<boolean> {
+  if (!isBidChapterScope(task.scope)) return false
   const outline = await readOutline(workspace)
   if (outline === undefined) return false
   const selected = task.scope.kind === 'project' ? null
@@ -648,26 +651,43 @@ export async function readCapabilityTaskCheckpoint(
   if (checkpoint.work_id !== run.work.workId || checkpoint.request_sha256 !== run.work.requestSha256) {
     throw new Error('BID_CAPABILITY_CHECKPOINT_IDENTITY_MISMATCH')
   }
-  let expected = (request.complete_task ?? request.task).steps.map(step => ({ step, authorization: request.authorization,
-    writing_resume_seed: undefined as z.infer<typeof writingResumeSeedSchema> | undefined }))
-  for (const patch of checkpoint.plan_patches) {
+  const originalSteps = (request.complete_task ?? request.task).steps
+  const originalIds = bidPlanStepIds(originalSteps, request.authorization)
+  if (JSON.stringify(originalIds) !== JSON.stringify(request.step_ids)) throw new Error('BID_CAPABILITY_STEP_IDENTITY_MISMATCH')
+  let expected = originalSteps.map((step, index) => {
+    const stepId = originalIds[index]
+    assert(stepId !== undefined)
+    return { step, step_id: stepId, authorization: request.authorization,
+      writing_resume_seed: undefined as z.infer<typeof writingResumeSeedSchema> | undefined }
+  })
+  for (const [revision, patch] of checkpoint.plan_patches.entries()) {
     if (patch.from_index > expected.length || patch.authorization.session_id !== session.id
       || !hasBidTaskAuthorization(session, patch.authorization)) {
       throw new Error('BID_CAPABILITY_CHECKPOINT_PATCH_INVALID')
     }
+    const patchSource = bindBidTaskSourceContext(session, patch.source_snapshot)
+    if (patchSource.message.message_id !== patch.authorization.message_id
+      || JSON.stringify(patchSource.root_scope) !== JSON.stringify(request.task.scope)) throw new Error('BID_CAPABILITY_PATCH_SOURCE_INVALID')
+    const ids = bidPlanStepIds(patch.steps, { work: run.work.workId, revision, authorization: patch.authorization })
+    if (JSON.stringify(ids) !== JSON.stringify(patch.step_ids)) throw new Error('BID_CAPABILITY_PATCH_IDENTITY_MISMATCH')
     expected = [...expected.slice(0, patch.from_index),
-      ...patch.steps.map((step, index) => ({ step, authorization: patch.authorization,
-        writing_resume_seed: index === patch.steps.findIndex(item => item.call.capability === 'chapter.write')
-          ? patch.writing_resume_seed : undefined }))]
+      ...patch.steps.map((step, index) => {
+        const stepId = ids[index]
+        assert(stepId !== undefined)
+        return { step, step_id: stepId, authorization: patch.authorization,
+          writing_resume_seed: index === patch.steps.findIndex(item => item.call.capability === 'chapter.write')
+            ? patch.writing_resume_seed : undefined }
+      })]
   }
   storedTaskSchema.parse({ ...request.task, steps: expected.map(item => item.step) })
+  const bindings = bindBidStepOutputs(expected.map(item => item.step), expected.map(item => item.step_id))
   if (checkpoint.steps.length !== expected.length) throw new Error('BID_CAPABILITY_CHECKPOINT_PLAN_MISMATCH')
-  for (const [index, { step, authorization, writing_resume_seed }] of expected.entries()) {
+  for (const [index, { step, step_id, authorization, writing_resume_seed }] of expected.entries()) {
     const saved = checkpoint.steps[index]
     if (saved === undefined || JSON.stringify(saved.step) !== JSON.stringify(step)
       || JSON.stringify(saved.authorization) !== JSON.stringify(authorization)
       || JSON.stringify(saved.writing_resume_seed) !== JSON.stringify(writing_resume_seed)
-      || saved.step_id !== stepId(run.work.workId, index)) {
+      || saved.step_id !== step_id || JSON.stringify(saved.output_sources) !== JSON.stringify(bindings[index])) {
       throw new Error('BID_CAPABILITY_CHECKPOINT_PLAN_MISMATCH')
     }
   }
@@ -696,13 +716,17 @@ export async function readCapabilityTaskCheckpoint(
 }
 
 function initialCheckpoint(run: BidRunContext, request: CapabilityTaskRequest): CapabilityTaskCheckpoint {
+  const steps = (request.complete_task ?? request.task).steps
+  const expected = bidPlanStepIds(steps, request.authorization)
+  if (JSON.stringify(expected) !== JSON.stringify(request.step_ids)) throw new Error('BID_CAPABILITY_STEP_IDENTITY_MISMATCH')
+  const bindings = bindBidStepOutputs(steps, request.step_ids)
   return capabilityTaskCheckpointSchema.parse({
-    schema_version: 1,
+    schema_version: 2,
     work_id: run.work.workId,
     request_sha256: run.work.requestSha256,
     plan_patches: [],
-    steps: (request.complete_task ?? request.task).steps.map((step, index) => ({
-      step_id: stepId(run.work.workId, index),
+    steps: steps.map((step, index) => ({
+      step_id: request.step_ids[index], output_sources: bindings[index],
       step, status: 'pending', authorization: request.authorization,
     })),
   })
@@ -801,6 +825,10 @@ export async function patchCapabilityTaskSteps(
     }
   }
   let writingSeed: z.infer<typeof writingResumeSeedSchema> | undefined
+  const replacementIds = bidPlanStepIds(steps, { work: run.work.workId, revision: checkpoint.plan_patches.length, authorization })
+  const combinedSteps = [...checkpoint.steps.slice(0, fromIndex).map(record => record.step), ...steps]
+  const combinedIds = [...checkpoint.steps.slice(0, fromIndex).map(record => record.step_id), ...replacementIds]
+  const outputBindings = bindBidStepOutputs(combinedSteps, combinedIds)
   const startedIndex = checkpoint.steps.findIndex((record, index) => index >= fromIndex
     && record.step.call.capability === 'chapter.write'
     && (record.status === 'running' || record.status === 'pending' && record.writing_resume_seed !== undefined))
@@ -847,7 +875,7 @@ export async function patchCapabilityTaskSteps(
         ? await verifyWritingResumeSeed(working, run.work, started.step_id, started.writing_resume_seed)
         : stepCandidateWorkspace(working, run.work, sourceStepId, sourceInput).workspace
       const paths = new Set([...await dispatcher.allowedWrites(started.step.call, beforeIds, candidate, sourceStepId),
-        ...await dispatcher.allowedWritesAfter?.(started.step.call, candidate) ?? [], ...WRITING_RECOVERY_PATHS])
+        ...await dispatcher.allowedWritesAfter?.(started.step.call, candidate, sourceStepId) ?? [], ...WRITING_RECOVERY_PATHS])
       const files: z.infer<typeof outputFileSchema>[] = []
       const removedPaths: string[] = []
       for (const path of paths) {
@@ -856,17 +884,18 @@ export async function patchCapabilityTaskSteps(
         else if (await fileHash(working, path) !== undefined) removedPaths.push(path)
       }
       writingSeed = writingResumeSeedSchema.parse({ input_sha256: sourceInput,
-        ...(sourceStepId === stepId(run.work.workId, fromIndex + resumeIndex) ? {} : { source_step_id: sourceStepId }),
+        ...(sourceStepId === replacementIds[resumeIndex] ? {} : { source_step_id: sourceStepId }),
         section_ids: beforeIds === null ? null : [...beforeIds], files, removed_paths: removedPaths })
       await verifyWritingResumeSeed(working, run.work, started.step_id, writingSeed)
     }
   }
   const replacement = steps.map((step, index) => ({
-    step_id: stepId(run.work.workId, fromIndex + index),
+    step_id: replacementIds[index], output_sources: outputBindings[fromIndex + index],
     step: bidCapabilityStepSchema.parse(step), status: 'pending' as const, authorization,
     ...(index === resumeIndex && writingSeed !== undefined ? { writing_resume_seed: writingSeed } : {}),
   }))
-  const patch = planPatchSchema.parse({ from_index: fromIndex, authorization, steps,
+  const patchSource = await freezeBidTaskSource(canonical, session, { ...request.task, steps: [...steps] }, authorization)
+  const patch = planPatchSchema.parse({ from_index: fromIndex, authorization, source_snapshot: patchSource, steps, step_ids: replacementIds,
     ...restartPending ? { restart_pending: true } : {},
     ...(writingSeed === undefined ? {} : { writing_resume_seed: writingSeed }) })
   let originalIds = checkpoint.original_section_ids
@@ -881,6 +910,7 @@ export async function patchCapabilityTaskSteps(
       { completed_step_count: checkpoint.steps.length, receipt: published }] } })
   const updatedTask = storedTaskSchema.parse({ ...request.task,
     steps: updated.steps.map(record => record.step) })
+  validateDocumentTaskTargets(updatedTask)
   const unfinishedIndex = updated.steps.findIndex(record => record.status !== 'completed')
   validateCapabilityTaskContentFollowup(updatedTask, await hasScopedChapterContent(working, updatedTask, canonical),
     unfinishedIndex < 0 ? updated.steps.length : unfinishedIndex)
@@ -902,6 +932,7 @@ export async function collectCapabilityTaskVerificationInput(
   canonical: BidWorkspace, working: BidWorkspace, source: BidTaskSourceSnapshot,
   request: CapabilityTaskRequest, checkpoint: CapabilityTaskCheckpoint, phase: 'plan' | 'result',
 ): Promise<BidTaskVerificationInput> {
+  source = verificationSource(source, checkpoint)
   const changed = new Set<string>()
   if (phase === 'result') {
     for (const record of checkpoint.steps) {
@@ -911,6 +942,8 @@ export async function collectCapabilityTaskVerificationInput(
     }
   }
   const task = { ...request.task, steps: checkpoint.steps.map(record => record.step) }
+  if (phase === 'result') await validateDocumentTaskResult(working, checkpoint.steps.flatMap(record =>
+    record.status === 'completed' ? [record.result] : []))
   const preserveOriginal = task.steps.some(step => step.call.capability === 'chapter.reorganize'
     && !step.call.input.allow_content_deletion)
   const authorized = checkpoint.verifications?.find(record => record.scope_authorized && record.unmet.length === 0
@@ -944,6 +977,13 @@ export async function collectCapabilityTaskVerificationInput(
     scope_evidence: await collectBidTaskScopeEvidence(canonical, working, task) }
 }
 
+function verificationSource(source: BidTaskSourceSnapshot, checkpoint: CapabilityTaskCheckpoint): BidTaskSourceSnapshot {
+  const amendments = [...new Map(checkpoint.plan_patches.map(patch => patch.source_snapshot.message)
+    .filter(message => message.message_id !== source.message.message_id)
+    .map(message => [message.message_id, message])).values()].sort((a, b) => a.seq - b.seq)
+  return amendments.length === 0 ? source : { ...source, amendments }
+}
+
 /**
  * 恢复完成凭据或按检查点依次执行步骤，最后一次发布正式文件。
  * @param canonical 正式项目。
@@ -961,6 +1001,7 @@ export async function executeCapabilityTask(
 ): Promise<CapabilityTaskOutcome> {
   if (run.work.kind !== 'capability_task') throw new Error('BID_CAPABILITY_WORK_REQUIRED')
   const request = capabilityTaskRequestSchema.parse(await readBidWorkRequest(canonical, run.work))
+  await verifyBidTaskObjects(canonical, session, request.task.scope)
   await reconcileBidPublications(canonical.root, canonical.projectRoot)
   const committed = await readCapabilityPublicationReceipt(canonical, run.work.workId, run.work.requestSha256)
   if (committed !== null && !await hasPendingCapabilityCorrection(canonical, run.work)) return { status: 'completed', receipt: committed, results: [] }
@@ -979,8 +1020,9 @@ export async function executeCapabilityTask(
   await saveCheckpoint(run, canonical, checkpoint)
   const changed = new Set<string>()
   const removed = new Set<string>()
-  const source = bindBidTaskSourceContext(session, request.source_snapshot
+  const originalSource = bindBidTaskSourceContext(session, request.source_snapshot
     ?? await freezeBidTaskSource(canonical, session, request.task, request.authorization))
+  const source = bindBidTaskSourceContext(session, verificationSource(originalSource, checkpoint))
   const verify = async (phase: 'plan' | 'result'): Promise<BidTaskVerification> => {
     const input = await collectCapabilityTaskVerificationInput(canonical, working, source, request, checkpoint, phase)
     const identity = bidInputFingerprint(input)
@@ -1032,7 +1074,7 @@ export async function executeCapabilityTask(
       const candidate = await verifyAwaitingCandidate(working, run.work, saved)
       if (candidate !== null) awaitingSeed = { workspace: candidate, step: saved }
       const resumed = pendingStepSchema.parse({ step_id: saved.step_id, step: saved.step,
-        status: 'pending', authorization: saved.authorization, answer_question_id: saved.question_id })
+        status: 'pending', authorization: saved.authorization, output_sources: saved.output_sources, answer_question_id: saved.question_id })
       checkpoint = capabilityTaskCheckpointSchema.parse({ ...checkpoint, steps: checkpoint.steps.map((step, position) =>
         position === index ? resumed : step) })
       await saveCheckpoint(run, canonical, checkpoint)
@@ -1044,7 +1086,8 @@ export async function executeCapabilityTask(
       throw new Error('BID_CAPABILITY_INPUT_ANSWER_MISSING')
     }
     const outline = await readOutline(working)
-    if (outline === undefined && (request.task.scope.kind !== 'project' || saved.step.scope.source !== 'task')) {
+    if (outline === undefined && isBidChapterScope(request.task.scope)
+      && (request.task.scope.kind !== 'project' || saved.step.scope.source !== 'task')) {
       throw new Error('BID_CAPABILITY_OUTLINE_REQUIRED')
     }
     const effectiveTask = { ...request.task, steps: checkpoint.steps.map(step => step.step) }
@@ -1054,7 +1097,7 @@ export async function executeCapabilityTask(
     const effectiveStepScope = saved.step.scope.source !== 'section_ids' ? saved.step.scope
       : { source: 'section_ids' as const, section_ids: [...await resolveBidTaskSections(canonical, working,
         effectiveTask, saved.step.scope.section_ids)] }
-    let scope = outline === undefined ? { sectionIds: null, paragraphs: null }
+    let scope = outline === undefined ? { sectionIds: isBidChapterScope(request.task.scope) ? null : new Set<string>(), paragraphs: null }
       : resolveCapabilityStepScope(effectiveScope, effectiveStepScope, outline, previous)
     if (saved.step.call.capability === 'chapter.reorganize' && scope.sectionIds !== null) {
       const sourceIds = new Set(scope.sectionIds)
@@ -1114,14 +1157,27 @@ export async function executeCapabilityTask(
         }
       }
     }
+    const stepOutputs = new Map<number, NonNullable<BidCapabilityResult['outputs']>>()
+    for (const binding of saved.output_sources) {
+      const sourceIndex = checkpoint.steps.findIndex(step => step.step_id === binding.step_id)
+      const source = checkpoint.steps[sourceIndex]
+      if (sourceIndex < 0 || sourceIndex >= index || source?.status !== 'completed' || source.result.outputs === undefined) {
+        throw new Error('BID_STEP_OUTPUT_NOT_COMPLETED')
+      }
+      const receipt = await readCapabilityStepReceipt(working, source.step_id, source.input_sha256)
+      if (receipt === null || JSON.stringify(receipt.result.outputs) !== JSON.stringify(source.result.outputs)) throw new Error('BID_STEP_OUTPUT_RECEIPT_MISMATCH')
+      stepOutputs.set(binding.step_position, source.result.outputs)
+    }
+    const stepSource = checkpoint.plan_patches.find(patch => patch.step_ids.includes(saved.step_id))?.source_snapshot ?? originalSource
     const stepInputSha256 = bidInputFingerprint({ call: saved.step.call, scope: saved.step.scope,
-      previous: previous?.result ?? null, sources: [...inputSources], answer: inputAnswer ?? null })
+      previous: previous?.result ?? null, sources: [...inputSources], answer: inputAnswer ?? null, outputs: [...stepOutputs],
+      authorization: stepSource })
     if (saved.status === 'running' && saved.input_sha256 !== stepInputSha256) {
       throw new Error('BID_CAPABILITY_RUNNING_STEP_INPUT_CHANGED')
     }
     const recovered = await readCapabilityStepReceipt(working, saved.step_id, stepInputSha256)
     if (recovered !== null) {
-      const restoredWrites = new Set([...writes, ...(await dispatcher.allowedWritesAfter?.(saved.step.call, working) ?? [])])
+      const restoredWrites = new Set([...writes, ...(await dispatcher.allowedWritesAfter?.(saved.step.call, working, saved.step_id) ?? [])])
       if (recovered.files.some(file => !restoredWrites.has(file.path))
         || recovered.removed_paths.some(path => !restoredWrites.has(path))) {
         throw new Error('BID_CAPABILITY_STEP_RECEIPT_SCOPE_INVALID')
@@ -1153,7 +1209,7 @@ export async function executeCapabilityTask(
       const marker = within(bidWorkRoot(working, stepWork), 'work-identity.json')
       await assertNoLinkedPath(working.root, marker)
       try {
-        if (JSON.stringify(JSON.parse(await readFile(marker, 'utf8'))) !== JSON.stringify(stepWork)) {
+        if (JSON.stringify(bidWorkDescriptorSchema.parse(JSON.parse(await readFile(marker, 'utf8')))) !== JSON.stringify(bidWorkDescriptorSchema.parse(stepWork))) {
           throw new Error('BID_CAPABILITY_STEP_CANDIDATE_IDENTITY_MISMATCH')
         }
       } catch (error) {
@@ -1175,7 +1231,7 @@ export async function executeCapabilityTask(
         throw new Error('BID_CAPABILITY_WRITING_RESUME_SCOPE_INVALID')
       }
       const source = await verifyWritingResumeSeed(working, run.work, saved.step_id, seed)
-      const permitted = new Set([...writes, ...await dispatcher.allowedWritesAfter?.(saved.step.call, source) ?? [],
+      const permitted = new Set([...writes, ...await dispatcher.allowedWritesAfter?.(saved.step.call, source, saved.step_id) ?? [],
         ...WRITING_RECOVERY_PATHS])
       if (seed.files.some(file => !permitted.has(file.path))
         || seed.removed_paths.some(path => !permitted.has(path))) {
@@ -1203,7 +1259,7 @@ export async function executeCapabilityTask(
     }
     if (awaitingSeed !== undefined) {
       const seedWrites = new Set([...writes,
-        ...await dispatcher.allowedWritesAfter?.(saved.step.call, awaitingSeed.workspace) ?? []])
+        ...await dispatcher.allowedWritesAfter?.(saved.step.call, awaitingSeed.workspace, saved.step_id) ?? []])
       if (awaitingSeed.step.result.changed_artifacts.some(path => !seedWrites.has(path))
         || awaitingSeed.step.removed_paths?.some(path => !seedWrites.has(path))) {
         throw new Error('BID_CAPABILITY_AWAITING_CANDIDATE_SCOPE_INVALID')
@@ -1221,7 +1277,7 @@ export async function executeCapabilityTask(
     }
     const authorizedNewDescendants = new Set<string>()
     const context: BidCapabilityExecutionContext = {
-      canonical, working: stepWorking, checkpointWorkspace: working, agent, sourceSession: session, sourceSnapshot: source,
+      canonical, working: stepWorking, checkpointWorkspace: working, agent, sourceSession: session, sourceSnapshot: stepSource,
       originalSectionIds: new Set(checkpoint.original_section_ids),
       originalTaskRequirements: checkpoint.verifications?.find(record => record.scope_authorized && record.unmet.length === 0
         && record.source_sha256 === bidInputFingerprint(source)
@@ -1232,7 +1288,7 @@ export async function executeCapabilityTask(
         && record.source_sha256 === bidInputFingerprint(source)
         && record.requirements.every(requirement => requirement.source_quote !== undefined))
           ?.requirements.some(requirement => requirement.preserve_migrated_content) === true ? { preserveMigratedContent: true } : {}),
-      run: candidateRun, sectionIds: scope.sectionIds,
+      run: candidateRun, sectionIds: scope.sectionIds, taskScope: request.task.scope, stepOutputs,
       ...(recovery === undefined ? {} : { recovery }),
       ...(sectionScopeRoots === undefined ? {} : { sectionScopeRoots }),
       authorizedNewDescendants,
@@ -1243,7 +1299,7 @@ export async function executeCapabilityTask(
       ...(reusedCandidate ? { resumeCandidate: true } : {}),
     }
     const execution = await dispatcher.execute(saved.step.call, context)
-    const postWrites = await dispatcher.allowedWritesAfter?.(saved.step.call, stepWorking) ?? new Set<string>()
+    const postWrites = await dispatcher.allowedWritesAfter?.(saved.step.call, stepWorking, saved.step_id) ?? new Set<string>()
     const validatedContext = { ...context, allowedWrites: new Set([...writes, ...postWrites]) }
     const currentOutline = await readOutline(stepWorking)
     const knownIds = new Set(currentOutline?.sections.map(section => section.id) ?? [])

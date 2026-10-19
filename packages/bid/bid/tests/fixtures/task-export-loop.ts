@@ -32,7 +32,7 @@ export async function runTaskExportLoop(ctx: Context, root: string) {
   const metadata = JSON.parse(await readFile(metadataPath, 'utf8')) as object
   await writeFile(metadataPath, JSON.stringify({ ...metadata, flowcharts: [] }))
   await writeFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), '# 章节1\n\n实施范围与交付步骤。\n')
-  const state = { stage: 'chapter_writing' as const, status: 'completed' as const, run: null }
+  const state = { workflow: { kind: 'full_bid' as const, stage: 'chapter_writing' as const }, status: 'completed' as const, run: null }
   await checkpointBidProjectState(workspace, state)
   agent.session.append('bid.task.changed', { state })
   if (ctx.get('bid') === undefined) await ctx.plugin(BidHostRuntime)

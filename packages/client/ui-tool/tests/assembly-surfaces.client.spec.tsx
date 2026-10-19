@@ -83,7 +83,7 @@ async function bench(nodes: ToolResultNode[]) {
   await runtime.sessions.add({
     id: SID,
     summary: { title: 'S', displayTitle: 'S', cwd: '/proj' },
-    snapshot: { nodes, chat: toolChatSnapshot(nodes) },
+    snapshot: { nodes, chat: toolChatSnapshot(nodes), running: true },
     session: {
       loadOlder: vi.fn<ISession['loadOlder']>(),
       prompt: vi.fn<ISession['prompt']>(async () => ({ ok: true, value: { accepted: true } })),
@@ -111,7 +111,7 @@ describe('todo_write assembly (product registrations, no outlet twins)', () => {
     // The current plan is expanded by default and can be collapsed.
     const panel = view.container.querySelector('[data-testid="todo-panel"]')
     expect(panel).not.toBeNull()
-    expect(panel!.textContent).toContain('1 已完成\u2002·\u20021 未收尾\u2002·\u20021 待处理')
+    expect(panel!.textContent).toContain('1 已完成\u2002·\u20021 进行中\u2002·\u20021 待处理')
     expect([...panel!.querySelectorAll('li')].map(li => li.getAttribute('data-status')))
       .toEqual(['completed', 'in_progress', 'pending'])
     fireEvent.click(panel!.querySelector('button')!)

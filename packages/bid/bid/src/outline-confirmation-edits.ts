@@ -1,6 +1,6 @@
 import { normalizeOutlineSectionTitle } from './outline-title.ts'
 import { z } from 'zod'
-import { applyOutlineEdits, buildOutlineView, type OutlineEditOperation, type OutlineViewSection } from './outline-confirmation-browser.ts'
+import { applyOutlineEdits, buildOutlineView, outlineBusinessBindingSchema, type OutlineBusinessBinding, type OutlineEditOperation, type OutlineViewSection } from './outline-confirmation-browser.ts'
 import type { OutlineArtifact } from './outline-generation-artifacts.ts'
 import type { TenderRequirementsArtifact, TenderScoringArtifact, TenderComplianceArtifact } from './tender-analysis-artifacts.ts'
 import type { ScoringResponsePointCatalog } from './scoring-response-point-artifacts.ts'
@@ -24,18 +24,6 @@ export const outlineEditOperationSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('merge_sections'), section_ids: z.array(text).min(2), title: sectionTitle, purpose: text }).strict(),
   z.object({ type: z.literal('move_section'), section_id: text, parent_id: z.string().min(1).nullable(), order: z.number().int().positive() }).strict(),
 ])
-
-/** 目录结构操作之后的业务归属；所有 ID 来自当前招标事实。 */
-export const outlineBusinessBindingSchema = z.object({
-  section_id: text,
-  requirement_ids: z.array(text),
-  scoring_ids: z.array(text),
-  scoring_response_point_ids: z.array(z.string().regex(/^RP-\d{6}$/u)),
-  compliance_ids: z.array(text),
-}).strict()
-
-/** 一次候选目录中的显式业务归属。 */
-export type OutlineBusinessBinding = z.infer<typeof outlineBusinessBindingSchema>
 
 /**
  * 更新真实业务归属并补齐响应点唯一确定的父评分项，最终完整性由 shared validator 检查。

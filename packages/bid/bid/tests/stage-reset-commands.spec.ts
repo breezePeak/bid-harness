@@ -6,7 +6,7 @@ import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
 import * as resetCommands from '../src/stage-reset-commands.ts'
 
 class FakeBidRuntime extends Service {
-  readonly resetStage = vi.fn(async (_agent: Agent, stage: string) => ({ stage, status: 'waiting_user' as const, run: null }))
+  readonly resetStage = vi.fn(async (_agent: Agent, stage: string) => ({ workflow: { kind: 'full_bid', stage }, status: 'waiting_user' as const, run: null }))
 
   constructor(ctx: Context) {
     super(ctx, 'bid')

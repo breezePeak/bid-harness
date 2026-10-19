@@ -175,15 +175,16 @@ export class BidOrchestrator {
     this.assertIdle()
     const state = this.state
     const recoverable = bidRecoverableRun(this.session, state)
-    if (recoverable === undefined || recoverable.runId !== suspendedRunId) {
+    if (recoverable === undefined || recoverable.runId !== suspendedRunId || recoverable.work.kind === 'capability_task') {
       throw new BidOrchestratorError('BID_RESUME_NOT_ALLOWED', '请求恢复的投标 Run 已不是当前可恢复任务。')
     }
+    const stage = recoverable.work.stage
     return this.begin(async () => {
       const resumeOf: BidRunResumeIdentity = {
         runId: recoverable.runId,
         cause: recoverable.cause,
       }
-      const settlement = await this.executeStage(state.stage, resumeOf, recoverable.work, onAccepted)
+      const settlement = await this.executeStage(stage, resumeOf, recoverable.work, onAccepted)
       return settlement === 'completed' ? this.driveLoop() : this.state
     })
   }
@@ -196,16 +197,18 @@ export class BidOrchestrator {
   runCurrentProgramStage(): Promise<BidTaskState> {
     this.assertIdle()
     const state = this.state
-    const policy = getBidStagePolicy(state.stage)
+    const workflow = state.workflow
+    if (workflow === null) throw new BidOrchestratorError('BID_PROGRAM_STAGE_NOT_ALLOWED', '当前没有完整编写路线。')
+    const policy = getBidStagePolicy(workflow.stage)
     if (policy.executor !== 'program' || (state.status !== 'ready'
-      && !(state.stage === 'file_intake' && (state.status === 'waiting_user' || state.status === 'failed')))) {
+      && !(state.workflow?.stage === 'file_intake' && (state.status === 'waiting_user' || state.status === 'failed')))) {
       throw new BidOrchestratorError(
         'BID_PROGRAM_STAGE_NOT_ALLOWED',
-        `cannot run Bid program stage ${JSON.stringify(state.stage)} while status is ${JSON.stringify(state.status)}`,
+        `cannot run Bid program stage ${JSON.stringify(state.workflow?.stage)} while status is ${JSON.stringify(state.status)}`,
       )
     }
     return this.begin(async () => {
-      await this.executeStage(state.stage)
+      await this.executeStage(workflow.stage)
       return this.state
     })
   }
@@ -218,15 +221,17 @@ export class BidOrchestrator {
   runCurrentAutomaticStage(): Promise<BidTaskState> {
     this.assertIdle()
     const state = this.state
-    const policy = getBidStagePolicy(state.stage)
-    if (state.status !== 'ready' || state.stage === 'file_intake' || policy.userGate === 'before_execution') {
+    const workflow = state.workflow
+    if (workflow === null) throw new BidOrchestratorError('BID_AUTOMATIC_STAGE_NOT_ALLOWED', '当前没有完整编写路线。')
+    const policy = getBidStagePolicy(workflow.stage)
+    if (state.status !== 'ready' || state.workflow?.stage === 'file_intake' || policy.userGate === 'before_execution') {
       throw new BidOrchestratorError(
         'BID_AUTOMATIC_STAGE_NOT_ALLOWED',
-        `cannot run Bid automatic stage ${JSON.stringify(state.stage)} while status is ${JSON.stringify(state.status)}`,
+        `cannot run Bid automatic stage ${JSON.stringify(state.workflow?.stage)} while status is ${JSON.stringify(state.status)}`,
       )
     }
     return this.begin(async () => {
-      await this.executeStage(state.stage)
+      await this.executeStage(workflow.stage)
       return this.state
     })
   }
@@ -238,14 +243,14 @@ export class BidOrchestrator {
   runConfirmedStage(): Promise<BidTaskState> {
     this.assertIdle()
     const state = this.state
-    if (state.status !== 'ready' || state.stage !== 'chapter_writing') {
+    if (state.status !== 'ready' || state.workflow?.stage !== 'chapter_writing') {
       throw new BidOrchestratorError(
         'BID_AUTOMATIC_STAGE_NOT_ALLOWED',
-        `cannot run confirmed Bid stage ${JSON.stringify(state.stage)} while status is ${JSON.stringify(state.status)}`,
+        `cannot run confirmed Bid stage ${JSON.stringify(state.workflow?.stage)} while status is ${JSON.stringify(state.status)}`,
       )
     }
     return this.begin(async () => {
-      const settlement = await this.executeStage(state.stage)
+      const settlement = await this.executeStage('chapter_writing')
       return settlement === 'completed' ? this.driveLoop() : this.state
     })
   }
@@ -261,11 +266,11 @@ export class BidOrchestrator {
     this.assertIdle()
     const state = this.state
     const policy = getBidStagePolicy(stage)
-    if (state.stage !== stage || state.status !== 'waiting_user'
+    if (state.workflow?.stage !== stage || state.status !== 'waiting_user'
       || policy.userGate !== 'after_validation') {
       throw new BidOrchestratorError(
         'BID_CONFIRM_NOT_ALLOWED',
-        `cannot confirm Bid stage ${JSON.stringify(stage)} while stage is ${JSON.stringify(state.stage)} and status is ${JSON.stringify(state.status)}`,
+        `cannot confirm Bid stage ${JSON.stringify(stage)} while stage is ${JSON.stringify(state.workflow?.stage)} and status is ${JSON.stringify(state.status)}`,
       )
     }
     return this.beginConfirmation(async () => {
@@ -303,11 +308,11 @@ export class BidOrchestrator {
     const confirmationWorkRunning = state.status === 'running'
       && state.run.work.kind === 'outline_confirmation'
       && state.run.work.stage === stage
-    if (state.stage !== stage || (state.status !== 'waiting_user' && !confirmationWorkRunning)
+    if (state.workflow?.stage !== stage || (state.status !== 'waiting_user' && !confirmationWorkRunning)
       || policy.userGate !== 'after_validation') {
       throw new BidOrchestratorError(
         'BID_CONFIRM_NOT_ALLOWED',
-        `cannot confirm Bid stage ${JSON.stringify(stage)} while stage is ${JSON.stringify(state.stage)} and status is ${JSON.stringify(state.status)}`,
+        `cannot confirm Bid stage ${JSON.stringify(stage)} while stage is ${JSON.stringify(state.workflow?.stage)} and status is ${JSON.stringify(state.status)}`,
       )
     }
     return this.begin(async () => {
@@ -350,7 +355,7 @@ export class BidOrchestrator {
       }
     }
     if (input.trim().length === 0) return { admitted: false, reason: 'bid.prompt_empty' }
-    return { admitted: true, stage: projection.task.stage, input }
+    return { admitted: true, workflow: projection.task.workflow, input }
   }
 
   /** Install one operation before its first async step, then release the slot after settlement. */
@@ -385,18 +390,18 @@ export class BidOrchestrator {
     while (true) {
       if (this.isAborted()) return this.state
       const state = this.state
-      if (state.status !== 'ready') return state
-      if (state.stage === 'file_intake') return state
-      const policy = getBidStagePolicy(state.stage)
+      if (state.status !== 'ready' || state.workflow === null) return state
+      if (state.workflow.stage === 'file_intake') return state
+      const policy = getBidStagePolicy(state.workflow.stage)
       if (policy.userGate === 'before_execution') {
         this.session.append('bid.user_confirmation.required', {
-          stage: state.stage,
+          stage: state.workflow.stage,
           status: 'waiting_user',
         })
         return this.state
       }
-      if (!this.executor.canExecute(state.stage)) return state
-      if (await this.executeStage(state.stage) !== 'completed') return this.state
+      if (!this.executor.canExecute(state.workflow.stage)) return state
+      if (await this.executeStage(state.workflow.stage) !== 'completed') return this.state
     }
   }
 
@@ -416,7 +421,7 @@ export class BidOrchestrator {
       requestSha256: '0'.repeat(64),
       inputFingerprint: '0'.repeat(64),
     }))
-    if (work.stage !== stage) throw new BidOrchestratorError('BID_RESUME_NOT_ALLOWED', 'the Work Descriptor stage does not match the workflow')
+    if (work.kind === 'capability_task' || work.stage !== stage) throw new BidOrchestratorError('BID_RESUME_NOT_ALLOWED', 'the Work Descriptor stage does not match the workflow')
     if (this.isAborted()) return 'aborted'
     if (this.beforeStageStart !== undefined && !await this.beforeStageStart(stage, resumeOf)) {
       return 'aborted'
@@ -534,7 +539,7 @@ export class BidOrchestrator {
   /** Preserve usable S5 artifacts when a bounded business correction cannot reach its confirmed target. */
   private attentionRequired(stage: BidStage, reason: string, issues: StageValidationIssue[]): void {
     this.session.append('bid.task.changed', {
-      state: { stage, status: 'waiting_user', run: null, reason, issues },
+      state: { workflow: { kind: 'full_bid', stage: stage }, status: 'waiting_user', run: null, reason, issues },
     })
   }
 }

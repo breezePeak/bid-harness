@@ -10,7 +10,7 @@ Bid 同时保存 Workflow gate、Run status、浏览器 runtime status 与重置
 
 `BidTaskState` 是 Host、项目文件、Session 归约和浏览器 Projection 的唯一业务状态。其 `status` 只允许 `ready`、`running`、`waiting_user`、`suspended`、`failed` 与 `completed`；判别联合规定只有 `running` 和 `suspended` 携带 Run。Run 只保存执行身份、Work Descriptor、revision、进度和时间，挂起原因与错误属于 `suspended` 分支，业务失败属于 `failed` 分支。
 
-`project-state.json` version 4 扁平保存任务状态及 revision、更新时间。读取器结构化接受 version 3 的 Workflow、Run、最近 Run 和兼容 runtime 字段并归一为 `BidTaskState`；正常写入只产生 version 4。Host 在项目锁内把没有 live operation 的 `running` 改为 `suspended(host_restart)`。
+`project-state.json` version 5 保存唯一任务状态及 revision、更新时间，旧磁盘格式拒读并保留原文件。`workflow` 为空或完整标书路线，能力 Work 不带专业阶段；具体入口及独立资产规则见[任务入口与原 Word 处理](2026-10-19-bid-task-entry-and-native-document-assets.md)。Host 在项目锁内把没有 live operation 的 `running` 改为 `suspended(host_restart)`。
 
 Session 使用 `bid.project.resumed` 同步完整任务状态，并用 `bid.task.changed` 提交显式业务结果。旧阶段事件、旧 v3 resumed payload 与 `stage_start` 决策值只服务历史日志回放，生产路径不再产生它们。`bid.run.completed` 本身不改变业务状态；Run 结束必须在同一次 checkpoint 中追加明确结果。
 

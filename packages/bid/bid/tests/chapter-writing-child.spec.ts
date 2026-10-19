@@ -52,6 +52,7 @@ describe('S5 reused Writer policy', () => {
       id: writerId,
       session: { events: [], header: { parentSession: 'parent' } },
       ctx: {
+        effect: (callback: () => () => void) => callback(),
         get: (name: string) => name === 'tools' ? tools : undefined,
         on: (name: string, listener: (...args: never[]) => void) => {
           listeners.set(name, listener)
@@ -117,6 +118,7 @@ describe('S5 paragraph revision Writer policy', () => {
       ctx: {
         get: (name: string) => name === 'tools' ? tools : undefined,
         on: vi.fn(() => () => {}),
+        effect: vi.fn((setup: () => unknown) => setup()),
       },
     } as unknown as Agent
     const subagents = {

@@ -47,6 +47,7 @@ describe('Bid Host stage reset', () => {
     await ctx.plugin(SessionStore)
     const cwd = await mkdtemp(join(tmpdir(), 'dsh-bid-reset-'))
     const session = ctx.sessions.create(SessionId('bid-reset-running'), { meta: { cwd, agentPreset: 'bid' } })
+    session.append('bid.workflow.started', { source: { session_id: String(session.id), message_id: 'fixture-start', content_sha256: 'a'.repeat(64) } })
     session.append('bid.stage.started', { stage: 'file_intake', status: 'running' })
     session.append('bid.stage.completed', { stage: 'file_intake', status: 'completed', artifacts: [] })
     session.append('bid.stage.started', { stage: 'tender_analysis', status: 'running' })
@@ -100,7 +101,7 @@ describe('Bid Host stage reset', () => {
       inbox: { clear: vi.fn() },
     } as unknown as Agent
     const flush = vi.fn(async () => {})
-    const drivenState: BidTaskState = { stage: 'outline_generation', status: 'waiting_user', run: null }
+    const drivenState: BidTaskState = { workflow: { kind: 'full_bid' as const, stage: 'outline_generation' }, status: 'waiting_user', run: null }
     const drive = vi.fn(async () => drivenState)
     const host = Object.assign(Object.create(BidHostRuntime.prototype) as object, {
       ctx: {
@@ -152,11 +153,11 @@ describe('Bid Host stage reset', () => {
 
     prior.resolve(undefined)
     executionIdle.resolve(undefined)
-    await expect(reset).resolves.toEqual({ stage: 'outline_generation', status: 'ready', run: null })
+    await expect(reset).resolves.toEqual({ workflow: { kind: 'full_bid' as const, stage: 'outline_generation' }, status: 'ready', run: null })
     expect(drive).not.toHaveBeenCalled()
     expect(host.inFlight.has(key)).toBe(true)
     expect(session.events.findLast(event => event.type === 'bid.task.changed')).toMatchObject({
-      type: 'bid.task.changed', data: { state: { stage: 'outline_generation', status: 'ready', run: null } },
+      type: 'bid.task.changed', data: { state: { workflow: { kind: 'full_bid' as const, stage: 'outline_generation' }, status: 'ready', run: null } },
     })
     expect(flush).toHaveBeenCalledWith(session)
     expect(session.events.some(event => event.type === 'bid.run.decision.required')).toBe(false)
@@ -170,6 +171,7 @@ describe('Bid Host stage reset', () => {
     await ctx.plugin(SessionStore)
     const cwd = await mkdtemp(join(tmpdir(), 'dsh-bid-reset-lifetime-'))
     const session = ctx.sessions.create(SessionId('bid-reset-lifetime'), { meta: { cwd, agentPreset: 'bid' } })
+    session.append('bid.workflow.started', { source: { session_id: String(session.id), message_id: 'fixture-start', content_sha256: 'a'.repeat(64) } })
     session.append('bid.stage.started', { stage: 'file_intake', status: 'running' })
     session.append('bid.stage.completed', { stage: 'file_intake', status: 'completed', artifacts: [] })
     session.append('bid.stage.started', { stage: 'tender_analysis', status: 'running' })
@@ -228,7 +230,7 @@ describe('Bid Host stage reset', () => {
       agent,
       'outline_generation',
     )
-    await expect(resetting).resolves.toEqual({ stage: 'outline_generation', status: 'ready', run: null })
+    await expect(resetting).resolves.toEqual({ workflow: { kind: 'full_bid' as const, stage: 'outline_generation' }, status: 'ready', run: null })
     expect(executionAgent).not.toHaveBeenCalled()
     expect(drive).not.toHaveBeenCalled()
     expect(host.inFlight.values().next().value).toMatchObject({ reservedForReset: false })
@@ -236,7 +238,7 @@ describe('Bid Host stage reset', () => {
     await vi.waitFor(() => { expect(drive).toHaveBeenCalledOnce() })
     expect(dispose).not.toHaveBeenCalled()
 
-    const drivenState: BidTaskState = { stage: 'outline_generation', status: 'waiting_user', run: null }
+    const drivenState: BidTaskState = { workflow: { kind: 'full_bid' as const, stage: 'outline_generation' }, status: 'waiting_user', run: null }
     driveGate.resolve(drivenState)
     await vi.waitFor(() => { expect(dispose).toHaveBeenCalledOnce() })
     expect(host.inFlight.size).toBe(0)
@@ -247,6 +249,7 @@ describe('Bid Host stage reset', () => {
     await ctx.plugin(SessionStore)
     const cwd = await mkdtemp(join(tmpdir(), 'dsh-bid-reset-finishing-'))
     const session = ctx.sessions.create(SessionId('bid-reset-finishing'), { meta: { cwd, agentPreset: 'bid' } })
+    session.append('bid.workflow.started', { source: { session_id: String(session.id), message_id: 'fixture-start', content_sha256: 'a'.repeat(64) } })
     session.append('bid.stage.started', { stage: 'file_intake', status: 'running' })
     session.append('bid.stage.completed', { stage: 'file_intake', status: 'completed', artifacts: [] })
     session.append('bid.stage.started', { stage: 'tender_analysis', status: 'running' })
@@ -281,7 +284,7 @@ describe('Bid Host stage reset', () => {
       executionHandle: { agent },
     }
     const drive = vi.fn(async (): Promise<BidTaskState> => ({
-      stage: 'outline_generation', status: 'waiting_user', run: null,
+      workflow: { kind: 'full_bid' as const, stage: 'outline_generation' }, status: 'waiting_user', run: null,
     }))
     const host = Object.assign(Object.create(BidHostRuntime.prototype) as object, {
       ctx: {
@@ -322,7 +325,7 @@ describe('Bid Host stage reset', () => {
     expect(drive).not.toHaveBeenCalled()
 
     finished.resolve(undefined)
-    await expect(resetting).resolves.toEqual({ stage: 'outline_generation', status: 'ready', run: null })
+    await expect(resetting).resolves.toEqual({ workflow: { kind: 'full_bid' as const, stage: 'outline_generation' }, status: 'ready', run: null })
     await vi.waitFor(() => { expect(drive).toHaveBeenCalledOnce() })
   })
 
@@ -331,6 +334,7 @@ describe('Bid Host stage reset', () => {
     await ctx.plugin(SessionStore)
     const cwd = await mkdtemp(join(tmpdir(), 'dsh-bid-reset-context-'))
     const session = ctx.sessions.create(SessionId(`bid-reset-context-${stage}`), { meta: { cwd, agentPreset: 'bid' } })
+    session.append('bid.workflow.started', { source: { session_id: String(session.id), message_id: 'fixture-start', content_sha256: 'a'.repeat(64) } })
     const messages = BID_STAGES.map((candidate) => {
       session.append('bid.stage.started', { stage: candidate, status: 'running' })
       const message = session.append('user/message', createUserMessage({
@@ -351,7 +355,7 @@ describe('Bid Host stage reset', () => {
       whenIdle: vi.fn(async () => {}),
       inbox: { clear },
     } as unknown as Agent
-    const drivenState: BidTaskState = { stage, status: 'waiting_user', run: null }
+    const drivenState: BidTaskState = { workflow: { kind: 'full_bid' as const, stage: stage }, status: 'waiting_user', run: null }
     const drive = vi.fn(async () => drivenState)
     const host = Object.assign(Object.create(BidHostRuntime.prototype) as object, {
       ctx: {
@@ -385,7 +389,7 @@ describe('Bid Host stage reset', () => {
     const reset = BidHostRuntime.prototype.resetStage.call(host as unknown as BidHostRuntime, agent, stage)
     await expect(reset).resolves.toEqual(stage === 'file_intake' || stage === 'chapter_writing'
       ? drivenState
-      : { stage, status: 'ready', run: null })
+      : { workflow: { kind: 'full_bid' as const, stage: stage }, status: 'ready', run: null })
     expect(session.surface.nodes).toEqual([
       ...messages.slice(0, stageIndex).map(message => message.seq),
       session.surface.nodes.at(-1),

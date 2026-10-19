@@ -66,7 +66,7 @@ try {
     runs: {
       count: starts.length,
       distinct: new Set(starts.map(event => event.data.run.runId)).size === starts.length,
-      stages: starts.map(event => event.data.run.work.stage),
+      stages: starts.map(event => (event.data.run.work.kind === 'capability_task' ? null : event.data.run.work.stage)),
       kinds: starts.map(event => event.data.run.work.kind),
     },
     failures: session.events.flatMap(event => event.type === 'bid.task.changed' && event.data.state.status === 'failed'
@@ -75,7 +75,7 @@ try {
       stage: event.data.stage, kind: event.data.kind, severity: event.data.severity, message: event.data.message,
     })),
     task: session.events.reduce(reduceBidTaskState, BID_INITIAL_TASK_STATE),
-    durableTask: saved === undefined ? null : { stage: saved.stage, status: saved.status, run: saved.run },
+    durableTask: saved === undefined ? null : { workflow: saved.workflow, status: saved.status, run: saved.run },
     files: (await workspace.readManifest()).files.map(file => ({
       name: file.originalName, role: file.role, parseStatus: file.parseStatus, parseError: file.parseError,
       inputPath: file.inputPath, documentPath: file.documentPath, chunkIndexPath: file.chunkIndexPath,

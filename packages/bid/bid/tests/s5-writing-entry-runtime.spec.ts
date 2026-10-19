@@ -75,7 +75,7 @@ async function setupS5Fixture(adapter = new ControllableMockLlmAdapter()) {
   const outline = await seedProjectArtifacts(workspace)
   await rm(join(workspace.projectRoot, 'chapters/writing-plan.json'), { force: true })
   await rm(join(workspace.projectRoot, 'chapters/writing-request.json'), { force: true })
-  await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'waiting_user', run: null })
+  await checkpointBidProjectState(workspace, { workflow: { kind: 'full_bid', stage: 'chapter_writing' }, status: 'waiting_user', run: null })
   const hash = outlineArtifactSha256(outline)
   await writeFile(
     join(workspace.projectRoot, 'outline/confirmation.json'),
@@ -207,7 +207,7 @@ describe('S5 写作入口运行时与完整工具链测试', () => {
     const now = Date.now()
     agent.session.append('bid.project.resumed', {
       state: {
-        stage: 'chapter_writing', status: 'running',
+        workflow: { kind: 'full_bid', stage: 'chapter_writing' }, status: 'running',
         run: {
           runId: 'flowchart-policy-run', epoch: 1, baseProjectRevision: 1,
           work: {

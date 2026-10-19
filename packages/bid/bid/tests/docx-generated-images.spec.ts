@@ -23,10 +23,10 @@ async function fixture() {
   const root = await fs.mkdtemp(join(tmpdir(), 'dsh-docx-images-'))
   roots.push(root)
   const workspace = new BidWorkspace(root)
-  await fs.mkdir(join(workspace.projectRoot, 'chapters/images'), { recursive: true })
+  await fs.mkdir(join(workspace.projectRoot, 'assets/images'), { recursive: true })
   const png = await chapterImageFixturePng()
   const hash = createHash('sha256').update(png).digest('hex')
-  const path = `chapters/images/${hash}.png`
+  const path = `assets/images/${hash}.png`
   await fs.writeFile(join(workspace.projectRoot, path), png)
   return { workspace, png, path }
 }

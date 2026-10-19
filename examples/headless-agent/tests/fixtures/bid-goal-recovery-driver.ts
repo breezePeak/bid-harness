@@ -108,7 +108,7 @@ let ctx: Context | undefined
 try {
   ctx = await boot('bid-goal-recovery-snapshot', configPath)
   const workspace = new BidWorkspace(process.cwd())
-  await checkpointBidProjectState(workspace, { stage: 'tender_analysis', status: 'ready', run: null })
+  await checkpointBidProjectState(workspace, { workflow: { kind: 'full_bid' as const, stage: 'tender_analysis' }, status: 'ready', run: null })
   const sessionId = SessionId('bid-goal-recovery')
   const adapter = new GoalRecoveryAdapter(sessionId)
   adapter.explicitContinuation = explicitContinuation
@@ -131,7 +131,7 @@ try {
   const host = ctx.bid as unknown as HostInternals
   const payload = { stage: 'tender_analysis' }
   const inputs = buildBidStageTask('tender_analysis').inputs.map(path => ({ path, sha256: null }))
-  const work = await persistBidWorkRequest(workspace, 'stage_execution', 'tender_analysis', payload,
+  const work = await persistBidWorkRequest(workspace, { kind: 'stage_execution', stage: 'tender_analysis' }, payload,
     { stage: 'tender_analysis', inputs, payload })
   const operation = host.beginOperation(agent.session)
   await host.prepareOperation(operation)
@@ -144,7 +144,7 @@ try {
     })
     const payload = { stage: 'outline_generation' }
     const inputs = buildBidStageTask('outline_generation').inputs.map(path => ({ path, sha256: null }))
-    const outlineWork = await persistBidWorkRequest(workspace, 'stage_execution', 'outline_generation', payload,
+    const outlineWork = await persistBidWorkRequest(workspace, { kind: 'stage_execution', stage: 'outline_generation' }, payload,
       { stage: 'outline_generation', inputs, payload })
     failed = await operation.runs.start(outlineWork)
     if (process.env.DSH_BID_RECOVERY_STAGE === 'evidence_mapping') {
@@ -153,15 +153,15 @@ try {
       })
       const payload = { stage: 'evidence_mapping' }
       const inputs = buildBidStageTask('evidence_mapping').inputs.map(path => ({ path, sha256: null }))
-      const mappingWork = await persistBidWorkRequest(workspace, 'stage_execution', 'evidence_mapping', payload,
+      const mappingWork = await persistBidWorkRequest(workspace, { kind: 'stage_execution', stage: 'evidence_mapping' }, payload,
         { stage: 'evidence_mapping', inputs, payload })
       failed = await operation.runs.start(mappingWork)
     }
   }
-  const issues = failed.work.stage === 'evidence_mapping' ? [{
+  const issues = (failed.work.kind === 'capability_task' ? null : failed.work.stage) === 'evidence_mapping' ? [{
     code: 'EVIDENCE_MAPPING_SUBAGENT_STRUCTURED_MISSING', artifact: 'MAP-REPAIR-S2.1',
     message: 'Mapping Subagent 未成功调用 finish_mapping_task 完成当前任务。',
-  }] : failed.work.stage === 'outline_generation' ? [
+  }] : (failed.work.kind === 'capability_task' ? null : failed.work.stage) === 'outline_generation' ? [
     { code: 'OUTLINE_SHARED_WRITABLE_NOT_LEAF', artifact: 'outline/outline.json', message: '父章节不能直接写作' },
     { code: 'OUTLINE_SHARED_RESPONSE_POINT_MISSING', artifact: 'outline/outline.json', message: '叶子章节缺失响应点' },
   ] : [{
@@ -221,9 +221,14 @@ try {
     await agent.whenIdle()
     await Promise.allSettled(host.recoveryTasks)
     await agent.whenIdle()
+    await host.recoveryDriver.request(agent)
+    await agent.whenIdle()
+    await host.recoveryDriver.request(agent)
+    await agent.whenIdle()
     const events = agent.session.events
     const runs = events.filter(event => event.type === 'bid.run.started')
     const decision = bidRunRecoveryEligibility(agent.session)
+    const terminal = events.findLast(event => event.type === 'bid.recovery.round' && event.data.state === 'blocked')
     process.stdout.write(JSON.stringify({
       startedRuns: runs.length, sameWork: runs.every(event => event.data.run.work.workId === failed.work.workId),
       ...(nativeContinuation ? { questionCount, nativeAnswerAccepted: events.some(event => event.type === 'bid.recovery.requested'
@@ -232,6 +237,9 @@ try {
       automaticEligible: decision.eligible, attempts: decision.attempts,
       automaticRound: events.findLast(event => event.type === 'bid.recovery.round')?.data.round,
       automaticBudget: events.findLast(event => event.type === 'bid.recovery.round')?.data.budget,
+      currentRunReportedOnce: terminal?.type === 'bid.recovery.round' && terminal.data.target.kind === 'run'
+        && terminal.data.target.runId === runs.at(-1)?.data.run.runId
+        && events.filter(event => event.type === 'user/message' && String(event.data.id) === terminal.data.messageId).length === 1,
       calls: events.filter(event => event.type === 'tool/call').map(event => event.data.name),
       userMessages: events.flatMap(event => event.type === 'user/message' && event.data.source.kind === 'user'
         ? event.data.content.flatMap(block => block.type === 'text' ? [block.text] : []) : []),

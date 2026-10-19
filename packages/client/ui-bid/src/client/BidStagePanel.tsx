@@ -424,7 +424,7 @@ export function BidStagePanel({
     return () => { active = false; window.clearTimeout(timer) }
   }, [getCapabilityTaskPlan, isBidSession, resetCommandSeq, sessionId])
 
-  const progressStage = projection?.task.stage
+  const progressStage = projection?.task.workflow?.stage
   const progressStatus = projection?.task.status
   const progressRunId = projection?.task.run?.runId ?? null
   const progressWorkId = projection?.task.run?.work.workId ?? null
@@ -593,11 +593,11 @@ export function BidStagePanel({
   }, [backgroundRunActive, setBackgroundActivity])
   const embedConversation = false
   const reviewViewAvailable = hasProjection && (bodyAvailable
-    || projection.task.stage === 'chapter_writing' || projection.task.stage === 'docx_export')
-  const outlineReviewReady = canConfirm && projection?.task.stage === 'evidence_mapping'
+    || projection.task.workflow?.stage === 'chapter_writing' || projection.task.workflow?.stage === 'docx_export')
+  const outlineReviewReady = canConfirm && projection?.task.workflow?.stage === 'evidence_mapping'
   const reviewViewId = canConfirmAnalysis ? 'bid-tender'
     : canConfirm ? outlineReviewReady ? 'bid-outline' : 'bid-confirmation' : 'bid-review'
-  const reviewStateKey = (reviewViewAvailable || canConfirmAnalysis || canConfirm) && projection !== undefined ? `${projection.task.stage}:${projection.task.status}` : null
+  const reviewStateKey = (reviewViewAvailable || canConfirmAnalysis || canConfirm) && projection !== undefined ? `${projection.task.workflow?.stage}:${projection.task.status}` : null
   const reviewHost = useSyncExternalStore(reviewSurface.subscribe, reviewSurface.host, () => null)
   const [, setReviewWorkbenchActive] = useState(false)
   useEffect(() => {
@@ -615,7 +615,7 @@ export function BidStagePanel({
 
   const showFloatingRevision = hasProjection
     && isBidSession
-    && (projection.task.stage === 'chapter_writing' || projection.task.stage === 'docx_export')
+    && (projection.task.workflow?.stage === 'chapter_writing' || projection.task.workflow?.stage === 'docx_export')
     && getRevisionQueue !== undefined
 
   useEffect(() => {
@@ -645,7 +645,7 @@ export function BidStagePanel({
     } else setDetailsAvailable(null)
     return () => { active = false }
   }, [
-    hasProjection, sessionId, projection?.task.stage, projection?.task.status,
+    hasProjection, sessionId, projection?.task.workflow?.stage, projection?.task.status,
     getDetails, setDetailsAvailable, reviewStateKey, reviewViewId, canConfirm, outlineReviewReady, selectReviewView,
   ])
 
@@ -668,7 +668,7 @@ export function BidStagePanel({
   useEffect(() => {
     const resetApplied = selectedFilesSessionId.current === sessionId
       && resetCommandSeq >= 0 && resetCommandSeq >= selectedFilesResetSeq.current
-    if (projection?.task.stage === 'file_intake' && selectedFilesSessionId.current === sessionId && !resetApplied) return
+    if (projection?.task.workflow?.stage === 'file_intake' && selectedFilesSessionId.current === sessionId && !resetApplied) return
     if (resetApplied || selectedFilesSessionId.current !== sessionId) selectedFilesEpoch.current += 1
     selectedFilesSessionId.current = sessionId
     selectedFilesResetSeq.current = Math.max(lastNodeSeq, resetCommandSeq + 1)
@@ -686,10 +686,10 @@ export function BidStagePanel({
       setCapabilitySnapshot(null)
       setRequestError(null)
     }
-  }, [projection?.task.stage, resetCommandSeq, lastNodeSeq, sessionId])
+  }, [projection?.task.workflow?.stage, resetCommandSeq, lastNodeSeq, sessionId])
 
   useEffect(() => {
-    if (!hasProjection || projection.task.stage !== 'file_intake') { setDocxLibrary(null); return }
+    if (!hasProjection || projection.task.workflow?.stage !== 'file_intake') { setDocxLibrary(null); return }
     let active = true
     void getDocxLibrary().then((value) => { if (active) setDocxLibrary(value) }, (reason: unknown) => {
       if (active) setDocxTemplateMessage(reason instanceof Error ? reason.message : 'Word 模板库读取失败。')
@@ -701,7 +701,7 @@ export function BidStagePanel({
     setOutlineFeedback('')
     setUpdatedForConfirmation(false)
     draftRef.current = null
-  }, [sessionId, projection?.task.stage])
+  }, [sessionId, projection?.task.workflow?.stage])
 
   useEffect(() => {
     requestEpoch.current += 1
@@ -711,7 +711,7 @@ export function BidStagePanel({
       actionErrorVisible.current = false
       setRequestError(null)
     }
-  }, [sessionId, projection?.task.stage, projection?.task.status])
+  }, [sessionId, projection?.task.workflow?.stage, projection?.task.status])
 
   useEffect(() => {
     setReviewContext(null)
@@ -723,7 +723,7 @@ export function BidStagePanel({
       if (active) setRequestError({ message: reason instanceof Error ? reason.message : String(reason), issues: [] })
     })
     return () => { active = false }
-  }, [canConfirm, getOutlineReviewContext, sessionId, projection?.task.stage])
+  }, [canConfirm, getOutlineReviewContext, sessionId, projection?.task.workflow?.stage])
 
 
   useEffect(() => {
@@ -757,18 +757,18 @@ export function BidStagePanel({
   const tenderAutomaticKey = `${sessionId}:tender_analysis`
   const chapterAutomaticKey = `${sessionId}:chapter_writing:automatic`
   useEffect(() => {
-    if (projection?.task.stage !== 'tender_analysis' || projection.task.status !== 'waiting_user') {
+    if (projection?.task.workflow?.stage !== 'tender_analysis' || projection.task.status !== 'waiting_user') {
       actions.clearAttempted(tenderAutomaticKey)
     }
-    if (projection?.task.stage !== 'chapter_writing' || projection.task.status !== 'waiting_user') {
+    if (projection?.task.workflow?.stage !== 'chapter_writing' || projection.task.status !== 'waiting_user') {
       actions.clearAttempted(chapterAutomaticKey)
     }
-  }, [actions, chapterAutomaticKey, projection?.task.stage, projection?.task.status, tenderAutomaticKey])
+  }, [actions, chapterAutomaticKey, projection?.task.workflow?.stage, projection?.task.status, tenderAutomaticKey])
 
   useEffect(() => {
     if (confirmationMode !== 'automatic' || !canConfirm || confirmOutline === undefined || draft === null
       || draftSaveState !== 'saved' || requestPending !== null) return
-    const key = `${sessionId}:${projection?.task.stage ?? ''}:${String(draft.revision)}:${draft.draft_outline_sha256}`
+    const key = `${sessionId}:${projection?.task.workflow?.stage ?? ''}:${String(draft.revision)}:${draft.draft_outline_sha256}`
     if (automaticAttempts.includes(key)) return
     actions.markAttempted(key)
     invoke('confirm', async () => {
@@ -780,11 +780,11 @@ export function BidStagePanel({
     })
   }, [
     actions, automaticAttempts, canConfirm, confirmationMode, confirmOutline, draft,
-    draftSaveState, invoke, projection?.task.stage, requestPending, sessionId,
+    draftSaveState, invoke, projection?.task.workflow?.stage, requestPending, sessionId,
   ])
 
   useEffect(() => {
-    if (!hasProjection || projection.task.stage !== 'chapter_writing' || projection.task.status !== 'waiting_user'
+    if (!hasProjection || projection.task.workflow?.stage !== 'chapter_writing' || projection.task.status !== 'waiting_user'
       || requestPending !== null) return
     if (writingEntry === null || writingEntry === undefined || writingEntry.phase !== 'empty') return
     if (!projection.allowedActions.includes('auto_start_chapter_writing')
@@ -800,7 +800,7 @@ export function BidStagePanel({
 
   const canUpload = projection.allowedActions.includes('upload_files')
   const s5WaitingUser = isBidSession
-    && projection.task.stage === 'chapter_writing'
+    && projection.task.workflow?.stage === 'chapter_writing'
     && projection.task.run === null
     && (projection.task.status === 'waiting_user' || projection.task.status === 'ready')
   const accept = projection.allowedExtensions?.join(',')
@@ -940,7 +940,8 @@ export function BidStagePanel({
     && projection.task.run.work.kind !== 'capability_task'
   const planItems = buildBidStagePlan(projection, t)
   const planLabels: PlanListLabels = {
-    title: t('plan.title', { stage: `S${String(BID_STAGES.indexOf(projection.task.stage) + 1)}`, name: t(stageKey(projection.task.stage)) }),
+    title: projection.task.workflow === null ? '任务执行' : t('plan.title', {
+      stage: `S${String(BID_STAGES.indexOf(projection.task.workflow.stage) + 1)}`, name: t(stageKey(projection.task.workflow.stage)) }),
     completed: count => t('plan.progress.completed', { count }),
     active: count => t('plan.progress.active', { count }),
     unfinished: count => t('plan.progress.unfinished', { count }),
@@ -963,12 +964,12 @@ export function BidStagePanel({
       refreshSignal={revisionSignal}
     />
   ) : null
-  const progressSyncFailed = projection.task.stage === 'evidence_mapping'
+  const progressSyncFailed = projection.task.workflow?.stage === 'evidence_mapping'
     && mappingReadState === 'stale'
   const dotState = progressSyncFailed
     ? 'warning'
     : statusDot(projection.task.status)
-  const displayStage = projection.task.stage
+  const displayStage = projection.task.workflow?.stage
   const mappingActivelyRunning = projection.task.status === 'running' && mappingReadState === 'ready'
   const mappingRunningLabel = projection.task.status === 'suspended'
     ? 'mapping.tasks.interrupted'
@@ -1181,7 +1182,7 @@ export function BidStagePanel({
       />
     </div>
   ) : null
-  if (projection.task.status === 'running') return <>
+  if (projection.task.status === 'running' || displayStage === undefined) return <>
     {runPlan}
     {capabilityRunPlan}
     {exportPlan}
@@ -1194,7 +1195,7 @@ export function BidStagePanel({
   const stagePanel = (
     <section className={css.root} aria-label={t('title')}>
       <div className={css.body}>
-        {!(projection.task.status === 'completed' && (projection.task.stage === 'chapter_writing' || projection.task.stage === 'docx_export')) && <div className={css.statusRow}>
+        {!(projection.task.status === 'completed' && (projection.task.workflow?.stage === 'chapter_writing' || projection.task.workflow?.stage === 'docx_export')) && <div className={css.statusRow}>
           {dotState === undefined
             ? <IconChecklistOutline14 className={css.lead} />
             : <StateDot state={dotState} />}
@@ -1257,8 +1258,8 @@ export function BidStagePanel({
                 feedback={outlineRevision}
                 notice={<>{updatedForConfirmation && <p role="status">{t('outline.updated')}</p>}{errorNotice}</>}
                 reviewContext={reviewContext}
-                stage={projection.task.stage}
-                displayMode={projection.task.stage === 'evidence_mapping' ? 'final_candidate' : 'initial'}
+                stage={projection.task.workflow?.stage}
+                displayMode={projection.task.workflow?.stage === 'evidence_mapping' ? 'final_candidate' : 'initial'}
                 draftSaveState={draftSaveState}
                 revision={draft?.revision}
                 onUpdateSection={updateSection}
@@ -1303,7 +1304,7 @@ export function BidStagePanel({
           </div>
         </Portal>}
 
-        {projection.task.stage === 'file_intake' && queuedFiles.length > 0 && (
+        {projection.task.workflow?.stage === 'file_intake' && queuedFiles.length > 0 && (
           <ul className={css.fileList} aria-label={t('file.selected')}>
             {queuedFiles.map(({ file, role, id, progress, status, error }) => {
               const sizeText = formatFileSize(file.size)
@@ -1355,7 +1356,7 @@ export function BidStagePanel({
           </ul>
         )}
 
-        {projection.task.stage === 'file_intake' && (
+        {projection.task.workflow?.stage === 'file_intake' && (
           <div aria-label="Word 模板">
             <input ref={docxTemplateInput} className={css.fileInput} type="file" accept=".docx" onChange={selectedDocxTemplate}/>
             {docxTemplateMessage && <p className={css.docxTemplateMessage} role="status">{docxTemplateMessage}</p>}

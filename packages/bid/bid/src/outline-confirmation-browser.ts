@@ -1,5 +1,39 @@
 import { normalizeOutlineSectionTitle } from './outline-title.ts'
+import { z } from 'zod'
 import type { OutlineArtifact, OutlineSection } from './outline-generation-artifacts.ts'
+import type { OutlineDraftView } from './outline-confirmation-artifacts.ts'
+import type { StageValidationIssue } from './control-plane-contract.ts'
+
+/** 目录结构操作之后的业务归属；所有 ID 来自当前招标事实。 */
+export const outlineBusinessBindingSchema = z.object({
+  section_id: z.string().min(1),
+  requirement_ids: z.array(z.string().min(1)),
+  scoring_ids: z.array(z.string().min(1)),
+  scoring_response_point_ids: z.array(z.string().regex(/^RP-\d{6}$/u)),
+  compliance_ids: z.array(z.string().min(1)),
+}).strict()
+
+/** 一次候选目录中的显式业务归属。 */
+export type OutlineBusinessBinding = z.infer<typeof outlineBusinessBindingSchema>
+
+/** 一次目录修改的版本和操作。 */
+export interface OutlineDraftMutationRequest {
+  readonly expected_revision: number
+  readonly expected_draft_sha256: string
+  readonly operations: readonly OutlineEditOperation[]
+  readonly business_bindings?: readonly OutlineBusinessBinding[]
+}
+
+/** 确认或重新生成目录所需的版本。 */
+export interface OutlineDraftIdentityRequest {
+  readonly expected_revision: number
+  readonly expected_draft_sha256: string
+}
+
+/** 不改变阶段状态的目录修改结果。 */
+export type OutlineDraftMutationResult =
+  | { readonly ok: true; readonly value: OutlineDraftView }
+  | { readonly ok: false; readonly error: { readonly code: 'BID_OUTLINE_DRAFT_CONFLICT' | 'BID_INVALID_USER_OUTLINE' | 'BID_OUTLINE_DRAFT_PERSIST_FAILED'; readonly message: string; readonly issues?: readonly StageValidationIssue[]; readonly current: OutlineDraftView } }
 
 /** User-requested outline change shared by the browser editor and Host validator. */
 export type OutlineEditOperation =

@@ -12,7 +12,7 @@ it('第八章新增小节的数字选择保留完整上下文，拒绝捏造目�
     binScript: fileURLToPath(new URL('./fixtures/bid-stage-interaction-driver.ts', import.meta.url)),
     configPath, binArgs: [configPath, 'task-numeric-clarification'], mode: 'src', processTimeoutMs: 120_000,
     tsconfigPath: fileURLToPath(new URL('../../../tsconfig.json', import.meta.url)) })
-  expect(JSON.parse(result.stdout)).toMatchObject({ state: 'completed', source: '3', userMessages: 2,
+  expect(JSON.parse(result.stdout)).toMatchObject({ state: 'ready', taskCompleted: true, source: '3', userMessages: 2,
     sourceContext: ['我需要将第8章也细化一下，增加几个小章节。'], workIds: [expect.any(String)],
     unfoundedRestrictionRejected: true, noSuspension: true, verifiedCompletionNotice: true, seedPreserved: true, outsidePreserved: true,
     children: ['收集输入', '校验结果', '交付成果'], workbench: Array(3).fill({ status: 'completed', content: true }) })
@@ -28,7 +28,7 @@ it('同一 Work 更新写作规则后继续无变更业务绑定，复用范围�
   })
   const facts = JSON.parse(result.stdout) as Record<string, unknown>
   expect(facts, JSON.stringify(facts.recoveryErrors)).toMatchObject({
-    state: 'completed', interrupted: true, workIds: [expect.any(String)], userMessages: 1,
+    state: 'ready', taskCompleted: true, interrupted: true, workIds: [expect.any(String)], userMessages: 1,
     seedPreserved: true, outsidePreserved: true, outsideCompleted: true, currentRulesReviewed: true, currentRulesShared: true,
     outsideDependencyPreserved: true, acceptedCheckpointRestored: true, missingCitationRejected: true,
     revisionPreservationShared: true, revisionPublished: true,
@@ -49,7 +49,7 @@ it('六子章稀疏迁移在同一子会话拒绝漏块、表题分离及原文�
   })
   const facts = JSON.parse(result.stdout) as { workIds: string[] }
   expect(facts.workIds).toHaveLength(1)
-  expect(facts).toMatchObject({ state: 'completed', migrationSubmissions: 4, originalUnique: true, generatedDraftRepaired: true,
+  expect(facts).toMatchObject({ state: 'ready', taskCompleted: true, migrationSubmissions: 4, originalUnique: true, generatedDraftRepaired: true,
     children: ['收集输入', '边界确认', '校验结果', '内业处理', '复核整改', '交付成果'],
     seedPreserved: true, outsidePreserved: true, outsideCompleted: true,
     workbench: Array(6).fill({ status: 'completed', content: true }),
@@ -67,7 +67,7 @@ it('局部审核中断后 Main 沿用原 Work 和正文，只续剩余审核并�
   })
   const facts = JSON.parse(result.stdout) as { workIds: string[] }
   expect(facts.workIds).toHaveLength(1)
-  expect(facts).toMatchObject({ state: 'completed', interrupted: true, reviewResumeNoWriter: true,
+  expect(facts).toMatchObject({ state: 'ready', taskCompleted: true, interrupted: true, reviewResumeNoWriter: true,
     children: ['收集输入', '校验结果', '交付成果'], seedPreserved: true, outsidePreserved: true,
     outsideCompleted: true, workbench: Array(3).fill({ status: 'completed', content: true }),
     calls: ['bid_project_inspect', 'bid_project_inspect', 'bid_run_task', 'bid_recover_task'],
@@ -84,7 +84,7 @@ it('产物核验只读首字符的完成结论在同一子会话拒绝，补读�
   })
   const facts = JSON.parse(result.stdout) as { workIds: string[] }
   expect(facts.workIds).toHaveLength(1)
-  expect(facts).toMatchObject({ state: 'completed', unreadVerificationRejected: true, seedPreserved: true,
+  expect(facts).toMatchObject({ state: 'ready', taskCompleted: true, unreadVerificationRejected: true, seedPreserved: true,
     outsidePreserved: true, outsideCompleted: true, workbench: Array(3).fill({ status: 'completed', content: true }),
     calls: ['bid_project_inspect', 'bid_project_inspect', 'bid_run_task'],
   })
@@ -100,7 +100,7 @@ it('已发布结果的用户纠正沿用原 Work，保留历史凭据并重新�
   })
   const facts = JSON.parse(result.stdout) as { workIds: string[] }
   expect(facts.workIds).toHaveLength(1)
-  expect(facts).toMatchObject({ state: 'completed', priorPublicationPreserved: true, planPatchCount: 1,
+  expect(facts).toMatchObject({ state: 'ready', taskCompleted: true, priorPublicationPreserved: true, planPatchCount: 1,
     publicationNotices: 2, correctionNoticeMatchesRun: true,
     seedPreserved: true, outsidePreserved: true, outsideCompleted: true, userMessages: 2,
     workbench: Array(3).fill({ status: 'completed', content: true }),
@@ -140,7 +140,7 @@ it('遗漏导出的计划拒绝后，Main 在原 Work 补齐尾步骤并完成�
       "goalMet": true,
       "planRejected": true,
       "sameWork": true,
-      "state": "completed",
+      "state": "ready",
       "steps": [
         {
           "capability": "tender.update",
@@ -169,7 +169,7 @@ it.each(['task-planning', 'task-adding'])('完整项目通过 %s 在原章下建
   const facts = JSON.parse(result.stdout) as { workIds: string[] }
   expect(facts.workIds).toHaveLength(1)
   expect(facts).toMatchObject({
-    state: 'completed', source: '只修改本章 S2.3，把三个阶段拆成真实目录子章节，保留原文并完成正文和审核。不要改其他章节。',
+    state: 'ready', taskCompleted: true, source: '只修改本章 S2.3，把三个阶段拆成真实目录子章节，保留原文并完成正文和审核。不要改其他章节。',
     children: ['收集输入', '校验结果', '交付成果'],
     workbench: Array(3).fill({ status: 'completed', content: true }),
     seedPreserved: true, outsidePreserved: true, outsideCompleted: true,
@@ -189,7 +189,7 @@ it('拆章要求经第二条章节名称澄清后完整冻结，并通过正文�
   })
   const facts = JSON.parse(result.stdout) as { workIds: string[] }
   expect(facts.workIds).toHaveLength(1)
-  expect(facts).toMatchObject({ state: 'completed', source: 'S2.3', userMessages: 2, verifiers: 2,
+  expect(facts).toMatchObject({ state: 'ready', taskCompleted: true, source: 'S2.3', userMessages: 2, verifiers: 2,
     sourceContext: ['本章也需要小章节。把三个阶段拆成真实目录子章节，保留原文、表格和流程图，并完成正文和审核。不要改其他章节；具体是哪章等我确认后再执行。'],
     children: ['收集输入', '校验结果', '交付成果'], seedPreserved: true, outsidePreserved: true, outsideCompleted: true,
     workbench: Array(3).fill({ status: 'completed', content: true }),
@@ -207,7 +207,7 @@ it('模型切换和原文迁移后中断仍以原 Work 完成资料、正文、�
     tsconfigPath: fileURLToPath(new URL('../../../tsconfig.json', import.meta.url)),
   })
   expect(JSON.parse(result.stdout)).toMatchObject({
-    state: 'completed', selectedRouteInherited: true, interrupted: true,
+    state: 'ready', taskCompleted: true, selectedRouteInherited: true, interrupted: true,
     children: ['收集输入', '校验结果', '交付成果'],
     workIds: [expect.any(String)], seedPreserved: true, outsidePreserved: true, outsideCompleted: true,
     workbench: Array(3).fill({ status: 'completed', content: true }),
@@ -225,7 +225,7 @@ it('已冻结授权的模型复判冲突由 Host 恢复原 Work，完成前缀�
     tsconfigPath: fileURLToPath(new URL('../../../tsconfig.json', import.meta.url)),
   })
   expect(JSON.parse(result.stdout)).toMatchObject({
-    state: 'completed', interrupted: true, workIds: [expect.any(String)],
+    state: 'ready', taskCompleted: true, interrupted: true, workIds: [expect.any(String)],
     seedPreserved: true, outsidePreserved: true, outsideCompleted: true,
     workbench: Array(3).fill({ status: 'completed', content: true }),
     calls: ['bid_project_inspect', 'bid_project_inspect', 'bid_run_task', 'bid_recover_task'],
@@ -244,7 +244,7 @@ it('部分新叶节完成后切换模型并重新规划，原 Work 复用正文�
   })
   const facts = JSON.parse(result.stdout) as { workIds: string[] }
   expect(facts.workIds).toHaveLength(1)
-  expect(facts).toMatchObject({ state: 'completed', selectedRouteInherited: true, interrupted: true,
+  expect(facts).toMatchObject({ state: 'ready', taskCompleted: true, selectedRouteInherited: true, interrupted: true,
     children: ['收集输入', '校验结果', '交付成果'], resumedWriterTitles: ['交付成果'],
     seedPreserved: true, outsidePreserved: true, outsideCompleted: true,
     planPatchCount: 1,
@@ -263,7 +263,7 @@ it('步骤指令与章节职责冲突时 Main 在原 Work 改计划，实际无�
     tsconfigPath: fileURLToPath(new URL('../../../tsconfig.json', import.meta.url)),
   })
   expect(JSON.parse(result.stdout)).toMatchObject({
-    state: 'completed', interrupted: true, workIds: [expect.any(String)], userMessages: 1,
+    state: 'ready', taskCompleted: true, interrupted: true, workIds: [expect.any(String)], userMessages: 1,
     seedPreserved: true, outsidePreserved: true, outsideCompleted: true,
     calls: ['bid_project_inspect', 'bid_project_inspect', 'bid_run_task', 'bid_plan_task', 'bid_recover_task'],
     executions: ['outline.update', 'chapter.reorganize', 'chapter.write', 'chapter.write', 'chapter.review'],
@@ -280,7 +280,7 @@ it('章节日志已完成但审核要求整改时，原 Work 只续写失败章�
     tsconfigPath: fileURLToPath(new URL('../../../tsconfig.json', import.meta.url)),
   })
   expect(JSON.parse(result.stdout)).toMatchObject({
-    state: 'completed', interrupted: true, workIds: [expect.any(String)], userMessages: 1,
+    state: 'ready', taskCompleted: true, interrupted: true, workIds: [expect.any(String)], userMessages: 1,
     resumedWriterTitles: ['校验结果'], seedPreserved: true, outsidePreserved: true, outsideCompleted: true,
     calls: ['bid_project_inspect', 'bid_project_inspect', 'bid_run_task', 'bid_plan_task', 'bid_recover_task'],
     planPatchCount: 1,
@@ -298,7 +298,7 @@ it('写作中断后先纠正业务归属，保留其他审核和原候选并完�
     tsconfigPath: fileURLToPath(new URL('../../../tsconfig.json', import.meta.url)),
   })
   expect(JSON.parse(result.stdout)).toMatchObject({
-    state: 'completed', interrupted: true, workIds: [expect.any(String)], userMessages: 1,
+    state: 'ready', taskCompleted: true, interrupted: true, workIds: [expect.any(String)], userMessages: 1,
     resumedWriterTitles: ['校验结果'], seedPreserved: true, outsidePreserved: true, outsideCompleted: true,
     calls: ['bid_project_inspect', 'bid_project_inspect', 'bid_run_task', 'bid_project_inspect', 'bid_plan_task', 'bid_recover_task'],
     executions: ['outline.update', 'chapter.reorganize', 'chapter.write', 'outline.update', 'chapter.write', 'chapter.review'],
@@ -318,7 +318,7 @@ it('用户纠正未完成写作的原文迁移时，在同一 Work 从已接纳�
     tsconfigPath: fileURLToPath(new URL('../../../tsconfig.json', import.meta.url)),
   })
   expect(JSON.parse(result.stdout)).toMatchObject({
-    state: 'completed', interrupted: true, workIds: [expect.any(String)], userMessages: 2,
+    state: 'ready', taskCompleted: true, interrupted: true, workIds: [expect.any(String)], userMessages: 2,
     seedPreserved: true, outsidePreserved: true, outsideCompleted: true,
     calls: ['bid_project_inspect', 'bid_project_inspect', 'bid_run_task', 'bid_project_inspect', 'bid_plan_task', 'bid_recover_task'],
     executions: ['outline.update', 'chapter.reorganize', 'chapter.write', 'chapter.reorganize', 'chapter.write'],
@@ -360,7 +360,7 @@ it.each(['supersede', 'failed-supersede'])('主 Agent 用新用户任务通过 %
     tsconfigPath: fileURLToPath(new URL('../../../tsconfig.json', import.meta.url)),
   })
   expect(JSON.parse(result.stdout)).toEqual({
-    status: 'completed', wrongTitleGone: true,
+    status: 'ready', wrongTitleGone: true,
     leaf: { title: '总体实施方案', parent_id: 'GROUP-A', responsePoints: ['RP-000001'],
       mustAnswer: ['回答评分1，说明实施方案的范围和方法'] },
     distinctWork: true, resumedOldWork: false,
@@ -448,8 +448,11 @@ it('S4 waiting_user 通过源码 Loader 执行受控对话修改', async () => {
       "revision": 3,
       "state": {
         "run": null,
-        "stage": "evidence_mapping",
         "status": "waiting_user",
+        "workflow": {
+          "kind": "full_bid",
+          "stage": "evidence_mapping",
+        },
       },
       "titles": [
         "访问控制与安全审计",
@@ -516,6 +519,7 @@ it('S4 waiting_user 通过源码 Loader 执行受控对话修改', async () => {
         "bid_outline_regenerate_scope",
         "bid_evidence_remap",
         "bid_project_inspect",
+        "bid_start_workflow",
         "bid_run_task",
         "bid_plan_task",
         "bid_confirm_writing_plan",

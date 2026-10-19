@@ -7,7 +7,7 @@ import { z } from 'zod'
  * @param params 生成 schema 的输入参数。
  */
 export function zodJsonSchema(value: z.ZodType, params: z.core.ToJSONSchemaParams = {}): Record<string, unknown> {
-  const schema: Record<string, unknown> = { ...z.toJSONSchema(value, { target: 'draft-7', ...params }) }
+  const schema: Record<string, unknown> = { ...z.toJSONSchema(value, { target: 'draft-7', io: 'input', ...params }) }
   delete schema['~standard']
   return schema
 }

@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import { boot } from '@deepseek-ai/dsh-app-boot'
 import LocalAttachmentStore from '@deepseek-ai/dsh-attachment-local'
+import { installModelSelection, type ModelSelectionRef } from '@deepseek-ai/dsh-agent'
 import { BidWorkspace, checkpointBidProjectState } from '@deepseek-ai/dsh-bid'
 import { LlmAdapter, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
@@ -13,12 +14,19 @@ import { seedProjectArtifacts } from '../../../../packages/bid/bid/tests/fixture
 
 const provider = 'visual-snapshot'
 class VisualAdapter extends LlmAdapter {
+  private calls = 0
   override resolveModel(provider: string, model: string) {
-    return Promise.resolve({ provider, id: model, name: model, inputModalities: ['text', 'image'] as const })
+    return Promise.resolve({ provider, id: model, name: model,
+      inputModalities: model === 'text-only' ? ['text'] as const : ['text', 'image'] as const, defaultMaxTokens: 8_192 })
   }
   async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+    if (options.maxTokens !== 8_192) throw new Error('视觉审核没有采用实际模型的输出预算')
     if (options.messages.flatMap(message => message.content).filter(block => block.type === 'image').length !== 3) {
       throw new Error('表格视觉审核没有取得目标页及相邻页')
+    }
+    if (this.calls++ === 0) {
+      yield { type: 'finish', reason: { kind: 'error', failure: { code: 'SERVER', message: '503 temporary failure' } } }
+      return
     }
     yield { type: 'block-start', index: 0, blockType: 'text' }
     yield { type: 'block-end', index: 0, block: { type: 'text', text: '{"status":"pass"}' } }
@@ -31,7 +39,7 @@ try {
   ctx.effect(() => ctx.llm.registerAdapter([provider], new VisualAdapter()))
   const workspace = new BidWorkspace(process.cwd())
   await seedProjectArtifacts(workspace)
-  await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'completed', run: null })
+  await checkpointBidProjectState(workspace, { workflow: { kind: 'full_bid' as const, stage: 'chapter_writing' }, status: 'completed', run: null })
   const ready = Promise.withResolvers<undefined>()
   const off = ctx.on('session/event', (session, event) => {
     if (session.id === 'visual-review' && event.type === 'bid.project.resumed') ready.resolve(undefined)
@@ -41,7 +49,9 @@ try {
   await ready.promise
   off()
   const session = handle.agent.session
-  session.append('request/header', { header: { config: { provider, model: provider } }, reason: 'initial' })
+  session.append('request/header', { header: { config: { provider, model: 'text-only' } }, reason: 'initial' })
+  const selection: ModelSelectionRef = { current: { provider, model: provider }, assembled: undefined }
+  installModelSelection(handle.agent.ctx, selection)
   const markdown = '# 目标表\n\n| 复核、关闭条件 | 首接与分析 | 响应、处理与阶段反馈口径 | 项目 内容 负责人 |\n'
     + '| --- | --- | --- | --- |\n| 一般协调问题 | 驻场登记 | 升级路径 | 内容 |\n'
   const view = await readDocxFormat(workspace, null)
@@ -63,6 +73,13 @@ try {
   const request = session.events.findLast(event => event.type === 'bid.visual-review.request')
   if (request?.type !== 'bid.visual-review.request') throw new Error('视觉模型输入没有持久事件')
   const text = request.data.messages[0]?.content.find(item => item.type === 'text')
+  selection.current = { provider, model: 'text-only' }
+  let unsupportedRejected = false
+  try { await reviewer.review({ block, pages }) } catch (error) {
+    if (!(error instanceof Error) || error.message !== 'DOCX_VISUAL_REVIEW_IMAGE_INPUT_REQUIRED:text-only') throw error
+    unsupportedRejected = true
+  }
+  if (!unsupportedRejected) throw new Error('不支持视觉的当前模型未被拒绝')
   await ctx.sessions.flush(session)
   const documentHash = `sha256:${createHash('sha256').update(repeated.bytes).digest('hex')}`
   process.stdout.write(`${JSON.stringify({ decision: { status: reviewed.reviews[0]?.status }, kind: block.kind, anchor: block.anchor,
@@ -70,6 +87,10 @@ try {
     prompt: text?.type === 'text' ? text.text : null,
     imageCount: request.data.messages.flatMap(message => message.content).filter(item => item.type === 'image').length,
     loggedRequest: true,
+    maxTokens: request.data.maxTokens,
+    selectedModelUsed: request.data.model === provider && session.requestHeader()?.config.model === 'text-only',
+    unsupportedRejected,
+    recoveredTransientFailure: beforeRepeat === 2,
     cacheReused: beforeRepeat === session.events.filter(event => event.type === 'bid.visual-review.request').length,
     finalOutputMatchesReviews: repeated.outputHash === documentHash && repeated.reviews.length === 1
       && repeated.reviews.every(review => review.documentHash === documentHash && review.status === 'passed'),

@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import type { Branded } from '@deepseek-ai/dsh-brand'
+import type {} from '@deepseek-ai/dsh-session/types'
 import { recordOnlySchemaVersion } from './schema-version.ts'
 import type { DocxTemplateId } from './docx-format-contract.ts'
 import type { FlowchartSpec } from './flowchart.ts'
@@ -37,6 +38,15 @@ export const BID_STAGES = [
 
 /** One fixed Bid Harness business stage. */
 export type BidStage = typeof BID_STAGES[number]
+
+/** 可选的完整编写路线位置；通用任务不创建专业阶段。 */
+export type BidWorkflowContext = { readonly kind: 'full_bid'; readonly stage: BidStage } | null
+
+/** 已发布任务的最终文件，位置只在对应发布回执中有效。 */
+export interface BidTaskDeliverablesView {
+  readonly receipt: string
+  readonly files: readonly { position: number; name: string; mediaType: string; bytes: number; preview: boolean }[]
+}
 
 /** The only durable statuses of a Bid task. */
 export const BID_TASK_STATUSES = [
@@ -78,8 +88,8 @@ export interface BidRunNotice {
   readonly supersedesTurn: number | null
   /** The exact Run that reached a terminal resumable state. */
   readonly runId: string
-  /** Workflow stage whose execution stopped. */
-  readonly stage: BidStage
+  /** 专业 Work 的阶段；独立能力任务为 null。 */
+  readonly stage: BidStage | null
   /** Neutral user stop or an interrupted automatic attempt. */
   readonly kind: 'stopped' | 'interrupted' | 'completed'
   /** Presentation intent; the renderer does not infer severity from text. */
@@ -90,6 +100,15 @@ export interface BidRunNotice {
   readonly workId?: string
   /** 同批发布的结果凭据路径；其他 Run 通知不携带。 */
   readonly resultRef?: string
+}
+
+declare module '@deepseek-ai/dsh-session/types' {
+  interface SessionEventMap {
+    /** 聊天时间线中的 Run 终态，不进入模型上下文。
+     * @param noticeId 当前终态的持久去重身份。
+     */
+    'bid.run.notice': BidRunNotice
+  }
 }
 
 /** Why one Run stopped before completing its stage. */
@@ -123,14 +142,18 @@ export const BID_WORK_KINDS = [
 export type BidWorkKind = typeof BID_WORK_KINDS[number]
 
 /** Durable request and input identity shared by every attempt of one work item. */
-export interface BidWorkDescriptor {
-  readonly kind: BidWorkKind
+interface BidWorkIdentity {
   readonly workId: string
-  readonly stage: BidStage
   readonly requestRef: string
   readonly requestSha256: string
   readonly inputFingerprint: string
 }
+
+/** 能力任务按计划执行，专业 Work 才携带实际阶段。 */
+export type BidWorkDescriptor = BidWorkIdentity & (
+  | { readonly kind: 'capability_task' }
+  | { readonly kind: Exclude<BidWorkKind, 'capability_task'>; readonly stage: BidStage }
+)
 
 /** Browser-safe failure details persisted at a task boundary. */
 export interface BidTaskFailure {
@@ -175,25 +198,25 @@ export interface BidRunData {
 
 /** Authoritative Bid task state; its discriminant makes invalid Run combinations unrepresentable. */
 export type BidTaskState =
-  | { readonly stage: BidStage; readonly status: 'ready'; readonly run: null }
-  | { readonly stage: BidStage; readonly status: 'running'; readonly run: BidRunData }
+  | { readonly workflow: BidWorkflowContext; readonly status: 'ready'; readonly run: null }
+  | { readonly workflow: BidWorkflowContext; readonly status: 'running'; readonly run: BidRunData }
   | {
-    readonly stage: BidStage
+    readonly workflow: BidWorkflowContext
     readonly status: 'waiting_user'
     readonly run: null
     readonly reason?: string | undefined
     readonly issues?: readonly StageValidationIssue[] | undefined
   }
   | {
-    readonly stage: BidStage
+    readonly workflow: BidWorkflowContext
     readonly status: 'suspended'
     readonly run: BidRunData & {
       readonly cause: BidRunSuspensionCause
       readonly error?: BidTaskFailure | undefined
     }
   }
-  | { readonly stage: BidStage; readonly status: 'failed'; readonly run: null; readonly failure: BidTaskFailure }
-  | { readonly stage: BidStage; readonly status: 'completed'; readonly run: null }
+  | { readonly workflow: BidWorkflowContext; readonly status: 'failed'; readonly run: null; readonly failure: BidTaskFailure }
+  | { readonly workflow: BidWorkflowContext; readonly status: 'completed'; readonly run: null }
 
 /** Current count of Host-owned S4 Mapping Tasks by execution state. */
 export interface BidEvidenceMappingProgress {
@@ -896,12 +919,16 @@ export type BidRevisionQueueResult =
 
 /** Result of host admission for an ordinary Bid composer message. */
 export type BidPromptAdmission =
-  | { admitted: true; stage: BidStage; input: string }
+  | { admitted: true; workflow: BidWorkflowContext; input: string }
   | { admitted: false; reason: BidComposerReason | 'bid.prompt_empty' }
 
 declare module '@deepseek-ai/dsh-session-projection/types' {
   interface SessionProjectionMap {
     /** Host-authorized Bid state and client capabilities. */
     [BID_RUNTIME_PROJECTION_KEY]: BidClientProjection
+  }
+  interface SessionProjectionStateMap {
+    /** 从会话事件恢复的 Bid 任务状态。 */
+    [BID_RUNTIME_PROJECTION_KEY]: BidTaskState
   }
 }

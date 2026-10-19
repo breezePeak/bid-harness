@@ -5,7 +5,7 @@ import { Context } from '@deepseek-ai/cordis'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import SessionStore from '@deepseek-ai/dsh-session'
 import { expect, it } from 'vitest'
-import { BidWorkspace } from '../src/index.ts'
+import { BidWorkspace, checkpointBidProjectState } from '../src/index.ts'
 import { createBidCapabilityDispatcher } from '../src/bid-capability-dispatcher.ts'
 import { persistCapabilityTaskRequest } from '../src/bid-capability-task.ts'
 import { executeTestCapabilityTask as executeCapabilityTask } from './fixtures/task-verifier.ts'
@@ -20,6 +20,7 @@ it.each(['outline_generation', 'evidence_mapping', 'chapter_writing', 'docx_expo
     const root = await mkdtemp(join(tmpdir(), 'dsh-capability-admission-'))
     const workspace = new BidWorkspace(root)
     await seedCapabilityProject(workspace, 'complete')
+    await checkpointBidProjectState(workspace, { workflow: { kind: 'full_bid' as const, stage }, status: 'waiting_user', run: null })
     const ctx = new Context()
     await ctx.plugin(SessionStore)
     try {
@@ -32,9 +33,9 @@ it.each(['outline_generation', 'evidence_mapping', 'chapter_writing', 'docx_expo
         steps: [{ description: '执行已授权的测试步骤', scope: { source: 'task' as const }, call: { capability: 'tender.update' as const,
           input: { operations: [{ type: 'update_requirement' as const, requirement_id: 'REQ-1',
             fields: { normalized_requirement: '明确实施边界' } }] } } }] }
-      const descriptor = await persistCapabilityTaskRequest(workspace, session, stage, task,
+      const descriptor = await persistCapabilityTaskRequest(workspace, session, task,
         { session_id: String(session.id), message_id: String(message.id) },
-        ['analysis/requirements.json'], { stage, status: 'completed', run: null })
+        ['analysis/requirements.json'])
       const run = createTestBidRunContext({ work: descriptor })
       const agent = { id: 'execution-agent' } as Parameters<typeof executeCapabilityTask>[3]
       const result = await executeCapabilityTask(workspace, run, createBidCapabilityDispatcher(settings), agent, session)

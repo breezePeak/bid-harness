@@ -15,7 +15,7 @@ try {
   ctx = await boot('bid-project-session-snapshot', configPath)
   const workspace = new BidWorkspace(process.cwd())
   await seedProjectArtifacts(workspace)
-  await checkpointBidProjectState(workspace, { stage: 'evidence_mapping', status: 'waiting_user', run: null })
+  await checkpointBidProjectState(workspace, { workflow: { kind: 'full_bid', stage: 'evidence_mapping' }, status: 'waiting_user', run: null })
   const host = ctx.bid as unknown as { readonly inFlight: Map<string, { done: Promise<void> }> }
   const createFresh = async (id: string, cwd = process.cwd()) => {
     const initialized = Promise.withResolvers<undefined>()
@@ -41,7 +41,7 @@ try {
   await mkdir(exportRoot)
   const exportWorkspace = new BidWorkspace(exportRoot)
   await seedProjectArtifacts(exportWorkspace)
-  await checkpointBidProjectState(exportWorkspace, { stage: 'docx_export', status: 'ready', run: null })
+  await checkpointBidProjectState(exportWorkspace, { workflow: { kind: 'full_bid', stage: 'docx_export' }, status: 'ready', run: null })
   const exporting = await createFresh('export-session-a', exportRoot)
   const automaticExport = await access(join(exportWorkspace.outputRoot, 'bid.docx')).then(() => true, () => false)
   const startingFormat = await ctx.bid.getDocxFormat(exporting, null)

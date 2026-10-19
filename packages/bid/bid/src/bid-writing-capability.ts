@@ -24,6 +24,7 @@ import { BidStageAttentionRequiredError, BidStageExecutionError } from './contro
 import { readPendingChapterReorganization } from './outline-capability-update.ts'
 import { outlineSectionScope } from './section-evidence-context.ts'
 import { BID_IMAGE_STYLE_PATH, chapterImageLedgerPath, readBidImages, readBidImageStyle, validateChapterImages } from './chapter-images.ts'
+import { bidImageRequestPath } from './bid-image-request.ts'
 
 type WritingCall = Extract<BidCapabilityCall, { capability: 'chapter.write' | 'chapter.revise' | 'chapter.review' }>
 
@@ -46,7 +47,11 @@ async function sourcePaths(workspace: BidWorkspace): Promise<Set<string>> {
     const ledger = parseWebEvidenceSourcesArtifact(await readJson(workspace, 'analysis/web-evidence-sources.json'))
     for (const source of ledger.sources) { paths.add(source.snapshot_path); paths.add(webEvidenceChunkIndexPath(source.source_id)) }
   }
-  for (const image of await readBidImages(workspace)) { paths.add(image.path); paths.add(chapterImageLedgerPath(image.section_id)) }
+  for (const image of await readBidImages(workspace)) {
+    paths.add(image.path)
+    paths.add(chapterImageLedgerPath(image.section_id))
+    paths.add(bidImageRequestPath(image.request_sha256))
+  }
   const style = await readBidImageStyle(workspace)
   if (style !== null) { paths.add(BID_IMAGE_STYLE_PATH); if (style.reference_image !== undefined) paths.add(style.reference_image.path) }
   return paths
@@ -217,7 +222,7 @@ export async function executeWritingCapability(
       await readFile(within(workspace.projectRoot, contentPath), 'utf8'))
   }
   for (const path of await sourcePaths(workspace)) {
-    const imageRecord = path === BID_IMAGE_STYLE_PATH || /^chapters\/images\/[a-f0-9]{64}\.json$/u.test(path)
+    const imageRecord = path === BID_IMAGE_STYLE_PATH || /^assets\/images\/[a-f0-9]{64}\.json$/u.test(path)
     if (!imageRecord && before.get(path) !== undefined && before.get(path) !== await capabilityFileHash(workspace, path)) {
       throw new Error(`BID_CHAPTER_WRITING_SOURCE_CHANGED: ${path}`)
     }

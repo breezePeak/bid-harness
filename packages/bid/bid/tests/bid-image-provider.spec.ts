@@ -200,17 +200,17 @@ describe('作图目的地只接受正式配置', () => {
     expect(generatedBody(init)).toEqual({ model: recorded?.model, prompt: '继续项目风格', size: '1536x1024', n: 1, output_format: 'png' })
   })
 
-  it('请求记录回调失败时不解析凭据也不发起HTTP', async () => {
+  it('预检凭据后请求记录失败，不发起HTTP', async () => {
     const fetch = await mockImageFetch()
     const { images, resolveCredential } = provider('https://official.example/v1')
     await expect(images.generate({ prompt: '方案场景', size: '1024x1024',
       beforeRequest: () => Promise.reject(new Error('request log unavailable')),
     }, signal())).rejects.toThrow('request log unavailable')
     expect(fetch).not.toHaveBeenCalled()
-    expect(resolveCredential).not.toHaveBeenCalled()
+    expect(resolveCredential).toHaveBeenCalledOnce()
   })
 
-  it('记录回调期间取消后不解析凭据也不发起HTTP', async () => {
+  it('预检凭据后在记录回调期间取消，不发起HTTP', async () => {
     const fetch = await mockImageFetch()
     const { images, resolveCredential } = provider('https://official.example/v1')
     const controller = new AbortController()
@@ -218,7 +218,7 @@ describe('作图目的地只接受正式配置', () => {
       beforeRequest: () => { controller.abort(); return Promise.resolve() },
     }, controller.signal)).rejects.toMatchObject({ code: 'BID_IMAGE_CANCELLED' })
     expect(fetch).not.toHaveBeenCalled()
-    expect(resolveCredential).not.toHaveBeenCalled()
+    expect(resolveCredential).toHaveBeenCalledOnce()
   })
 })
 

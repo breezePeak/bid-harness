@@ -42,7 +42,7 @@ function visibleTarget(options: GenerateOptions, pattern: RegExp): string {
 export async function runCapabilityReplanLoop(ctx: Context, root: string) {
   const { agent, workspace, parentScript } = await runEvidenceMappingLoop(ctx, root, false, true)
   await seedCapabilityProject(workspace, 'complete')
-  const state = { stage: 'evidence_mapping' as const, status: 'completed' as const, run: null }
+  const state = { workflow: { kind: 'full_bid' as const, stage: 'evidence_mapping' as const }, status: 'completed' as const, run: null }
   agent.session.append('bid.task.changed', { state })
   await checkpointBidProjectState(workspace, state)
   if (ctx.get('bid') === undefined) await ctx.plugin(BidHostRuntime)
@@ -156,7 +156,7 @@ export async function runCapabilityReplanLoop(ctx: Context, root: string) {
     await Promise.all([...operations.values()].map(operation => operation.done))
     await agent.whenIdle()
     const settled = await readBidProjectState(workspace)
-    if (settled?.status !== 'completed') throw new Error('能力重规划未完成：' + JSON.stringify({
+    if (settled?.status !== 'ready' || agent.session.events.findLast(event => event.type === 'bid.run.notice')?.data.kind !== 'completed') throw new Error('能力重规划未完成：' + JSON.stringify({
       state: settled, calls: agent.session.events.slice(before).filter(event => event.type === 'tool/call')
         .map(event => event.data.name),
       last: agent.session.deriveMessages().at(-1)?.content,
@@ -192,7 +192,7 @@ export async function runCapabilitySupersedeLoop(ctx: Context, root: string, ter
   for (const path of ['outline/outline.json', 'outline/confirmed-outline.json']) {
     await writeFile(join(workspace.projectRoot, path), `${JSON.stringify(wrong)}\n`)
   }
-  const stable = { stage: 'evidence_mapping' as const, status: 'completed' as const, run: null }
+  const stable = { workflow: { kind: 'full_bid' as const, stage: 'evidence_mapping' as const }, status: 'completed' as const, run: null }
   agent.session.append('bid.task.changed', { state: stable })
   await checkpointBidProjectState(workspace, stable)
   if (ctx.get('bid') === undefined) await ctx.plugin(BidHostRuntime)
@@ -213,12 +213,12 @@ export async function runCapabilitySupersedeLoop(ctx: Context, root: string, ter
   if (oldRun?.work.kind !== 'capability_task') throw new Error('旧能力任务缺少原 Run 身份')
   const oldWorkId = oldRun.work.workId
   if (terminal) {
-    const failed = { stage: old.stage, status: 'failed' as const, run: null,
+    const failed = { workflow: old.workflow, status: 'failed' as const, run: null,
       failure: { code: 'BID_TASK_SCOPE_AUTHORIZATION_REQUIRED', message: '旧任务授权范围需要新用户消息澄清',
         recovery: { kind: 'blocked' as const, unit: oldWorkId, reason: '旧任务授权范围需要新用户消息澄清' } } }
     agent.session.append('bid.task.changed', { state: failed })
     agent.session.append('bid.run.notice', { noticeId: `run:${oldRun.runId}:failed`, supersedesTurn: null,
-      runId: oldRun.runId, stage: old.stage, kind: 'interrupted', severity: 'error', message: failed.failure.message })
+      runId: oldRun.runId, stage: null, kind: 'interrupted', severity: 'error', message: failed.failure.message })
     await checkpointBidProjectState(workspace, failed)
   }
   parentScript.push(

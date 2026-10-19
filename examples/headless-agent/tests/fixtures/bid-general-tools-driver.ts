@@ -76,7 +76,7 @@ try {
   const workspace = new BidWorkspace(root)
   await mkdir(workspace.projectRoot, { recursive: true })
   const failure = { code: 'BID_TEST_FAILURE', message: '阶段资料尚未补齐' }
-  await checkpointBidProjectState(workspace, { stage: 'evidence_mapping', status: 'failed', run: null, failure })
+  await checkpointBidProjectState(workspace, { workflow: { kind: 'full_bid' as const, stage: 'evidence_mapping' }, status: 'failed', run: null, failure })
   let { agent } = await ctx.agentLoop.createAgent(ctx, { sessionId: SessionId('bid-general-main'),
     agentOptions: { provider: live ? 'deepseek-official' : 'fixture-general', model: live ? 'deepseek-v4-flash' : 'fixture' },
     meta: { cwd: root, agentPreset: 'bid' } })
@@ -91,7 +91,7 @@ try {
       assert.equal(errors.length, 0, JSON.stringify(errors))
     }
   }
-  const stages: Array<{ stage: BidTaskState['stage']; status: BidTaskState['status'] }> = [
+  const stages: Array<{ stage: NonNullable<BidTaskState['workflow']>['stage']; status: BidTaskState['status'] }> = [
     { stage: 'evidence_mapping', status: 'failed' },
     ...live ? [] : [
       { stage: 'outline_generation' as const, status: 'waiting_user' as const },
@@ -102,11 +102,11 @@ try {
   ]
   const outcomes: object[] = []
   for (const { stage, status } of stages) {
-    const work = await persistBidWorkRequest(workspace, 'stage_execution', stage, { stage }, { stage })
+    const work = await persistBidWorkRequest(workspace, { kind: 'stage_execution', stage: stage }, { stage }, { stage })
     const run = { runId: work.workId, work, epoch: 1, baseProjectRevision: 1, startedAt: Date.now(), updatedAt: Date.now() }
-    const state: BidTaskState = status === 'running' ? { stage, status, run }
-      : status === 'suspended' ? { stage, status, run: { ...run, cause: 'user_stop' } }
-        : status === 'failed' ? { stage, status, run: null, failure } : { stage, status: 'waiting_user', run: null }
+    const state: BidTaskState = status === 'running' ? { workflow: { kind: 'full_bid' as const, stage: stage }, status, run }
+      : status === 'suspended' ? { workflow: { kind: 'full_bid' as const, stage: stage }, status, run: { ...run, cause: 'user_stop' } }
+        : status === 'failed' ? { workflow: { kind: 'full_bid' as const, stage: stage }, status, run: null, failure } : { workflow: { kind: 'full_bid' as const, stage: stage }, status: 'waiting_user', run: null }
     agent.session.append('bid.task.changed', { state })
     const before = agent.session.events.length
     if (status === 'failed') {
@@ -145,7 +145,7 @@ docx 库的现有模块路径：${docxModule}；Node 路径：${process.execPath
   assert.equal(await readFile(probePath, 'utf8'), '现有工作区权限')
   await ctx.sessions.flush(agent.session)
   if (!live) {
-    const state = { stage: 'evidence_mapping' as const, status: 'waiting_user' as const, run: null }
+    const state = { workflow: { kind: 'full_bid' as const, stage: 'evidence_mapping' as const }, status: 'waiting_user' as const, run: null }
     await checkpointBidProjectState(workspace, state)
     agent.session.append('bid.task.changed', { state })
     await ctx.sessions.flush(agent.session)

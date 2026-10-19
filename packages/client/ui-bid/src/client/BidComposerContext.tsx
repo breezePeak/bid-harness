@@ -27,8 +27,8 @@ export function BidComposerContext({
   const isBid = useSessions(state => isBidMainSessionSummary(state.byId[sessionId]))
   const projection = useProjection('bid.runtime')
   const reference = useStore(state => state.reference)
-  const enabled = isBid && (projection?.task.stage === 'docx_export'
-    || projection?.task.stage === 'chapter_writing'
+  const enabled = isBid && (projection?.task.workflow?.stage === 'docx_export'
+    || projection?.task.workflow?.stage === 'chapter_writing'
       && ['running', 'waiting_user', 'completed'].includes(projection.task.status))
   const rootRef = useRef<HTMLDivElement>(null)
   const requestVersion = useRef(0)

@@ -1,9 +1,12 @@
 /** 只读任务核验：语义来自原始来源，目录、文件和章节身份由 Host 核对。 */
 import { z } from 'zod'
+import { createHash } from 'node:crypto'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { assertObjectJsonSchema } from '@deepseek-ai/dsh-tools'
 import type { BidWorkspace } from './index.ts'
-import { bidCapabilityInputSchema, type BidCapabilityTask } from './bid-capability-contract.ts'
+import { bidCapabilityInputSchema, isBidChapterScope, type BidCapabilityTask } from './bid-capability-contract.ts'
+import { readBidFileRecord } from './file-assets.ts'
+import { readBidFigure } from './figure-assets.ts'
 import type { BidTaskSourceSnapshot } from './bid-task-source.ts'
 import { bidInputFingerprint } from './work-descriptor.ts'
 import { capabilityFileHash } from './bid-capability-files.ts'
@@ -21,21 +24,27 @@ import { parseChapterMetadata } from './chapter-writing-artifacts.ts'
 import { normalizeFlowchartInputs } from './flowchart.ts'
 import { resolveBidTaskSections } from './bid-task-sections.ts'
 import { attachBidTaskEvidenceReader } from './bid-task-evidence-reader.ts'
+import { excludeBidRecoveryInputReader } from './bid-user-input.ts'
+import { readDocxXml } from './docx-template.ts'
+import { docxDescendants, docxNodeText } from './docx-document-index.ts'
 
 const hash = z.string().regex(/^[a-f0-9]{64}$/u)
 const evidenceSchema = z.object({ path: z.string().min(1), sha256: hash }).strict()
 const evidenceReferenceSchema = evidenceSchema.extend({ sha256: hash.optional() })
-const requirementSchema = z.object({
+const requirementFieldsSchema = z.object({
   source_id: z.string().min(1),
   source_quote: z.string().trim().min(1).optional(),
   description: z.string().min(1),
-  object: z.enum(['outline', 'content', 'evidence', 'writing_plan', 'review', 'export']),
+  object: z.enum(['outline', 'content', 'evidence', 'writing_plan', 'review', 'export', 'figure', 'document']),
   section_ids: z.array(z.string().min(1)),
   new_children: z.boolean(),
   completed_content: z.boolean(),
   repair: z.boolean(),
   preserve_migrated_content: z.boolean().default(false),
 }).strict()
+const requirementSchema = requirementFieldsSchema.refine(value => !['figure', 'document'].includes(value.object)
+  || !value.new_children && !value.completed_content && !value.preserve_migrated_content,
+'独立图和原 Word 要求不能使用章节新增、正文写作或章节迁移标志。')
 const capabilityIdSchema = z.enum(bidCapabilityInputSchema.options.map(option => option.shape.capability.value))
 const scopeConstraintSchema = z.object({ source_id: z.string().min(1), quote: z.string().trim().min(1),
   forbidden_capabilities: z.array(capabilityIdSchema).min(1) }).strict()
@@ -49,8 +58,13 @@ const decisionSchema = z.object({
 }).strict()
 const semanticCheckSchema = z.object({ met: z.boolean(), reason: z.string().min(1),
   evidence_positions: z.array(z.number().int().nonnegative()) }).strict()
-const semanticRequirementSchema = requirementSchema.omit({ source_id: true, section_ids: true, description: true })
+const semanticRequirementFields = requirementFieldsSchema.omit({ source_id: true, section_ids: true, description: true })
   .extend({ source_quote: z.string().trim().min(1), check: semanticCheckSchema }).strict()
+const semanticRequirementSchema = z.discriminatedUnion('object', [
+  semanticRequirementFields.extend({ object: z.enum(['outline', 'content', 'evidence', 'writing_plan', 'review', 'export']) }),
+  semanticRequirementFields.extend({ object: z.enum(['figure', 'document']), new_children: z.literal(false),
+    completed_content: z.literal(false), preserve_migrated_content: z.literal(false) }),
+])
 const modelPlanSchema = z.object({ scope_authorized: z.boolean(), scope_constraints: z.array(scopeConstraintSchema
   .omit({ source_id: true }).extend({ source_position: z.number().int().nonnegative() }).strict()), sources: z.array(z.object({
   relevant: z.boolean(), requirements: z.array(semanticRequirementSchema),
@@ -63,6 +77,8 @@ function verificationSources(input: BidTaskVerificationInput) {
   return [{ id: input.source.message.message_id, sectionIds: null,
     content: { kind: 'message' as const, text: input.source.message.text,
       context_messages: input.source.context_messages?.map(message => message.text) ?? [], selected: true } },
+  ...(input.source.amendments ?? []).map(message => ({ id: message.message_id, sectionIds: null,
+    content: { kind: 'message' as const, text: message.text, context_messages: [] as string[], selected: true } })),
   ...[...issues.values()].map(issue => ({ id: issue.issue_id, sectionIds: [issue.section_id],
     content: { kind: 'issue' as const, text: issue.instruction, suggestion: issue.suggestion,
       scope: issue.scope, selected: selected.has(issue.issue_id), section_title: issue.section_title,
@@ -135,7 +151,8 @@ function bindSemanticDecision(input: BidTaskVerificationInput, value: unknown,
     }
     return decisionSchema.parse({ scope_authorized: true,
       relevant_issue_ids: [...new Set(input.requirements.map(item => item.source_id)
-        .filter(id => id !== input.source.message.message_id))], requirements: input.requirements,
+        .filter(id => input.source.issues.some(issue => issue.issue_id === id)
+          || input.source.observed_issues.some(issue => issue.issue_id === id)))], requirements: input.requirements,
       scope_constraints: input.scope_constraints ?? [], checks })
   }
   const result = modelPlanSchema.parse(value)
@@ -162,7 +179,7 @@ function bindSemanticDecision(input: BidTaskVerificationInput, value: unknown,
       continue
     }
     if (decision.requirements.length === 0) throw new Error('BID_TASK_VERIFICATION_SOURCE_INVALID')
-    if (index > 0) relevant.push(source.id)
+    if (source.content.kind === 'issue') relevant.push(source.id)
     for (const { check, ...requirement } of decision.requirements) {
       const texts = source.content.kind === 'message' ? [source.content.text, ...source.content.context_messages]
         : [source.content.text, source.content.suggestion ?? '']
@@ -215,7 +232,7 @@ export interface BidTaskVerificationInput {
   readonly preservation_evidence?: { readonly retained: boolean; readonly missing: readonly string[] }
   readonly evidence: readonly { path: string; sha256: string; text: string }[]
   readonly scope_evidence?: readonly {
-    section_id: string
+    section_id?: string
     object: string
     outside_scope: boolean
     before_section?: OutlineArtifact['sections'][number]
@@ -238,6 +255,14 @@ export type BidTaskVerifier = (
 export async function collectBidTaskScopeEvidence(
   canonical: BidWorkspace, working: BidWorkspace, task: BidCapabilityTask,
 ): Promise<NonNullable<BidTaskVerificationInput['scope_evidence']>> {
+  if (!isBidChapterScope(task.scope)) {
+    const paths = task.scope.kind === 'figures'
+      ? await Promise.all(task.scope.figure_refs.map(async ref => (await readBidFigure(canonical, ref)).record.path))
+      : await Promise.all((task.scope.kind === 'files' ? task.scope.file_refs : task.scope.block_refs.map(block => block.file_ref))
+        .map(async ref => (await readBidFileRecord(canonical, ref)).path))
+    return Promise.all([...new Set(paths)].map(async path => ({ object: path, outside_scope: true,
+      before_sha256: await capabilityFileHash(canonical, path) ?? null, after_sha256: await capabilityFileHash(working, path) ?? null })))
+  }
   if (task.scope.kind === 'project'
     && await optionalBody(canonical, 'outline/confirmed-outline.json') === undefined
     && await optionalBody(canonical, 'outline/draft.json') === undefined
@@ -290,6 +315,7 @@ async function optionalBody(workspace: BidWorkspace, path: string): Promise<stri
  */
 export async function collectBidTaskPreservationEvidence(canonical: BidWorkspace, working: BidWorkspace,
   task: BidCapabilityTask, originalSectionIds?: readonly string[]): Promise<NonNullable<BidTaskVerificationInput['preservation_evidence']>> {
+  if (!isBidChapterScope(task.scope)) throw new Error('BID_CAPABILITY_CHAPTER_SCOPE_INVALID')
   const missing: string[] = []
   const before = (await readCapabilityOutlineBaseline(canonical)).outline
   const after = (await readCapabilityOutlineBaseline(working)).outline
@@ -361,13 +387,14 @@ export async function collectBidTaskPreservationEvidence(canonical: BidWorkspace
 export async function collectBidTaskEvidence(
   working: BidWorkspace, task: BidCapabilityTask, changed: readonly string[], canonical: BidWorkspace = working,
 ): Promise<BidTaskVerificationInput['evidence']> {
-  const paths = new Set([...changed, 'outline/confirmed-outline.json', 'outline/draft.json',
+  const paths = new Set([...changed, ...isBidChapterScope(task.scope) ? ['outline/confirmed-outline.json', 'outline/draft.json',
     'analysis/evidence-map.json', 'chapters/writing-plan.json', 'chapters/execution-plan.json',
     'chapters/execution-log.json', 'chapters/manifest.json', 'outline/reassignment.json',
-    'chapters/pending-reorganization.json', 'chapters/reuse-seeds.json'])
-  const locations = await readChapterLocations(working)
+    'chapters/pending-reorganization.json', 'chapters/reuse-seeds.json'] : []])
+  const locations: Awaited<ReturnType<typeof readChapterLocations>> = isBidChapterScope(task.scope)
+    ? await readChapterLocations(working) : new Map()
   let ids: ReadonlySet<string> | null = null
-  if (task.scope.kind !== 'project') {
+  if (isBidChapterScope(task.scope) && task.scope.kind !== 'project') {
     ids = await resolveBidTaskSections(canonical, working, task, task.scope.kind === 'sections'
       ? task.scope.section_ids : [task.scope.reference.section_id])
   }
@@ -379,10 +406,22 @@ export async function collectBidTaskEvidence(
   }
   const evidence: Array<{ path: string; sha256: string; text: string }> = []
   for (const path of paths) {
-    const text = await optionalBody(working, path)
-    if (text === undefined) continue
-    const sha256 = await capabilityFileHash(working, path)
-    if (sha256 === undefined) throw new Error('BID_TASK_VERIFICATION_EVIDENCE_CHANGED')
+    const absolute = within(working.projectRoot, path)
+    await assertNoLinkedPath(working.root, absolute)
+    let bytes: Buffer
+    try { bytes = await readFile(absolute) } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue
+      throw error
+    }
+    const sha256 = createHash('sha256').update(bytes).digest('hex')
+    const documentText = /\.docx$/iu.test(path) ? Object.entries(await readDocxXml(bytes))
+      .filter(([part]) => /^word\/(?:document|header\d+|footer\d+)\.xml$/u.test(part))
+      .map(([part, xml]) => ({ part, paragraphs: docxDescendants(xml, 'p').map(docxNodeText) })) : undefined
+    const text = /\.(?:md|txt|json|svg)$/iu.test(path) ? new TextDecoder('utf-8', { fatal: true }).decode(bytes)
+      : JSON.stringify({ kind: 'binary', path, sha256, bytes: bytes.length,
+        ...documentText === undefined ? {} : { document_text: documentText },
+        content: documentText === undefined ? '二进制原件；此元数据不代表已查看图像或 Word 页面，内容判断须引用相应实际检查记录。'
+          : 'document_text 提取自此版本 DOCX 的实际正文、题注、页眉页脚 XML，按部件保留段落顺序；文字可据此核验，图像内容和页面排版仍须引用实际检查记录。' })
     evidence.push({ path, sha256, text })
   }
   return evidence
@@ -406,7 +445,10 @@ export const modelBidTaskVerifier: BidTaskVerifier = async (input, agent, signal
   delete outputSchema.$schema
   // 结构化工具接受基础 JSON 类型；数量、非空字段和证据区间由提交守卫核对。
   const wireCheck = semanticCheckSchema.extend({ reason: z.string(), evidence_positions: z.array(z.number()) })
-  const wireRequirement = semanticRequirementSchema.extend({ source_quote: z.string(), check: wireCheck })
+  const wireRequirement = z.discriminatedUnion('object', [
+    semanticRequirementSchema.options[0].extend({ source_quote: z.string(), check: wireCheck }),
+    semanticRequirementSchema.options[1].extend({ source_quote: z.string(), check: wireCheck }),
+  ])
   const wireConstraint = z.object({ source_position: z.number(), quote: z.string(),
     forbidden_capabilities: z.array(capabilityIdSchema) }).strict()
   const wireSchema = zodJsonSchema(input.requirements === undefined
@@ -419,6 +461,7 @@ export const modelBidTaskVerifier: BidTaskVerifier = async (input, agent, signal
     '你只核验任务，不规划、不写文件、不提问。完成时调用 structured_output 提交符合 schema 的判断；工具拒绝未读证据时，在当前会话按提示补读后重新提交。',
     '输出 schema 描述返回值的结构，不是返回值本身。只返回业务字段，不返回 $schema、type、properties、required 等 schema 描述字段。不要用文本回复代替 structured_output。',
     '目标依据是 source.message 原话和 frozen issues；task.goal、步骤说明及 Writer/Reviewer 自述不能替代它们。',
+    'sources 中的消息依次包含原请求和同一 Work 已接纳的后续用户修订，全部必须覆盖。后续消息可以在原目标范围内补充或更正处理要求；不得从步骤说明推断新增删除权限，也不得丢弃未被更正的原目标。',
     '消息来源的 context_messages 是同一会话本次任务接纳前的真实用户原话，按时间顺序提供。当前消息若只补充章节名称或澄清对象，须结合这些原话还原完整要求；不把无关问答或其他任务当成本次要求，不能用模型计划补造授权。',
     'clarification_dialogue 包含相同时间范围的用户和助手公开文本；助手选项只用于解释用户的编号或短回复，不授予权限。回复“3”若选择第三个章名，只确认章名，不能解释为目录模式或新增限制。',
     'requirements 只列来源支持的业务成果和保留义务。用户未提出“仅改目录”“禁止写正文”等限制时，不得从未提及某步骤推造这些限制；本章增加真实子章节可包含保证原文可用的迁移、补全和独立审核。用户明确仅改目录或禁止正文时必须遵守。',
@@ -429,18 +472,21 @@ export const modelBidTaskVerifier: BidTaskVerifier = async (input, agent, signal
     'plan 返回同样数量、同样顺序的 sources，每个来源填写 relevant 和其语义 requirements；无关来源 requirements=[]。消息来源和用户选中的意见不得遗漏。',
     '真实目录子章节必须 object=outline、new_children=true；Markdown 标题、表格和分项不是目录节点。章节身份由 Host 从任务根范围或意见来源绑定。',
     '要求写完新章节和审核时 completed_content=true；只审核可交付 repair 报告，要求修好时 repair=true。',
+    'object=figure 或 document 时，new_children、completed_content、preserve_migrated_content 必须全部为 false；这些标志只用于内部章节。独立图、原 Word 的完成和保留要求直接按实际产物及检查证据核验。',
     'preserve_migrated_content 表示拆分或迁移时须完整且唯一保留原文、原表格和原图，用户明确要求保留迁移原文时填写 true；其他要求填写 false。原章标题可由新目录标题替代，原文段落、表题及表格不得改写、删除或跨章复制。',
     '首次核验没有明确结构授权且小章节含义与段落 scope 冲突时 scope_authorized=false，说明需澄清真实目录子章还是选区内分项。',
     'plan 阶段核验步骤能否覆盖要求；指向新拆叶节的 chapter.write 本身交付正文及独立审核。计划已经包含该步骤时，附加 chapter.review 不代表缺少审核，不得因此否决；仅有 chapter.review 而没有 chapter.write 才不能覆盖新叶节写作。',
     'outline.update.defer_content_migration=true 只推迟该目录步骤中的迁移；同一计划后续的 chapter.reorganize 可用原父章 source_section_ids 将完整原文块分配给新叶节。后续 chapter.write 的 previous_targets 由 Host 使用迁移结果解析为真实新叶节，不需要模型预先猜新 ID；这样的目录、迁移、写作序列可以覆盖完整要求。',
     '能力事实：chapter.write 和 chapter.revise 均包含独立 Reviewer 和 Host 的候选核对，完成后交付当前正文及审核；它们可以同时覆盖“写作/修订和审核”，不要求重复添加 chapter.review。paragraphs 根范围仅允许一个引用完全相同选区的 chapter.revise 步骤。chapter.review 只复核已有可恢复正文，不承担修复。',
+    '文档能力事实：document.layout_review(mode=repair) 包含实际 PDF 渲染、逐页视觉审核、授权新增或替换图文的局部排版修复及重新渲染复核，通过后产出带页面审核的 Word。它可以覆盖“检查并修好新增图文排版”，不要求再添加 document.patch。mode=inspect 只检查并产出报告，没有修复动作和文档输出。document.patch 负责插图与内容修改，不替代真实页面检查。',
     'Host 编排事实：本核验已在 bid_run_task 接纳或原 Work 恢复后执行；输入 task 是业务计划，不含入口调用。不得因 task 未写 bid_run_task 而否决。已有运行时由 Host 持久登记队列，结束后自动执行，并按发布收据主动通知 Main；不需要排队或通知能力步骤。requirements 列业务成果及范围约束，编排时序由 Host 的运行记录核对。首次计划故意遗漏步骤的测试仍须据实拒绝缺失的业务成果；同一任务后续修正完整计划可以通过，不要求后续继续遗漏。',
     'plan 的 met 表示拟执行计划能满足要求，不表示产物已完成；不要因为目录尚未拆分或尚未写作而否定包含这些能力的完整计划。result 的 met 才表示实际产物满足要求。',
+    '计划只以 task.steps 中实际保存的能力及参数为准；目标、步骤说明、恢复建议或文字承诺都不能补出未保存的步骤。',
     'plan 将可独立验收的语义要求分开，每项附带一个 check，填写 met、reason 和 evidence_positions。result 只返回与给定 requirements 同样数量、同样顺序的 checks，不再生成或复制要求。evidence_positions 只引用本次已完整读取且支持该结论的文件位置，计划尚未执行的产物可以不引用文件。',
     '输入已提供 requirements 时，Host 已核对同一不可变请求的授权、明确禁止能力及原要求；无论 phase 是 plan 还是 result，只返回与它们数量和顺序完全对应的 checks，不再返回或重判 scope_authorized，不得合并、删除或重新列出要求。accepted_plan_sha256 标识已接纳计划，result 只核验成果是否满足要求，不因该计划已经接纳的迁移、写作或审核步骤再次否决授权；明确禁止能力及实际越界修改仍由 Host 拒绝。plan 结合已完成步骤的真实证据与未完成步骤核验覆盖。',
     '所有来源 ID、章节 ID、编号、文件路径和摘要由 Host 绑定。证据仅填写 evidence_positions，不抄写路径或摘要，Host 不会替你引用未读文件。',
     'result 的每个正文完成、原文保留或 content 要求若填写 met=true，该项 evidence_positions 必须引用证据索引中 chapters/sections/、chapters/meta/ 和 chapters/reviews/ 下的全部文件；先逐个完整读取。已读文件也必须在每项相关结论中引用，不能只在其他 check 引用；遗漏引用时按拒绝信息补齐本项索引，不把引用遗漏判成业务成果未完成。',
-    '导出是 Host 在内容发布后执行的尾效果；这里只将 object=export 保留为未执行项。',
+    '只有内部章节汇编的 docx.export 是 Host 发布后的尾效果。外部原稿补丁及其 Word 交付使用 object=document，独立图使用 object=figure；不能因原话出现 Word、导出或下载就要求章节汇编。原稿页面检查依据真实渲染记录。',
     'result 核验在正式发布之前执行。你核对候选业务成果，Host 在核验通过后才原子写入正式文件、goal_met=true 的发布凭据和完成通知；此时没有正式发布收据是正常时序，不能因此判定业务成果未满足，也不能将本次候选核验声称为已经正式发布。',
     '内容证据不足或无相应文件不得声称 met。保持所有原文约束和真实资料限制。',
     'evidence 只列出本次冻结证据的位置、路径和总字符数。用 read_task_evidence 按位置读取与要求相关的完整目录、正文、审核和执行记录；next_start 非空时须继续读取，未读部分不能当作已核验。证据目录不是正文或审核结论；不要一次读取整本项目，也不要以文件存在代替内容核验。计划核验结合已完成步骤证据与剩余能力判断。result 要判定完成正文或保留迁移原文，须逐个完整读取并引用范围内 chapters/sections、chapters/meta、chapters/reviews 的证据；逐项核对原文在各章的归属，不能只检查总量和存在。',
@@ -466,6 +512,7 @@ export const modelBidTaskVerifier: BidTaskVerifier = async (input, agent, signal
   const reads = new Map<number, Array<{ start: number; end: number }>>()
   const liftReader = agent.ctx.on('subagent/child-setup', ({ parent, childContext, request }) => {
     if (parent !== agent || request.prompt !== prompt) return
+    excludeBidRecoveryInputReader(childContext.agent as Agent)
     attachBidTaskEvidenceReader(childContext.agent as Agent, input.evidence, (position, start, end) => {
       const ranges = reads.get(position) ?? []
       ranges.push({ start, end })
@@ -473,6 +520,7 @@ export const modelBidTaskVerifier: BidTaskVerifier = async (input, agent, signal
       reads.set(position, ranges)
     })
     childContext.tools.guard((exec) => {
+      if (exec.name === 'bid_read_recovery_input') return '任务核验只读取冻结来源、实际计划和候选证据。'
       if (exec.name !== 'structured_output') return undefined
       try {
         bindSemanticDecision(input, exec.arguments, reads)
@@ -548,7 +596,8 @@ export async function validateBidTaskVerification(
     if (parsed.requirements.some(item => item.repair) && capabilities.every(id => id === 'chapter.review'
       || id === 'document.review')) unmet.push('审核报告不能代替修复任务。')
   }
-  const expectedSources = new Set([input.source.message.message_id, ...parsed.relevant_issue_ids])
+  const expectedSources = new Set([input.source.message.message_id, ...input.source.amendments?.map(message => message.message_id) ?? [],
+    ...parsed.relevant_issue_ids])
   const actualSources = new Set(parsed.requirements.map(item => item.source_id))
   if (actualSources.size !== expectedSources.size || [...expectedSources].some(id => !actualSources.has(id))) {
     unmet.push('核验未覆盖完整原始来源。')
@@ -581,6 +630,7 @@ export async function validateBidTaskVerification(
   }
   const scopedRequirements = parsed.requirements.filter(item => item.section_ids.length > 0)
   if (scopedRequirements.length > 0) {
+    if (!isBidChapterScope(input.task.scope)) throw new Error('BID_TASK_VERIFICATION_SECTION_INVALID')
     const outline = (await readCapabilityOutlineBaseline(canonical)).outline
     const known = new Set(outline.sections.map(section => section.id))
     const allowed = input.task.scope.kind === 'project' ? known : outlineSectionScope(outline,
@@ -613,7 +663,7 @@ export async function validateBidTaskVerification(
     })
     const requirement = parsed.requirements[check.requirement_index]
     if (requirement === undefined) throw new Error('BID_TASK_VERIFICATION_REQUIREMENT_INVALID')
-    if (requirement.object === 'export') {
+    if (requirement.object === 'export' && isBidChapterScope(input.task.scope)) {
       const positions = input.task.steps.flatMap((step, index) => step.call.capability === 'docx.export' ? [index] : [])
       if (positions.length !== 1 || positions[0] !== input.task.steps.length - 1) {
         unmet.push(requirement.description + '：缺少唯一的末尾 docx.export 步骤。')
@@ -623,6 +673,7 @@ export async function validateBidTaskVerification(
     if (!check.met || input.phase === 'result' && check.evidence.length === 0) unmet.push(requirement.description + '：' + check.reason)
     if (input.phase !== 'result') continue
     if (requirement.new_children) {
+      if (!isBidChapterScope(input.task.scope)) throw new Error('BID_TASK_VERIFICATION_SECTION_INVALID')
       const before = (await readCapabilityOutlineBaseline(canonical)).outline
       const outline = (await readCapabilityOutlineBaseline(working)).outline
       const allowed = input.task.scope.kind === 'project' ? null
@@ -637,6 +688,7 @@ export async function validateBidTaskVerification(
       })) unmet.push(requirement.description + '：没有授权范围内的真实新增目录子节点。')
     }
     if (requirement.completed_content || requirement.repair && requirement.object === 'content') {
+      if (!isBidChapterScope(input.task.scope)) throw new Error('BID_TASK_VERIFICATION_SECTION_INVALID')
       const outline = (await readCapabilityOutlineBaseline(working)).outline
       const roots = requirement.section_ids.length > 0 ? requirement.section_ids
         : input.task.scope.kind === 'project' ? (await readCapabilityOutlineBaseline(canonical)).outline.sections

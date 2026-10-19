@@ -1,7 +1,7 @@
 import { fileURLToPath } from 'node:url'
 import type { Browser, Page } from 'playwright'
 import { chromium } from 'playwright'
-import { afterAll, beforeAll, describe, expect, it, onTestFailed } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it, onTestFailed, vi } from 'vitest'
 import { resolveSessionPreset } from '@deepseek-ai/dsh-agent-presets'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { launchWebScaffold, watchConsole, type WebScaffold } from './scaffold.ts'
@@ -26,7 +26,7 @@ describe('web e2e: Bid Run 错误提示', () => {
     await page.goto(scaffold.baseUrl, { waitUntil: 'load' })
     await page.waitForSelector('[class*="frame"]', { timeout: 30_000 })
     await connectFreshWorkspaceZh(page, scaffold.workspaceCwd)
-    await page.getByRole('region', { name: '技术标生成' }).waitFor({ timeout: 20_000 })
+    await vi.waitFor(() => { expect(scaffold.ctx.agents.list().some(candidate => resolveSessionPreset(candidate.session) === 'bid')).toBe(true) }, { timeout: 20_000 })
     const found = scaffold.ctx.agents.list().find(candidate => resolveSessionPreset(candidate.session) === 'bid')
     if (found === undefined) throw new Error('Missing Bid agent')
     agent = found
@@ -51,7 +51,7 @@ describe('web e2e: Bid Run 错误提示', () => {
       message,
     })
 
-    const alert = page.getByRole('alert').filter({ hasText: '阶段运行失败' })
+    const alert = page.getByRole('alert').filter({ hasText: '任务运行失败' })
     await alert.waitFor({ timeout: 10_000 })
     const disclosure = alert.getByRole('button')
     expect(await disclosure.getAttribute('aria-expanded')).toBe('false')

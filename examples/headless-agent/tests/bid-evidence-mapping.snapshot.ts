@@ -257,7 +257,7 @@ it('corrects S4 tool arguments in one Child turn through the headless Loader', a
     },
   })
   expect(JSON.parse(result.stdout)).toEqual({
-    stage: 'evidence_mapping', status: 'waiting_user', run: null,
+    workflow: { kind: 'full_bid', stage: 'evidence_mapping' }, status: 'waiting_user', run: null,
     state_files: [],
   })
 }, LOADER_SMOKE_TEST_TIMEOUT_MS)
@@ -342,5 +342,5 @@ it.each(['review-budget', 'review-partitioned'])('S4 大章通过真实 Loader �
       expect(expected).toBe(await readFile(path, 'utf8'))
     },
   })
-  expect(JSON.parse(result.stdout)).toMatchObject({ stage: 'evidence_mapping', status: 'waiting_user', run: null })
+  expect(JSON.parse(result.stdout)).toMatchObject({ workflow: { kind: 'full_bid', stage: 'evidence_mapping' }, status: 'waiting_user', run: null })
 }, 105_000)

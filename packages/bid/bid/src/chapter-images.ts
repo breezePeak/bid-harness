@@ -14,7 +14,7 @@ import { chapterToolArgs, createChapterProtocol, type ChapterProtocol } from './
 import type { BidImageConnectionSpec, BidImageProvider } from './bid-image-provider.ts'
 import { DOCX_MAX_BODY_IMAGE_BYTES, docxImageDimensions } from './docx-image.ts'
 import { assertNoLinkedPath, within } from './workspace-path.ts'
-import { bidImageRequestedSchema } from './bid-events.ts'
+import { generateTrackedBidImage } from './bid-image-request.ts'
 import { BidImageId } from './control-plane-contract.ts'
 
 const text = z.string().trim().min(1).max(8000)
@@ -22,7 +22,7 @@ const sha256 = z.string().regex(/^[a-f0-9]{64}$/u)
 /** 项目内生成图片的完整身份；模型只选择位置。 */
 export const bidChapterImageSchema = z.object({
   id: z.string().regex(/^IMG-[a-f0-9]{64}$/u).transform(BidImageId), section_id: text,
-  path: z.string().regex(/^chapters\/images\/[a-f0-9]{64}\.png$/u),
+  path: z.string().regex(/^assets\/images\/[a-f0-9]{64}\.png$/u),
   content_sha256: sha256, request_sha256: sha256,
   width: z.number().int().positive(), height: z.number().int().positive(),
   title: z.string().trim().min(1).max(200), purpose: text, prompt: text,
@@ -45,7 +45,7 @@ const styleSchema = z.object({
 export type BidImageStyle = z.infer<typeof styleSchema>
 
 /** S5 重置时仍保留的项目风格文件。 */
-export const BID_IMAGE_STYLE_PATH = 'chapters/image-style.json'
+export const BID_IMAGE_STYLE_PATH = 'assets/image-style.json'
 
 const ledgerSchema = z.object({ schema_version: z.literal(1), section_id: text,
   images: z.array(bidChapterImageSchema).max(100) }).strict()
@@ -101,7 +101,7 @@ function markdownImagePath(url: string): string | undefined {
   let decoded: string
   try { decoded = decodeURIComponent(url) } catch { return undefined }
   const path = posix.normalize(decoded.replaceAll('\\', '/'))
-  return /^chapters\/images\//iu.test(path) ? path.toLowerCase() : path
+  return /^assets\/images\//iu.test(path) ? path.toLowerCase() : path
 }
 
 /**
@@ -112,7 +112,7 @@ function markdownImagePath(url: string): string | undefined {
 export function chapterImagePaths(markdown: string): string[] {
   return [...new Set(markdownImageUrls(markdown).flatMap((url) => {
     const path = markdownImagePath(url)
-    return path?.startsWith('chapters/images/') === true ? [path] : []
+    return path?.startsWith('assets/images/') === true ? [path] : []
   }))]
 }
 
@@ -125,7 +125,7 @@ export function chapterImageCaptions(markdown: string): ReadonlyMap<string, stri
   const captions = new Map<string, string>()
   for (const { url, node } of markdownImages(markdown)) {
     const path = markdownImagePath(url)
-    if (path?.startsWith('chapters/images/') !== true) continue
+    if (path?.startsWith('assets/images/') !== true) continue
     const caption = node.alt ?? ''
     if (captions.has(path) && captions.get(path) !== caption) throw new ToolArgsError([
       'markdown: 同一图片的多处展示须使用相同图题，不能将不同图题合并到一个图片位置。',
@@ -203,7 +203,7 @@ function digest(value: string | Buffer): string {
  * @returns 项目内 JSON 路径。
  */
 export function chapterImageLedgerPath(sectionId: string): string {
-  return `chapters/images/${digest(sectionId)}.json`
+  return `assets/images/${digest(sectionId)}.json`
 }
 
 async function readJson(workspace: BidWorkspace, path: string): Promise<unknown> {
@@ -225,7 +225,7 @@ export async function readBidImageStyle(workspace: BidWorkspace): Promise<BidIma
   }
   const style = styleSchema.parse(value)
   if (style.sha256 !== digest(style.prompt)) throw new Error('BID_IMAGE_STYLE_HASH_INVALID')
-  if (style.reference_image !== undefined && (style.reference_image.path !== `chapters/images/${style.reference_image.content_sha256}.png`
+  if (style.reference_image !== undefined && (style.reference_image.path !== `assets/images/${style.reference_image.content_sha256}.png`
     || style.reference_image.id !== `IMG-${digest(style.reference_image.request_sha256 + style.reference_image.content_sha256)}`)) {
     throw new Error('BID_IMAGE_REFERENCE_INVALID')
   }
@@ -246,7 +246,7 @@ export async function readChapterImages(workspace: BidWorkspace, sectionId: stri
   }
   const ledger = ledgerSchema.parse(value)
   if (ledger.section_id !== sectionId || ledger.images.some(image => image.section_id !== sectionId)
-    || ledger.images.some(image => image.path !== `chapters/images/${image.content_sha256}.png`
+    || ledger.images.some(image => image.path !== `assets/images/${image.content_sha256}.png`
       || image.id !== `IMG-${digest(image.request_sha256 + image.content_sha256)}`)
     || new Set(ledger.images.map(image => image.id)).size !== ledger.images.length) throw new Error('BID_IMAGE_LEDGER_INVALID')
   return ledger.images
@@ -258,7 +258,7 @@ export async function readChapterImages(workspace: BidWorkspace, sectionId: stri
  * @returns 各章已发图片；损坏账本拒绝读取。
  */
 export async function readBidImages(workspace: BidWorkspace): Promise<BidChapterImage[]> {
-  const directory = within(workspace.projectRoot, 'chapters/images')
+  const directory = within(workspace.projectRoot, 'assets/images')
   await assertNoLinkedPath(workspace.root, directory)
   let files: string[]
   try { files = await readdir(directory) } catch (error) {
@@ -267,8 +267,8 @@ export async function readBidImages(workspace: BidWorkspace): Promise<BidChapter
   }
   const images: BidChapterImage[] = []
   for (const file of files.filter(file => /^[a-f0-9]{64}\.json$/u.test(file)).sort()) {
-    const ledger = ledgerSchema.parse(await readJson(workspace, `chapters/images/${file}`))
-    if (chapterImageLedgerPath(ledger.section_id) !== `chapters/images/${file}`) throw new Error('BID_IMAGE_LEDGER_INVALID')
+    const ledger = ledgerSchema.parse(await readJson(workspace, `assets/images/${file}`))
+    if (chapterImageLedgerPath(ledger.section_id) !== `assets/images/${file}`) throw new Error('BID_IMAGE_LEDGER_INVALID')
     images.push(...await readChapterImages(workspace, ledger.section_id))
   }
   return images
@@ -442,23 +442,18 @@ export function createBidProjectImageSession(workspace: BidWorkspace, provider: 
         }
         const prompt = `${style.prompt}\n\n本图用途：${input.purpose}\n本图内容：${input.prompt}`
         signal.throwIfAborted()
-        const result = await provider.generate({ prompt,
-          size: input.size, ...(reference === undefined ? {} : { reference }), model: style.model,
-          async beforeRequest(spec) {
-            writer.session.append('bid.image.requested', bidImageRequestedSchema.parse({
-              section_id: sectionId, request_sha256: requestHash, style_sha256: style.sha256, prompt, size: input.size,
-              model: spec.model, base_url: spec.baseURL,
-              ...(style.reference_image === undefined || referenceAttachment === undefined ? {} : {
-                reference: { ...style.reference_image, attachment: referenceAttachment },
-              }),
-            }))
-            if (!await writer.ctx.sessions.flush(writer.session)) throw new Error('BID_IMAGE_REQUEST_LOG_UNAVAILABLE')
-          },
+        const result = await generateTrackedBidImage(workspace, provider, writer, commits, {
+          owner: { kind: 'chapter', section_id: sectionId }, request_sha256: requestHash,
+          style_sha256: style.sha256, prompt, size: input.size, model: style.model,
+          ...(reference === undefined ? {} : { referenceBytes: reference }),
+          ...(style.reference_image === undefined || referenceAttachment === undefined ? {} : {
+            reference: { kind: 'style', ...style.reference_image, attachment: referenceAttachment },
+          }),
         }, signal)
         signal.throwIfAborted()
         const hash = digest(result.png)
         const image = bidChapterImageSchema.parse({
-          id: `IMG-${digest(requestHash + hash)}`, section_id: sectionId, path: `chapters/images/${hash}.png`,
+          id: `IMG-${digest(requestHash + hash)}`, section_id: sectionId, path: `assets/images/${hash}.png`,
           content_sha256: hash, request_sha256: requestHash, width: result.width, height: result.height,
           title: input.title, purpose: input.purpose, prompt: input.prompt, style_sha256: style.sha256,
           model: result.model, visual_status: 'pending',

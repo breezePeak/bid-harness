@@ -497,7 +497,7 @@ describe('项目 Word 格式链路', () => {
       mapping: { figureCaption: captionPosition, tableCaption: captionPosition },
     }) }] } }))
     const append = vi.fn()
-    const ctx = { get: () => ({ generate }) } as unknown as Context
+    const ctx = { get: (name: string) => name === 'llm' ? { generate } : undefined } as unknown as Context
     const session = { id: 'format-test', requestHeader: () => ({ config: { provider: 'test', model: 'test' } }), append } as unknown as Session
     const result = await suggestDocxFormat(ctx, session, view, new AbortController().signal, 4096)
     expect(result.mapping).toEqual({ figureCaption: 'Caption', tableCaption: 'Caption' })

@@ -106,6 +106,7 @@ export function isQuotaExceededError(detail: string): boolean {
  */
 export function isRetryableServerError(detail: string): boolean {
   return /\bAn error occurred while processing your request\.\s+You can retry your request\b/i.test(detail)
+    || /\bservers?\s+(?:is|are)\s+(?:currently\s+)?overloaded\b.*\b(?:try again later|retry)\b/i.test(detail)
 }
 
 /**

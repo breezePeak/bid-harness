@@ -224,13 +224,13 @@ try {
   const payload = { stage }
   const inputs = stageInput ? await Promise.all(buildBidStageTask(stage).inputs.map(async path => ({ path,
     sha256: createHash('sha256').update(await readFile(join(workspace.projectRoot, path))).digest('hex') }))) : []
-  const work = stageInput ? await persistBidWorkRequest(workspace, 'stage_execution', stage, payload, { stage, inputs, payload }) : undefined
+  const work = stageInput ? await persistBidWorkRequest(workspace, { kind: 'stage_execution', stage: stage }, payload, { stage, inputs, payload }) : undefined
   const suspended = work === undefined ? undefined : { runId: 'stage-input-original', epoch: 1, baseProjectRevision: 0,
     work, cause: 'awaiting_input' as const, startedAt: 1, updatedAt: 2, error: { message: '演示章节需要用户决定。',
       issues: [{ code: 'CHAPTER_WRITING_INPUT_REQUIRED', artifact: 'SEC-2', message: '缺少实际演示资料，请明确本章写作方式。' }] } }
   await checkpointBidProjectState(workspace, suspended === undefined
-    ? { stage, status: savedRequirements ? 'waiting_user' : 'completed', run: null }
-    : { stage, status: 'suspended', run: suspended })
+    ? { workflow: { kind: 'full_bid', stage: stage }, status: savedRequirements ? 'waiting_user' : 'completed', run: null }
+    : { workflow: { kind: 'full_bid', stage: stage }, status: 'suspended', run: suspended })
   const mainId = SessionId('bid-writing-recovery-main')
   const adapter = new WritingRecoveryAdapter(mainId, scenario)
   ctx.effect(() => ctx!.llm.registerAdapter(['mock'], adapter))

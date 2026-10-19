@@ -2092,6 +2092,9 @@ importers:
         specifier: ^2.0.0
         version: 2.1.1
     devDependencies:
+      '@deepseek-ai/dsh-host-apiproxy':
+        specifier: workspace:^
+        version: link:../../host/apiproxy
       '@deepseek-ai/cordis':
         specifier: workspace:^
         version: link:../../../vendor/cordis

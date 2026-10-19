@@ -2,6 +2,7 @@
 import { createHash } from 'node:crypto'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
+import { SessionId } from '@deepseek-ai/dsh-session'
 import { createScoringResponsePointCatalog, outlineArtifactSha256, type BidWorkspace, type ChapterWritingManifest, type OutlineArtifact } from '@deepseek-ai/dsh-bid'
 import { normalizeFlowchartInputs } from '../src/flowchart.ts'
 import { collectDocxExportSnapshot } from '../src/docx-export.ts'
@@ -33,7 +34,7 @@ export async function seedCapabilityProject(workspace: BidWorkspace, variant: 'c
   }
   const source = requirements.requirements[0]!.source_refs
   const [reference] = await workspace.import([{ name: 'reference.md', role: 'reference',
-    bytes: new TextEncoder().encode('参考资料：设计、实施和验收采用可追踪的交付记录。') }])
+    bytes: new TextEncoder().encode('参考资料：设计、实施和验收采用可追踪的交付记录。') }], undefined, { id: SessionId('capability-baseline') })
   if (reference?.chunksPath === null || reference?.chunksPath === undefined) throw new Error('测试参考资料缺少分块')
   const referenceIndex = JSON.parse(await readFile(join(workspace.projectRoot, reference.chunksPath, 'index.json'), 'utf8')) as {
     chunks: Array<{ path: string }>

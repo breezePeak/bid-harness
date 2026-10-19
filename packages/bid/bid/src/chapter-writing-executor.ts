@@ -485,7 +485,7 @@ function chapterReadGuard(
     return ranges.some(range => Number(offset) >= range.start_line && end <= range.end_line)
       ? undefined : 'S5 Chapter Child 只能读取 S4 为当前章节映射的 Web Chunk 行范围。'
   }
-  if (!/^corpus\//u.test(target) || !/\/chunks(?:\/(?:index\.json|[^/]+\.md))?$/u.test(target)) {
+  if (!/\/chunks(?:\/(?:index\.json|[^/]+\.md))?$/u.test(target)) {
     return 'S5 Chapter Child 只可检索 reference、reference_bid、outline_framework 分块或 Host 账本登记的 Web Snapshot。'
   }
   const readable = manifest.files.some(file => (file.role === 'reference' || file.role === 'reference_bid' || file.role === 'outline_framework')

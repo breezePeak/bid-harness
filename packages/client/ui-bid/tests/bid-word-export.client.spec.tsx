@@ -343,7 +343,7 @@ describe('Word 导出页面', () => {
     vi.mocked(actions.generate).mockResolvedValue({ path: 'output/bid.docx', warnings: [{ code: 'DOCX_EXPORT_CONTENT_SNAPSHOT', message }] })
     render(<BidWordExport {...props} useProjection={(key: string) => key === 'bid.docx_export' ? null : ({
       allowedActions: ['send_message', 'export_docx'],
-      task: { stage: 'chapter_writing', status: 'running' },
+      task: { workflow: { kind: 'full_bid', stage: 'chapter_writing' }, status: 'running' },
     })}/>)
     await screen.findByTitle('Word 效果预览')
     expect(screen.getByRole('status').textContent).toContain('按目录导出所有已保存正文；缺失正文的章节会保留标题并标注。')

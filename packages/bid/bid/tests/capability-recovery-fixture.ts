@@ -33,8 +33,8 @@ export async function capabilityRecoveryFixture() {
     { description: '审核全书', scope: { source: 'task' as const }, call: { capability: 'document.review' as const, input: { reason: '审核全书' } } },
   ] }
   const authorization = { session_id: String(session.id), message_id: String(message.id) }
-  const work = await persistCapabilityTaskRequest(workspace, session, 'chapter_writing', task, authorization,
-    ['chapters/execution-log.json'], { stage: 'chapter_writing', status: 'completed', run: null })
+  const work = await persistCapabilityTaskRequest(workspace, session, task, authorization,
+    ['chapters/execution-log.json'])
   const agent = { id: 'fault-injection-agent' } as Parameters<CapabilityTaskDispatcher['execute']>[1]['agent']
   return { root, workspace, ctx, session, work, task, authorization, agent,
     run: () => createTestBidRunContext({ work }),

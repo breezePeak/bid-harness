@@ -24,7 +24,7 @@ import { BidReviewWorkbench, type BidReviewChapterView } from './BidReviewWorkbe
 import { BidImageSettings, type BidImageSettingsInjected, type BidImageSettingsView } from './BidImageSettings.tsx'
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import { BidComposerContext } from './BidComposerContext.tsx'
-import { BidRunNotice } from './BidRunNotice.tsx'
+import { BidRunNotice, type BidRunNoticeInjected } from './BidRunNotice.tsx'
 import { bidRunNoticeDefinition } from './bid-run-notice-definition.ts'
 import { BidDocxExportNotice, type BidDocxExportNoticeInjected } from './BidDocxExportNotice.tsx'
 import { bidDocxExportNoticeDefinition } from './bid-docx-export-notice-definition.ts'
@@ -317,6 +317,18 @@ export function apply(ctx: ClientContext): void {
   ctx.slots.inject('conversation.chat.node', () => ctx.slots.register({
     name: 'conversation.chat.node',
     key: 'bid-run-notice',
+    inject: (sessionId: SessionId): BidRunNoticeInjected => ({
+      getDeliverables: async (workId) => {
+        const result = await ctx.remote.bid.getTaskDeliverables(sessionId, workId)
+        if (!result.ok) throw actionFailure(result.error)
+        return result.value
+      },
+      artifactUrl: (workId, receipt, position, mode) => {
+        const url = new URL('/api/bid/artifacts', window.location.href)
+        url.search = new URLSearchParams({ session: String(sessionId), work: workId, receipt, position: String(position), mode }).toString()
+        return url.href
+      },
+    }),
   }, BidRunNotice))
   ctx.slots.inject('conversation.chat.node', () => ctx.slots.register({
     name: 'conversation.chat.node',

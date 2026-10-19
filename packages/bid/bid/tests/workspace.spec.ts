@@ -1,4 +1,4 @@
-import { access, mkdir, mkdtemp, readFile, symlink, writeFile } from 'node:fs/promises'
+import { access, mkdir, mkdtemp, readFile, readdir, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -37,11 +37,11 @@ describe('BidWorkspace', () => {
     const file = (await bid.import([{ name: '公司资料.txt', type: 'text/plain', bytes: new TextEncoder().encode('企业资料') }]))[0]!
     expect(file.parseStatus).toBe('success')
     expect(await readFile(file.absoluteDocumentPath!, 'utf8')).toBe('企业资料')
-    expect(file.chunksPath).toBe('corpus/公司资料.txt/chunks')
+    expect(file.chunksPath).toBe(`${file.corpusPath}/chunks`)
     expect(JSON.parse(await readFile(file.absoluteChunkIndexPath!, 'utf8'))).toMatchObject({ schema_version: 1, chunk_count: 1 })
     const inventory = await bid.messageInventory('编写技术标')
-    expect(inventory).toContain('.bid-harness/input/公司资料.txt')
-    expect(inventory).toContain('.bid-harness/corpus/公司资料.txt/document.md')
+    expect(inventory).toContain(`.bid-harness/${file.inputPath}`)
+    expect(inventory).toContain(`.bid-harness/${file.documentPath}`)
     expect(inventory).not.toContain(root)
   })
 
@@ -55,9 +55,12 @@ describe('BidWorkspace', () => {
       .rejects.toThrow('BID_RUN_RETIRED')
 
     await expect(readFile(join(bid.projectRoot, 'manifest.json'))).rejects.toMatchObject({ code: 'ENOENT' })
-    await expect(readFile(join(bid.projectRoot, 'corpus', '迟到解析.txt', 'document.md'))).rejects.toMatchObject({ code: 'ENOENT' })
-    await expect(readFile(join(bid.projectRoot, 'runs', run.runId, 'staging', 'corpus', '迟到解析.txt', 'document.md'), 'utf8'))
-      .resolves.toBe('仍在解析')
+    await expect(readdir(bid.corpusRoot)).rejects.toMatchObject({ code: 'ENOENT' })
+    const stagedRoot = join(bid.projectRoot, 'runs', run.runId, 'staging', 'assets/parsed')
+    const [key] = await readdir(stagedRoot)
+    await expect(readFile(join(stagedRoot, key!, 'document.md'), 'utf8')).resolves.toBe('仍在解析')
+    const [original] = await readdir(bid.inputRoot)
+    await expect(readFile(join(bid.inputRoot, original!, '迟到解析.txt'), 'utf8')).resolves.toBe('仍在解析')
   })
 
   it('persists every document role and renders its model-visible inventory name', async () => {
@@ -72,7 +75,7 @@ describe('BidWorkspace', () => {
     ])
 
     await expect(bid.readManifest()).resolves.toMatchObject({
-      version: 4,
+      version: 5,
       files: [
         { role: 'tender' },
         { role: 'outline_framework' },
@@ -109,20 +112,20 @@ describe('BidWorkspace', () => {
 
     expect(imported.map(file => file.parseStatus)).toEqual(['success', 'success'])
     for (const file of imported) {
-      expect(file.documentPath).toBe(`corpus/${file.originalName}/document.md`)
-      expect(file.structurePath).toBe(`corpus/${file.originalName}/structure.json`)
-      expect(file.metadataPath).toBe(`corpus/${file.originalName}/metadata.json`)
-      expect(file.chunksPath).toBe(`corpus/${file.originalName}/chunks`)
-      expect(file.chunkIndexPath).toBe(`corpus/${file.originalName}/chunks/index.json`)
+      expect(file.documentPath).toBe(`${file.corpusPath}/document.md`)
+      expect(file.structurePath).toBe(`${file.corpusPath}/structure.json`)
+      expect(file.metadataPath).toBe(`${file.corpusPath}/metadata.json`)
+      expect(file.chunksPath).toBe(`${file.corpusPath}/chunks`)
+      expect(file.chunkIndexPath).toBe(`${file.corpusPath}/chunks/index.json`)
       await expect(readFile(file.absoluteDocumentPath!, 'utf8')).resolves.toContain('项目实施管理')
       await expect(readFile(file.absoluteStructurePath!, 'utf8')).resolves.toContain('sections')
       await expect(readFile(file.absoluteMetadataPath!, 'utf8')).resolves.toContain('parse_status')
     }
     const manifest = await bid.readManifest()
-    expect(manifest.version).toBe(4)
+    expect(manifest.version).toBe(5)
     expect(manifest.files).toMatchObject([
-      { originalName: '历史投标书.doc', mediaType: 'application/msword', documentPath: 'corpus/历史投标书.doc/document.md' },
-      { originalName: '招标文件.docx', documentPath: 'corpus/招标文件.docx/document.md' },
+      { originalName: '历史投标书.doc', mediaType: 'application/msword' },
+      { originalName: '招标文件.docx' },
     ])
   })
 
@@ -150,8 +153,8 @@ describe('BidWorkspace', () => {
       expect(reparsed).toMatchObject({ id: failed[0]!.id, role: 'tender', parseStatus: 'success' })
       const manifest = await bid.readManifest()
       expect(manifest.files).toMatchObject([
+        { id: failed[0]!.id, role: 'tender', parseStatus: 'success', inputPath: failed[0]!.inputPath },
         { id: failed[1]!.id, role: 'reference', parseStatus: 'failed' },
-        { id: failed[0]!.id, role: 'tender', parseStatus: 'success', inputPath: 'input/招标文件 (2).docx' },
       ])
       expect(manifest.files).toHaveLength(2)
       for (const file of [...failed, reparsed!]) {
@@ -162,18 +165,15 @@ describe('BidWorkspace', () => {
       const resolved = await resolveEvidenceChunk(bid, manifest, material)
       await expect(readFile(resolved.path, 'utf8')).resolves.toContain('项目实施管理')
 
-      conversion.mockRejectedValueOnce(new Error('转换服务再次不可用'))
-      const [retryFailure] = await bid.import([{ name: '招标文件.docx', role: 'tender', bytes }], createTestBidRunContext())
-      expect(retryFailure!.parseStatus).toBe('failed')
-      const withRetryFailure = await bid.readManifest()
-      expect(withRetryFailure.files.filter(file => file.role === 'tender').map(file => file.parseStatus))
-        .toEqual(['success', 'failed'])
-      await expect(resolveEvidenceChunk(bid, withRetryFailure, material)).resolves.toMatchObject({ file: { parseStatus: 'success' } })
-      await expect(readFile(join(bid.projectRoot, retryFailure!.inputPath))).resolves.toEqual(bytes)
+      const calls = conversion.mock.calls.length
+      const [reused] = await bid.import([{ name: '招标文件.docx', role: 'tender', bytes }], createTestBidRunContext())
+      expect(reused).toEqual(reparsed)
+      expect(conversion).toHaveBeenCalledTimes(calls)
+      await expect(bid.readManifest()).resolves.toEqual(manifest)
 
       const differentBytes = await Packer.toBuffer(new Document({ sections: [{ children: [new Paragraph('新的招标文件内容')] }] }))
       const [different] = await bid.import([{ name: '招标文件.docx', role: 'tender', bytes: differentBytes }], createTestBidRunContext())
-      expect(different!.inputPath).toBe('input/招标文件 (4).docx')
+      expect(different!.inputPath).not.toBe(failed[0]!.inputPath)
       await expect(readFile(join(bid.projectRoot, failed[0]!.inputPath))).resolves.toEqual(bytes)
       await expect(readFile(join(bid.projectRoot, different!.inputPath))).resolves.toEqual(differentBytes)
     } finally {
@@ -181,7 +181,7 @@ describe('BidWorkspace', () => {
     }
   })
 
-  it('同批次相同 DOCX 保留失败和成功记录、原件，并优先引用成功语料', async () => {
+  it('同批次相同 DOCX 重试成功后共享同一原件和成功语料', async () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-bid-'))
     const bid = new BidWorkspace(root)
     const bytes = await Packer.toBuffer(new Document({ sections: [{ children: [new Paragraph('项目实施管理')] }] }))
@@ -192,11 +192,11 @@ describe('BidWorkspace', () => {
         { name: '招标文件.docx', bytes },
       ]
       const imported = await bid.import(files, createTestBidRunContext())
-      expect(imported.map(file => file.parseStatus)).toEqual(['failed', 'success'])
+      expect(imported.map(file => file.parseStatus)).toEqual(['success', 'success'])
+      expect(imported[0]).toEqual(imported[1])
       const manifest = await bid.readManifest()
-      expect(manifest.files).toHaveLength(2)
+      expect(manifest.files).toHaveLength(1)
       expect(manifest.files[0]).toMatchObject({ id: imported[0]!.id, parseStatus: 'success', inputPath: imported[1]!.inputPath })
-      expect(manifest.files[1]).toMatchObject({ id: imported[0]!.id, parseStatus: 'failed', inputPath: imported[0]!.inputPath })
       await expect(validateFileIntake(bid, imported, 'file_intake', [{
         stage: 'file_intake', type: 'manifest', path: 'manifest.json',
       }], files)).resolves.toEqual({ ok: true })
@@ -220,9 +220,9 @@ describe('BidWorkspace', () => {
     const manifest = await bid.readManifest()
     expect(manifest.files).toHaveLength(2)
     expect(manifest.files.map(file => ({ name: file.originalName, status: file.parseStatus }))).toEqual([
-      { name: 'same.txt', status: 'success' }, { name: 'broken.docx', status: 'failed' },
+      { name: 'broken.docx', status: 'failed' }, { name: 'same.txt', status: 'success' },
     ])
-    expect(manifest.files[1]!.parseError).toContain('DOCX_PARSE_FAILED')
+    expect(manifest.files[0]!.parseError).toContain('DOCX_PARSE_FAILED')
     await expect(validateFileIntake(bid, imported, 'file_intake', [{
       stage: 'file_intake', type: 'manifest', path: 'manifest.json',
     }], files)).resolves.toEqual({ ok: true })
@@ -332,11 +332,10 @@ describe('BidWorkspace', () => {
       { name: '评分.xlsx', bytes: workbook },
       { name: '旧表.xls', bytes: workbook },
     ])
-    expect(imported.map(file => file.inputPath)).toEqual([
-      'input/说明.txt', 'input/说明 (2).txt', 'input/笔记.md', 'input/评分.xlsx', 'input/旧表.xls',
-    ])
+    expect(new Set(imported.map(file => file.inputPath)).size).toBe(imported.length)
+    for (const file of imported) expect(file.inputPath).toBe(`assets/originals/${file.sha256}/${file.originalName}`)
     const repeated = await bid.import([{ name: '说明.txt', bytes: new TextEncoder().encode('第三份') }])
-    expect(repeated[0]!.inputPath).toBe('input/说明 (3).txt')
+    expect(imported.map(file => file.inputPath)).not.toContain(repeated[0]!.inputPath)
     await expect(readFile(imported[0]!.absoluteDocumentPath!, 'utf8')).resolves.toBe('内容')
     const table = await readFile(imported[3]!.absoluteDocumentPath!, 'utf8')
     expect(table).toContain('## 工作表：评分表')
@@ -356,9 +355,9 @@ describe('BidWorkspace', () => {
       { name: 'fallback.foo', bytes: new Uint8Array([1]) },
     ])
     expect(imported.map(file => file.parseStatus)).toEqual(['failed', 'failed', 'failed', 'failed'])
-    expect(imported[0]).toMatchObject({ mediaType: 'text/plain', corpusPath: 'corpus/bad.txt', documentPath: null })
+    expect(imported[0]).toMatchObject({ mediaType: 'text/plain', documentPath: null })
     expect(imported[1]!.parseError).toContain('PDF_PARSE_FAILED')
-    expect(imported[2]).toMatchObject({ mediaType: 'application/custom', parseError: 'bid-unsupported-file-type' })
+    expect(imported[2]).toMatchObject({ mediaType: 'application/octet-stream', parseError: 'bid-unsupported-file-type' })
     expect(imported[3]).toMatchObject({ mediaType: 'application/octet-stream' })
     const inventory = await bid.messageInventory('继续')
     expect(inventory).toContain('完整正文：无')
@@ -384,21 +383,11 @@ describe('BidWorkspace', () => {
     await expect(bid.readManifest()).rejects.toThrow()
     await writeFile(bid.manifestPath, JSON.stringify({ version: 1, files: [] }))
     await expect(bid.readManifest()).rejects.toThrow('bid-unsupported-manifest-version')
-    await writeFile(bid.manifestPath, JSON.stringify({ version: 4, files: [{ originalName: 'missing-fields.txt' }] }))
+    await writeFile(bid.manifestPath, JSON.stringify({ version: 5, files: [{ originalName: 'missing-fields.txt' }] }))
     await expect(bid.readManifest()).rejects.toThrow('bid-invalid-manifest')
-    await writeFile(bid.manifestPath, JSON.stringify({ version: 4, files: [{
-      id: 'id', role: 'tender', originalName: 'scan.pdf', inputPath: 'input/scan.pdf', corpusPath: 'corpus/scan.pdf',
-      documentPath: 'corpus/scan.pdf/document.md', structurePath: 'corpus/scan.pdf/structure.json', metadataPath: 'corpus/scan.pdf/metadata.json',
-      chunksPath: null, chunkIndexPath: null,
-      mediaType: 'application/pdf', size: 1, sha256: 'hash', parseStatus: 'needs_ocr', parseError: null,
-    }, {
-      id: 'failed', role: 'tender', originalName: 'failed.pdf', inputPath: 'input/failed.pdf', corpusPath: null,
-      documentPath: null, structurePath: null, metadataPath: null, mediaType: 'application/pdf', size: 1,
-      chunksPath: null, chunkIndexPath: null,
-      sha256: 'failed', parseStatus: 'failed', parseError: null,
-    }] }))
+    await writeFile(bid.manifestPath, JSON.stringify({ version: 5, files: [] }))
+    await bid.import([{ name: '扫描件.pdf', bytes: await readFile(fixture('scanned-document.pdf')) }])
     await expect(bid.messageInventory('识别')).resolves.toContain('需要 OCR')
-    await expect(bid.messageInventory('识别')).resolves.toContain('失败：未知错误')
   })
 
   it('delegates document parsing and exports supported Markdown blocks to DOCX', async () => {

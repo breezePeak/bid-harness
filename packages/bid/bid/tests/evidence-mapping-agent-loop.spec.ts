@@ -256,7 +256,7 @@ describe('S4 Web evidence through a real Agent Tool loop', () => {
     try {
       const outcome = await runFullOutlineRegenerationLoop(ctx, root)
       expect(outcome, JSON.stringify(outcome)).toMatchObject({ result: { ok: true }, draft: { revision: 2 },
-        canonicalPreserved: true, state: { stage: 'evidence_mapping', status: 'waiting_user' } })
+        canonicalPreserved: true, state: { workflow: { kind: 'full_bid', stage: 'evidence_mapping' }, status: 'waiting_user' } })
       expect(outcome.draft.outline.sections.find(section => section.id === 'SEC-SECURITY')?.title)
         .toBe('访问控制与安全审计方案')
       expect(outcome.transitions).toContain('bid.run.started')
@@ -278,11 +278,11 @@ describe('S4 Web evidence through a real Agent Tool loop', () => {
     await ctx.plugin(spawn, { providerName: 'spawn' })
     try {
       expect(await runStageInteractionLoop(ctx, root, true)).toMatchObject({
-        state: { stage: 'evidence_mapping', status: 'waiting_user' },
+        state: { workflow: { kind: 'full_bid', stage: 'evidence_mapping' }, status: 'waiting_user' },
         confirmations: 0, generalFileCreated: true, canonicalPreserved: true, untouchedEvidencePreserved: true, revision: 3, disposed: true,
         titles: ['访问控制与安全审计', '实施准备与资源核查', '实施过程', '验收移交'],
         visibleTools: ['read', 'grep', 'write', 'web_search', 'web_fetch', 'bid_stage_inspect', 'bid_outline_apply_operations', 'bid_outline_regenerate_scope', 'bid_evidence_remap',
-          'bid_project_inspect', 'bid_run_task', 'bid_plan_task', 'bid_confirm_writing_plan'],
+          'bid_project_inspect', 'bid_start_workflow', 'bid_run_task', 'bid_plan_task', 'bid_confirm_writing_plan'],
         concurrent: Array(3).fill('BID_OPERATION_IN_PROGRESS'), failures: 1, incompletePlanRejected: true,
         readOnlyNoWork: true, planOnlyNoWork: true, capabilityUpdates: 1, updatedRequirement: '明确实施边界',
       })
@@ -303,7 +303,7 @@ describe('S4 Web evidence through a real Agent Tool loop', () => {
     await ctx.plugin(spawn, { providerName: 'spawn' })
     try {
       const { agent, workspace, sourceUrl, outcome, requests } = await runEvidenceMappingLoop(ctx, root, repair)
-      expect(outcome, JSON.stringify(outcome)).toMatchObject({ stage: 'evidence_mapping', status: 'waiting_user' })
+      expect(outcome, JSON.stringify(outcome)).toMatchObject({ workflow: { kind: 'full_bid', stage: 'evidence_mapping' }, status: 'waiting_user' })
       const reviewTool = requests.flatMap(request => request.tools ?? []).find(tool => tool.name === 'review_items')
       expect(reviewTool?.parameters).toMatchObject({
         type: 'object',

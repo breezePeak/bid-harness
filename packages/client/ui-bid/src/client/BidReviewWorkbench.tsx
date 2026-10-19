@@ -996,7 +996,7 @@ function markdownImageAssetPath(url: string): string | undefined {
   try {
     normalized = decodeURIComponent(new URL(path.split('/').map(encodeURIComponent).join('/'), 'https://bid-assets.invalid/').pathname.slice(1))
   } catch { return undefined }
-  return /^chapters\/images\//iu.test(normalized) ? normalized.toLowerCase() : normalized
+  return /^assets\/images\//iu.test(normalized) ? normalized.toLowerCase() : normalized
 }
 
 function AnchoredFlowcharts({ chapter, getImage }: {

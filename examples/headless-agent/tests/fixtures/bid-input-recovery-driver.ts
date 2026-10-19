@@ -1,6 +1,6 @@
 /** 真实 Loader 的待答卸载、保存答案、生产文件导入和接纳对账回放。 */
-import { createHash, randomUUID } from 'node:crypto'
-import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { randomUUID } from 'node:crypto'
+import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { boot } from '@deepseek-ai/dsh-app-boot'
@@ -10,6 +10,7 @@ import { SessionId } from '@deepseek-ai/dsh-session'
 import type { AskUserQuestionAnswer } from '@deepseek-ai/dsh-user-questions/types'
 import { bindBidInputRecovery, readBidInputRecovery } from '../../../../packages/bid/bid/src/bid-input-recovery.ts'
 import { persistBidWorkRequest } from '../../../../packages/bid/bid/src/work-descriptor.ts'
+import { receiveBidFile } from '../../../../packages/bid/bid/src/file-assets.ts'
 
 class InputRecoveryAdapter extends LlmAdapter {
   override resolveModel(provider: string, model: string) { return Promise.resolve({ provider, id: model, name: model }) }
@@ -25,16 +26,13 @@ if (configPath === undefined) throw new Error('缺少输入恢复回放配置')
 const workspace = new BidWorkspace(process.cwd())
 const workId = randomUUID()
 const bytes = Buffer.from('not a zip archive', 'utf8')
-const bytesRef = `requests/${workId}/files/0001`
-await mkdir(join(workspace.projectRoot, 'requests', workId, 'files'), { recursive: true })
-await writeFile(join(workspace.projectRoot, bytesRef), bytes)
-const files = [{ name: 'input-recovery-broken.docx', role: 'tender' as const, bytes_ref: bytesRef,
-  size: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex') }]
-const work = await persistBidWorkRequest(workspace, 'file_intake', 'file_intake', { files }, files, workId)
+const sessionId = SessionId('input-recovery-loader-owner')
+const ref = await receiveBidFile(workspace, { id: sessionId }, { name: 'input-recovery-broken.docx', bytes })
+const files = [{ ref: { attachmentId: ref.attachmentId, version: ref.version }, role: 'tender' as const }]
+const work = await persistBidWorkRequest(workspace, { kind: 'file_intake', stage: 'file_intake' }, { schema_version: 2, files }, files, workId)
 const run = { runId: randomUUID(), epoch: 1, baseProjectRevision: 0, work,
   cause: 'user_stop' as const, startedAt: 1, updatedAt: 2 }
-await checkpointBidProjectState(workspace, { stage: 'file_intake', status: 'suspended', run })
-const sessionId = SessionId('input-recovery-loader-owner')
+await checkpointBidProjectState(workspace, { workflow: { kind: 'full_bid' as const, stage: 'file_intake' }, status: 'suspended', run })
 let ctx: Context | undefined
 const start = async (restoring: boolean) => {
   ctx = await boot('bid-input-recovery-snapshot', configPath)
@@ -112,6 +110,6 @@ try {
     received: restored.session.events.filter(event => event.type === 'bid.run.decision.received').map(event => event.data.decision),
     productionImport: { preservedBytes: (await readFile(join(workspace.projectRoot, 'input/input-recovery-broken.docx'))).equals(bytes),
       parseStatus: manifest.files[0]?.parseStatus, parseError: manifest.files[0]?.parseError },
-    task: { stage: state?.stage, status: state?.status, code: state?.status === 'failed' ? state.failure.code : undefined },
+    task: { stage: state?.workflow?.stage, status: state?.status, code: state?.status === 'failed' ? state.failure.code : undefined },
   })}\n`)
 } finally { await ctx?.fiber.dispose() }

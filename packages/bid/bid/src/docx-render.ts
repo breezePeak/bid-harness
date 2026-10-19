@@ -168,7 +168,7 @@ async function readAssets(workspace: BidWorkspace, root: Node): Promise<Map<stri
       })
       total += bytes.length - info.size
       if (total > DOCX_MAX_BODY_IMAGE_BYTES) throw new Error('正文图片必须为普通文件，总大小不能超过 20 MiB。')
-      const imageHash = /^chapters\/images\/([a-f0-9]{64})\.png$/iu.exec(relative(workspace.projectRoot, path).replaceAll('\\', '/'))?.[1]
+      const imageHash = /^assets\/images\/([a-f0-9]{64})\.png$/iu.exec(relative(workspace.projectRoot, path).replaceAll('\\', '/'))?.[1]
       if (imageHash !== undefined && createHash('sha256').update(bytes).digest('hex') !== imageHash.toLowerCase()) {
         throw new Error('BID_IMAGE_CONTENT_CHANGED: 生成图片内容与资产摘要不一致。')
       }

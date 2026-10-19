@@ -19,7 +19,8 @@ const attr = (node: XmlNode,
   name: string): string | undefined => Object.entries(node.attributes ?? {}).find(([key]) => local(key) === name)?.[1]
 const val = (node: XmlNode, name: string): string | undefined => attr(child(node, name), 'val')
 const isFormatXmlPart = (name: string): boolean => name === '[Content_Types].xml'
-  || /^word\/(?:document|styles|numbering|header\d+|footer\d+)\.xml$/u.test(name)
+  || /^word\/(?:document|styles|settings|numbering|header\d+|footer\d+)\.xml$/u.test(name)
+  || /^word\/_rels\/(?:document|header\d+|footer\d+)\.xml\.rels$/u.test(name)
   || /^word\/theme\/theme\d*\.xml$/u.test(name)
 function descendants(node: XmlNode,
   name: string): XmlNode[] { return (node.elements ?? []).flatMap(item => [...(local(item.name) === name ? [item] : []),
