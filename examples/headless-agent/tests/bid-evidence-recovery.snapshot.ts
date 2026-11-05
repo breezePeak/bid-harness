@@ -8,6 +8,45 @@ import type { SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
 import { BidWorkspace, readEvidenceMappingProgress } from '@deepseek-ai/dsh-bid'
 import { expect, it } from 'vitest'
 
+it('S4 目录复审剩余问题在同一 Run 内自动完成多轮修复', async () => {
+  const fixtureDir = fileURLToPath(new URL('./bid-evidence-recovery-snapshots/structure-automatic/', import.meta.url))
+  const result = await runLoaderSmoke({
+    label: 'S4 连续内容修复', tempDirPrefix: 'dsh-s4-automatic-repair-',
+    binScript: fileURLToPath(new URL('./fixtures/bid-evidence-mapping-driver.ts', import.meta.url)),
+    configPath: fileURLToPath(new URL('../bid-evidence-mapping.cordis.snapshot.yml', import.meta.url)),
+    mode: 'src', tsconfigPath: fileURLToPath(new URL('../../../tsconfig.json', import.meta.url)),
+    env: { DSH_S4_RECOVERY_SCENARIO: 'structure-automatic' },
+    inspect: async (cwd) => {
+      const store = join(cwd, '.session-store')
+      const paths = (await readdir(store, { recursive: true })).filter(path => path.endsWith('.jsonl'))
+      const logs = await Promise.all(paths.map(async path => readFile(join(store, path), 'utf8')))
+      const main = logs.find(log => (JSON.parse(log.split('\n')[0]!) as SessionHeader).id === 's3-real-loop')!
+      const events = main.trimEnd().split('\n').slice(1).map(line => JSON.parse(line) as SessionEvent)
+      expect(events.filter(event => event.type === 'bid.run.started')).toHaveLength(1)
+      expect(events.some(event => event.type === 'bid.stage.failed' || event.type === 'bid.recovery.requested')).toBe(false)
+      const log = JSON.parse(await readFile(join(cwd, '.bid-harness/analysis/evidence-mapping-log.json'), 'utf8')) as {
+        tasks: Array<{ task_id: string; status: string }>
+        outline_reviews: Array<{ blocking_issues: unknown[] }>
+      }
+      expect(log.outline_reviews.map(review => review.blocking_issues.length)).toEqual([1, 1, 0])
+      expect(log.tasks.filter(task => task.task_id.startsWith('MAP-INIT-'))).toHaveLength(1)
+      expect(log.tasks.filter(task => task.task_id.startsWith('MAP-REPAIR-')).map(task => task.task_id))
+        .toEqual(['MAP-REPAIR-1-SEC-SECURITY', 'MAP-REPAIR-2-SEC-SECURITY'])
+      expect(log.tasks.every(task => task.status === 'completed')).toBe(true)
+      const sessionIds = logs.map(content => (JSON.parse(content.split('\n')[0]!) as SessionHeader).id)
+      const selected = { main, repair: logs.find(content => content.includes('repair-2-task'))! }
+      if (process.env.DSH_SNAPSHOT === 'refresh') await mkdir(fixtureDir, { recursive: true })
+      for (const [name, content] of Object.entries(selected)) {
+        const normalized = normalizeSessionSnapshot(content, { sessionIds, cwd })
+        const path = join(fixtureDir, `${name}.expected.jsonl`)
+        if (process.env.DSH_SNAPSHOT === 'refresh') await writeFile(path, normalized)
+        expect(normalized).toBe(await readFile(path, 'utf8'))
+      }
+    },
+  })
+  expect(JSON.parse(result.stdout)).toMatchObject({ status: 'waiting_user' })
+}, LOADER_SMOKE_TEST_TIMEOUT_MS)
+
 it.each(['web_search', 'web_fetch', 'url_failure'] as const)('S4 %s 通过源码 Loader 保留联网失败并继续同一任务', async (scenario) => {
   const tool = scenario === 'url_failure' ? 'web_fetch' : scenario
   const fixtureDir = fileURLToPath(new URL(scenario === 'url_failure' ? './bid-evidence-recovery-snapshots/url-failure/' : tool === 'web_fetch'

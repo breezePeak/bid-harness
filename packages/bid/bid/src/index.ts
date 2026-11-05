@@ -3879,6 +3879,10 @@ export class BidHostRuntime extends TypertRemoteService {
       await this.mutateProject(operation, lease => lease.writeJson(within(workspace.projectRoot, 'workflow/admission.json'), receipt),
         { workflow: { kind: 'full_bid', stage: 'file_intake' }, status: 'waiting_user', run: null })
       session.append('bid.workflow.started', { source: receipt.source })
+      agent.inject(createUserMessage({
+        content: [{ type: 'text', text: renderStageInteractionPrompt('file_intake') }],
+        source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'instructions' },
+      }))
       await this.ctx.sessions.flush(session)
       return receipt
     } finally {
@@ -8196,7 +8200,8 @@ export class BidHostRuntime extends TypertRemoteService {
     const finalOutline = confirmedExists || (task.workflow?.stage === 'evidence_mapping' && task.status === 'completed')
     const reviewingOutline = task.workflow?.stage === 'evidence_mapping' && task.status === 'waiting_user'
     const initialOutline = task.workflow?.stage === 'evidence_mapping' || (task.workflow?.stage === 'outline_generation' && task.status === 'completed')
-    const tenderReady = task.workflow?.stage !== 'file_intake' && (task.workflow?.stage !== 'tender_analysis' || task.status === 'waiting_user' || task.status === 'completed')
+    const tenderReady = task.workflow !== null && task.workflow.stage !== 'file_intake'
+      && (task.workflow.stage !== 'tender_analysis' || task.status === 'waiting_user' || task.status === 'completed')
     const [tender, outline] = await Promise.all([
       tenderReady ? this.getTenderAnalysisForConfirmation(session) : null,
       finalOutline || initialOutline
@@ -8232,7 +8237,8 @@ export class BidHostRuntime extends TypertRemoteService {
   async getTenderAnalysisForConfirmation(session: Session): Promise<TenderAnalysisConfirmationView> {
     if (!isBidMainSession(session)) throw new Error('Bid Session with a workspace is required.')
     const task = bidSessionTaskState(session)
-    if (task.workflow?.stage === 'file_intake' || (task.workflow?.stage === 'tender_analysis' && task.status !== 'waiting_user' && task.status !== 'completed')) throw new Error('Tender-analysis details are not available in the current Bid stage state.')
+    if (task.workflow === null || task.workflow.stage === 'file_intake'
+      || (task.workflow.stage === 'tender_analysis' && task.status !== 'waiting_user' && task.status !== 'completed')) throw new Error('Tender-analysis details are not available in the current Bid stage state.')
     const workspace = new BidWorkspace(session.header.cwd, workspaceConfig(this.config))
     return readTenderAnalysisConfirmationView(workspace)
   }

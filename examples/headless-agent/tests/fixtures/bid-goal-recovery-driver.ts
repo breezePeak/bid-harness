@@ -102,7 +102,9 @@ const configPath = process.argv[2]
 if (configPath === undefined) throw new Error('缺少 Bid Goal 回放配置')
 const stale = process.argv[3] === 'stale'
 const nativeContinuation = process.argv[3] === 'native-continue'
-const explicitContinuation = process.argv[3] === 'continue' || nativeContinuation
+const wrappedQuotaContinuation = process.argv[3] === 'wrapped-quota-continue'
+const quotaContinuation = process.argv[3] === 'quota-continue' || wrappedQuotaContinuation
+const explicitContinuation = process.argv[3] === 'continue' || nativeContinuation || quotaContinuation
 const clarify = process.argv[3] === 'clarify'
 let ctx: Context | undefined
 try {
@@ -158,18 +160,22 @@ try {
       failed = await operation.runs.start(mappingWork)
     }
   }
-  const issues = (failed.work.kind === 'capability_task' ? null : failed.work.stage) === 'evidence_mapping' ? [{
-    code: 'EVIDENCE_MAPPING_SUBAGENT_STRUCTURED_MISSING', artifact: 'MAP-REPAIR-S2.1',
-    message: 'Mapping Subagent 未成功调用 finish_mapping_task 完成当前任务。',
-  }] : (failed.work.kind === 'capability_task' ? null : failed.work.stage) === 'outline_generation' ? [
-    { code: 'OUTLINE_SHARED_WRITABLE_NOT_LEAF', artifact: 'outline/outline.json', message: '父章节不能直接写作' },
-    { code: 'OUTLINE_SHARED_RESPONSE_POINT_MISSING', artifact: 'outline/outline.json', message: '叶子章节缺失响应点' },
-  ] : [{
-    code: 'TENDER_ANALYSIS_SUBMISSION_INCOMPLETE', artifact: 'analysis/project.json', message: '项目字段缺失',
-  }]
+  const issues = quotaContinuation ? [{ code: 'QUOTA', message: '模型额度耗尽，等待用户恢复通道后重试。' }]
+    : (failed.work.kind === 'capability_task' ? null : failed.work.stage) === 'evidence_mapping' ? [{
+      code: 'EVIDENCE_MAPPING_SUBAGENT_STRUCTURED_MISSING', artifact: 'MAP-REPAIR-S2.1',
+      message: 'Mapping Subagent 未成功调用 finish_mapping_task 完成当前任务。',
+    }] : (failed.work.kind === 'capability_task' ? null : failed.work.stage) === 'outline_generation' ? [
+      { code: 'OUTLINE_SHARED_WRITABLE_NOT_LEAF', artifact: 'outline/outline.json', message: '父章节不能直接写作' },
+      { code: 'OUTLINE_SHARED_RESPONSE_POINT_MISSING', artifact: 'outline/outline.json', message: '叶子章节缺失响应点' },
+    ] : [{
+      code: 'TENDER_ANALYSIS_SUBMISSION_INCOMPLETE', artifact: 'analysis/project.json', message: '项目字段缺失',
+    }]
   if (stale) issues.push({ code: 'EVIDENCE_MAPPING_OUTLINE_SCOPE_STALE', artifact: 'outline/outline.json', message: '目录范围已过期。' })
   adapter.runId = failed.runId
-  await operation.runs.suspend('retry_exhausted', safeRecoverableBidFailure(failed.work, new BidStageExecutionError(issues)))
+  const failure = new BidStageExecutionError(wrappedQuotaContinuation
+    ? [{ code: 'EVIDENCE_MAPPING_INFRASTRUCTURE_ERROR', message: issues[0]!.message }] : issues)
+  if (wrappedQuotaContinuation) failure.cause = Object.assign(new Error(issues[0]!.message), { code: 'QUOTA' })
+  await operation.runs.suspend('retry_exhausted', safeRecoverableBidFailure(failed.work, failure))
   await host.finishOperation(agent.session, operation)
   let waiting: { round: number | undefined; recoveries: number; startedRuns: number } | undefined
   if (clarify) {
@@ -210,10 +216,22 @@ try {
         block => block.type === 'text' && block.text.includes('不重复询问，也不只生成独立附件后把原任务留在失败状态')))),
     }) + '\n')
   } else if (explicitContinuation) {
+    if (quotaContinuation) {
+      const schema = ctx.tools.schemas(agent).find(tool => tool.name === 'bid_resume_current_run')
+      if (schema === undefined || JSON.stringify(schema.parameters).includes('"workflow"')) {
+        throw new Error('继续工具不能提供不存在的整本路线 continuation')
+      }
+      const denied = await ctx.tools.execute({ agent, name: 'bid_resume_current_run', arguments: {},
+        callId: CallId('quota-without-user'), signal: new AbortController().signal })
+      if (!denied.isError || !JSON.stringify(denied).includes('BID_USER_CONTINUATION_REQUIRED')) {
+        throw new Error('额度故障不能由自动通知授权继续')
+      }
+    }
     adapter.continueEnabled = true
-    agent.followup(createUserMessage({ content: [{ type: 'text', text: nativeContinuation ? '请澄清原失败任务的业务选择。' : '继续' }],
-      source: nativeContinuation ? { kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'notice', summary: '澄清原任务业务选择' }
-        : { kind: 'user' } }))
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: nativeContinuation ? '请澄清原失败任务的业务选择。'
+      : quotaContinuation ? '继续，现在 api 好了' : '继续' }],
+    source: nativeContinuation ? { kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'notice', summary: '澄清原任务业务选择' }
+      : { kind: 'user' } }))
     if (nativeContinuation) {
       await asked.promise
       answer.resolve({ answers: [{ id: 'demo', selected: [], custom: '可以先生成几张图就行，后续演示这种再说了' }] })
@@ -230,10 +248,10 @@ try {
     const decision = bidRunRecoveryEligibility(agent.session)
     const terminal = events.findLast(event => event.type === 'bid.recovery.round' && event.data.state === 'blocked')
     process.stdout.write(JSON.stringify({
-      startedRuns: runs.length, sameWork: runs.every(event => event.data.run.work.workId === failed.work.workId),
+      startedRuns: runs.length, sameWork: runs.slice(-2).every(event => event.data.run.work.workId === failed.work.workId),
       ...(nativeContinuation ? { questionCount, nativeAnswerAccepted: events.some(event => event.type === 'bid.recovery.requested'
         && event.data.instruction.includes('可以先生成几张图就行，后续演示这种再说了')) } : {}),
-      resumeOfOriginal: runs[1]?.data.run.resumeOf?.runId === failed.runId,
+      resumeOfOriginal: runs.at(-1)?.data.run.resumeOf?.runId === failed.runId,
       automaticEligible: decision.eligible, attempts: decision.attempts,
       automaticRound: events.findLast(event => event.type === 'bid.recovery.round')?.data.round,
       automaticBudget: events.findLast(event => event.type === 'bid.recovery.round')?.data.budget,
@@ -241,6 +259,8 @@ try {
         && terminal.data.target.runId === runs.at(-1)?.data.run.runId
         && events.filter(event => event.type === 'user/message' && String(event.data.id) === terminal.data.messageId).length === 1,
       calls: events.filter(event => event.type === 'tool/call').map(event => event.data.name),
+      toolFailures: events.flatMap(event => event.type === 'tool/result'
+        ? event.data.message.content.flatMap(block => block.type === 'tool-result' && block.isError ? [block.content] : []) : []),
       userMessages: events.flatMap(event => event.type === 'user/message' && event.data.source.kind === 'user'
         ? event.data.content.flatMap(block => block.type === 'text' ? [block.text] : []) : []),
       continuationGuidance: adapter.requests.flatMap(request => request.messages.flatMap(message => message.content

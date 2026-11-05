@@ -47,19 +47,21 @@ it('失败先询问具体业务选择，等用户回答后才修复原任务', a
   })
 }, LOADER_SMOKE_TEST_TIMEOUT_MS)
 
-it('自动预算耗尽后用户说继续，通过真实工具启动原 S2，保留原 Work 和预算', async () => {
+it.each(['continue', 'quota-continue', 'wrapped-quota-continue'])('用户继续 %s，通过真实工具启动原阶段，保留原 Work 和预算', async (mode) => {
   const configPath = fileURLToPath(new URL('../bid-goal-recovery.cordis.snapshot.yml', import.meta.url))
   const result = await runLoaderSmoke({
     label: 'Bid 用户继续失败阶段', tempDirPrefix: 'dsh-bid-user-continue-',
     binScript: fileURLToPath(new URL('./fixtures/bid-goal-recovery-driver.ts', import.meta.url)),
-    configPath, binArgs: [configPath, 'continue'], mode: 'src',
+    configPath, binArgs: [configPath, mode], mode: 'src',
+    env: mode === 'wrapped-quota-continue' ? { DSH_BID_RECOVERY_STAGE: 'evidence_mapping' } : {},
     tsconfigPath: fileURLToPath(new URL('../../../tsconfig.json', import.meta.url)),
   })
   expect(JSON.parse(result.stdout)).toEqual({
-    startedRuns: 2, sameWork: true, resumeOfOriginal: true, automaticEligible: false, attempts: 1,
-    automaticRound: 3, automaticBudget: 3,
+    startedRuns: mode === 'wrapped-quota-continue' ? 4 : 2, sameWork: true, resumeOfOriginal: true, automaticEligible: false, attempts: 1,
+    automaticRound: mode === 'continue' ? 3 : 0, automaticBudget: 3,
     currentRunReportedOnce: true,
-    calls: ['bid_stage_inspect', 'bid_resume_current_run'], userMessages: ['继续'],
+    calls: ['bid_stage_inspect', 'bid_resume_current_run'], toolFailures: [],
+    userMessages: [mode === 'continue' ? '继续' : '继续，现在 api 好了'],
     continuationGuidance: '先用 bid_stage_inspect(view=recovery) 核对失败、原目标和检查点。新的直接用户消息明确要求继续或重试原任务时，调用 bid_resume_current_run 实际执行；即使自动恢复预算已耗尽，也可按这次新授权继续一次。保留原 Work、已保存候选和正式校验，不重置自动预算；普通问答不启动恢复。',
   })
 }, LOADER_SMOKE_TEST_TIMEOUT_MS)
@@ -75,7 +77,7 @@ it('自动预算耗尽后的原生回答直接授权原任务续行，无需再�
   expect(JSON.parse(result.stdout)).toMatchObject({ startedRuns: 2, sameWork: true, resumeOfOriginal: true,
     automaticEligible: false, attempts: 1, automaticBudget: 3, questionCount: 1, nativeAnswerAccepted: true,
     currentRunReportedOnce: true,
-    calls: ['ask_user_question', 'bid_stage_inspect', 'bid_resume_current_run'],
+    calls: ['ask_user_question', 'bid_stage_inspect', 'bid_resume_current_run'], toolFailures: [],
     userMessages: ['问题：在线演示还没准备好，本次标书先怎样处理？\n用户回答：可以先生成几张图就行，后续演示这种再说了'],
   })
 }, LOADER_SMOKE_TEST_TIMEOUT_MS)

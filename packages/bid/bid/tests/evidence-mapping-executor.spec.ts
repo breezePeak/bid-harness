@@ -1526,7 +1526,7 @@ function mappingFixture(
 
 const webUrl = 'https://official.example/a'
 
-it('已完成研究和一代结构修复后，已接纳恢复先修改问题章节再审核', async () => {
+it.each([false, true])('已接纳恢复先修改问题章节，重启仍有问题=%s 时继承预算', async (stillBlocked) => {
   const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-s4-accepted-structure-recovery-')))
   const material = await writeInputs(workspace)
   const work = createTestBidRunContext().work
@@ -1634,16 +1634,20 @@ it('已完成研究和一代结构修复后，已接纳恢复先修改问题章�
   reentered.serializeQuality.mockImplementation((text) => {
     expect(reentered.outlineReviewPrompts.at(-1)).toContain(secondInstruction)
     expect(reentered.outlineReviewPrompts.at(-1)).toContain('明确验证成果接收责任。')
-    return text
+    return stillBlocked ? JSON.stringify({ ...JSON.parse(text) as object,
+      blocking_issues: [{ section_id: 'SEC-1', reason: '验证成果接收责任仍未明确。' }],
+    }) : text
   })
   const reentry = executeEvidenceMapping(reentered.agent, workspace, buildBidStageTask('evidence_mapping'), {
     run: createTestBidRunContext({ work, resumeOf: { runId: 'cancelled-run', cause: 'user_stop' } }),
     recovery, maxRepairAttempts: 20,
-  })
+  }).then(() => undefined, (error: unknown) => error)
   await vi.waitFor(() => { expect(reentered.starts).toHaveLength(1) })
   expect(mappingTaskId(reentered.starts[0]!.request.request)).toBe(taskId)
   reentered.starts[0]!.resolve()
-  await reentry
+  const reentryError = await reentry
+  if (stillBlocked) expect(reentryError).toBeInstanceOf(BidStageExecutionError)
+  else expect(reentryError).toBeUndefined()
   expect(reentered.starts).toHaveLength(1)
   const finalPlan = JSON.parse(await readFile(planPath, 'utf8')) as EvidenceMappingPlan
   expect(finalPlan.tasks.filter(task => task.phase === 'initial')).toEqual(cancelledPlan.tasks)
@@ -4789,6 +4793,70 @@ describe('evidence-mapping Agent executor', () => {
     const published = parseOutlineArtifact(await read('outline/outline.json'))
     expect(published.sections.find(section => section.id === 'SEC-1')?.scoring_response_point_ids)
       .toEqual([catalog.points[0]!.id, extra.id])
+  })
+
+  it.each([
+    { limit: 0, required: 2 }, { limit: 1, required: 2 },
+    { limit: 2, required: 2 }, { limit: 3, required: 2 }, { limit: 3, required: 4 },
+  ])('目录内容修复按预算继续复审：$limit 轮预算，需 $required 轮', async ({ limit, required }) => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-outline-repair-rounds-')))
+    const fixture = mappingFixture(workspace, await writeInputs(workspace))
+    fixture.serializeQuality.mockImplementation(text => JSON.stringify({ ...JSON.parse(text) as object,
+      blocking_issues: fixture.starts.length - 2 < required
+        ? [{ section_id: 'SEC-1', reason: '本章仍需补充责任承接与闭环动作。' }] : [],
+    }))
+    const result = executeEvidenceMapping(fixture.agent, workspace, buildBidStageTask('evidence_mapping'), {
+      maxRepairAttempts: limit,
+    }).then(() => undefined, (error: unknown) => error)
+    await vi.waitFor(() => { expect(fixture.starts).toHaveLength(2) })
+    fixture.starts.forEach((start) => { start.resolve() })
+    for (let round = 1; round <= Math.min(limit, required); round++) {
+      await vi.waitFor(() => { expect(fixture.starts).toHaveLength(2 + round) })
+      const repair = fixture.starts.at(-1)!
+      expect(promptText(repair.request.request)).toContain(`MAP-REPAIR-${round}-SEC-1`)
+      expect(promptText(repair.request.request)).toContain('本章仍需补充责任承接与闭环动作。')
+      repair.resolve()
+    }
+    const error = await result
+    if (limit < required) {
+      expect(error).toBeInstanceOf(BidStageExecutionError)
+      expect(error).toMatchObject({ issues: [expect.objectContaining({ code: 'OUTLINE_REFINEMENT_STRUCTURE_UNRESOLVED' })] })
+    } else expect(error).toBeUndefined()
+    expect(fixture.starts).toHaveLength(2 + Math.min(limit, required))
+    expect(fixture.starts.filter(start => promptText(start.request.request).includes('MAP-INIT-SEC-2'))).toHaveLength(1)
+    const log = parseEvidenceMappingExecutionLog(JSON.parse(await readFile(join(workspace.projectRoot,
+      'analysis/evidence-mapping-log.json'), 'utf8')))
+    expect(log.tasks.every(task => task.status === 'completed')).toBe(true)
+    expect(log.outline_reviews?.at(-1)?.blocking_issues).toHaveLength(limit < required ? 1 : 0)
+  })
+
+  it.each([1, 2])('目录修复恢复计入已有轮次，预算 %i 不重跑已完成研究', async (limit) => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-outline-repair-resume-')))
+    const material = await writeInputs(workspace)
+    const first = mappingFixture(workspace, material)
+    const blocked = (text: string) => JSON.stringify({ ...JSON.parse(text) as object,
+      blocking_issues: [{ section_id: 'SEC-1', reason: '本章仍需补充责任承接与闭环动作。' }],
+    })
+    first.serializeQuality.mockImplementation(blocked)
+    const failed = executeEvidenceMapping(first.agent, workspace, buildBidStageTask('evidence_mapping'))
+      .catch((error: unknown) => error)
+    await vi.waitFor(() => { expect(first.starts).toHaveLength(2) })
+    first.starts.forEach((start) => { start.resolve() })
+    await vi.waitFor(() => { expect(first.starts).toHaveLength(3) })
+    first.starts[2]!.resolve()
+    expect(await failed).toBeInstanceOf(BidStageExecutionError)
+    const resumed = mappingFixture(workspace, material)
+    resumed.serializeQuality.mockImplementation(text => resumed.starts.length === 0 ? blocked(text) : text)
+    const result = executeEvidenceMapping(resumed.agent, workspace, buildBidStageTask('evidence_mapping'), {
+      resume: true, maxRepairAttempts: limit,
+    }).then(() => undefined, (error: unknown) => error)
+    if (limit === 2) {
+      await vi.waitFor(() => { expect(resumed.starts).toHaveLength(1) })
+      expect(promptText(resumed.starts[0]!.request.request)).toContain('MAP-REPAIR-2-SEC-1')
+      resumed.starts[0]!.resolve()
+      expect(await result).toBeUndefined()
+    } else expect(await result).toBeInstanceOf(BidStageExecutionError)
+    expect(resumed.starts).toHaveLength(limit - 1)
   })
 
   it('目录复核的重叠问题合并到同一 Section 子树，新子叶入队且不重跑兄弟', async () => {

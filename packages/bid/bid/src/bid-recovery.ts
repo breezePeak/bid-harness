@@ -92,14 +92,19 @@ const STAGES = new Set(['tender_analysis', 'outline_generation', 'evidence_mappi
  * 选择可由新的直接用户消息继续的失败 Run；自动恢复预算保持原值。
  * @param session 保存原 Run 和失败通知的会话。
  * @param task 当前项目状态。
- * @returns 可修复或可重试的原 Run；输入、权限及外部阻断不授予继续。
+ * @returns 可修复、可重试或仅额度耗尽的原 Run；输入、权限及其他外部阻断不授予继续。
  */
 export function bidUserContinuableRun(session: Session, task: BidTaskState): ReturnType<typeof bidRecoverableRun> {
   if (task.status !== 'failed') return
   const run = bidRecoverableRun(session, task)
   if (run?.error?.recovery === undefined || run.work.kind === 'file_intake') return
   const recovery = classifyBidRecovery(run.work, run.error)
-  return recovery?.kind === 'repair' || recovery?.kind === 'retry' ? run : undefined
+  const failures = [run.error, ...run.error.cause === undefined ? [] : [run.error.cause], ...run.error.issues ?? []]
+  const quota = failures.some(item => item.code === 'QUOTA')
+    && failures.every(item => item.code === 'QUOTA' || item.code === 'BID_EXECUTOR_ERROR'
+      || item.code === 'EVIDENCE_MAPPING_INFRASTRUCTURE_ERROR'
+        && run.error?.cause?.code === 'QUOTA' && item.message === run.error.cause.message)
+  return recovery?.kind === 'repair' || recovery?.kind === 'retry' || quota ? run : undefined
 }
 
 const BLOCKED_CODE = new RegExp(

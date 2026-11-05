@@ -7,7 +7,7 @@ import { Context } from '@deepseek-ai/cordis'
 import SessionStore from '@deepseek-ai/dsh-session'
 import { BidWorkspace } from '../src/index.ts'
 import { safeRecoverableBidFailure, bidRunRecoveryEligibility, bidRecoveryInstructionRepeated, bidWritingPlanRecoveryEligibility,
-  isLegacyOutlineReviewBudgetFailure, bidEvidenceMappingTakeoverRun } from '../src/bid-recovery.ts'
+  isLegacyOutlineReviewBudgetFailure, bidEvidenceMappingTakeoverRun, bidUserContinuableRun } from '../src/bid-recovery.ts'
 import { inspectBidStage } from '../src/stage-interaction.ts'
 import type { BidRunData, BidWorkDescriptor } from '../src/control-plane-contract.ts'
 import { BidStageExecutionError } from '../src/control-plane-contract.ts'
@@ -150,6 +150,52 @@ it.each(['TIMEOUT', 'TRANSPORT', 'SERVER', 'RATE_LIMIT'])('已保存写作要求
 function run(runId: string): BidRunData {
   return { runId, epoch: 1, baseProjectRevision: 1, work, startedAt: 1, updatedAt: 1 }
 }
+
+it('额度耗尽仅开放用户继续，混合权限、输入及未知故障仍拒绝', async () => {
+  const ctx = new Context()
+  cleanup.push(() => ctx.fiber.dispose())
+  await ctx.plugin(SessionStore)
+  const session = ctx.sessions.create()
+  const original = run('quota')
+  session.append('bid.run.started', { run: original })
+  session.append('bid.run.notice', { runId: original.runId, stage: work.stage, kind: 'interrupted', severity: 'error',
+    noticeId: `run:${original.runId}:failed`, supersedesTurn: null, message: '额度耗尽' })
+  for (const code of [undefined, 'AUTH', 'INPUT_CHANGED', 'EACCES', 'PI_AI_ERROR']) {
+    const failure = safeRecoverableBidFailure(work, new BidStageExecutionError([
+      { code: 'QUOTA', message: '额度耗尽' }, ...code === undefined ? [] : [{ code, message: '其他故障' }],
+    ]))
+    const state = { workflow: { kind: 'full_bid' as const, stage: work.stage }, status: 'failed' as const, run: null, failure }
+    session.append('bid.task.changed', { state })
+    expect(bidRunRecoveryEligibility(session).eligible).toBe(false)
+    expect(bidUserContinuableRun(session, state)?.runId).toBe(code === undefined ? original.runId : undefined)
+    expect((await inspectBidStage(undefined, session, undefined, 'recovery')).available_actions)
+      .toEqual(code === undefined ? ['bid_resume_current_run'] : [])
+  }
+})
+
+it.each([undefined, 'AUTH', 'INPUT_CHANGED', 'UNKNOWN'])('S4 额度 cause 的同文包装允许用户继续，混合 %s 仍拒绝', async (code) => {
+  const ctx = new Context()
+  cleanup.push(() => ctx.fiber.dispose())
+  await ctx.plugin(SessionStore)
+  const session = ctx.sessions.create()
+  const original = { ...run('s4-quota'), work: { ...work, stage: 'evidence_mapping' as const } }
+  const message = 'OpenAI API error (429): usage_limit_reached'
+  const error = new BidStageExecutionError([
+    { code: 'EVIDENCE_MAPPING_INFRASTRUCTURE_ERROR', message },
+    ...code === undefined ? [] : [{ code, message: '其他故障' }],
+  ])
+  error.cause = Object.assign(new Error(message), { code: 'QUOTA' })
+  const failure = safeRecoverableBidFailure(original.work, error)
+  const state = { workflow: { kind: 'full_bid' as const, stage: original.work.stage }, status: 'failed' as const, run: null, failure }
+  session.append('bid.run.started', { run: original })
+  session.append('bid.run.notice', { runId: original.runId, stage: original.work.stage, kind: 'interrupted', severity: 'error',
+    noticeId: `run:${original.runId}:failed`, supersedesTurn: null, message })
+  session.append('bid.task.changed', { state })
+  expect(bidRunRecoveryEligibility(session).eligible).toBe(false)
+  expect(bidUserContinuableRun(session, state)?.runId).toBe(code === undefined ? original.runId : undefined)
+  expect((await inspectBidStage(undefined, session, undefined, 'recovery')).available_actions)
+    .toEqual(code === undefined ? ['bid_resume_current_run'] : [])
+})
 
 it('keeps repairable candidate issues distinct from provider and input faults', () => {
   expect(safeRecoverableBidFailure(work, new Error('bad JSON'), [{

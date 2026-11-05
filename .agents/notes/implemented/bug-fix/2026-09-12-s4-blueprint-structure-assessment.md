@@ -20,6 +20,8 @@ Host 用当前子树、Blueprint 和 Research Assessment 计算 fingerprint。�
 
 `reviewRefinedOutline()` 根据最终 Blueprint、中性 findings、S3 职责、父子同级责任和覆盖摘要给出独立第二意见，优先检查过粗、过拆和隐藏标题压力。同一方法的步骤不能仅因各自具有输入输出就独立成节；复核须说明段落、列表和表格不能承载的实际技术差异。Repair 读取研究内容和具体阻断问题，不注入旧归位理由，也不把 Reviewer 的拆分建议视为业务事实。非阻断建议的工具字段与正式质量报告保持相同的 advisory 对象结构。Final Check 保留任务、Evidence、材料用途、缺口、父总述与完整性复核，结构问题必须由具有目录编辑权限的前序任务解决。
 
+全书复审与局部 Repair 在 `modelStageRepairAttempts` 内连续执行，以最新问题选择待修子树，通过后才进入 Final Check。已计划的 `outline_repair` 按不同 generation 计轮，普通断点续跑继承已用次数；显式恢复按接纳请求分别计轮，每代都携带同一 `recovery_request`。单轮并发修多个章节不额外消耗轮数，目录拆分后补映射的 generation 也不计作 Repair。保留有限预算以约束模型调用成本，不以问题数量减少作为确定已收敛的判据，也不放宽内容校验。
+
 是否联网仍由模型选择，执行沿用已有 Web 服务配置。已调用的 search 或 fetch 若全部失败，Host 拒绝研究充分、结构判断、编辑和锁定；失败后先修复 Provider 或重试，再重新提交研究判断。只有成功 fetch 的正文可绑定 Web Evidence。独立搜索服务的配置不依赖聊天 Provider 是否支持 hosted search；未配置时不假定存在 Tavily 等服务。
 
 私有 checkpoint 升为 v10；旧格式明确要求重置 S4，不补造判断或双轨解释。恢复已完成拆分时复用计划中的初始叶任务，只有结构 Repair 可以为既有叶子安排重新研究，避免重复任务合并同一子树。正式 Evidence Map v10、Outline v3、稳定 Section ID 和用户手工修改后的局部确认保持现有格式。执行日志继续 v3，以可选统计记录研究工具成败与原因、findings、KEEP/REFINE、结构失效、实际操作、全书阻断和 Repair 是否改变结构。

@@ -49,7 +49,7 @@
         "local_materials": [
           {
             "source_kind": "reference",
-            "file_id": "4bd88a6a65cc5585238663025fdb442c52aa7be376b34822456a2294c80d699f",
+            "file_id": "file:b4840c657a79f4a0247f5e1e0a50956c0798f4667d795b2baf93e30649a0d4c0",
             "chunk": "chunk_0001",
             "usage": "reference",
             "summary": "支持本章实施组织任务，仅参考流程组织思路，不据此新增具体技术步骤或项目承诺。"

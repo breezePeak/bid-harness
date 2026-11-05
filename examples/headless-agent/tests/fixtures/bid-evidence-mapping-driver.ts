@@ -10,7 +10,8 @@ import { runEvidenceMappingLoop, runEvidenceMappingRecoveryLoop } from '../../..
 const configPath = process.argv[2]
 if (configPath === undefined) throw new Error('缺少 S4 回放配置路径')
 // 原 Run 的模型回执包含业务时间戳；固定外部时钟，保留完整恢复记录供跨平台回放。
-if (process.env.DSH_S4_RECOVERY_SCENARIO === 'structure' || process.env.DSH_S4_RECOVERY_SCENARIO === 'legacy'
+if (process.env.DSH_S4_RECOVERY_SCENARIO === 'structure' || process.env.DSH_S4_RECOVERY_SCENARIO === 'structure-automatic'
+  || process.env.DSH_S4_RECOVERY_SCENARIO === 'legacy'
   || process.env.DSH_S4_RECOVERY_SCENARIO === 'legacy-output' || process.env.DSH_S4_RECOVERY_SCENARIO === 'server'
   || process.env.DSH_S4_RECOVERY_SCENARIO === 'server-takeover' || process.env.DSH_S4_RECOVERY_SCENARIO === 'transport-takeover') {
   Date.now = () => Date.UTC(2026, 9, 8, 10)
@@ -38,11 +39,13 @@ try {
     || process.env.DSH_S4_RECOVERY_SCENARIO === 'legacy-output' || process.env.DSH_S4_RECOVERY_SCENARIO === 'server'
     || process.env.DSH_S4_RECOVERY_SCENARIO === 'server-takeover' || process.env.DSH_S4_RECOVERY_SCENARIO === 'transport-takeover'
     ? await runEvidenceMappingRecoveryLoop(ctx, process.cwd(), process.env.DSH_S4_RECOVERY_SCENARIO)
-    : await runEvidenceMappingLoop(ctx, process.cwd(), !recovery, false,
-      urlFailure ? { code: 'WEB_FETCH_FAILED', failures: 1, tool: 'web_fetch' } : recovery ? { code: 'WEB_PROVIDER_RATE_LIMITED', statusCode: 429, failures: 1,
-        ...(process.env.DSH_S4_RECOVERY_SCENARIO === 'fetch-backoff' ? { tool: 'web_fetch' as const } : {}) } : undefined,
-      undefined, false, process.env.DSH_S4_RECOVERY_SCENARIO === 'review-partitioned' ? 'partitioned'
-        : process.env.DSH_S4_RECOVERY_SCENARIO === 'review-budget')
+    : process.env.DSH_S4_RECOVERY_SCENARIO === 'structure-automatic'
+      ? await runEvidenceMappingLoop(ctx, process.cwd(), false, false, undefined, 'local', 'automatic')
+      : await runEvidenceMappingLoop(ctx, process.cwd(), !recovery, false,
+        urlFailure ? { code: 'WEB_FETCH_FAILED', failures: 1, tool: 'web_fetch' } : recovery ? { code: 'WEB_PROVIDER_RATE_LIMITED', statusCode: 429, failures: 1,
+          ...(process.env.DSH_S4_RECOVERY_SCENARIO === 'fetch-backoff' ? { tool: 'web_fetch' as const } : {}) } : undefined,
+        undefined, false, process.env.DSH_S4_RECOVERY_SCENARIO === 'review-partitioned' ? 'partitioned'
+          : process.env.DSH_S4_RECOVERY_SCENARIO === 'review-budget')
   if (outcome?.status !== 'waiting_user') throw new Error(JSON.stringify(outcome))
   process.stdout.write(`${JSON.stringify({ ...outcome, state_files: [...stateFiles].sort() })}\n`)
 } finally {

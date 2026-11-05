@@ -132,8 +132,11 @@ class WritingRecoveryAdapter extends LlmAdapter {
       } else if (this.mainRequests.length === 2) {
         yield* tool('bid_recover_task', { target: 'writing_plan', instruction: '复用已保存的实施要求，重新提交失败的计划步骤。' })
       } else if (this.mainRequests.length === 3) {
-        yield* tool('bid_stage_inspect', { view: 'task_contract_context' })
+        // 计划提交响应原生引导消息，等待接纳调用所属回合结束。
+        yield { type: 'finish', reason: { kind: 'stop' } }
       } else if (this.mainRequests.length === 4) {
+        yield* tool('bid_stage_inspect', { view: 'task_contract_context' })
+      } else if (this.mainRequests.length === 5) {
         const result = options.messages.flatMap(message => message.content).findLast(block => block.type === 'tool-result' && block.toolCallId === 'bid_stage_inspect')
         if (result?.type !== 'tool-result') throw new Error('保存要求恢复缺少实际计划上下文')
         const content = result.content.find(block => block.type === 'text')

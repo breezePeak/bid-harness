@@ -5939,8 +5939,9 @@ async function executeEvidenceMappingRun(
         const sameRecovery = (task: EvidenceMappingTask): boolean => recoveryRequest !== undefined
           && task.recovery_request?.owner_session_id === recoveryRequest.owner_session_id
           && task.recovery_request.request_seq === recoveryRequest.request_seq
-        const recoveryAlreadyPlanned = initialTasks.some(sameRecovery)
-        const resumedRepair = initialTasks.some(item => item.task_kind === 'outline_repair')
+        const plannedRecovery = initialTasks.find(sameRecovery)?.recovery_request
+        const recoveryAlreadyPlanned = plannedRecovery !== undefined
+        if (plannedRecovery !== undefined) recoveryRequest = plannedRecovery
         let executed = await runTaskQueue(initialTasks, inputs)
         if (structureRecovery && !recoveryAlreadyPlanned) {
           const issues = executionLog.outline_reviews?.at(-1)?.blocking_issues ?? []
@@ -6003,20 +6004,25 @@ async function executeEvidenceMappingRun(
           executionLog.outline_reviews ??= []
           executionLog.outline_reviews.push({ blocking_issues: reviewedOutline.blockingIssues })
           await writeMappingState(options.run.commits, logPath, executionLog)
-          if (reviewedOutline.blockingIssues.length > 0) {
+          while (reviewedOutline.blockingIssues.length > 0) {
             if (options.remap !== undefined && !options.remap.allow_outline_refinement) {
               throw new BidStageExecutionError(reviewedOutline.blockingIssues.map(issue => ({
                 code: 'OUTLINE_REFINEMENT_STRUCTURE_UNRESOLVED', message: `${issue.section_id}：${issue.reason}`,
               })))
             }
-            if (options.maxRepairAttempts < 1 || resumedRepair || structureRecovery) {
+            const repairRounds = new Set(plan.tasks.filter(item => item.task_kind === 'outline_repair'
+              && (recoveryRequest === undefined ? item.recovery_request === undefined : sameRecovery(item)))
+              .map(item => item.generation)).size
+            if (repairRounds >= Math.min(options.maxRepairAttempts, recoveryRequest?.max_repair_attempts ?? Infinity)) {
               throw new BidStageExecutionError(reviewedOutline.blockingIssues.map(issue => ({
                 code: 'OUTLINE_REFINEMENT_STRUCTURE_UNRESOLVED',
                 message: `${issue.section_id}：${issue.reason}`,
               })))
             }
             const generation = Math.max(0, ...plan.tasks.filter(task => task.phase === 'initial').map(task => task.generation)) + 1
-            const repairTasks = structureRepairTasks(finalOutline, initialResults, reviewedOutline.blockingIssues, generation)
+            const repairTasks = structureRepairTasks(
+              finalOutline, initialResults, reviewedOutline.blockingIssues, generation, recoveryRequest,
+            )
             await writeJson(join(workspace.projectRoot, REFINED_OUTLINE_CANDIDATE_PATH), finalOutline, options.run.commits)
             await appendPlannedTasks(repairTasks)
             const repaired = await runTaskQueue(repairTasks, { ...inputs, outline: finalOutline })
@@ -6038,10 +6044,6 @@ async function executeEvidenceMappingRun(
             executionLog.outline_review_passes = reviewedOutline.passes
             executionLog.outline_reviews.push({ blocking_issues: reviewedOutline.blockingIssues })
             await writeMappingState(options.run.commits, logPath, executionLog)
-            if (reviewedOutline.blockingIssues.length > 0) throw new BidStageExecutionError(reviewedOutline.blockingIssues.map(issue => ({
-              code: 'OUTLINE_REFINEMENT_STRUCTURE_UNRESOLVED',
-              message: `${issue.section_id}：${issue.reason}`,
-            })))
           }
           finalOutline = reviewedOutline.outline
         }

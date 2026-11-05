@@ -360,7 +360,7 @@ export async function runTenderAnalysisLoop(ctx: Context, root: string) {
   }
 }
 
-async function prepareS2(workspace: BidWorkspace): Promise<{
+async function prepareS2(workspace: BidWorkspace, owner?: Pick<Session, 'id'>): Promise<{
   chunk: string
   requirementId: string
   scoringId: string
@@ -369,7 +369,7 @@ async function prepareS2(workspace: BidWorkspace): Promise<{
   const [tender, reference] = await workspace.import([
     { name: 'tender.md', role: 'tender', bytes: new TextEncoder().encode('需要访问控制与安全审计方案。') },
     { name: 'reference.md', role: 'reference', bytes: new TextEncoder().encode('本地资料只有实施流程。') },
-  ])
+  ], undefined, owner)
   if (tender === undefined || reference === undefined || reference.chunkIndexPath === null || reference.chunksPath === null) throw new Error('S4 integration corpus missing')
   const chunkIndex = JSON.parse(await readFile(join(workspace.projectRoot, reference.chunkIndexPath), 'utf8')) as { chunks: Array<{ path: string }> }
   const chunk = `${reference.chunksPath}/${chunkIndex.chunks[0]!.path}`
@@ -463,7 +463,7 @@ function researchAssessment(sufficient: boolean, affectsBlueprint: boolean, mode
  * @param ctx - 真实 Agent、工具、持久化和 Subagent 服务。
  * @param root - 本用例的隔离工作区。
  * @param repair - 搜索错误后调整查询，跨 Child 轮次抓取 URL，并修复目录 Schema。
- * @param structureRecovery - 保留首代修复失败及后续补修脚本，供真实 Main 恢复或新授权使用。
+ * @param structureRecovery - 使用两代内容修复脚本；automatic 在同一 Run 内完成，true 在首代后耗尽预算供 Main 恢复。
  * @param largeReview - 大原文使用足够容量、硬预算分段或旧本地预算失败场景。
  * @returns 阶段结果、Host、工作区及模型实际请求。
  */
@@ -479,12 +479,13 @@ export async function runEvidenceMappingLoop(ctx: Context, root: string, repair:
     retryAfter?: string
     resume?: true
     production?: true
-  }, researchMode?: 'zero' | 'local' | 'external_unbound', structureRecovery = false,
+  }, researchMode?: 'zero' | 'local' | 'external_unbound', structureRecovery: boolean | 'automatic' = false,
   largeReview: boolean | 'partitioned' | 'legacy' | 'server' = false) {
   const sessionId = SessionId('s3-real-loop')
   const workspace = new BidWorkspace(root)
+  const owner = { id: sessionId }
   const s2 = fault?.resume === true ? { requirementId: 'REQ-1', scoringId: 'SCORE-1', responsePointId: 'RP-000001' }
-    : await prepareS2(workspace)
+    : await prepareS2(workspace, owner)
   if (fault?.resume !== true) await workspace.import([{
     name: 'reference-bid.md', role: 'reference_bid', bytes: new TextEncoder().encode([
       '# 安全平台技术标', '## 身份治理', '### 账户生命周期', '### 权限审批', '## 安全运维', '### 访问控制与安全审计',
@@ -494,7 +495,7 @@ export async function runEvidenceMappingLoop(ctx: Context, root: string, repair:
       '# 安全平台方案', '## 访问控制与安全审计', '## 资产盘点', '### 资产发现', '### 资产核验',
       '', '框架内部编写说明。',
     ].join('\n\n')),
-  }])
+  }], undefined, owner)
   const sourceUrl = 'https://official.example/standard'
   const unusedSourceUrl = 'https://official.example/unused'
   const useWeb = researchMode !== 'zero' && researchMode !== 'local'
@@ -680,7 +681,7 @@ export async function runEvidenceMappingLoop(ctx: Context, root: string, repair:
       return () => { ctx.subagents.start = start }
     })
   }
-  adapter.structureRecovery = structureRecovery
+  adapter.structureRecovery = Boolean(structureRecovery)
   adapter.reviewOverflow = fault?.reviewOverflow === true
   ctx.effect(() => ctx.llm.registerAdapter(['mock'], adapter))
   registerIntegrationTools(ctx, root, [sourceUrl, unusedSourceUrl], fault === undefined ? undefined
@@ -709,7 +710,7 @@ export async function runEvidenceMappingLoop(ctx: Context, root: string, repair:
   const orchestrator = new BidOrchestrator(
     agent.session,
     { canExecute: stage => stage === 'evidence_mapping', execute: (task, run) => executeEvidenceMapping(agent, workspace, task, {
-      maxRepairAttempts: repair || structureRecovery ? 1 : 0, maxConcurrency: 2,
+      maxRepairAttempts: structureRecovery === 'automatic' ? 2 : repair || structureRecovery ? 1 : 0, maxConcurrency: 2,
       ...(fault?.maxRetries === undefined ? {} : { maxInfrastructureRetryAttempts: fault.maxRetries }),
       ...(run.resumeOf === undefined ? {} : { resume: true }),
       run: fault?.signal === undefined ? run : { ...run, signal: AbortSignal.any([run.signal, fault.signal]) },
