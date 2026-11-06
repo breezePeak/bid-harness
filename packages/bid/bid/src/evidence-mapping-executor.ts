@@ -7,6 +7,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-fs'
 import { CallId, CONTEXT_WINDOW_EXCEEDED_CODE, EMPTY_RESPONSE_CODE } from '@deepseek-ai/dsh-llm'
 import { estimateHeader } from '@deepseek-ai/dsh-token-meter'
+import { deadline } from '@deepseek-ai/dsh-timeout'
 import { bindOutlineReviewIssue, buildOutlineReviewRequest, buildOutlineReviewRequests, OutlineReviewContextTooLargeError,
   type OutlineReviewRequest, type OutlineReviewIssueKind } from './outline-review-context.ts'
 import { SessionId } from '@deepseek-ai/dsh-session'
@@ -292,12 +293,12 @@ function mappingSubagentTurnInfrastructureFailure(
   if (typeof code === 'string' && ['QUOTA', 'AUTH', 'NO_ADAPTER', 'INVALID_REQUEST', 'PI_AI_ERROR'].includes(code)) {
     return new MappingSubagentInfrastructureError([{
       code, message: `Mapping Subagent 模型通道不可用：${detail}`,
-    }], false, false, taskId, 0, 'subagent')
+    }], false, false, taskId, 0, 'subagent', error)
   }
   if (typeof code === 'string' && ['TRANSPORT', 'TIMEOUT', 'SERVER', EMPTY_RESPONSE_CODE].includes(code)) {
     return new MappingSubagentInfrastructureError([{
       code, message: `Mapping Subagent 模型通道暂时失败：${detail}`,
-    }], true, false, taskId, 0, 'subagent')
+    }], true, false, taskId, 0, 'subagent', error)
   }
   const permanent = /authentication|invalid api key|insufficient (?:balance|credit)|billing|permanent quota/iu.test(detail)
   const rateLimited = code === 'RATE_LIMIT'
@@ -3492,7 +3493,6 @@ function renderEvidenceMappingSubagentRepairTask(
 
 /** Wait past an idle-to-wakeup race until a follow-up turn records an assistant result. */
 async function waitForMappingChildReply(agent: Agent, eventStart: number, signal: AbortSignal): Promise<void> {
-  const deadline = Date.now() + 5 * 60_000
   while (true) {
     signal.throwIfAborted()
     await waitForMappingChildIdle(agent, signal)
@@ -3500,7 +3500,6 @@ async function waitForMappingChildReply(agent: Agent, eventStart: number, signal
     if (ending !== undefined && ['error', 'aborted', 'blocked', 'interrupted'].includes(ending.data.reason.kind)) return
     if (agent.session.events.slice(eventStart).some(event => event.type === 'assistant/message')) return
     signal.throwIfAborted()
-    if (Date.now() >= deadline) throw new Error('evidence-mapping-child-reply-timeout')
     await new Promise<void>(resolve => setTimeout(resolve, 25))
   }
 }
@@ -4321,13 +4320,20 @@ export async function reviewRefinedOutline(
   let lastOverflow: unknown
   let previousRequests: string[] = []
   let previousConsolidationPrompt: string | undefined
+  const outputOverflow = (error: unknown): error is BidStageExecutionError => error instanceof BidStageExecutionError
+    && error.issues.some(issue => issue.code === 'OUTLINE_REVIEW_OUTPUT_BUDGET_EXCEEDED')
+  const reviewOverflow = (error: unknown) => isContextOverflow(error) || outputOverflow(error)
   for (let contextAttempt = 0; contextAttempt <= 2; contextAttempt++) {
     let requests: ReturnType<typeof buildOutlineReviewRequests>
-    try { requests = buildOutlineReviewRequests(reviewContext, inputBudgetTokens, targetTokens) } catch (error) {
+    try {
+      requests = buildOutlineReviewRequests(reviewContext, inputBudgetTokens, targetTokens, outputOverflow(lastOverflow))
+    } catch (error) {
       if (!(error instanceof OutlineReviewContextTooLargeError)) throw error
+      if (outputOverflow(lastOverflow)) throw lastOverflow
       throw new BidStageExecutionError([{ code: 'OUTLINE_REVIEW_INPUT_BUDGET_EXCEEDED', message: error.message }])
     }
     if (lastOverflow !== undefined && JSON.stringify(requests.map(item => item.prompt)) === JSON.stringify(previousRequests)) {
+      if (outputOverflow(lastOverflow)) throw lastOverflow
       throw new MappingSubagentInfrastructureError([{ code: CONTEXT_WINDOW_EXCEEDED_CODE,
         message: '目录审查单个对象无法继续缩减，保留原上下文超限原因。' }], false, true, undefined, 0, 'subagent', lastOverflow)
     }
@@ -4336,7 +4342,7 @@ export async function reviewRefinedOutline(
     let overflow: unknown
     for (const [requestIndex, reviewRequest] of requests.entries()) {
       try { collected.push(await reviewOne(reviewRequest, requestIndex)) } catch (error) {
-        if (!isContextOverflow(error)) throw error
+        if (!reviewOverflow(error)) throw error
         overflow = error
         break
       }
@@ -4385,6 +4391,7 @@ export async function reviewRefinedOutline(
       }
       const consolidationPrompt = JSON.stringify(consolidations.map(item => item.prompt))
       if (consolidationPrompt === previousConsolidationPrompt) {
+        if (outputOverflow(lastOverflow)) throw lastOverflow
         throw new MappingSubagentInfrastructureError([{ code: CONTEXT_WINDOW_EXCEEDED_CODE,
           message: '目录意见整理无法继续缩减，保留原上下文超限原因。' }], false, true, undefined, 0, 'subagent', lastOverflow)
       }
@@ -4396,7 +4403,7 @@ export async function reviewRefinedOutline(
           resolved.push(...result.blockingIssues.map(item => item.issue))
         }
       } catch (error) {
-        if (!isContextOverflow(error)) throw error
+        if (!reviewOverflow(error)) throw error
         previousConsolidationPrompt = consolidationPrompt
         overflow = error
         break
@@ -4415,6 +4422,7 @@ export async function reviewRefinedOutline(
     return { outline: inputs.outline, passes: [...passes.values()], blockingIssues: [...new Map(resolved
       .map(issue => [`${issue.section_id}:${issue.reason}`, issue])).values()] }
   }
+  if (outputOverflow(lastOverflow)) throw lastOverflow
   throw new MappingSubagentInfrastructureError([{ code: CONTEXT_WINDOW_EXCEEDED_CODE,
     message: '目录审查缩减上下文预算后仍超限，已耗尽两轮分片调整。' }], false, true, undefined, 0, 'subagent', lastOverflow)
 
@@ -4455,7 +4463,7 @@ export async function reviewRefinedOutline(
         const result = await run.result
         if (result.stopReason === 'max-tokens') throw new BidStageExecutionError([{
           code: 'OUTLINE_REVIEW_OUTPUT_BUDGET_EXCEEDED', artifact: QUALITY_PATH,
-          message: `目录复核达到输出上限 ${String(outputTokens)} token，未形成完整报告；请提高所选模型的 maxTokens 后恢复原 S4。`,
+          message: `目录复核达到输出上限 ${String(outputTokens)} token，未形成完整报告；Host 已尝试无损缩小审核范围。最小请求或两次调整仍无法完整输出时，需要调整部署的输出限制或模型路由。`,
         }])
         if (result.stopReason !== 'completed' && run.localAgent !== undefined) throwForFailedTurn(run.localAgent, 0)
         if (result.stopReason !== 'completed') issues.push({
@@ -5011,7 +5019,7 @@ async function executeEvidenceMappingRun(
       if (snapshots.length > 0) await writeWebEvidenceArtifacts(
         workspace, snapshots, availableSnapshots().map(snapshot => snapshot.source), options.run.commits,
       )
-      checkpointTasks.set(taskId, {
+      const saved = {
         task_id: taskId,
         input_fingerprint: taskInputFingerprint(plan.tasks.find(task => task.task_id === taskId)
           ?? (() => { throw new Error(`evidence-mapping-task-missing:${taskId}`) })(), fingerprintOutline, [...acceptedMappings.values()]),
@@ -5027,13 +5035,17 @@ async function executeEvidenceMappingRun(
         ...(submission.researchAssessment === undefined ? {} : { research_assessment: submission.researchAssessment }),
         ...(submission.refinementConclusion === undefined ? {} : { refinement_conclusion: submission.refinementConclusion }),
         ...(outlineOperations === undefined ? {} : { outline_operations: z.array(outlineEditOperationSchema).parse(outlineOperations) }),
-      })
+      }
+      checkpointTasks.set(taskId, saved)
       checkpoint = { tasks: plan.tasks.flatMap((item) => {
         const saved = checkpointTasks.get(item.task_id)
         return saved === undefined ? [] : [saved]
       }) }
       await writeMappingState(options.run.commits, checkpointPath, checkpoint)
       const log = executionLog.tasks.find(item => item.task_id === taskId)
+      if (completed && log?.attempts.at(-1)?.accepted === true) await options.run.acceptProgress({ unit: `mapping:${taskId}`,
+        inputSha256: saved.input_fingerprint,
+        planSha256: reviewFingerprint(plan) })
       if (log !== undefined) log.research_diagnostics = deriveResearchDiagnostics(
         log.research_observations, submission.researchAssessment, researchMaterialRefs(result.section_mappings),
         researchMaterialRefs(result.section_mappings), [],
@@ -5477,12 +5489,19 @@ async function executeEvidenceMappingRun(
         }
         let outputEventStart = 0
         const observedCallIds = new Set<string>()
+        let executionFailure: unknown
         try {
           for (let attempt = 0; attempt <= maxMappingRepairs; attempt++) {
             try {
               signal.throwIfAborted()
-              if (attempt === 0) await waitForMappingChildIdle(child, signal)
-              else await waitForMappingChildReply(child, outputEventStart, signal)
+              using waiting = deadline(signal, options.run.childTimeoutMs, 'TIMEOUT')
+              try {
+                if (attempt === 0) await waitForMappingChildIdle(child, waiting.signal)
+                else await waitForMappingChildReply(child, outputEventStart, waiting.signal)
+              } catch (error) {
+                child.cancel({ kind: 'hook', reason: 'evidence-mapping-child-wait-ended' })
+                throw error
+              }
               if (guardFailures.has(String(started.childId))) throw guardFailures.get(String(started.childId))
               if (externalChildCancellations.has(String(started.childId))) throw new Error('evidence-mapping-child-cancelled', {
                 cause: externalChildCancellations.get(String(started.childId)),
@@ -5657,8 +5676,12 @@ async function executeEvidenceMappingRun(
               if (resumed !== undefined) child = resumed
             }
           }
+        } catch (error) {
+          executionFailure = error
+          throw error
         } finally {
-          await subagents.drainContinuableChildren(agent, [started.childId])
+          await options.run.waitForCleanup(`s4_child:${started.childId}`, subagents.drainContinuableChildren(agent, [started.childId]))
+            .catch((cleanup: unknown) => { throw executionFailure ?? cleanup })
         }
         log.status = 'failed'
         log.active_child_session_id = null
@@ -6233,7 +6256,7 @@ async function executeEvidenceMappingRun(
     liftObserver()
     liftCancellationObserver()
     liftChildReadGuard()
-    await Promise.all([criticalStateWrites, progressLogWrites])
+    await options.run.waitForCleanup('s4_state_writes', Promise.all([criticalStateWrites, progressLogWrites]))
   }
   const evidence = finalEvidence
   return { artifacts, outline: finalOutline, evidence }

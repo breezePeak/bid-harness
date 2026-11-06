@@ -49,6 +49,13 @@ for line in sys.stdin:
                 "size": "1536x1024", "model": "gpt-image-2", "base_url": "https://cpa.example/v1",
             }}}}), flush=True)
         print(json.dumps({"jsonrpc": "2.0", "method": "session.event", "params": {
+            "sessionId": params["sessionId"], "event": {"type": "bid.run.progress", "data": {
+                "runId": "run-1", "epoch": 1, "progress": {
+                    "phase": "accepted", "summary": "已验收并保存任务成果。", "updatedAt": 100,
+                    "checkpoint": {"unit": "step:step-1", "inputSha256": "c" * 64, "planSha256": "d" * 64},
+                },
+            }}}}), flush=True)
+        print(json.dumps({"jsonrpc": "2.0", "method": "session.event", "params": {
             "sessionId": params["sessionId"], "event": {"type": "bid.task.changed", "data": {
                 "state": {"stage": "chapter_writing", "status": "failed", "run": None,
                     "failure": {"code": "BID_TASK_RESULT_UNMET", "message": "当前章节尚需修复。"}},
@@ -62,6 +69,7 @@ for line in sys.stdin:
             "sessionId": params["sessionId"], "event": {"type": "bid.recovery.requested", "data": {
                 "ownerSessionId": params["sessionId"], "target": {"kind": "run", "workId": "work-1", "runId": "run-1"},
                 "unit": "outline/outline.json", "instruction": "核对原文并修正当前章节。", "progressFingerprint": "a" * 64, "sourceMessageId": "answer-1",
+                "continuation": True, "windowBudget": 3, "totalBaseBudget": 9,
             }}}}), flush=True)
         print(json.dumps({"jsonrpc": "2.0", "method": "session.event", "params": {
             "sessionId": params["sessionId"], "event": {"type": "bid.user_input.recorded", "data": {
@@ -71,7 +79,7 @@ for line in sys.stdin:
             "sessionId": params["sessionId"], "event": {"type": "bid.recovery.round", "data": {
                 "ownerSessionId": params["sessionId"], "target": {"kind": "run", "workId": "work-1", "runId": "run-1"},
                 "fingerprint": "a" * 64, "round": 1, "budget": 3, "dispatchAttempts": 1, "state": "notified",
-                "messageId": "recovery-message-1", "nextAt": 100, "reason": "原失败已保存，等待 Main 实际恢复。",
+                "windowKey": "user:answer-1", "messageId": "recovery-message-1", "nextAt": 100, "reason": "原失败已保存，等待 Main 实际恢复。",
             }}}}), flush=True)
         print(json.dumps({
             "jsonrpc": "2.0",
@@ -153,9 +161,16 @@ for line in sys.stdin:
             "failure": {"code": "BID_TASK_RESULT_UNMET", "message": "当前章节尚需修复。"}},
     }
     assert next(event["data"] for event in result.events if event["type"] == "bid.run.notice")["noticeId"] == "run:run-1:failed"
+    assert next(event["data"] for event in result.events if event["type"] == "bid.run.progress") == {
+        "runId": "run-1", "epoch": 1, "progress": {
+            "phase": "accepted", "summary": "已验收并保存任务成果。", "updatedAt": 100,
+            "checkpoint": {"unit": "step:step-1", "inputSha256": "c" * 64, "planSha256": "d" * 64},
+        },
+    }
     assert next(event["data"] for event in result.events if event["type"] == "bid.recovery.requested") == {
         "ownerSessionId": "main", "target": {"kind": "run", "workId": "work-1", "runId": "run-1"},
         "unit": "outline/outline.json", "instruction": "核对原文并修正当前章节。", "progressFingerprint": "a" * 64, "sourceMessageId": "answer-1",
+        "continuation": True, "windowBudget": 3, "totalBaseBudget": 9,
     }
     assert next(event["data"] for event in result.events if event["type"] == "bid.user_input.recorded") == {
         "messageId": "answer-1", "questionKey": "question-1", "work": {"workId": "work-1", "requestSha256": "b" * 64},
@@ -163,7 +178,7 @@ for line in sys.stdin:
     assert next(event["data"] for event in result.events if event["type"] == "bid.recovery.round") == {
         "ownerSessionId": "main", "target": {"kind": "run", "workId": "work-1", "runId": "run-1"},
         "fingerprint": "a" * 64, "round": 1, "budget": 3, "dispatchAttempts": 1, "state": "notified",
-        "messageId": "recovery-message-1", "nextAt": 100, "reason": "原失败已保存，等待 Main 实际恢复。",
+        "windowKey": "user:answer-1", "messageId": "recovery-message-1", "nextAt": 100, "reason": "原失败已保存，等待 Main 实际恢复。",
     }
 
     dumped_env = json.loads(env_dump.read_text())

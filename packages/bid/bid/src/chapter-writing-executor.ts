@@ -13,6 +13,7 @@ import type { ToolExecution } from '@deepseek-ai/dsh-tools'
 import { ToolArgsError } from '@deepseek-ai/dsh-tools'
 import { recordOnlySchemaVersion } from './schema-version.ts'
 import { safeRecoverableBidFailure } from './bid-recovery.ts'
+import { safeBidRunError } from './safe-error.ts'
 import type { BidManifest, BidWorkspace } from './index.ts'
 import { attachChapterPlan, CHAPTER_PLAN_TOOLS } from './chapter-writing-planning.ts'
 import { appendChapterWebReferences, bindChapterWriterInput, createChapterWriterReferences, loadChapterWriterChunkReferences, mergeChapterWebMaterials, projectChapterWriterCandidate, renderChapterWriterReferences, type ChapterWriterReferences } from './chapter-writing-writer.ts'
@@ -20,7 +21,8 @@ import { normalizeChapterHeadings, validateChapterHeadings } from './chapter-hea
 import { indexChapterContentBlocks } from './chapter-content-reuse.ts'
 import { ensureChapterLocations, planChapterLocations, readChapterLocations, type ChapterLocation } from './chapter-storage.ts'
 import { buildOutlineView } from './outline-confirmation-browser.ts'
-import { ChapterWriterImageInputError, createChapterWriterChild, type ChapterWriterChild } from './chapter-writing-child.ts'
+import { ChapterWriterImageInputError, createChapterWriterChild, createChapterWriterParentResolver,
+  type ChapterWriterChild } from './chapter-writing-child.ts'
 import { attachChapterReview, buildChapterReviewChecklist, buildChapterReviewEvidence, type ChapterReviewEvidence, type ChapterRevisionReviewIssue } from './chapter-writing-review.ts'
 import {
   attachGlobalComplianceReview,
@@ -1292,7 +1294,7 @@ interface ChapterCheckpoint {
   readonly executionLog: ChapterExecutionLog
   readonly completed: Map<string, CompletedChapter>
   /** Current bodies whose old or invalid review must be rerun before any Writer repair. */
-  readonly drafts: Map<string, { candidate: AcceptedChapterCandidate; writerChildSessionId: string }>
+  readonly drafts: Map<string, { candidate: AcceptedChapterCandidate; writerChildSessionId: string; needsPublication?: boolean }>
   /** Existing Writer identities retained for current-plan targeted revisions. */
   readonly reusableWriterIds: Map<string, string>
   /** Current bodies bound to sections explicitly affected by a newer writing plan. */
@@ -1326,7 +1328,7 @@ async function loadChapterCheckpoint(
     if (executionLog.sections.length !== worklist.length) return undefined
     const planSections = new Map(plan.sections.map(section => [section.section_id, section]))
     const completed = new Map<string, CompletedChapter>()
-    const drafts = new Map<string, { candidate: AcceptedChapterCandidate; writerChildSessionId: string }>()
+    const drafts = new Map<string, { candidate: AcceptedChapterCandidate; writerChildSessionId: string; needsPublication?: boolean }>()
     const reusableWriterIds = new Map<string, string>()
     const planRevisions = new Map<string, BidChapterRevisionRequest>()
     const manifest = await workspace.readManifest()
@@ -1341,7 +1343,8 @@ async function loadChapterCheckpoint(
         return undefined
       }
       // 修订失败不撤销此前已提交的章节；只有修订恢复路径可通过下方完整产物校验恢复完成状态。
-      if (log.status !== 'completed' && !recoverAcceptedArtifacts) {
+      const reviewed = log.reviewed_candidate
+      if (log.status !== 'completed' && !recoverAcceptedArtifacts && reviewed === undefined) {
         log.status = 'pending'
         log.phase = 'queued'
         log.failure_phase = null
@@ -1350,16 +1353,21 @@ async function loadChapterCheckpoint(
         continue
       }
       try {
-        if (log.final_writer_child_session_id === null) throw new Error('checkpoint-writer-missing')
-        await assertNoLinkedPath(workspace.root, join(workspace.projectRoot, context.contentPath))
-        const markdown = await readFile(join(workspace.projectRoot, context.contentPath), 'utf8')
-        const metadata = parseChapterMetadata(await readJson(workspace, context.metadataPath))
+        const writerId = reviewed?.writer_child_session_id ?? log.final_writer_child_session_id
+        const reviewerId = reviewed?.reviewer_child_session_id ?? log.final_reviewer_child_session_id
+        if (writerId === null) throw new Error('checkpoint-writer-missing')
+        if (reviewed === undefined) await assertNoLinkedPath(workspace.root, join(workspace.projectRoot, context.contentPath))
+        const markdown = reviewed?.candidate.markdown ?? await readFile(join(workspace.projectRoot, context.contentPath), 'utf8')
+        const metadata = reviewed?.candidate.metadata ?? parseChapterMetadata(await readJson(workspace, context.metadataPath))
         const serial = String(context.storageSerial).padStart(4, '0')
         const reviewPath = context.reviewPath
         const candidateSha256 = chapterCandidateSha256(markdown)
         if (metadata.section_id !== section.id
         || !log.attempts.some(attempt => attempt.role === 'writer' && attempt.accepted
-          && attempt.child_session_id === log.final_writer_child_session_id)
+          && attempt.child_session_id === writerId)
+        || reviewed !== undefined && (reviewed.candidate.section_id !== section.id
+          || reviewed.candidate_sha256 !== candidateSha256 || reviewed.input.section_epoch !== log.epoch
+          || reviewed.input.plan_version !== context.writingPlan.plan_version)
         ) {
           throw new Error('checkpoint-identity-invalid')
         }
@@ -1376,11 +1384,14 @@ async function loadChapterCheckpoint(
           webMaterialValid(workspace, sources, material)))).some(valid => !valid)) {
           throw new Error('checkpoint-artifact-invalid')
         }
-        drafts.set(section.id, { candidate, writerChildSessionId: log.final_writer_child_session_id })
+        drafts.set(section.id, { candidate, writerChildSessionId: writerId, needsPublication: reviewed !== undefined })
         let candidateBytesChanged = false
         try {
-          if (log.final_reviewer_child_session_id === null) throw new Error('checkpoint-reviewer-missing')
-          const review = parseChapterReviewArtifact(await readJson(workspace, reviewPath))
+          if (reviewerId === null) throw new Error('checkpoint-reviewer-missing')
+          const review = reviewed === undefined ? parseChapterReviewArtifact(await readJson(workspace, reviewPath)) : {
+            ...reviewed.review, candidate_sha256: reviewed.candidate_sha256,
+            writer_child_session_id: writerId, reviewer_child_session_id: reviewerId,
+          }
           candidateBytesChanged = review.candidate_sha256 !== candidateSha256
           const semanticPath = candidateBytesChanged
             ? await resolveSemanticRevisionPath(workspace, serial, section.id, review.candidate_sha256, candidateSha256)
@@ -1389,15 +1400,22 @@ async function loadChapterCheckpoint(
             ? { ...candidate, markdown: semanticPath.from_markdown }
             : candidate
           if (review.section_id !== section.id || (candidateBytesChanged && semanticPath?.valid !== true)
-          || review.writer_child_session_id !== log.final_writer_child_session_id
-          || review.reviewer_child_session_id !== log.final_reviewer_child_session_id
+          || review.writer_child_session_id !== writerId
+          || review.reviewer_child_session_id !== reviewerId
           || !log.attempts.some(attempt => attempt.role === 'reviewer' && attempt.accepted
-            && attempt.child_session_id === log.final_reviewer_child_session_id)
+            && attempt.child_session_id === reviewerId)
            || (activeSectionIds === undefined || activeSectionIds.has(section.id))
              && log.attempts.findLast(attempt => attempt.role === 'reviewer' && attempt.accepted
-             && attempt.child_session_id === log.final_reviewer_child_session_id)?.input.evidence_sha256
+             && attempt.child_session_id === reviewerId)?.input.evidence_sha256
              !== chapterEvidenceInputFingerprint(context, manifest, sources)
            || validateChapterReview(context, reviewCandidate, review).length > 0) throw new Error('checkpoint-review-invalid')
+          if (reviewed !== undefined) {
+            log.status = 'pending'
+            log.phase = 'queued'
+            log.final_writer_child_session_id = writerId
+            log.final_reviewer_child_session_id = null
+            continue
+          }
           completed.set(section.id, { candidate, entry: entryFor(context, candidate, reviewPath, candidateSha256) })
           drafts.delete(section.id)
           log.status = 'completed'
@@ -1411,6 +1429,7 @@ async function loadChapterCheckpoint(
           log.final_reviewer_child_session_id = null
         }
       } catch { /* 无法恢复的章节及其强依赖下游需要重跑，历史尝试仍保留。 */
+        delete log.reviewed_candidate
         drafts.delete(section.id)
         log.status = 'pending'
         log.phase = 'queued'
@@ -1702,6 +1721,20 @@ export async function executeChapterWriting(
   workspace: BidWorkspace,
   task: BidStageTask,
   options: ChapterWritingExecutionOptions,
+): Promise<StageArtifact[]> {
+  if (options.writerParentFor !== undefined || options.scoped?.writerParentFor !== undefined) {
+    return executeChapterWritingWithParents(agent, workspace, task, options)
+  }
+  const parents = createChapterWriterParentResolver(agent, workspace.root, options.run.signal)
+  try {
+    return await executeChapterWritingWithParents(agent, workspace, task, {
+      ...options, writerParentFor: writerId => parents.resolve(writerId),
+    })
+  } finally { await options.run.waitForCleanup('s5_writer_parents', parents.dispose()) }
+}
+
+async function executeChapterWritingWithParents(
+  agent: Agent, workspace: BidWorkspace, task: BidStageTask, options: ChapterWritingExecutionOptions,
 ): Promise<StageArtifact[]> {
   await options.run.scheduler.waitUntilRunnable(options.run.signal)
   if (options.scoped !== undefined) {
@@ -2886,6 +2919,7 @@ async function runChapterWriting(
             final_writer_child_session_id: writerChildSessionId,
             final_reviewer_child_session_id: reviewerChildSessionId,
           }
+          delete committed.reviewed_candidate
           await options.run.commits.publish(async (lease) => {
             if (persistCandidate) {
               await lease.writeText(join(workspace.projectRoot, context.contentPath), afterMarkdown)
@@ -2912,8 +2946,12 @@ async function runChapterWriting(
           })
           assertCurrentInput(reviewerInputIdentity)
           Object.assign(log, committed)
+          delete log.reviewed_candidate
         })
         await logWrites
+        if (review.verdict === 'pass') await options.run.acceptProgress({ unit: `chapter:${sectionId}`,
+          inputSha256: createHash('sha256').update(JSON.stringify(reviewerInputIdentity)).digest('hex'),
+          planSha256: createHash('sha256').update(JSON.stringify(plan)).digest('hex') })
         if (batchTask !== undefined) {
           const missing = review.revision_issue_checks?.filter(item => item.status === 'needs_input') ?? []
           const needsInput = review.external_input_gaps.length > 0 || missing.length > 0
@@ -3111,9 +3149,16 @@ async function runChapterWriting(
             signal.throwIfAborted()
             assertCurrentInput(reviewerInputIdentity)
             if (reviewResult.stopReason !== 'completed') {
+              if (reviewResult.stopReason === 'error') {
+                const end = reviewer.localAgent?.session.events.findLast(event => event.type === 'turn/end')
+                const failure = end?.type === 'turn/end' && end.data.reason.kind === 'error'
+                  ? safeBidRunError(end.data.reason.error)
+                  : { code: 'CHAPTER_SUBAGENT_FAILURE_UNKNOWN', message: '章节 Reviewer 未提供结构化故障。' }
+                retryReviewerInfrastructure = safeRecoverableBidFailure(options.run.work, failure).recovery?.kind === 'retry'
+                  && reviewInfrastructureRetries < options.maxRepairAttempts
+                if (!retryReviewerInfrastructure) throw Object.assign(new Error(failure.message), failure)
+              }
               reviewIssues.push({ code: 'CHAPTER_REVIEWER_STOP_REASON_INVALID', message: `Chapter Reviewer 未正常完成：${reviewResult.stopReason}。${reviewResult.diagnostic ?? ''}` })
-              retryReviewerInfrastructure = reviewResult.stopReason === 'error'
-                && reviewInfrastructureRetries < options.maxRepairAttempts
             } else if (reviewRuntime?.captured() === undefined) {
               reviewIssues.push({ code: 'CHAPTER_REVIEWER_FINISH_REQUIRED', message: 'Chapter Reviewer 未成功提交 finish_chapter_review。' })
             } else {
@@ -3185,7 +3230,7 @@ async function runChapterWriting(
         if (reviewed.review.verdict !== 'repair' || options.maxRepairAttempts === 0) {
           return await finishChapter(
             preserved.candidate, reviewed.review,
-            preserved.writerChildSessionId, reviewed.reviewerChildSessionId, false,
+            preserved.writerChildSessionId, reviewed.reviewerChildSessionId, preserved.needsPublication ?? false,
           )
         }
         rejectedCandidate = projectChapterWriterCandidate(
@@ -3273,6 +3318,7 @@ async function runChapterWriting(
         let stopAfterReview = false
         let stopAfterVisualIssue = false
         let acceptedWriter = false
+        let failedTurn = false
         const reusableWriterId = originalWriterId ?? reusableWriterIds.get(sectionId) ?? preserved?.writerChildSessionId
         childSetups.set(label, (child) => {
           readableWebPathsByChild.set(String(child.id), mappedWebPaths(context))
@@ -3326,8 +3372,16 @@ async function runChapterWriting(
           let result: Awaited<ReturnType<ChapterWriterChild['run']>>
           try { result = await run.run(recoveryPrompt) } finally { childSetups.delete(label) }
           signal.throwIfAborted()
-          if (revisionBatch !== undefined && result.failure !== undefined) {
-            throw Object.assign(new Error(result.failure.message), { code: result.failure.code })
+          if (result.failure !== undefined) {
+            failedTurn = true
+            throw Object.assign(new Error(result.failure.message), result.failure)
+          }
+          if (result.stopReason === 'error') {
+            failedTurn = true
+            throw Object.assign(new Error('章节 Writer 未提供结构化故障。'), { code: 'CHAPTER_SUBAGENT_FAILURE_UNKNOWN' })
+          }
+          if (result.stopReason === 'aborted') {
+            throw new DOMException('章节 Writer 已取消。', 'AbortError')
           }
           latestStopReason = result.stopReason
           const captured = capturedByChild.get(String(run.id)) ?? new Map()
@@ -3336,7 +3390,6 @@ async function runChapterWriting(
           await appendChapterWebReferences(workspace, references, chapterWebSources())
           if (result.stopReason !== 'completed') {
             issues.push({ code: 'CHAPTER_SUBAGENT_STOP_REASON_INVALID', message: `Chapter Subagent 未正常完成：${result.stopReason}。${result.diagnostic ?? ''}` })
-            retryInfrastructure = result.stopReason === 'error' && infrastructureRetries < options.maxRepairAttempts
           } else if (result.structured === undefined) {
             issues.push({ code: 'CHAPTER_SUBAGENT_STRUCTURED_MISSING', message: 'Chapter Subagent 未返回 structured candidate。' })
           } else {
@@ -3439,6 +3492,11 @@ async function runChapterWriting(
             const reviewed = await reviewCandidate(candidate)
             rejectedCandidate = projectChapterWriterCandidate(candidate, references, preservedWriterFlowcharts, preservedWriterMarkdown)
             if (reviewed.review !== undefined && reviewed.reviewerChildSessionId !== undefined) {
+              log.reviewed_candidate = { candidate: { ...candidate, metadata: parseChapterMetadata(candidate.metadata) },
+                review: reviewed.review, writer_child_session_id: String(run.id),
+                reviewer_child_session_id: reviewed.reviewerChildSessionId, candidate_sha256: chapterCandidateSha256(candidate.markdown),
+                input: reviewerInputIdentity }
+              await persistLog()
               reviewedFallback = {
                 candidate,
                 review: reviewed.review,
@@ -3451,7 +3509,7 @@ async function runChapterWriting(
           }
           if (issues.length > 0) latestIssues = issues
         } catch (error: unknown) {
-          if (signal.aborted) throw error
+          if (signal.aborted || error instanceof Error && error.name === 'AbortError') throw error
           if (error instanceof Error && error.message === 'BID_CHAPTER_INPUT_STALE') {
             const staleIssue = { code: 'BID_CHAPTER_INPUT_STALE', message: 'Writer 输入绑定的计划、章节 epoch 或强依赖身份已失效。' }
             const recorded = log.attempts.findLast(attempt => attempt.role === 'writer'
@@ -3472,7 +3530,7 @@ async function runChapterWriting(
           }
           if (acceptedWriter) throw error
           const imageUnsupported = error instanceof ChapterWriterImageInputError
-          latestStopReason = imageUnsupported ? 'image-input-unsupported' : 'infrastructure-error'
+          latestStopReason = imageUnsupported ? 'image-input-unsupported' : failedTurn ? 'error' : 'infrastructure-error'
           issues.push(imageUnsupported ? {
             code: 'CHAPTER_FLOWCHART_VISUAL_MODEL_UNSUPPORTED',
             message: error.message,
@@ -3496,14 +3554,22 @@ async function runChapterWriting(
           await persistLog()
           latestIssues = issues
           stopAfterVisualIssue = imageUnsupported
-          retryInfrastructure = !imageUnsupported && effectiveRevision === undefined
+          let failure = safeRecoverableBidFailure(options.run.work, error)
+          if (failure.code === 'BID_EXECUTOR_ERROR' && failure.recovery?.kind === 'repair') {
+            failure = safeRecoverableBidFailure(options.run.work, { ...failure, code: 'CHAPTER_SUBAGENT_INFRASTRUCTURE_ERROR' })
+          }
+          retryInfrastructure = !imageUnsupported && failure.recovery?.kind === 'retry'
             && infrastructureRetries < options.maxRepairAttempts
-          await run.dispose()
-          if (activeWriterIds.get(sectionId) === String(run.id)) activeWriterIds.delete(sectionId)
-          writer = undefined
-          capturedByChild.delete(String(run.id))
-          if (effectiveRevision !== undefined || revisionBatch !== undefined
-            && safeRecoverableBidFailure(options.run.work, error).recovery?.kind === 'blocked') throw error
+          if (!failedTurn) {
+            await run.dispose()
+            if (activeWriterIds.get(sectionId) === String(run.id)) activeWriterIds.delete(sectionId)
+            writer = undefined
+            capturedByChild.delete(String(run.id))
+            presentedRenderedHash = undefined
+          } else if (retryInfrastructure && visualPrompt !== undefined) {
+            pendingVisualPrompt = visualPrompt
+          }
+          if (!imageUnsupported && !retryInfrastructure) throw Object.assign(new Error(failure.message), failure)
         }
         if (stopAfterVisualIssue) break
         if (stopAfterReview) break
@@ -3512,11 +3578,9 @@ async function runChapterWriting(
           continue
         }
         if (pendingVisualPrompt !== undefined) {
-          infrastructureRetries = 0
           continue
         }
         attempt += 1
-        infrastructureRetries = 0
       }
       if (reviewedFallback !== undefined) {
         const finished = await finishChapter(
@@ -3550,12 +3614,14 @@ async function runChapterWriting(
             code: failure.code !== undefined && failure.code !== 'BID_EXECUTOR_ERROR'
               ? failure.code : issue?.code ?? 'CHAPTER_WRITING_FAILED',
             message: issue?.message ?? failure.message,
+            ...(failure.cause === undefined ? {} : { cause: failure.cause }),
             phase: log.failure_phase,
           },
         })
       }
       if (error instanceof BidStageExecutionError || error instanceof Error && error.message.startsWith('Bid chapter ')) throw error
-      throw new Error(`Bid chapter writing infrastructure failed for ${sectionId}`, { cause: error })
+      const failure = safeRecoverableBidFailure(options.run.work, error)
+      throw Object.assign(new Error(failure.message), { ...failure, message: `章节 ${sectionId} 执行失败：${failure.message}` })
     } finally {
       if (writer !== undefined) {
         await writer.dispose()
@@ -3639,9 +3705,13 @@ async function runChapterWriting(
     if (failures.size > 0 && revisionBatch === undefined) {
       const errors = [...failures.values()]
       if (errors.length === 1) throw errors[0]
+      const classified = errors.map(error => safeRecoverableBidFailure(options.run.work, error))
+      const primary = classified.find(failure => failure.recovery?.kind === 'blocked')
+        ?? classified.find(failure => failure.recovery?.kind === 'retry') ?? safeRecoverableBidFailure(options.run.work, errors[0])
       throw Object.assign(new BidStageExecutionError([...failures].flatMap(([sectionId, error]) =>
-        error instanceof BidStageExecutionError ? error.issues : [{ code: 'CHAPTER_WRITING_FAILED', artifact: sectionId,
-          message: error instanceof Error ? error.message : String(error) }])), { cause: new AggregateError(errors, '多个章节执行失败。') })
+        error instanceof BidStageExecutionError ? error.issues : [{ code: safeRecoverableBidFailure(options.run.work, error).code
+          ?? 'CHAPTER_WRITING_FAILED', artifact: sectionId, message: error instanceof Error ? error.message : String(error) }])),
+      { code: primary.code, ...(primary.cause === undefined ? {} : { cause: primary.cause }) })
     }
   } catch (error: unknown) {
     controller.abort()

@@ -71,6 +71,7 @@ async function fixture(options: { root?: string; budget?: number; resume?: boole
     const run = bidRecoverableRun(session, task)
     if (run?.cause === 'user_stop' || run?.cause === 'awaiting_input') return
     return { target: decision.target, fingerprint: decision.fingerprint, eligible: decision.eligible,
+      ...(decision.windowKey === undefined ? {} : { windowKey: decision.windowKey }),
       reason: decision.reason, facts: ['已保存真实执行失败，保留原正文。'] }
   }
   const driver = new BidRecoveryDriver(ctx, budget, read, session => ctx.agents.get(session.id)?.session === session)
@@ -105,6 +106,35 @@ async function fixture(options: { root?: string; budget?: number; resume?: boole
 }
 
 describe('BidRecoveryDriver 的持久化与运行时协议', () => {
+  it('新验收成果解除旧窗口 blocked，重复证明及重启不再次开放窗口', async () => {
+    const f = await fixture({ budget: 1 })
+    await f.fail()
+    await f.driver.request(f.agent)
+    await f.agent.whenIdle()
+    await f.driver.request(f.agent)
+    await f.agent.whenIdle()
+    expect(f.rounds().at(-1)?.state).toBe('blocked')
+    const runs = f.coordinator()
+    const run = await runs.start(f.work)
+    const checkpoint = { unit: 'chapter:SEC-2', inputSha256: 'c'.repeat(64), planSha256: 'd'.repeat(64) }
+    await run.acceptProgress(checkpoint)
+    await runs.suspend('executor_error', { code: 'TIMEOUT', message: '超时', recovery: { kind: 'retry', unit: 'chapter:SEC-3', reason: '超时' } })
+    await f.driver.request(f.agent)
+    await f.agent.whenIdle()
+    expect(f.rounds().at(-1)).toMatchObject({ state: 'notified', round: 1, windowKey: expect.stringMatching(/^progress:/) })
+    await f.driver.request(f.agent)
+    await f.agent.whenIdle()
+    expect(f.rounds().at(-1)?.state).toBe('blocked')
+    const duplicate = await runs.start(f.work)
+    await duplicate.acceptProgress(checkpoint)
+    await runs.suspend('executor_error', { code: 'TIMEOUT', message: '超时', recovery: { kind: 'retry', unit: 'chapter:SEC-3', reason: '超时' } })
+    expect(f.read(f.agent.session)?.eligible).toBe(false)
+    await f.ctx.sessions.flush(f.agent.session)
+    await f.ctx.fiber.dispose()
+    const restored = await fixture({ root: f.root, budget: 1, resume: true })
+    expect(restored.read(restored.agent.session)?.eligible).toBe(false)
+  })
+
   it.each(['EIO', 'ETIMEDOUT'])('预算耗尽后同 Work 新 Run 的终态独立唤醒空闲 Main：%s', async (code) => {
     const f = await fixture({ budget: 1 })
     const original = await f.fail()
@@ -574,7 +604,7 @@ describe('BidRecoveryDriver 的持久化与运行时协议', () => {
     expect(decision.reason).toContain('BID_RECOVERY_BUDGET_EXHAUSTED')
     await f.driver.request(f.agent)
     await f.agent.whenIdle()
-    expect(f.rounds().at(-1)).toMatchObject({ round: 2, budget: 2, state: 'blocked' })
+    expect(f.rounds().at(-1)).toMatchObject({ round: 0, budget: 2, state: 'blocked' })
     const calls = f.adapter.requests.length
     await Promise.all(Array.from({ length: 20 }, () => f.driver.request(f.agent)))
     expect(executions).toBe(2)

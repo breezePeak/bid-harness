@@ -15,6 +15,7 @@ import { buildChapterRevisionLineagePath } from './chapter-revision-lineage.ts'
 import { chapterCandidateSha256, parseChapterReviewArtifact } from './chapter-writing-review-artifacts.ts'
 import { assertNoLinkedPath, within } from './workspace-path.ts'
 import { BidStageExecutionError } from './control-plane-contract.ts'
+import { safeRecoverableBidFailure } from './bid-recovery.ts'
 
 type RevisionCall = Extract<BidCapabilityCall, { capability: 'chapter.revision_batch' }>
 /** 在既有 Run 内执行已由 Host 从冻结意见构造的批次。 */
@@ -134,10 +135,15 @@ export async function executeRevisionCapability(
     }
   }
   const failures = finished.tasks.filter(task => task.status !== 'completed' && !waitingIds.has(task.task_id))
-  if (failures.length > 0) throw new BidStageExecutionError(failures.map(task => ({
-    code: task.failure?.code ?? (task.status === 'conflict' ? 'BID_REVISION_CONFLICT' : 'BID_REVISION_TASK_FAILED'),
-    message: task.failure?.message ?? task.status, artifact: task.section_id, path: task.task_id,
-  })))
+  if (failures.length > 0) {
+    const causes = failures.flatMap(task => task.failure === null ? [] : [safeRecoverableBidFailure(context.run.work, task.failure)])
+    const primary = causes.find(failure => failure.recovery?.kind === 'blocked')
+      ?? causes.find(failure => failure.recovery?.kind === 'retry') ?? causes[0]
+    throw Object.assign(new BidStageExecutionError(failures.map(task => ({
+      code: task.failure?.code ?? (task.status === 'conflict' ? 'BID_REVISION_CONFLICT' : 'BID_REVISION_TASK_FAILED'),
+      message: task.failure?.message ?? task.status, artifact: task.section_id, path: task.task_id,
+    }))), primary === undefined ? {} : { code: primary.code, ...(primary.cause === undefined ? {} : { cause: primary.cause }) })
+  }
   const waiting = finished.tasks.filter(task => task.status === 'needs_input')
   const missing = waiting
     .map(task => task.section_id + '：' + (task.failure?.message ?? task.status))

@@ -16,7 +16,7 @@ import { chapterLocation } from '../src/chapter-storage.ts'
 import { emitAgentEvent, type Agent } from '@deepseek-ai/dsh-agent'
 import SessionStore, { SessionId, snapshotJsonValue } from '@deepseek-ai/dsh-session'
 import { Context } from '@deepseek-ai/cordis'
-import type { ContinuableStartSpec, SubagentProvider, SubagentResult } from '@deepseek-ai/dsh-subagent'
+import type { ContinuableStartSpec, SubagentProvider, SubagentResult, SubagentStartRequest } from '@deepseek-ai/dsh-subagent'
 import type { ToolDefinition, ToolExecution, ToolExecutionResult, ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { validateJsonSchemaValue } from '@deepseek-ai/dsh-tools'
 import { CONTEXT_WINDOW_EXCEEDED_CODE, createUserMessage, CallId, LlmAdapter, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
@@ -303,7 +303,7 @@ it.each([['configured', 12_288], ['default', 8_192]] as const)('目录复核沿�
   }
 })
 
-it('目录复核输出超限立即保留失败，不在相同上限内反复修报告', async () => {
+it('目录复核输出超限先拆分实际请求，最小单元仍超限则保留失败', async () => {
   const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-outline-review-max-tokens-')))
   const material = await writeInputs(workspace)
   const fixture = mappingFixture(workspace, material)
@@ -324,8 +324,11 @@ it('目录复核输出超限立即保留失败，不在相同上限内反复修�
     issues: [{ code: 'OUTLINE_REVIEW_OUTPUT_BUDGET_EXCEEDED', artifact: 'outline/quality-report.json',
       message: expect.stringContaining('2048 token') }],
   })
-  expect(fixture.subagents.start).toHaveBeenCalledTimes(1)
-  expect(fixture.outlineReviewDisposals[0]).toHaveBeenCalledTimes(1)
+  expect(fixture.subagents.start).toHaveBeenCalledTimes(2)
+  const requests = fixture.subagents.start.mock.calls.map(([, request]) => request)
+  expect(requests[0]!.prompt).not.toEqual(requests[1]!.prompt)
+  expect(requests.every(request => request.agentOptions?.maxTokens === 2048)).toBe(true)
+  expect(fixture.outlineReviewDisposals.every(dispose => dispose.mock.calls.length === 1)).toBe(true)
   await expect(readFile(join(workspace.projectRoot, 'analysis/evidence-mapping-quality.candidate.json'))).rejects.toMatchObject({ code: 'ENOENT' })
 })
 
@@ -766,6 +769,42 @@ function submittedFindingRef(result: Readonly<ToolExecutionResult>): string {
   if (typeof findingRef !== 'string') throw new Error('Research Assessment did not return a finding_ref')
   return findingRef
 }
+
+it.each(['initial', 'followup'] as const)('S4 %s 的 whenIdle 永不返回仍触发执行期限并取消 Child', async (mode) => {
+  const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-mapping-deadline-')))
+  const material = await writeInputs(workspace)
+  const fixture = mappingFixture(workspace, material, mode === 'followup')
+  const cancelled = vi.fn()
+  const block = (id: SessionId) => {
+    const child = fixture.children.get(String(id))!
+    child.whenIdle = () => new Promise<void>(() => {})
+    child.cancel = cancelled
+  }
+  if (mode === 'initial') {
+    const start = fixture.subagents.startContinuable.getMockImplementation()!
+    fixture.subagents.startContinuable.mockImplementation(async (...args) => {
+      const result = await start(...args)
+      block(result.childId)
+      return result
+    })
+  } else {
+    const followup = fixture.subagents.followup.getMockImplementation()!
+    fixture.subagents.followup.mockImplementation(async (...args) => {
+      const result = await followup(...args)
+      block(args[1])
+      return result
+    })
+  }
+  const work = { ...createTestBidRunContext().work, kind: 'stage_execution' as const, stage: 'evidence_mapping' as const }
+  const error: unknown = await executeEvidenceMapping(fixture.agent, workspace, buildBidStageTask('evidence_mapping'), {
+    maxRepairAttempts: 1, maxConcurrency: 1, maxInfrastructureRetryAttempts: 0,
+    run: createTestBidRunContext({ work, childTimeoutMs: 100 }),
+  }).catch((error: unknown) => error)
+  expect(safeRecoverableBidFailure(work, error)).toMatchObject({ recovery: { kind: 'retry' }, cause: { code: 'TIMEOUT' } })
+  expect(cancelled).toHaveBeenCalled()
+  expect(fixture.subagents.drainContinuableChildren).toHaveBeenCalled()
+  await expect(readFile(join(workspace.projectRoot, 'analysis/evidence-map.json'))).rejects.toMatchObject({ code: 'ENOENT' })
+})
 
 function mappingFixture(
   workspace: BidWorkspace,
@@ -1277,7 +1316,11 @@ function mappingFixture(
   const childRequests = new Map<string, ContinuableStartSpec>()
   const subagents = {
     getProvider: vi.fn(() => spawnProvider),
-    start: vi.fn(async (_provider: string, request: { prompt: Array<{ type: 'text'; text: string }>; outputSchema?: unknown }) => {
+    start: vi.fn(async (_provider: string, request: {
+      prompt: Array<{ type: 'text'; text: string }>
+      outputSchema?: unknown
+      agentOptions?: SubagentStartRequest['agentOptions']
+    }) => {
       outlineReviewRequests.push(request)
       const prompt = request.prompt.map(item => item.text).join('\n')
       outlineReviewPrompts.push(prompt)

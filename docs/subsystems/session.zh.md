@@ -891,4 +891,21 @@ Host-wide prompt admission. The first rejection prevents message creation and Ag
 ```
 
 Source: [`packages/host/apiproxy/src/prompt-admission.ts`](../../packages/host/apiproxy/src/prompt-admission.ts)
+
+<a id="sessionprompt-files--serial"></a>
+
+#### `session/prompt-files` — serial
+
+文件所属实现按当前会话日志和工作区解析不可变引用。
+
+```ts cordis-catalog
+/**
+ * 文件所属实现按当前会话日志和工作区解析不可变引用。
+ * @mode serial
+ * @param request 当前会话与客户端回传的有序引用。
+ */
+'session/prompt-files'(request: { session: Session; refs: readonly PromptFileRef[] }): MessageFileRef[] | undefined | Promise<MessageFileRef[] | undefined>
+```
+
+Source: [`packages/host/apiproxy/src/prompt-admission.ts`](../../packages/host/apiproxy/src/prompt-admission.ts)
 <!-- END GENERATED cordis-surface -->

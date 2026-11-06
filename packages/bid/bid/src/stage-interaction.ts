@@ -247,10 +247,12 @@ async function inspectBidStageValue(
   session: Session,
   reference?: z.infer<typeof chapterRevisionReferenceSchema>,
   view: 'summary' | 'task_contract_context' | 'recovery' = 'summary',
+  recoveryLimits?: { window: number; total: number },
 ) {
   const task = session.events.reduce(reduceBidTaskState, BID_INITIAL_TASK_STATE)
   const recoveryDecision = task.workflow?.stage === 'chapter_writing' && task.status === 'waiting_user'
-    ? bidWritingPlanRecoveryEligibility(session) : bidRunRecoveryEligibility(session)
+    ? bidWritingPlanRecoveryEligibility(session, recoveryLimits?.window)
+    : bidRunRecoveryEligibility(session, recoveryLimits?.window, recoveryLimits?.total)
   const repairable = bidRecoverableRun(session, task)
   const availableActions = [
     ...(repairable?.work.kind === 'capability_task' && repairable.cause !== 'awaiting_input'
@@ -310,6 +312,10 @@ async function inspectBidStageValue(
       eligible: decision.eligible && (writingPlanDiagnostic?.matchesTarget ?? true),
       reason: decision.reason.slice(0, 600),
       attempts: decision.attempts,
+      ...('windowAttempts' in decision ? { recovery_budget: {
+        window_used: decision.windowAttempts, window_limit: decision.windowLimit,
+        total_used: decision.attempts, total_limit: decision.totalLimit,
+      } } : {}),
       same_problem_count: decision.sameProblemCount,
       requires_strategy_change: decision.requiresStrategyChange,
       previous_instructions: decision.previousInstructions,
@@ -576,6 +582,7 @@ function summarizeMappingProgress(progress: BidEvidenceMappingProgress | null) {
  * @param session 读取状态的会话。
  * @param reference 可选正文引用；只影响 S5 引用上下文。
  * @param view 摘要或显式请求的完整任务契约上下文。
+ * @param recoveryLimits 当前 Host 的恢复窗口与累计上限；省略时使用已记录上限。
  * @returns 最新目录编号、CAS 与阶段资料，不从聊天历史推测。
  */
 export function inspectBidStage(
@@ -583,8 +590,9 @@ export function inspectBidStage(
   session: Session,
   reference?: z.infer<typeof chapterRevisionReferenceSchema>,
   view?: 'summary' | 'task_contract_context' | 'recovery',
+  recoveryLimits?: { window: number; total: number },
 ): ReturnType<typeof inspectBidStageValue> {
-  return inspectBidStageValue(workspace, session, reference, view)
+  return inspectBidStageValue(workspace, session, reference, view, recoveryLimits)
 }
 
 /**
@@ -682,7 +690,7 @@ function renderIdleStageInteractionPrompt(
     '用户询问阶段或要求处理正式业务时，先调用 bid_stage_inspect(view=summary) 获取权威状态。正式 Artifact 修改必须通过 Host 业务工具。',
     status === 'ready' ? '普通问答不启动业务写操作；用户明确授权的局部修改可调用 bid_run_task，不能把该任务当作原生阶段确认。'
       : userContinuationAvailable
-        ? '先用 bid_stage_inspect(view=recovery) 核对失败、原目标和检查点。新的直接用户消息明确要求继续或重试原任务时，调用 bid_resume_current_run 实际执行；即使自动恢复预算已耗尽，也可按这次新授权继续一次。保留原 Work、已保存候选和正式校验，不重置自动预算；普通问答不启动恢复。'
+        ? '先用 bid_stage_inspect(view=recovery) 核对失败、原目标和检查点。新的直接用户消息明确要求继续或重试原任务时，调用 bid_resume_current_run 开启有限恢复窗口；同一消息只接纳一次。窗口内后续可恢复故障用 bid_recover_task 继续。保留原 Work、已保存候选和正式校验，累计用量保留；普通问答不启动恢复。'
         : recoveryAvailable
           ? '先用 bid_stage_inspect(view=recovery) 核对失败、原目标和检查点。同一目标的继续或修复使用 bid_recover_task；Host 重验原 Work、输入、候选与有限恢复预算，保留已完成研究和正式确认。'
           : takeoverAvailable
@@ -711,7 +719,7 @@ function renderSuspendedRunPrompt(
       : workKind === 'capability_task'
         ? cause === 'user_stop'
           ? '停止期间不自动续行。用户明确要求继续时无参数调用 bid_resume_current_run；程序重新验证当前 Run、授权和项目 revision。用户明确提出新目标时，先用 bid_project_inspect(object=task) 核对旧目标和步骤，再用 bid_run_task(supersede=true) 创建新 Work；Host 绑定旧 Run 和项目版本。'
-          : '继续同一目标时先用 bid_project_inspect(object=task) 核对原目标和步骤，必要时 bid_plan_task 重规划，再 bid_recover_task；只继续被打断的原 Work 时用 bid_resume_current_run。用户明确提出新目标时，用 bid_run_task(supersede=true) 创建新 Work；Host 绑定旧 Run 和项目版本。'
+          : '继续同一目标时先用 bid_project_inspect(object=task) 核对原目标和步骤，必要时 bid_plan_task 重规划，再 bid_recover_task；用户明确要求继续被打断的原 Work 时可用 bid_resume_current_run。用户明确提出新目标时，用 bid_run_task(supersede=true) 创建新 Work；Host 绑定旧 Run 和项目版本。'
         : interrupted
           ? '用户明确要求继续时无参数调用 bid_resume_current_run；程序绑定当前 Run 和项目 revision。内部可修复失败由主 Agent inspect 后调用 bid_recover_task，普通询问保持只读。'
           : '挂起 Run 的继续、当前阶段重跑或停止由 Host 通过 DSH 原生用户提问处理；普通消息不视为这些决策的答案。',
@@ -767,13 +775,16 @@ const CAPABILITY_TASK_GUIDANCE = [
  * @param ctx Host 插件上下文，负责全部注册释放。
  * @param execute 共享 Host 操作入口。
  * @param workspaceFor 当前会话对应的正式项目。
+ * @param recoveryLimits 当前 Host 的恢复窗口与累计上限；提示、动作列表和接纳共用。
  */
 export function installStageInteractionTools(
   ctx: Context,
   execute: (agent: Agent, request: unknown, signal: AbortSignal,
     authorization?: ReturnType<typeof resolveBidToolAuthorization> | null) => Promise<unknown>,
   workspaceFor: (session: Session) => BidWorkspace,
+  recoveryLimits?: { window: number; total: number },
 ): void {
+  const runEligibility = (session: Session) => bidRunRecoveryEligibility(session, recoveryLimits?.window, recoveryLimits?.total)
   ctx.inject(['tools'], (toolCtx) => {
     const modelCatalogs = new WeakMap<Agent, BidModelTaskCatalog>()
     const mounted = new Map<Agent, { scope: string; dispose: () => void }>()
@@ -785,8 +796,8 @@ export function installStageInteractionTools(
         || bidUserContinuableRun(agent.session, task) !== undefined
       const stage = task.workflow?.stage
       const scope = `${stage ?? 'none'}:${suspended === undefined ? task.status : `suspended:${suspended.runId}`}`
-      const recoveryAvailable = bidRunRecoveryEligibility(agent.session).eligible
-        || bidWritingPlanRecoveryEligibility(agent.session).eligible
+      const recoveryAvailable = runEligibility(agent.session).eligible
+        || bidWritingPlanRecoveryEligibility(agent.session, recoveryLimits?.window).eligible
       const takeoverAvailable = (bidCapabilityTakeoverRun(agent.session, task)
         ?? bidEvidenceMappingTakeoverRun(agent.session, task)) !== undefined
       const completedCapability = bidCompletedCapabilityRun(agent.session, task)
@@ -1160,7 +1171,7 @@ export function installStageInteractionTools(
         '任务结束后仍可继续对话。只按已验证并发布的产物报告完成。',
       ].join('\n') : failureMessage && task.status === 'failed'
         ? renderIdleStageInteractionPrompt(stage, task.status, task,
-          bidRunRecoveryEligibility(agent.session).eligible || bidWritingPlanRecoveryEligibility(agent.session).eligible,
+          runEligibility(agent.session).eligible || bidWritingPlanRecoveryEligibility(agent.session, recoveryLimits?.window).eligible,
           (bidCapabilityTakeoverRun(agent.session, task) ?? bidEvidenceMappingTakeoverRun(agent.session, task)) !== undefined,
           hasUser && bidUserContinuableRun(agent.session, task) !== undefined)
         : suspended !== undefined ? renderSuspendedRunPrompt(
@@ -1178,7 +1189,8 @@ export function installStageInteractionTools(
               ? renderLiveStageInteractionPrompt(stage, task.status)
               : task.status === 'ready' || task.status === 'failed'
                 ? renderIdleStageInteractionPrompt(stage, task.status, task,
-                  bidRunRecoveryEligibility(agent.session).eligible || bidWritingPlanRecoveryEligibility(agent.session).eligible,
+                  runEligibility(agent.session).eligible
+                    || bidWritingPlanRecoveryEligibility(agent.session, recoveryLimits?.window).eligible,
                   (bidCapabilityTakeoverRun(agent.session, task) ?? bidEvidenceMappingTakeoverRun(agent.session, task)) !== undefined,
                   hasUser && bidUserContinuableRun(agent.session, task) !== undefined)
                 : undefined
@@ -1186,9 +1198,10 @@ export function installStageInteractionTools(
       const progress = task.status === 'running' ? renderCurrentRunProgress(task.run) : undefined
       const taskToolsAvailable = task.status !== 'failed'
         || (bidCapabilityTakeoverRun(agent.session, task) ?? bidEvidenceMappingTakeoverRun(agent.session, task)) !== undefined
-        || bidRecoverableRun(agent.session, task)?.work.kind === 'capability_task' && bidRunRecoveryEligibility(agent.session).eligible
+        || bidRecoverableRun(agent.session, task)?.work.kind === 'capability_task' && runEligibility(agent.session).eligible
       const context = [prompt,
-        '独立作图、文件和文档局部任务走 bid_run_task。用户要求暂停整本先处理局部任务时设置 pause_workflow=true；Host 收敛原 Run 后保存精确 continuation。局部任务完成不自动继续整本；只有当前工具提供 target=workflow 时，才用它恢复局部任务暂停前的整本路线。继续当前失败或中断的阶段及能力任务使用 bid_resume_current_run(target=current)。',
+        '独立作图、文件和文档局部任务走 bid_run_task。用户要求暂停整本先处理局部任务时设置 pause_workflow=true；Host 收敛原 Run 后保存精确 continuation。局部任务完成不自动继续整本；只有当前工具提供 target=workflow 时，才用它恢复局部任务暂停前的整本路线。',
+        '只有后台失败通知、没有新的用户执行要求时，先读取失败和原检查点，再用 bid_recover_task 恢复原 Work；能力任务需要调整未完成步骤时先 bid_plan_task，保留完成前缀。bid_resume_current_run(target=current) 需要当前有效的用户继续要求或 Goal 授权。用户消息与通知同时到达时，以用户本轮意图为准：询问状态只答复状态，要求停止就停止，新目标走目标变更入口；不要因通知自动继续。',
         'Bid 模式不通过模型创建 Goal。Goal 只能由用户显式 /goal 创建；已有 Goal 可正常读取和更新。后台失败交由你分析并通过当前公开能力处理；Host 只校验和执行。',
         ...(taskToolsAvailable ? [CAPABILITY_TASK_GUIDANCE] : []), ...(progress === undefined ? [] : [progress]),
       ].join('\n')

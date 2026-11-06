@@ -378,7 +378,7 @@ it('无 Goal 时主 Agent 恢复原 Run；重复失败再次 steer，相同指�
       .rejects.toMatchObject({ code: 'BID_RECOVERY_DUPLICATE_INSTRUCTION' })
     expect(agent.session.events.some(event => event.type === 'bid.recovery.round'
       && event.data.target.kind === 'run' && event.data.target.workId === descriptor.workId
-      && event.data.state === 'scheduled' && event.data.round >= 2)).toBe(true)
+      && event.data.state === 'scheduled' && event.data.round >= 1)).toBe(true)
     const changed = await agent.ctx.tools.execute({ agent, name: 'bid_recover_task',
       arguments: { target: 'run', instruction: '先核对 chunk 原文，再逐字段补齐并提交。' },
       callId: CallId('changed-strategy'), signal: new AbortController().signal })
@@ -443,13 +443,13 @@ it.each([0, 3])('自动纠正耗尽且已执行 %i 次时新消息可继续原 R
   expect((await call({ run_id: original.runId })).isError).toBe(true)
   expect(await call()).toMatchObject({ isError: false, value: { accepted: true, execution_status: 'started', completed: false } })
   await vi.waitFor(() => { expect(host.inFlight.size).toBe(0) })
-  expect(bidRunRecoveryEligibility(session)).toMatchObject({ eligible: false, attempts: attempts + 1 })
+  expect(bidRunRecoveryEligibility(session)).toMatchObject({ eligible: true, attempts: attempts + 1, windowAttempts: 1 })
   expect((await call()).isError).toBe(true)
   expect(session.events.filter(event => event.type === 'bid.run.started')).toHaveLength(2)
   message('继续')
   expect(await call()).toMatchObject({ isError: false, value: { accepted: true } })
   await vi.waitFor(() => { expect(host.inFlight.size).toBe(0) })
-  expect(bidRunRecoveryEligibility(session)).toMatchObject({ eligible: false, attempts: attempts + 2 })
+  expect(bidRunRecoveryEligibility(session)).toMatchObject({ eligible: true, attempts: attempts + 2, windowAttempts: 1 })
   expect(session.events.filter(event => event.type === 'bid.run.started').every(event => event.data.run.work.workId === descriptor.workId)).toBe(true)
 })
 

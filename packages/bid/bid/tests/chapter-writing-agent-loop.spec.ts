@@ -16,12 +16,14 @@ import {
   BidWorkspace, buildBidStageTask, executeChapterWriting as executeChapterWritingImplementation, parseChapterExecutionLog,
   parseChapterReviewArtifact, parseChapterWritingCompletionState, validateChapterWriting,
 } from '@deepseek-ai/dsh-bid'
-import { createTestBidRunContext } from '../src/run-coordinator.ts'
+import { BidRunCoordinator, DirectBidRunScheduler, createTestBidRunContext } from '../src/run-coordinator.ts'
+import { safeRecoverableBidFailure } from '../src/bid-recovery.ts'
 import { CHAPTER_REVIEW_TOOLS } from '../src/chapter-writing-review.ts'
 import { CHAPTER_PLAN_TOOLS } from '../src/chapter-writing-planning.ts'
 import { ChapterAdapter } from './fixtures/chapter-writing-adapter.ts'
 import { writeInputs } from './fixtures/chapter-writing-inputs.ts'
 import { parseChapterMetadata } from '../src/chapter-writing-artifacts.ts'
+import { chapterContentSha256 } from '../src/chapter-revision.ts'
 import { webEvidenceContentSha256, type WebEvidenceSource } from '../src/web-evidence-source-artifacts.ts'
 import { buildWebEvidenceChunkIndex, webEvidenceChunkIndexPath } from '../src/web-evidence-chunks.ts'
 
@@ -36,7 +38,9 @@ const executeChapterWriting = (
     maxRepairAttempts: 1,
     maxConcurrency: 3,
     ...stageOptions,
-    run: run ?? createTestBidRunContext(signal instanceof AbortSignal ? { signal } : {}),
+    run: run ?? createTestBidRunContext({ ...(signal instanceof AbortSignal ? { signal } : {}), work: {
+      ...createTestBidRunContext().work, kind: 'stage_execution', stage: 'chapter_writing',
+    } }),
   } as Parameters<typeof executeChapterWritingImplementation>[3])
 }
 
@@ -65,6 +69,43 @@ async function fixture(cancelWriter?: () => void, omitReviewFinish = false) {
 }
 
 describe('S5 真实 DSH Child 接入', () => {
+  it.each(['AUTH', 'QUOTA', 'TIMEOUT'].flatMap(code => (['throw', 'finish'] as const).flatMap(mode =>
+    ['normal', 'scoped', 'revision'].map(scope => ({ code, mode, scope })))))(
+    '真实模型错误 $code/$mode/$scope 经 Child、executor 与 Run failure 保留身份', async ({ code, mode, scope }) => {
+      const { ctx, workspace, adapter, agent } = await fixture()
+      let original: string | undefined
+      if (scope === 'revision') {
+        await executeChapterWriting(agent, workspace, buildBidStageTask('chapter_writing'))
+        original = await readFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), 'utf8')
+      }
+      adapter.writerFailure = { code, message: 'token=private provider payload: private', status: code === 'AUTH' ? 401 : 503 }
+      adapter.writerFailureMode = mode
+      agent.session.append('bid.task.changed', { state: { workflow: { kind: 'full_bid', stage: 'chapter_writing' }, status: 'ready', run: null } })
+      const runs = new BidRunCoordinator(agent.session, new DirectBidRunScheduler(), { drain: async () => {} }, () => 0)
+      const work = { ...createTestBidRunContext().work, kind: 'stage_execution' as const, stage: 'chapter_writing' as const }
+      const run = await runs.start(work)
+      try {
+        const error: unknown = await executeChapterWriting(agent, workspace, buildBidStageTask('chapter_writing'), {
+          maxRepairAttempts: 0, maxConcurrency: 1, run,
+          ...scope === 'scoped' ? { scoped: { targetSectionIds: ['SEC-1'], mode: 'write', instruction: '只完成第一章' } } : {},
+          ...original === undefined ? {} : { revision: { instruction: '修订第一章表述', reference: {
+            scope: 'chapter', section_id: 'SEC-1', content_sha256: chapterContentSha256(original),
+          } } },
+        }).catch((error: unknown) => error)
+        const failure = safeRecoverableBidFailure(work, error)
+        await runs.suspend('executor_error', failure)
+        const state = agent.session.events.findLast(event => event.type === 'bid.task.changed')
+        expect(state).toMatchObject({ data: { state: { status: 'failed', failure: { code,
+          cause: { status: code === 'AUTH' ? 401 : 503 }, recovery: { kind: code === 'TIMEOUT' ? 'retry' : 'blocked' } } } } })
+        expect(JSON.stringify(failure)).not.toContain('private')
+        expect([...adapter.requests.values()].filter(request => request.role === 'writer' && request.sectionId === 'SEC-1'))
+          .toHaveLength(1)
+        if (original === undefined) await expect(readFile(join(workspace.projectRoot, 'chapters/manifest.json'))).rejects.toMatchObject({ code: 'ENOENT' })
+        else expect(await readFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), 'utf8')).toBe(original)
+      } finally { await runs.retire(); await ctx.fiber.dispose() }
+    },
+  )
+
   it('Writer Promise 未完成时 Main Agent 先回复，随后原 Writer 继续完成', async () => {
     const { ctx, workspace, adapter, agent } = await fixture()
     const writerStarted = Promise.withResolvers<undefined>()

@@ -540,6 +540,11 @@ it('保留 Bid 内部失败、原 Run 通知及 Main Agent 恢复指令，不产
   expect(result.events.find(event => event.type === 'bid.recovery.requested')?.data).toEqual({
     ownerSessionId: result.sessionId, target: { kind: 'run', workId: 'work-1', runId: 'run-1' },
     unit: 'outline/outline.json', instruction: '核对原文并修正当前章节。', progressFingerprint: 'a'.repeat(64), sourceMessageId: 'answer-1',
+    continuation: true, windowBudget: 3, totalBaseBudget: 9,
+  })
+  expect(result.events.find(event => event.type === 'bid.run.progress')?.data).toEqual({
+    runId: 'run-1', epoch: 1, progress: { phase: 'accepted', summary: '已验收并保存任务成果。', updatedAt: 100,
+      checkpoint: { unit: 'step:step-1', inputSha256: 'c'.repeat(64), planSha256: 'd'.repeat(64) } },
   })
   expect(result.events.find(event => event.type === 'bid.user_input.recorded')?.data).toEqual({
     messageId: 'answer-1', questionKey: 'question-1', work: { workId: 'work-1', requestSha256: 'b'.repeat(64) },
@@ -547,7 +552,7 @@ it('保留 Bid 内部失败、原 Run 通知及 Main Agent 恢复指令，不产
   expect(result.events.find(event => event.type === 'bid.recovery.round')?.data).toEqual({
     ownerSessionId: result.sessionId, target: { kind: 'run', workId: 'work-1', runId: 'run-1' },
     fingerprint: 'a'.repeat(64), round: 1, budget: 3, dispatchAttempts: 1, state: 'notified',
-    messageId: 'recovery-message-1', nextAt: 100, reason: '原失败已保存，等待 Main 实际恢复。',
+    windowKey: 'user:answer-1', messageId: 'recovery-message-1', nextAt: 100, reason: '原失败已保存，等待 Main 实际恢复。',
   })
 })
 

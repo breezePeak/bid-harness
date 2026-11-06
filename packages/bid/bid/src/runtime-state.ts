@@ -26,6 +26,8 @@ const stageValidationIssueSchema = z.object({
 
 /** Durable bounded Run progress shared by Session replay and project checkpoints. */
 export const bidRunProgressSchema: z.ZodType<BidRunProgress> = z.object({
+  checkpoint: z.object({ unit: z.string().min(1).max(240), inputSha256: z.string().regex(/^[a-f0-9]{64}$/u),
+    planSha256: z.string().regex(/^[a-f0-9]{64}$/u) }).strict().optional(),
   phase: z.string().regex(/^[a-z][a-z0-9_]{0,31}$/u),
   summary: z.string().min(1).max(240),
   completed: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional(),
@@ -35,7 +37,8 @@ export const bidRunProgressSchema: z.ZodType<BidRunProgress> = z.object({
 }).strict().refine(progress => progress.completed === undefined || progress.total === undefined
   || progress.completed <= progress.total, { message: 'completed must not exceed total' })
 
-const bidTaskFailureSchema = z.object({
+/** Run 与修订批次共用的安全故障持久化字段。 */
+export const bidTaskFailureSchema = z.object({
   code: z.string().optional(),
   message: z.string(),
   cause: z.object({ code: z.string().optional(), message: z.string(), status: z.number().int().optional(),

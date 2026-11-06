@@ -1,4 +1,4 @@
-import { readFile } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
@@ -41,6 +41,97 @@ function work(stage: BidStage): BidWorkDescriptor {
 }
 
 describe('BidRunCoordinator', () => {
+  it('清理拒绝保留原执行错误，附加资源诊断且不释放旧 Run', async () => {
+    const { session, runs, children } = await fixture()
+    const run = await runs.start(work('chapter_writing'))
+    children.drain.mockRejectedValueOnce(new Error('Child 清理失败'))
+    await expect(runs.suspend('executor_error', { code: 'TIMEOUT', message: '原模型等待超时' }))
+      .rejects.toMatchObject({ code: 'TIMEOUT', message: '原模型等待超时' })
+    expect(session.events.findLast(event => event.type === 'bid.run.notice')?.data.message).toContain('BID_RUN_CLEANUP_FAILED: children')
+    expect(runs.current).toBe(run)
+    await expect(runs.start(work('chapter_writing'))).rejects.toThrow('BID_RUN_ALREADY_ACTIVE')
+    await runs.retire()
+  })
+  it('延迟的已接纳正式写入排空后才允许恢复 Run 发布', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-late-run-commit-'))
+    const path = join(root, 'formal.md')
+    const { runs } = await fixture()
+    const run = await runs.start(work('chapter_writing'))
+    const gate = Promise.withResolvers<undefined>()
+    await writeFile(path, '原成果')
+    const writing = run.commits.publish(async (lease) => { await gate.promise; await lease.writeText(path, '旧 Run 已接纳成果') })
+    const stopping = runs.suspend('executor_error', { code: 'TIMEOUT', message: '执行超时' })
+    try {
+      await expect(runs.start(work('chapter_writing'))).rejects.toThrow('BID_RUN_ALREADY_ACTIVE')
+      expect(await readFile(path, 'utf8')).toBe('原成果')
+      gate.resolve(undefined)
+      await writing
+      await stopping
+      expect(await readFile(path, 'utf8')).toBe('旧 Run 已接纳成果')
+      const recovered = await runs.start(work('chapter_writing'), { runId: run.runId, cause: 'executor_error' })
+      await recovered.commits.writeText(path, '恢复成果')
+      await expect(run.commits.writeText(path, '晚到覆盖')).rejects.toThrow('BID_RUN_RETIRED')
+      expect(await readFile(path, 'utf8')).toBe('恢复成果')
+      await runs.retire()
+    } finally { gate.resolve(undefined); await writing; await stopping; await rm(root, { recursive: true, force: true }) }
+  })
+
+  it.each(['main_agents', 'children', 'activities', 'commits'])('清理 %s 超时可观察，旧资源排空前拒绝新写入和 Run', async (resource) => {
+    const ctx = new Context()
+    await ctx.plugin(SessionStore)
+    const session = ctx.sessions.create()
+    const pending = Promise.withResolvers<undefined>()
+    const scheduler = new TestScheduler()
+    const runs = new BidRunCoordinator(session, scheduler, { drain: () => resource === 'children' ? pending.promise : Promise.resolve() },
+      () => 0, undefined, undefined, undefined, undefined, undefined, undefined, { childMs: 1000, cleanupMs: 10 })
+    const run = await runs.start(work('chapter_writing'))
+    if (resource === 'main_agents') run.bindMainAgent({ cancel() {}, discardOwnedInbox() {}, whenIdle: () => pending.promise })
+    const activity = resource === 'activities' ? run.activities.track(() => pending.promise)
+      : resource === 'commits' ? run.commits.publish(() => pending.promise) : Promise.resolve()
+    await Promise.resolve()
+    const failure = { code: 'TIMEOUT', message: '原始模型超时' }
+    const settling = runs.suspend('executor_error', failure)
+    await vi.waitFor(() => { expect(session.events.some(event => event.type === 'bid.run.notice'
+      && event.data.message.includes(`BID_RUN_CLEANUP_TIMEOUT: ${resource}`))).toBe(true) })
+    expect(runs.current).toBe(run)
+    expect(scheduler.closed).toBe(true)
+    await expect(runs.start(work('chapter_writing'))).rejects.toThrow('BID_RUN_ALREADY_ACTIVE')
+    await expect(run.commits.publish(async () => {})).rejects.toThrow('BID_RUN_RETIRED')
+    expect(session.events.some(event => event.type === 'bid.task.changed')).toBe(false)
+    pending.resolve(undefined)
+    await activity
+    expect(await settling).toMatchObject({ error: failure })
+    expect(runs.current).toBeUndefined()
+    expect(session.events.findLast(event => event.type === 'bid.task.changed')).toMatchObject({ data: { state: { status: 'failed', failure } } })
+    await ctx.fiber.dispose()
+  })
+
+  it.each(['settlement_checkpoint', 'terminal_checkpoint', 'completion_checkpoint'] as const)(
+    '%s 未持久化时报告阻断并保留原 Run，写盘成功后才允许新 Run', async (resource) => {
+      const ctx = new Context()
+      await ctx.plugin(SessionStore)
+      const session = ctx.sessions.create()
+      const pending = Promise.withResolvers<number>()
+      let checkpoints = 0
+      const runs = new BidRunCoordinator(session, new TestScheduler(), { drain: async () => {} }, () => 0,
+        async () => {
+          checkpoints++
+          return checkpoints === (resource === 'terminal_checkpoint' ? 3 : 2) ? pending.promise : 0
+        }, undefined, undefined, undefined, undefined, undefined, { childMs: 1000, cleanupMs: 10 })
+      const run = await runs.start(work('chapter_writing'))
+      const settling = resource === 'completion_checkpoint' ? runs.complete(run, () => {})
+        : runs.suspend('executor_error', { code: 'TIMEOUT', message: '原始执行超时' })
+      try {
+        await vi.waitFor(() => { expect(session.events.some(event => event.type === 'bid.run.notice'
+          && event.data.message.includes(`BID_RUN_CLEANUP_TIMEOUT: ${resource}`))).toBe(true) })
+        expect(runs.current).toBe(run)
+        await expect(runs.start(work('chapter_writing'))).rejects.toThrow('BID_RUN_ALREADY_ACTIVE')
+        await expect(run.commits.publish(async () => {})).rejects.toThrow('BID_RUN_RETIRED')
+      } finally { pending.resolve(0); await settling; await ctx.fiber.dispose() }
+      expect(runs.current).toBeUndefined()
+    },
+  )
+
   it('publishes a bounded starting milestone and preserves latest progress at completion', async () => {
     const { session, runs } = await fixture()
     const run = await runs.start(work('tender_analysis'))

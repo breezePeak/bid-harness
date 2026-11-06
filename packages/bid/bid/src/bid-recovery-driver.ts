@@ -16,6 +16,7 @@ export interface BidRecoveryNotice {
   eligible: boolean
   reason: string
   facts: string[]
+  windowKey?: string
 }
 
 /**
@@ -154,6 +155,7 @@ export class BidRecoveryDriver {
     const confirmed = this.read(agent.session)
     if (this.available(agent.session) && confirmed !== undefined && (blocked || confirmed.eligible)
       && sameBidRecoveryTarget(confirmed.target, round.target) && confirmed.fingerprint === round.fingerprint
+      && (confirmed.windowKey ?? 'initial') === (round.windowKey ?? 'initial')
       && JSON.stringify(confirmed.target) === JSON.stringify(round.target)
       && !this.received(agent, String(message.id))) agent.steer(message)
   }
@@ -190,6 +192,7 @@ export class BidRecoveryDriver {
       return
     }
     if (prior !== undefined && !sameBidRecoveryTarget(prior.target, notice.target)) prior = undefined
+    if (prior !== undefined && (prior.windowKey ?? 'initial') !== (notice.windowKey ?? 'initial')) prior = undefined
     const budget = Math.min(prior?.budget ?? this.budget, this.budget)
     if ((prior?.dispatchAttempts ?? 0) > budget && prior?.state !== 'blocked') return
     if (prior !== undefined && prior.budget !== budget) {
@@ -216,7 +219,7 @@ export class BidRecoveryDriver {
         const executed = session.events.some(event => event.type === 'bid.recovery.requested'
           && event.seq > (receipt?.seq ?? enqueued?.seq ?? -1)
           && sameBidRecoveryTarget(event.data.target, notice.target))
-        prior = { ...prior, state: executed ? 'failed' : 'no_effect', reason: executed
+        prior = { ...prior, ...(executed ? { round: 0 } : {}), state: executed ? 'failed' : 'no_effect', reason: executed
           ? '执行后原失败仍存在，必须调整策略。' : 'Main 本轮没有落地恢复动作，原失败仍存在。' }
         await this.append(session, prior)
       } else {
@@ -224,10 +227,12 @@ export class BidRecoveryDriver {
         return
       }
     }
+    if (prior?.state === 'executing') prior = { ...prior, round: 0, state: 'failed' }
     if (!notice.eligible || (prior?.round ?? 0) >= budget && prior?.state !== 'scheduled') {
       const reason = !notice.eligible ? notice.reason
         : `BID_RECOVERY_BUDGET_EXHAUSTED: ${budget} 轮纠正后仍未解除原失败；${notice.reason}`
       const blocked: Round = { ownerSessionId: String(session.id), target: notice.target, fingerprint: notice.fingerprint,
+        ...(notice.windowKey === undefined ? {} : { windowKey: notice.windowKey }),
         round: prior?.round ?? 0, budget, state: 'blocked', reason,
         ...(prior?.dispatchAttempts === undefined ? {} : { dispatchAttempts: prior.dispatchAttempts }) }
       await this.notify(agent, blocked, notice)
@@ -241,6 +246,7 @@ export class BidRecoveryDriver {
     }
     else {
       scheduled = { ownerSessionId: String(session.id), target: notice.target, fingerprint: notice.fingerprint,
+        ...(notice.windowKey === undefined ? {} : { windowKey: notice.windowKey }),
         round: (prior?.round ?? 0) + 1, budget, state: 'scheduled',
         nextAt: Date.now() + (prior === undefined ? 0 : Math.min(2000, 250 * 2 ** prior.round)), reason: notice.reason }
       await this.append(session, scheduled)

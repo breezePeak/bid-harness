@@ -104,14 +104,17 @@ export function bidUserContinuableRun(session: Session, task: BidTaskState): Ret
     && failures.every(item => item.code === 'QUOTA' || item.code === 'BID_EXECUTOR_ERROR'
       || item.code === 'EVIDENCE_MAPPING_INFRASTRUCTURE_ERROR'
         && run.error?.cause?.code === 'QUOTA' && item.message === run.error.cause.message)
-  return recovery?.kind === 'repair' || recovery?.kind === 'retry' || quota ? run : undefined
+  const outputBudget = failures.some(item => item.code === 'OUTLINE_REVIEW_OUTPUT_BUDGET_EXCEEDED')
+    && failures.every(item => item.code === undefined || item.code === 'BID_EXECUTOR_ERROR'
+      || item.code === 'OUTLINE_REVIEW_OUTPUT_BUDGET_EXCEEDED')
+  return recovery?.kind === 'repair' || recovery?.kind === 'retry' || quota || outputBudget ? run : undefined
 }
 
 const BLOCKED_CODE = new RegExp(
   'INPUT_(?:INVALID|CHANGED|MISMATCH|MISSING|CORRUPT)|FILE_(?:MISSING|CORRUPT)|REVISION_(?:CONFLICT|MISMATCH)|RUN_RETIRED|EACCES|EPERM|'
   + 'CHAPTER_REVISION_(?:NOT_WRITABLE|SELECTION_INVALID|CONTEXT_UNAVAILABLE)|CREDENTIAL|QUOTA|PROVIDER|INFRASTRUCTURE|'
   + '^(?:AUTH|NO_ADAPTER|INVALID_REQUEST|PI_AI_ERROR)$|'
-  + 'CONTEXT_WINDOW_EXCEEDED|OUTLINE_REVIEW_INPUT_BUDGET_EXCEEDED|FATAL|CORRUPTION|FINGERPRINT|SEMANTIC_BLOCKED|CATALOG_MISMATCH|'
+  + 'CONTEXT_WINDOW_EXCEEDED|OUTLINE_REVIEW_(?:INPUT|OUTPUT)_BUDGET_EXCEEDED|FATAL|CORRUPTION|FINGERPRINT|SEMANTIC_BLOCKED|CATALOG_MISMATCH|'
   + 'SCOPE_STALE|DEPENDENCY_STALE|STALE_BASE|PREVIOUS_TARGET_INVALID|INVARIANT|DOCX_FORMAT_CORRUPT|^EVIDENCE_MAPPING_GUARD_ERROR$', 'iu',
 )
 const LEGACY_OUTLINE_REVIEW_BUDGET = /^目录审查对象超过输入预算：位置 (?:\d+|undefined)，估算 \d+ token，预算 12000 token。$/u
@@ -132,8 +135,8 @@ export function isLegacyOutlineReviewBudgetFailure(work: BidWorkDescriptor, fail
       || !BLOCKED_CODE.test(item.code) || legacy(item.code, item.message))
 }
 const RETRY_CODE = new RegExp(
-  '^(?:EIO|ETIMEDOUT|ECONNRESET|EAI_AGAIN|TRANSPORT|TIMEOUT|SERVER|EMPTY_RESPONSE|RATE_LIMIT|'
-  + '(?:EVIDENCE_MAPPING|CHAPTER)_SUBAGENT_INFRASTRUCTURE_ERROR|'
+  '^(?:EIO|ETIMEDOUT|ECONNRESET|EAI_AGAIN|TRANSPORT|TIMEOUT|SERVER|EMPTY_RESPONSE|RATE_LIMIT|UNKNOWN|'
+  + '(?:EVIDENCE_MAPPING|CHAPTER)_SUBAGENT_INFRASTRUCTURE_ERROR|CHAPTER_SUBAGENT_FAILURE_UNKNOWN|'
   + 'EVIDENCE_MAPPING_INFRASTRUCTURE_ERROR|WEB_PROVIDER_RATE_LIMITED|WEB_SEARCH_TIMEOUT|WEB_FETCH_TIMEOUT|TOOL_TIMEOUT|EVIDENCE_MAPPING_WEB_PROVIDER_BACKOFF)$', 'u',
 )
 const PROVIDER_FAILURE = new RegExp(
@@ -170,7 +173,9 @@ export function classifyBidRecovery(
   const reason = sanitizeBidErrorText(issue?.message ?? failure.message)
   const codes = [failure, ...failure.cause === undefined ? [] : [failure.cause], ...failure.issues ?? []].map(effectiveCode)
     .filter((value): value is string => value !== undefined)
-  const kind = codes.some(blockedCode)
+  const status = failure.cause?.status
+  const kind = codes.some(blockedCode) || status !== undefined && status >= 400 && status < 500 && status !== 408 && status !== 429
+    || codes.includes('SERVER') && (failure.cause?.retryable === false || status !== undefined && status < 500)
     || (codes.every(value => value === 'BID_EXECUTOR_ERROR') && PROVIDER_FAILURE.test(failure.message))
     ? 'blocked' : codes.some(retryCode) ? 'retry' : 'repair'
   return { kind, unit, reason }
@@ -227,12 +232,70 @@ function recordedProblemFingerprint(session: Session, target: { kind: 'run'; run
 }
 
 /**
+ * 从成果证明与明确用户继续的审计推导窗口；重启、Run 身份和普通进度不增加额度。
+ * @param session 原授权会话的完整日志。
+ * @param work 不可变的原 Work。
+ * @param budget 单个窗口的恢复执行上限。
+ * @param totalBudget 未追加用户授权时的 Work 累计上限，默认允许三个窗口。
+ * @returns 当前窗口身份、使用量和累计上限；历史用量始终保留。
+ */
+export function bidRecoveryWindow(session: Session, work: BidWorkDescriptor,
+  budget = DEFAULT_MODEL_STAGE_REPAIR_ATTEMPTS, totalBudget?: number): {
+  key: string
+  start: number
+  limit: number
+  totalLimit: number
+  attempts: number
+  windowAttempts: number
+} {
+  const runs = new Map(session.events.flatMap(event => event.type === 'bid.run.started'
+    && event.data.run.work.workId === work.workId && event.data.run.work.requestSha256 === work.requestSha256
+    && event.data.run.work.inputFingerprint === work.inputFingerprint ? [[event.data.run.runId, event.data.run] as const] : []))
+  const proofs = new Set<string>()
+  const grants = new Set<string>()
+  let key = 'initial'
+  let start = -1
+  let limit = budget
+  const recorded = session.events.find(event => event.type === 'bid.recovery.requested'
+    && event.data.target.kind === 'run' && event.data.target.workId === work.workId && event.data.totalBaseBudget !== undefined)
+  let totalLimit = totalBudget ?? (recorded?.type === 'bid.recovery.requested' ? recorded.data.totalBaseBudget : undefined) ?? 9
+  let added = 0
+  for (const event of session.events) {
+    if (event.type === 'bid.run.progress' && runs.get(event.data.runId)?.epoch === event.data.epoch
+      && event.data.progress.checkpoint !== undefined) {
+      const proof = createHash('sha256').update(JSON.stringify(event.data.progress.checkpoint)).digest('hex')
+      const unit = event.data.progress.checkpoint.unit
+      if (!proofs.has(unit)) { proofs.add(unit); key = `progress:${proof}`; start = event.seq; limit = budget }
+    }
+    if (event.type !== 'bid.recovery.requested' || event.data.target.kind !== 'run'
+      || event.data.target.workId !== work.workId) continue
+    totalLimit = Math.min(totalLimit, event.data.totalBaseBudget ?? totalLimit)
+    const message = event.data.sourceMessageId
+    if (event.data.continuation === true && message !== undefined && !grants.has(message)
+      && session.events.some(item => item.seq < event.seq && item.type === 'user/message'
+        && String(item.data.id) === message && item.data.source.kind === 'user')) {
+      grants.add(message)
+      added += Math.min(budget, event.data.windowBudget ?? budget)
+      key = `user:${message}`
+      start = event.seq
+      limit = budget
+    }
+    if (event.seq >= start) limit = Math.min(limit, event.data.windowBudget ?? budget)
+  }
+  const requests = session.events.filter(event => event.type === 'bid.recovery.requested'
+    && event.data.target.kind === 'run' && event.data.target.workId === work.workId)
+  return { key, start, limit, totalLimit: totalLimit + added, attempts: requests.length,
+    windowAttempts: requests.filter(event => event.seq >= start).length }
+}
+
+/**
  * Current run target and durable history shared by admission, inspect, and recovery.
  * @param session - Main Session containing the current Run and audit history.
- * @param budget 原 Work 可执行的有限恢复次数。
+ * @param budget 单个窗口的恢复执行次数。
+ * @param totalBudget 原 Work 未追加授权时的累计执行上限。
  * @returns Exact target, history and reason for admission.
  */
-export function bidRunRecoveryEligibility(session: Session, budget?: number): {
+export function bidRunRecoveryEligibility(session: Session, budget?: number, totalBudget?: number): {
   eligible: boolean
   reason: string
   attempts: number
@@ -242,6 +305,10 @@ export function bidRunRecoveryEligibility(session: Session, budget?: number): {
   lastInstruction?: string
   target?: { kind: 'run'; runId: string; workId: string }
   fingerprint?: string
+  windowKey?: string
+  windowAttempts?: number
+  totalLimit?: number
+  windowLimit?: number
 } {
   const task = session.events.reduce(reduceBidTaskState, BID_INITIAL_TASK_STATE)
   const run = bidRecoverableRun(session, task)
@@ -253,12 +320,18 @@ export function bidRunRecoveryEligibility(session: Session, budget?: number): {
     && event.data.target.workId === run.work.workId ? [{ ...event.data,
       progressFingerprint: recordedProblemFingerprint(session, event.data.target, event.seq, event.data.progressFingerprint) }] : [])
   const attempts = history.length
+  const storedRound = session.events.findLast(event => event.type === 'bid.recovery.round'
+    && event.data.target.kind === 'run' && event.data.target.workId === run.work.workId)
+  const window = bidRecoveryWindow(session, run.work,
+    budget ?? (storedRound?.type === 'bid.recovery.round' ? storedRound.data.budget : undefined), totalBudget)
   const target = { kind: 'run' as const, runId: run.runId, workId: run.work.workId }
   const fingerprint = run.error === undefined ? undefined : bidRecoveryFingerprint(run.work, run.error, run.progress)
   const sameProblemCount = fingerprint === undefined ? 0 : history.slice().reverse()
     .findIndex(event => event.progressFingerprint !== fingerprint)
   const repeated = sameProblemCount < 0 ? history.length : sameProblemCount
-  const details = { attempts, target, ...(fingerprint === undefined ? {} : { fingerprint }), sameProblemCount: repeated,
+  const details = { attempts, target, windowKey: window.key, windowAttempts: window.windowAttempts,
+    totalLimit: window.totalLimit, windowLimit: window.limit,
+    ...(fingerprint === undefined ? {} : { fingerprint }), sameProblemCount: repeated,
     previousInstructions: history.slice(-3).map(event => sanitizeBidErrorText(event.instruction, 400)),
     ...(repeated > 0 ? { lastInstruction: history.at(-1)?.instruction ?? '' } : {}),
     requiresStrategyChange: repeated > 0 }
@@ -275,10 +348,12 @@ export function bidRunRecoveryEligibility(session: Session, budget?: number): {
     return { eligible: false, reason: run.error?.recovery?.reason ?? run.error?.message ?? '故障未被认定可自动恢复。', ...details }
   }
   const settled = session.events.findLast(event => event.type === 'bid.recovery.round' && event.data.target.kind === 'run'
-    && event.data.target.workId === run.work.workId)
+    && event.data.target.workId === run.work.workId && (event.data.windowKey ?? 'initial') === window.key)
   const storedBudget = settled?.type === 'bid.recovery.round' ? settled.data.budget : undefined
-  const limit = Math.min(budget ?? storedBudget ?? DEFAULT_MODEL_STAGE_REPAIR_ATTEMPTS, storedBudget ?? Infinity)
-  if (attempts >= limit) return { eligible: false, reason: 'BID_RECOVERY_BUDGET_EXHAUSTED: 原 Work 的执行恢复预算已耗尽。', ...details }
+  const limit = Math.min(window.limit, storedBudget ?? Infinity)
+  details.windowLimit = limit
+  if (attempts >= window.totalLimit || window.windowAttempts >= limit) return { eligible: false,
+    reason: `BID_RECOVERY_BUDGET_EXHAUSTED: 当前窗口 ${window.windowAttempts}/${limit}；原 Work 累计 ${attempts}/${window.totalLimit}。`, ...details }
   const settledRunId = settled?.type === 'bid.recovery.round' && settled.data.target.kind === 'run'
     ? settled.data.target.runId : undefined
   const resumedReclassified = settled?.type === 'bid.recovery.round' && settledRunId !== undefined
@@ -383,7 +458,12 @@ export function isBidWritingPlanRecoverableFailure(failure: { code: string; mess
 export function bidRecoveryInstructionRepeated(session: Session,
   target: { kind: 'run'; workId: string; runId: string } | { kind: 'writing_plan'; requestId: string; attemptId: string },
   fingerprint: string | undefined, instruction: string): boolean {
+  const task = session.events.reduce(reduceBidTaskState, BID_INITIAL_TASK_STATE)
+  const run = bidRecoverableRun(session, task)
+  const start = target.kind === 'run' && run?.work.workId === target.workId
+    ? bidRecoveryWindow(session, run.work).start : -1
   return session.events.some(event => event.type === 'bid.recovery.requested'
+    && event.seq >= start
     && (target.kind === 'run'
       ? event.data.target.kind === 'run' && event.data.target.workId === target.workId
       : event.data.target.kind === 'writing_plan' && event.data.target.requestId === target.requestId)

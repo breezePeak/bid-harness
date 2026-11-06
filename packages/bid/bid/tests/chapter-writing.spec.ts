@@ -71,6 +71,8 @@ import { executeWritingCapability, validateWritingCapability } from '../src/bid-
 import { createBidCapabilityDispatcher } from '../src/bid-capability-dispatcher.ts'
 import { validateDocumentReviewCapability } from '../src/bid-document-review-capability.ts'
 import { BidStageAttentionRequiredError, BidStageExecutionError } from '../src/control-plane-contract.ts'
+import type { BidTaskFailure } from '../src/control-plane-contract.ts'
+import { safeRecoverableBidFailure } from '../src/bid-recovery.ts'
 
 type SectionResearch = typeof import('../src/evidence-mapping-executor.ts').executeSectionResearch
 const sectionResearchHook = vi.hoisted(() => ({ run: undefined as SectionResearch | undefined }))
@@ -100,7 +102,9 @@ const executeChapterWriting = (
     maxRepairAttempts: 1,
     maxConcurrency: 3,
     ...stageOptions,
-    run: run ?? createTestBidRunContext(signal instanceof AbortSignal ? { signal } : {}),
+    run: run ?? createTestBidRunContext({ ...(signal instanceof AbortSignal ? { signal } : {}), work: {
+      ...createTestBidRunContext().work, kind: 'stage_execution', stage: 'chapter_writing',
+    } }),
   } as Parameters<typeof executeChapterWritingImplementation>[3])
 }
 
@@ -541,7 +545,8 @@ function fixtureAgent(
   dependencies: Record<string, string[]> = {},
   automatic = true,
   validCandidate: (attempt: number, request: SubagentStartRequest) => boolean = () => true,
-  resultForAttempt?: (attempt: number, request: SubagentStartRequest) => SubagentResult | Promise<SubagentResult>,
+  resultForAttempt?: (attempt: number, request: SubagentStartRequest) =>
+    (SubagentResult & { failure?: BidTaskFailure }) | Promise<SubagentResult & { failure?: BidTaskFailure }>,
   webResearch = false,
 ) {
   let mainPending = false
@@ -650,7 +655,7 @@ function fixtureAgent(
         void (async () => {
           const result = await resultForAttempt?.(currentAttempt, request)
             ?? { stopReason: 'completed', output: [], structured: candidateFrom(request, validCandidate(currentAttempt, request), webResearch && currentAttempt === 1) }
-          let reason: object = { kind: result.stopReason === 'completed' ? 'completed' : 'error', error: { message: result.diagnostic ?? result.stopReason } }
+          let reason: object = { kind: result.stopReason === 'completed' ? 'completed' : 'error', error: result.failure ?? { message: result.diagnostic ?? result.stopReason } }
           try {
             if (result.structured !== undefined) await call(localAgent, registry, events, 'submit_chapter', result.structured)
           } catch (error) {
@@ -799,6 +804,15 @@ function fixtureAgent(
   const listenerSets = new Map<string, Set<(...args: unknown[]) => void>>()
   const nextStep: UserMessage[] = []
   const nextTurn: UserMessage[] = []
+  const persistence = {
+    async inspect(id: SessionId) {
+      const log = parseChapterExecutionLog(JSON.parse(await readFile(join(workspace.projectRoot, 'chapters/execution-log.json'), 'utf8')))
+      if (!log.sections.some(section => section.attempts.some(attempt => attempt.child_session_id === id))) {
+        throw new Error('测试 Writer 缺少持久身份')
+      }
+      return { meta: { cwd: workspace.root, origin: 'subagent', parentSession: SessionId('parent') } }
+    },
+  }
   const agent = {
     id: 'parent',
     options: {},
@@ -821,7 +835,7 @@ function fixtureAgent(
     ctx: {
       agents: { get: (id: SessionId) => children.get(id)?.child },
       get: (name: string) => name === 'tools' ? tools : name === 'subagents' ? subagents
-        : name === 'attachments' ? attachments : name === 'llm' ? llm : undefined,
+        : name === 'attachments' ? attachments : name === 'llm' ? llm : name === 'sessionPersistence' ? persistence : undefined,
       on: (name: string, listener: (...args: unknown[]) => void) => {
         const entries = listenerSets.get(name) ?? new Set<(...args: unknown[]) => void>()
         entries.add(listener)
@@ -2201,17 +2215,23 @@ describe('chapter-writing executor', () => {
       }
     })
 
-    await executeChapterWriting(fixture.agent, workspace, buildBidStageTask('chapter_writing'), {
+    await expect(executeChapterWriting(fixture.agent, workspace, buildBidStageTask('chapter_writing'), {
       maxRepairAttempts: 1,
       maxConcurrency: 1,
-    })
+    })).rejects.toMatchObject({ code: 'CHAPTER_SUBAGENT_FAILURE_UNKNOWN' })
 
     const log = parseChapterExecutionLog(JSON.parse(await readFile(join(workspace.projectRoot, 'chapters/execution-log.json'), 'utf8')))
-    expect(log.sections[0]).toMatchObject({ status: 'completed', final_writer_child_session_id: fixture.starts[0]!.run.id })
+    expect(log.sections[0]).toMatchObject({ status: 'failed' })
+    expect(log.sections[0]?.reviewed_candidate).toMatchObject({ review: { verdict: 'repair' },
+      writer_child_session_id: fixture.starts[0]!.run.id })
+    expect(log.sections[0]?.attempts.some(attempt => attempt.role === 'reviewer' && attempt.accepted)).toBe(true)
     expect(log.sections[0]?.attempts.filter(attempt => attempt.role === 'writer').map(attempt => attempt.stop_reason))
       .toEqual(['completed', 'error', 'error'])
-    const review = JSON.parse(await readFile(join(workspace.projectRoot, 'chapters/reviews/0001.json'), 'utf8')) as { verdict: string }
-    expect(review.verdict).toBe('repair')
+    await expect(readFile(join(workspace.projectRoot, 'chapters/manifest.json'), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+    const restored = fixtureAgent(workspace, outline)
+    await executeChapterWriting(restored.agent, workspace, buildBidStageTask('chapter_writing'), { maxRepairAttempts: 1, maxConcurrency: 1 })
+    expect(restored.starts.some(item => item.request.label?.endsWith('章节1'))).toBe(false)
+    expect(await readFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), 'utf8')).toContain('完整实施措施与质量控制。')
   })
 
   it('无效审查引句不能生成报告，结束后不另建 Child 补协议或重写正文', async () => {
@@ -2894,6 +2914,63 @@ describe('chapter-writing executor', () => {
     expect(fixture.disposed).toHaveLength(6)
   })
 
+  it.each([0, 1, 3])('持续 TIMEOUT 的正文执行次数为首次加 %i 次追加尝试', async (budget) => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-s5-timeout-')))
+    const outline = await writeInputs(workspace)
+    const fixture = fixtureAgent(workspace, outline, {}, true, () => true, (_attempt, request) =>
+      request.label?.endsWith('章节1') === true
+        ? { stopReason: 'error', output: [], failure: { code: 'TIMEOUT', message: '等待模型超时',
+          cause: { code: 'TIMEOUT', message: 'token=private provider payload: private', status: 504, retryable: true } } }
+        : { stopReason: 'completed', output: [], structured: candidateFrom(request) })
+    const work = { ...createTestBidRunContext().work, kind: 'stage_execution' as const, stage: 'chapter_writing' as const }
+    const error: unknown = await executeChapterWriting(fixture.agent, workspace, buildBidStageTask('chapter_writing'), {
+      maxRepairAttempts: budget, maxConcurrency: 1, run: createTestBidRunContext({ work }),
+    }).catch((error: unknown) => error)
+    const failure = safeRecoverableBidFailure(work, error)
+    expect(failure).toMatchObject({ code: 'TIMEOUT', recovery: { kind: 'retry' }, cause: { status: 504, retryable: true } })
+    expect(JSON.stringify(failure)).not.toContain('private')
+    expect(fixture.starts.filter(item => item.request.label?.endsWith('章节1'))).toHaveLength(budget + 1)
+  })
+
+  it.each(['exhausted', 'recovered'])('内容修复与基础设施预算独立，交替执行：%s', async (mode) => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-s5-mixed-retries-')))
+    const outline = await writeInputs(workspace)
+    let executions = 0
+    const fixture = fixtureAgent(workspace, outline, {}, true, () => true, (_attempt, request) => {
+      if (request.label?.endsWith('章节1') === true) {
+        executions++
+        if (executions === 1 || mode === 'exhausted' && executions === 3) {
+          return { stopReason: 'error', output: [], failure: { code: 'TIMEOUT', message: '模型超时' } }
+        }
+        if (executions === 2) return { stopReason: 'completed', output: [] }
+      }
+      return { stopReason: 'completed', output: [], structured: candidateFrom(request) }
+    })
+    const execution = executeChapterWriting(fixture.agent, workspace, buildBidStageTask('chapter_writing'), {
+      maxRepairAttempts: 1, maxConcurrency: 1,
+    })
+    if (mode === 'exhausted') await expect(execution).rejects.toMatchObject({ code: 'TIMEOUT' })
+    else await execution
+    expect(executions).toBe(3)
+    const log = parseChapterExecutionLog(JSON.parse(await readFile(join(workspace.projectRoot, 'chapters/execution-log.json'), 'utf8')))
+    expect(log.sections[0]?.status).toBe(mode === 'exhausted' ? 'failed' : 'completed')
+  })
+
+  it.each(['AUTH', 'QUOTA', 'INVALID_REQUEST'])('%s 返回失败保留身份且不执行内容修复', async (code) => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-s5-blocked-')))
+    const outline = await writeInputs(workspace)
+    const fixture = fixtureAgent(workspace, outline, {}, true, () => true, (_attempt, request) =>
+      request.label?.endsWith('章节1') === true
+        ? { stopReason: 'error', output: [], failure: { code, message: '模型执行阻断', cause: { code, message: '安全原因', retryable: false } } }
+        : { stopReason: 'completed', output: [], structured: candidateFrom(request) })
+    const work = { ...createTestBidRunContext().work, kind: 'stage_execution' as const, stage: 'chapter_writing' as const }
+    const error: unknown = await executeChapterWriting(fixture.agent, workspace, buildBidStageTask('chapter_writing'), {
+      maxRepairAttempts: 3, run: createTestBidRunContext({ work }),
+    }).catch((error: unknown) => error)
+    expect(safeRecoverableBidFailure(work, error)).toMatchObject({ code, recovery: { kind: 'blocked' }, cause: { retryable: false } })
+    expect(fixture.starts.filter(item => item.request.label?.endsWith('章节1'))).toHaveLength(1)
+  })
+
   it('lets unrelated chapters finish before reporting one exhausted branch', async () => {
     const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-chapter-writing-failure-')))
     const outline = await writeInputs(workspace)
@@ -2928,7 +3005,7 @@ describe('chapter-writing executor', () => {
     await expect(executeChapterWriting(fixture.agent, workspace, buildBidStageTask('chapter_writing'), {
       maxRepairAttempts: 0,
       maxConcurrency: 1,
-    })).rejects.toThrow('CHAPTER_SUBAGENT_INFRASTRUCTURE_ERROR')
+    })).rejects.toThrow('provider unavailable')
     const log = parseChapterExecutionLog(JSON.parse(await readFile(join(workspace.projectRoot, 'chapters/execution-log.json'), 'utf8')))
     expect(log.sections[0]).toMatchObject({ section_id: 'SEC-1', status: 'failed', attempts: [expect.objectContaining({ stop_reason: 'infrastructure-error' })] })
     await expect(readFile(join(workspace.projectRoot, 'chapters/manifest.json'), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
@@ -2984,49 +3061,53 @@ describe('chapter-writing executor', () => {
     expect(finalLog.sections[0]?.attempts).toEqual(priorLog.sections[0]?.attempts)
   })
 
-  it('正文批次保存原 Writer 错误码，失败后复用原完成产物恢复同一单元', async () => {
-    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-writing-batch-retry-')))
-    const outline = await writeInputs(workspace)
-    const first = fixtureAgent(workspace, outline)
-    await executeChapterWriting(first.agent, workspace, buildBidStageTask('chapter_writing'), { maxRepairAttempts: 0 })
-    const { addRevisionIssue, readRevisionQueue } = await import('../src/chapter-revision-queue.ts')
-    const { createRevisionBatch, readRevisionBatch, writeRevisionBatch } = await import('../src/chapter-revision-batch.ts')
-    const body = await readFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), 'utf8')
-    const queue = addRevisionIssue(await readRevisionQueue(workspace), { section_id: 'SEC-1', scope: 'chapter',
-      reference: { scope: 'chapter', base_content_sha256: chapterContentSha256(body) },
-      instruction: '保持原业务含义，修订表达', suggestion: null }, '章节1', 1)
-    const issue = queue.issues[0]!
-    const plan = { issue_ids: [issue.issue_id], expected_queue_revision: queue.revision,
-      tasks: [{ task_id: 'task-1', section_id: 'SEC-1', issue_ids: [issue.issue_id], depends_on: [] }] }
-    const { batch } = createRevisionBatch(queue, plan, 'BATCH-RETRY', 1, [])
-    await writeRevisionBatch(workspace, batch)
-    const input = { batchId: batch.batch_id, tasks: [{ ...plan.tasks[0]!, issues: [{
-      issue_id: issue.issue_id, instruction: issue.instruction, suggestion: null, scope: 'chapter' as const,
-      reference_text: null, start: null, end: null,
-    }] }] }
-    const failed = fixtureAgent(workspace, outline)
-    const work = { ...createTestBidRunContext().work, kind: 'capability_task' as const, stage: 'chapter_writing' as const }
-    failed.subagents.followup.mockRejectedValueOnce(Object.assign(new Error('凭证不可用'), { code: 'CREDENTIAL_MISSING' }))
-    await executeChapterWriting(failed.agent, workspace, buildBidStageTask('chapter_writing'), {
-      maxRepairAttempts: 0, revisionBatch: input, documentReview: 'defer', run: createTestBidRunContext({ work }),
+  it.each(['AUTH', 'QUOTA', 'TIMEOUT'].flatMap(code => ['throw', 'failure'].map(mode => ({ code, mode }))))(
+    '正文批次 $code/$mode 保留安全故障，恢复不改写独立章节', async ({ code, mode }) => {
+      const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-writing-batch-retry-')))
+      const outline = await writeInputs(workspace)
+      const first = fixtureAgent(workspace, outline)
+      await executeChapterWriting(first.agent, workspace, buildBidStageTask('chapter_writing'), { maxRepairAttempts: 0 })
+      const { addRevisionIssue, readRevisionQueue } = await import('../src/chapter-revision-queue.ts')
+      const { createRevisionBatch, readRevisionBatch, writeRevisionBatch } = await import('../src/chapter-revision-batch.ts')
+      const body = await readFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), 'utf8')
+      const queue = addRevisionIssue(await readRevisionQueue(workspace), { section_id: 'SEC-1', scope: 'chapter',
+        reference: { scope: 'chapter', base_content_sha256: chapterContentSha256(body) },
+        instruction: '保持原业务含义，修订表达', suggestion: null }, '章节1', 1)
+      const issue = queue.issues[0]!
+      const plan = { issue_ids: [issue.issue_id], expected_queue_revision: queue.revision,
+        tasks: [{ task_id: 'task-1', section_id: 'SEC-1', issue_ids: [issue.issue_id], depends_on: [] }] }
+      const { batch } = createRevisionBatch(queue, plan, 'BATCH-RETRY', 1, [])
+      await writeRevisionBatch(workspace, batch)
+      const input = { batchId: batch.batch_id, tasks: [{ ...plan.tasks[0]!, issues: [{
+        issue_id: issue.issue_id, instruction: issue.instruction, suggestion: null, scope: 'chapter' as const,
+        reference_text: null, start: null, end: null,
+      }] }] }
+      const cause = { code, message: '安全原因', status: code === 'AUTH' ? 401 : 503, retryable: code === 'TIMEOUT' }
+      const failed = fixtureAgent(workspace, outline, {}, true, () => true, () => ({
+        stopReason: 'error', output: [], failure: { code, message: '模型执行失败', cause },
+      }))
+      const work = { ...createTestBidRunContext().work, kind: 'capability_task' as const, stage: 'chapter_writing' as const }
+      if (mode === 'throw') failed.subagents.followup.mockRejectedValueOnce(Object.assign(new Error('模型执行失败'), { code, cause }))
+      await executeChapterWriting(failed.agent, workspace, buildBidStageTask('chapter_writing'), {
+        maxRepairAttempts: 0, revisionBatch: input, documentReview: 'defer', run: createTestBidRunContext({ work }),
+      })
+      const saved = (await readRevisionBatch(workspace, batch.batch_id))!
+      expect(saved.tasks[0]).toMatchObject({ status: 'failed', failure: { code, message: '模型执行失败', cause } })
+      expect(await readFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), 'utf8')).toBe(body)
+      const independent = await readFile(join(workspace.projectRoot, 'chapters/sections/0003.md'), 'utf8')
+      await writeRevisionBatch(workspace, { ...saved, tasks: saved.tasks.map(task => ({ ...task, status: 'queued', failure: null })) })
+      const retry = fixtureAgent(workspace, outline)
+      retry.reviewerResult.mockImplementation(request => ({ ...reviewFrom(request), revision_issue_checks: [{
+        issue_id: issue.issue_id, status: 'satisfied', reason: '修订已满足意见',
+      }] }))
+      await executeChapterWriting(retry.agent, workspace, buildBidStageTask('chapter_writing'), {
+        maxRepairAttempts: 0, revisionBatch: input, documentReview: 'defer', run: createTestBidRunContext({ work }),
+      })
+      const retried = await readRevisionBatch(workspace, batch.batch_id)
+      expect(retried?.tasks[0]?.status, JSON.stringify(retried?.tasks[0]?.failure)).toBe('completed')
+      expect(retry.subagents.followup).toHaveBeenCalledTimes(1)
+      expect(await readFile(join(workspace.projectRoot, 'chapters/sections/0003.md'), 'utf8')).toBe(independent)
     })
-    const saved = (await readRevisionBatch(workspace, batch.batch_id))!
-    expect(saved.tasks[0]).toMatchObject({ status: 'failed', failure: { code: 'CREDENTIAL_MISSING', message: '凭证不可用' } })
-    expect(await readFile(join(workspace.projectRoot, 'chapters/sections/0001.md'), 'utf8')).toBe(body)
-    const independent = await readFile(join(workspace.projectRoot, 'chapters/sections/0003.md'), 'utf8')
-    await writeRevisionBatch(workspace, { ...saved, tasks: saved.tasks.map(task => ({ ...task, status: 'queued', failure: null })) })
-    const retry = fixtureAgent(workspace, outline)
-    retry.reviewerResult.mockImplementation(request => ({ ...reviewFrom(request), revision_issue_checks: [{
-      issue_id: issue.issue_id, status: 'satisfied', reason: '修订已满足意见',
-    }] }))
-    await executeChapterWriting(retry.agent, workspace, buildBidStageTask('chapter_writing'), {
-      maxRepairAttempts: 0, revisionBatch: input, documentReview: 'defer', run: createTestBidRunContext({ work }),
-    })
-    const retried = await readRevisionBatch(workspace, batch.batch_id)
-    expect(retried?.tasks[0]?.status, JSON.stringify(retried?.tasks[0]?.failure)).toBe('completed')
-    expect(retry.subagents.followup).toHaveBeenCalledTimes(1)
-    expect(await readFile(join(workspace.projectRoot, 'chapters/sections/0003.md'), 'utf8')).toBe(independent)
-  })
 
   it('写作计划升级只重写模型判定受影响的已完成章节', async () => {
     const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-writing-plan-revision-')))
@@ -3105,7 +3186,7 @@ describe('chapter-writing executor', () => {
     await expect(executeChapterWriting(failed.agent, workspace, buildBidStageTask('chapter_writing'), {
       maxRepairAttempts: 0,
       maxConcurrency: 2,
-    })).rejects.toThrow('infrastructure failed for SEC-2')
+    })).rejects.toThrow('SEC-2 执行失败：writer session unavailable')
     const failedLog = parseChapterExecutionLog(JSON.parse(await readFile(
       join(workspace.projectRoot, 'chapters/execution-log.json'), 'utf8',
     )))

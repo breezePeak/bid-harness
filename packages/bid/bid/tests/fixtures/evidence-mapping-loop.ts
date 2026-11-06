@@ -465,6 +465,7 @@ function researchAssessment(sufficient: boolean, affectsBlueprint: boolean, mode
  * @param repair - 搜索错误后调整查询，跨 Child 轮次抓取 URL，并修复目录 Schema。
  * @param structureRecovery - 使用两代内容修复脚本；automatic 在同一 Run 内完成，true 在首代后耗尽预算供 Main 恢复。
  * @param largeReview - 大原文使用足够容量、硬预算分段或旧本地预算失败场景。
+ * @param deferChildReports 在初始执行结算后再递交 Child 通知，固定回放的并发调度。
  * @returns 阶段结果、Host、工作区及模型实际请求。
  */
 export async function runEvidenceMappingLoop(ctx: Context, root: string, repair: boolean, interactive = false,
@@ -480,7 +481,7 @@ export async function runEvidenceMappingLoop(ctx: Context, root: string, repair:
     resume?: true
     production?: true
   }, researchMode?: 'zero' | 'local' | 'external_unbound', structureRecovery: boolean | 'automatic' = false,
-  largeReview: boolean | 'partitioned' | 'legacy' | 'server' = false) {
+  largeReview: boolean | 'partitioned' | 'legacy' | 'server' = false, deferChildReports = false) {
   const sessionId = SessionId('s3-real-loop')
   const workspace = new BidWorkspace(root)
   const owner = { id: sessionId }
@@ -727,9 +728,24 @@ export async function runEvidenceMappingLoop(ctx: Context, root: string, repair:
   )
 
   const suspended = agent.session.events.findLast(event => event.type === 'bid.run.suspended' || event.type === 'bid.run.started')
-  const outcome = fault?.resume === true && (suspended?.type === 'bid.run.suspended' || suspended?.type === 'bid.run.started')
-    ? await orchestrator.resume(suspended.data.run.runId)
-    : await orchestrator.runCurrentAutomaticStage()
+  const steer = agent.steer.bind(agent)
+  const reports: Array<Parameters<typeof agent.steer>[0]> = []
+  if (deferChildReports) agent.steer = (message) => {
+    if (message.source.kind === 'subagent-settled') reports.push(message)
+    else steer(message)
+  }
+  let outcome
+  try {
+    outcome = fault?.resume === true && (suspended?.type === 'bid.run.suspended' || suspended?.type === 'bid.run.started')
+      ? await orchestrator.resume(suspended.data.run.runId)
+      : await orchestrator.runCurrentAutomaticStage()
+  } finally {
+    if (deferChildReports) {
+      agent.steer = steer
+      for (const message of reports) steer(message)
+      await agent.whenIdle()
+    }
+  }
   adapter.interactive = interactive
   return { agent, workspace, sourceUrl, outcome, requests: adapter.requests, adapter,
     parentScript, childScript, reviewScript: adapter.reviewScript }
@@ -751,7 +767,7 @@ export async function runEvidenceMappingRecoveryLoop(ctx: Context, root: string,
   const takeover = scenario === 'server-takeover' || scenario === 'transport-takeover'
   const structure = scenario === 'structure' || takeover
   const result = await runEvidenceMappingLoop(ctx, root, false, true, undefined, 'local', structure,
-    structure ? false : scenario === 'server' ? 'server' : 'legacy')
+    structure ? false : scenario === 'server' ? 'server' : 'legacy', scenario === 'legacy-output')
   if (scenario === 'legacy-output') result.adapter.reviewMaxTokens = true
   if (result.outcome.status !== 'failed') throw new Error('结构恢复夹具未产生首代修复后的失败：' + JSON.stringify(result.outcome))
   if (scenario === 'server' || takeover) {
@@ -787,15 +803,14 @@ export async function runEvidenceMappingRecoveryLoop(ctx: Context, root: string,
   const instruction = await prepareRecovery?.(result) ?? (structure ? '保留已研究资料，明确授权岗位核验与审计岗位追溯责任，只补修失败章节后重新复核。'
     : scenario === 'server' ? '继续原 S4，有限重试服务端处理失败，保留已完成研究及正式确认。'
       : '继续原 S4，按当前模型预算重新组织审核，保留已完成研究及正式确认。')
-  for (let round = 0; round < (scenario === 'legacy-output' ? 2 : 1); round++) {
-    const recoveryInstruction = round === 0 ? instruction : '提高目录复核输出预算，保留原 S4 的目录和已完成研究，只继续审核与最终检查。'
-    if (round === 1) result.adapter.outlineReview!.defaultMaxTokens = 8_192
+  {
+    const recoveryInstruction = instruction
     result.parentScript.push(...takeover ? [
       toolCall('inspect-new-goal', 'bid_project_inspect', { query: { object: 'outline' } }),
       toolCall('accept-new-goal', 'bid_run_task', { supersede: true, task: { goal: instruction, scope: { kind: 'project' },
         steps: [{ description: '补修目录并重新复核', scope: { source: 'task' }, call: { capability: 'outline.refine', input: { feedback: instruction } } }] } }),
-    ] : [toolCall(round === 0 ? 'inspect-structure-recovery' : 'inspect-output-recovery', 'bid_stage_inspect', { view: 'recovery' }),
-      toolCall(round === 0 ? 'accept-structure-recovery' : 'accept-output-recovery',
+    ] : [toolCall('inspect-structure-recovery', 'bid_stage_inspect', { view: 'recovery' }),
+      toolCall('accept-structure-recovery',
         continuation === 'resume' ? 'bid_resume_current_run' : 'bid_recover_task',
         continuation === 'resume' ? {} : { target: 'run', instruction: recoveryInstruction })],
     finalText('已接纳定向补修，等待实际修改及复核结果。'))
@@ -803,9 +818,7 @@ export async function runEvidenceMappingRecoveryLoop(ctx: Context, root: string,
     const off = ctx.on('session/event', (session, event) => {
       if (session === result.agent.session && event.type === 'bid.user_confirmation.required' && event.data.stage === 'evidence_mapping') done.resolve(undefined)
       if (session === result.agent.session && event.type === 'bid.task.changed' && event.data.state.status === 'failed') {
-        if (scenario === 'legacy-output' && round === 0
-          && event.data.state.failure.issues?.some(issue => issue.code === 'OUTLINE_REVIEW_OUTPUT_BUDGET_EXCEEDED')) done.resolve(undefined)
-        else done.reject(new Error('S4 定向补修失败：' + JSON.stringify(event.data.state.failure)))
+        done.reject(new Error('S4 定向补修失败：' + JSON.stringify(event.data.state.failure)))
       }
     }, { global: true })
     let timer: ReturnType<typeof setTimeout> | undefined

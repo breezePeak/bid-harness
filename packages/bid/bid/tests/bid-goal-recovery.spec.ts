@@ -12,6 +12,80 @@ import { inspectBidStage } from '../src/stage-interaction.ts'
 import type { BidRunData, BidWorkDescriptor } from '../src/control-plane-contract.ts'
 import { BidStageExecutionError } from '../src/control-plane-contract.ts'
 import { BidRunCoordinator } from '../src/run-coordinator.ts'
+import { DirectBidRunScheduler } from '../src/run-coordinator.ts'
+import { createUserMessage } from '@deepseek-ai/dsh-llm'
+
+it('验收成果更新恢复窗口，重复证明与新 Run 不增加额度，累计额度保持上限', async () => {
+  const ctx = new Context()
+  cleanup.push(() => ctx.fiber.dispose())
+  await ctx.plugin(SessionStore)
+  const session = ctx.sessions.create()
+  session.append('bid.task.changed', { state: { workflow: { kind: 'full_bid', stage: 'outline_generation' }, status: 'ready', run: null } })
+  const runs = new BidRunCoordinator(session, new DirectBidRunScheduler(), { drain: async () => {} }, () => 0)
+  let run = await runs.start(work)
+  const fail = () => runs.suspend('executor_error', safeRecoverableBidFailure(work,
+    Object.assign(new Error('模型暂时超时'), { code: 'TIMEOUT' })))
+  await fail()
+  for (let attempt = 0; attempt < 6; attempt++) {
+    expect(bidRunRecoveryEligibility(session, 2, 6).eligible).toBe(true)
+    session.append('bid.recovery.requested', { ownerSessionId: String(session.id),
+      target: { kind: 'run', workId: work.workId, runId: run.runId }, unit: work.workId,
+      instruction: '重试当前未完成单元', progressFingerprint: 'same-problem', windowBudget: 2, totalBaseBudget: 6 })
+    run = await runs.start(work, { runId: run.runId, cause: 'executor_error' })
+    if (attempt % 2 === 1) await run.acceptProgress({ unit: `unit-${attempt}`, inputSha256: 'a'.repeat(64), planSha256: 'b'.repeat(64) })
+    await fail()
+    expect(bidRunRecoveryEligibility(session, 2, 6).attempts).toBe(attempt + 1)
+  }
+  expect(bidRunRecoveryEligibility(session, 2, 6)).toMatchObject({ eligible: false, attempts: 6, totalLimit: 6 })
+  run = await runs.start(work)
+  await run.acceptProgress({ unit: 'unit-5', inputSha256: 'c'.repeat(64), planSha256: 'd'.repeat(64) })
+  await fail()
+  expect(bidRunRecoveryEligibility(session, 2, 6)).toMatchObject({ eligible: false, attempts: 6, windowAttempts: 0 })
+})
+
+it('同一用户继续消息仅追加一次有限窗口；历史 blocked 不阻断新窗口', async () => {
+  const ctx = new Context()
+  cleanup.push(() => ctx.fiber.dispose())
+  await ctx.plugin(SessionStore)
+  const session = ctx.sessions.create()
+  session.append('bid.task.changed', { state: { workflow: { kind: 'full_bid', stage: 'outline_generation' }, status: 'ready', run: null } })
+  const runs = new BidRunCoordinator(session, new DirectBidRunScheduler(), { drain: async () => {} }, () => 0)
+  const run = await runs.start(work)
+  await runs.suspend('executor_error', safeRecoverableBidFailure(work, Object.assign(new Error('等待超时'), { code: 'TIMEOUT' })))
+  const target = { kind: 'run' as const, workId: work.workId, runId: run.runId }
+  session.append('bid.recovery.round', { ownerSessionId: String(session.id), target, fingerprint: 'same',
+    round: 3, budget: 3, state: 'blocked', reason: '旧窗口耗尽' })
+  const message = createUserMessage({ content: [{ type: 'text', text: '继续原任务' }], source: { kind: 'user' } })
+  session.append('user/message', message, { surfaceOp: 'append' })
+  const request = { ownerSessionId: String(session.id), target, unit: work.workId, instruction: '继续原任务',
+    progressFingerprint: 'same', sourceMessageId: String(message.id), continuation: true as const,
+    windowBudget: 3, totalBaseBudget: 6 }
+  session.append('bid.recovery.requested', request)
+  expect(bidRunRecoveryEligibility(session, 3, 6)).toMatchObject({ eligible: true, attempts: 1, windowAttempts: 1, totalLimit: 9 })
+  session.append('bid.recovery.requested', request)
+  expect(bidRunRecoveryEligibility(session, 3, 6)).toMatchObject({ eligible: true, attempts: 2, windowAttempts: 2, totalLimit: 9 })
+})
+
+it('工具投影沿用已保存的大于默认值的累计预算，配置不能扩大历史上限', async () => {
+  const ctx = new Context()
+  cleanup.push(() => ctx.fiber.dispose())
+  await ctx.plugin(SessionStore)
+  const session = ctx.sessions.create()
+  session.append('bid.task.changed', { state: { workflow: { kind: 'full_bid', stage: 'outline_generation' }, status: 'ready', run: null } })
+  const runs = new BidRunCoordinator(session, new DirectBidRunScheduler(), { drain: async () => {} }, () => 0)
+  for (let index = 0; index < 10; index++) {
+    const run = await runs.start(work)
+    session.append('bid.recovery.requested', { ownerSessionId: String(session.id),
+      target: { kind: 'run', workId: work.workId, runId: run.runId }, unit: work.workId,
+      instruction: '恢复当前单元', progressFingerprint: 'same', windowBudget: 3, totalBaseBudget: 12 })
+    await run.acceptProgress({ unit: `unit-${index}`, inputSha256: 'a'.repeat(64), planSha256: 'b'.repeat(64) })
+    await runs.suspend('executor_error', safeRecoverableBidFailure(work, Object.assign(new Error('超时'), { code: 'TIMEOUT' })))
+  }
+  expect(bidRunRecoveryEligibility(session)).toMatchObject({ eligible: true, attempts: 10, windowAttempts: 0, totalLimit: 12 })
+  expect(bidRunRecoveryEligibility(session, 3, 20).totalLimit).toBe(12)
+  expect(await inspectBidStage(undefined, session, undefined, 'recovery', { window: 3, total: 12 }))
+    .toMatchObject({ eligible: true, recovery_budget: { total_used: 10, total_limit: 12, window_used: 0, window_limit: 3 } })
+})
 
 const cleanup: Array<() => Promise<unknown>> = []
 afterEach(async () => { await Promise.allSettled(cleanup.splice(0).reverse().map(dispose => dispose())) })

@@ -1,5 +1,5 @@
 /** S5 包测试与 Loader 会话回放共用的外部模型脚本。 */
-import { CallId, LlmAdapter, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
+import { CallId, LlmAdapter, LlmError, type GenerateOptions, type LlmFailure, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import { assertSupportedJsonSchema } from '@deepseek-ai/dsh-tools'
 import { chapterModelPositions } from './chapter-model-positions.ts'
 
@@ -23,6 +23,8 @@ export class ChapterAdapter extends LlmAdapter {
   writerMetadata?: (sectionId: string, step: number) => object
   repairReviews = 0
   failWriterStep?: number
+  writerFailure?: LlmFailure
+  writerFailureMode: 'throw' | 'finish' = 'throw'
   omitRepairSubmission = false
   reviewPreamble = true
   onReview?: () => void
@@ -99,6 +101,13 @@ export class ChapterAdapter extends LlmAdapter {
       this.onWriterStart?.()
       await this.writerGate
       this.cancelWriter?.()
+      if (section.id === 'SEC-1' && this.writerFailure !== undefined) {
+        if (this.writerFailureMode === 'finish') {
+          yield { type: 'finish', reason: { kind: 'error', failure: this.writerFailure } }
+          return
+        }
+        throw new LlmError(this.writerFailure.message, this.writerFailure.code, this.writerFailure)
+      }
       if (section.id === 'SEC-1' && step === this.failWriterStep) throw new Error('暂时的模型传输错误')
       if (this.omitRepairSubmission && step >= 2) { yield* text('已完成修改。'); return }
       const markdown = `# ${section.id}\n\n${prompt.includes('这是同一章节 Writer 的修复轮次') ? '修复候选' : '首次候选'}：本章具体说明技术措施、责任接口与成果交付，逐项核查要求并形成可追溯的审计记录。`

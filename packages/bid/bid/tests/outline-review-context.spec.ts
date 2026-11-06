@@ -15,6 +15,18 @@ function context(count: number): OutlineReviewContext {
 }
 
 describe('目录审查上下文', () => {
+  it('输出超限强制拆分单章依据，保留完整目录、尾部原文和跨章审核', () => {
+    const input = context(3)
+    input.cards[2]!.research = '完整尾部原文。'.repeat(400)
+    const original = buildOutlineReviewRequests(input, 50_000, 50_000)
+    const requests = buildOutlineReviewRequests(input, 50_000, 2_500, true)
+    expect(requests.length).toBeGreaterThan(original.length)
+    expect(requests.every(request => request.estimatedInputTokens <= 2_500)).toBe(true)
+    expect(requests.every(request => request.prompt.includes(JSON.stringify(input.structure)))).toBe(true)
+    expect(requests.some(request => request.kind === 'cross_sections')).toBe(true)
+    const parts = requests.flatMap(request => request.evidenceParts ?? [])
+    expect(JSON.stringify(parts)).toContain(input.cards[2]!.research)
+  })
   it('全局修改目标由跨章审核接收，局部片不接收也不接受目标阻断', () => {
     const input = { ...context(4), userRequest: '核对章节三、四的承责关系，保持章节一的业务内容。' }
     input.cards.forEach((card) => { card.research = '本章完整研究。'.repeat(500) })

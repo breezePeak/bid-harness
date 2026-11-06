@@ -21,6 +21,7 @@ import { bidCapabilityTaskSchema, type BidCapabilityExecutionContext } from '../
 import { allowedRevisionCapabilityWrites, executeRevisionCapability, type CapabilityRevisionRunner } from '../src/bid-revision-capability.ts'
 import { buildParagraphRevisionReviewPath, createParagraphRevisionReviewArtifact } from '../src/chapter-paragraph-revision-artifacts.ts'
 import { parseChapterReviewArtifact } from '../src/chapter-writing-review-artifacts.ts'
+import { safeRecoverableBidFailure } from '../src/bid-recovery.ts'
 
 const disposals: Array<() => Promise<void>> = []
 afterEach(async () => { for (const dispose of disposals.splice(0)) await dispose() })
@@ -138,6 +139,24 @@ it.each(['batch_id', 'task_id', 'section_id', 'after_sha256'] as const)('完成�
   await writeFile(path, JSON.stringify(artifact))
   await expect(executeRevisionCapability(call, context, runner)).rejects.toThrow('BID_REVISION_REVIEW_INCOMPLETE')
   expect(runner).toHaveBeenCalledOnce()
+})
+
+it.each(['AUTH', 'QUOTA', 'TIMEOUT'])('批次能力外层保留 %s 的状态码、可重试标记及分类', async (code) => {
+  const { workspace, call, context: base } = await fixture()
+  const context = { ...base, run: createTestBidRunContext({ work: {
+    kind: 'capability_task', workId: base.rootWorkId, requestRef: 'requests/work-1.json',
+    requestSha256: 'a'.repeat(64), inputFingerprint: 'b'.repeat(64),
+  } }) }
+  const cause = { code, message: '安全模型故障', status: code === 'AUTH' ? 401 : 503, retryable: code === 'TIMEOUT' }
+  const runner: CapabilityRevisionRunner = async (input) => {
+    const batch = (await readRevisionBatch(workspace, input.batchId))!
+    await writeRevisionBatch(workspace, { ...batch, tasks: batch.tasks.map(task => ({ ...task, status: 'failed',
+      failure: { code, message: 'token=private provider payload: private', cause, phase: 'writing' } })) })
+  }
+  const error: unknown = await executeRevisionCapability(call, context, runner).catch((error: unknown) => error)
+  const failure = safeRecoverableBidFailure(context.run.work, error)
+  expect(failure).toMatchObject({ code, cause, recovery: { kind: code === 'TIMEOUT' ? 'retry' : 'blocked' } })
+  expect(JSON.stringify(failure)).not.toContain('private')
 })
 
 it.each(['failed', 'needs_input'] as const)('批次 %s 保留成功项并按真实原因恢复', async (status) => {

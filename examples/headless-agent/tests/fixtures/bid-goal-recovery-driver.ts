@@ -239,10 +239,20 @@ try {
     await agent.whenIdle()
     await Promise.allSettled(host.recoveryTasks)
     await agent.whenIdle()
-    await host.recoveryDriver.request(agent)
-    await agent.whenIdle()
-    await host.recoveryDriver.request(agent)
-    await agent.whenIdle()
+    const settledBy = Date.now() + 10_000
+    while (true) {
+      await host.recoveryDriver.request(agent)
+      await agent.whenIdle()
+      const latest = agent.session.events.findLast(event => event.type === 'bid.recovery.round')
+      const started = agent.session.events.findLast(event => event.type === 'bid.run.started')
+      const receipt = latest?.type === 'bid.recovery.round' ? agent.session.events.find(event => event.type === 'user/message'
+        && String(event.data.id) === latest.data.messageId) : undefined
+      if (latest?.type === 'bid.recovery.round' && latest.data.state === 'blocked'
+        && latest.data.target.kind === 'run' && latest.data.target.runId === started?.data.run.runId
+        && receipt !== undefined && agent.session.events.some(event => event.type === 'turn/end' && event.seq > receipt.seq)) break
+      if (Date.now() > settledBy) throw new Error('用户继续窗口未有界结算')
+      await new Promise<void>(resolve => setTimeout(resolve, 20))
+    }
     const events = agent.session.events
     const runs = events.filter(event => event.type === 'bid.run.started')
     const decision = bidRunRecoveryEligibility(agent.session)

@@ -200,6 +200,7 @@ import { appendBidSchemaWarning, createBidSchemaWarning } from './bid-events.ts'
 import type {} from '@deepseek-ai/dsh-goal-round-driver'
 import { bidCapabilityTakeoverRun, bidCompletedCapabilityRun, bidEvidenceMappingTakeoverRun, bidRecoverableRun, bidRecoveryFingerprint, bidRecoveryInstructionRepeated, bidRunRecoveryEligibility, bidUserContinuableRun, bidWritingPlanRecoveryEligibility, isBidWritingPlanRecoverableFailure, safeRecoverableBidFailure } from './bid-recovery.ts'
 import { BidRecoveryDriver, type BidRecoveryNotice } from './bid-recovery-driver.ts'
+import { observeBidCleanup } from './run-cleanup.ts'
 import { resolveBidToolAuthorization, withBidNativeTaskAuthorization } from './bid-tool-authorization.ts'
 import type { BidSessionEventMap } from './bid-events.ts'
 import {
@@ -555,6 +556,12 @@ export interface Config {
   docxTemplateMaxBytes: number
   /** Validator-guided repair turns available to each model-authored stage execution. */
   modelStageRepairAttempts: number
+  /** 同一 Work 未追加用户授权时的恢复执行总上限；默认九次，窗口仍使用 modelStageRepairAttempts。 */
+  recoveryTotalAttempts?: number
+  /** 单个 S4 Child 首次执行或 follow-up 的总等待上限，默认 30 分钟。 */
+  runChildTimeoutMs?: number
+  /** 每个清理资源的诊断期限；默认一分钟，超时后仍等待排空并保留项目写锁。 */
+  runCleanupTimeoutMs?: number
   /** Maximum Mapping Subagents running at the same time during S4. */
   evidenceMappingMaxConcurrency: number
   /** Maximum Chapter Subagents running at the same time during S5. */
@@ -600,6 +607,9 @@ export const Config: z<Config> = z.object({
   maxTotalBytes: z.natural().min(1).default(DEFAULT_HOST_RUNTIME_CONFIG.maxTotalBytes),
   docxTemplateMaxBytes: z.natural().min(1).default(DEFAULT_HOST_RUNTIME_CONFIG.docxTemplateMaxBytes),
   modelStageRepairAttempts: z.natural().min(1).max(20).default(DEFAULT_HOST_RUNTIME_CONFIG.modelStageRepairAttempts),
+  recoveryTotalAttempts: z.natural().min(1).max(200).default(9),
+  runChildTimeoutMs: z.natural().min(1000).max(24 * 60 * 60_000).default(30 * 60_000),
+  runCleanupTimeoutMs: z.natural().min(1000).max(60 * 60_000).default(60_000),
   evidenceMappingMaxConcurrency: z.natural().min(1).max(8).default(DEFAULT_HOST_RUNTIME_CONFIG.evidenceMappingMaxConcurrency),
   chapterWritingMaxConcurrency: z.natural().min(1).max(8).default(DEFAULT_HOST_RUNTIME_CONFIG.chapterWritingMaxConcurrency),
   chapterWritingCompletionRepairRounds: z.natural().min(1).max(20)
@@ -1964,6 +1974,8 @@ export class BidHostRuntime extends TypertRemoteService {
           issues: run.error?.issues,
         })
       },
+      { childMs: this.config.runChildTimeoutMs ?? 30 * 60_000, cleanupMs: this.config.runCleanupTimeoutMs ?? 60_000 },
+      async () => { await this.ctx.sessions.flush(session) },
     )
     const operation: ActiveBidOperation = {
       key,
@@ -2091,6 +2103,7 @@ export class BidHostRuntime extends TypertRemoteService {
 
   private async finishOperationOnce(_session: Session, operation: ActiveBidOperation, persist: boolean): Promise<void> {
     const key = operation.key
+    let settlementFailure: Error | undefined
     try {
       if (operation.ready && persist) {
         if (operation.retirement !== undefined) {
@@ -2107,11 +2120,40 @@ export class BidHostRuntime extends TypertRemoteService {
           if (operation.suspension === undefined && this.isContextActive()) await this.checkpoint(operation)
         }
       }
+    } catch (error) {
+      settlementFailure = error instanceof Error ? error : new Error(sanitizeBidErrorText(String(error)))
+      throw settlementFailure
     } finally {
-      try {
-        operation.stopTrackingContinuableChildren()
-        await operation.executionHandle?.dispose()
-      } finally {
+      operation.stopTrackingContinuableChildren()
+      await observeBidCleanup(operation.executionHandle?.dispose() ?? Promise.resolve(),
+        this.config.runCleanupTimeoutMs ?? 60_000, () => {
+          const started = operation.session.events.findLast(event => event.type === 'bid.run.started')
+          if (started?.type === 'bid.run.started') operation.session.append('bid.run.notice', {
+            noticeId: `run:${started.data.run.runId}:cleanup:execution_handle`, supersedesTurn: null,
+            runId: started.data.run.runId, stage: started.data.run.work.kind === 'capability_task' ? null : started.data.run.work.stage,
+            kind: 'interrupted', severity: 'error', message: 'BID_RUN_CLEANUP_TIMEOUT: execution_handle 未释放；保留项目写锁。',
+          })
+          void this.ctx.sessions.flush(operation.session).catch((error: unknown) => {
+            this.ctx.logger.warn(`清理阻断诊断未落盘：${sanitizeBidErrorText(String(error))}`)
+          })
+        }).catch((error: unknown) => {
+        const message = `BID_RUN_CLEANUP_FAILED: execution_handle；${sanitizeBidErrorText(String(error))}；保留项目写锁。`
+        this.ctx.logger.warn(message)
+        const started = operation.session.events.findLast(event => event.type === 'bid.run.started')
+        if (started?.type === 'bid.run.started') operation.session.append('bid.run.notice', {
+          noticeId: `run:${started.data.run.runId}:cleanup_failed:execution_handle`, supersedesTurn: null,
+          runId: started.data.run.runId, stage: started.data.run.work.kind === 'capability_task' ? null : started.data.run.work.stage,
+          kind: 'interrupted', severity: 'error', message,
+        })
+        void this.ctx.sessions.flush(operation.session).catch((failure: unknown) => {
+          this.ctx.logger.warn(`清理失败诊断未落盘：${sanitizeBidErrorText(String(failure))}`)
+        })
+        throw settlementFailure ?? error
+      })
+      {
+        if (operation.runs.current !== undefined) {
+          throw settlementFailure ?? new Error('BID_RUN_CLEANUP_BLOCKED: 旧 Run 尚未静止，项目写锁保持占用。')
+        }
         if (this.inFlight.get(key) === operation) this.inFlight.delete(key)
         operation.settle()
         const settledTask = bidSessionTaskState(operation.session)
@@ -3323,7 +3365,7 @@ export class BidHostRuntime extends TypertRemoteService {
     const writing = session.events.findLast(event => event.type === 'bid.writing_entry.changed')
     const decision = task.workflow?.stage === 'chapter_writing' && task.status === 'waiting_user'
       ? bidWritingPlanRecoveryEligibility(session, this.config.modelStageRepairAttempts)
-      : bidRunRecoveryEligibility(session, this.config.modelStageRepairAttempts)
+      : bidRunRecoveryEligibility(session, this.config.modelStageRepairAttempts, this.config.recoveryTotalAttempts)
     const original = bidRecoverableRun(session, task)
     const target = decision.target ?? (original === undefined ? undefined
       : { kind: 'run' as const, workId: original.work.workId, runId: original.runId })
@@ -3351,6 +3393,7 @@ export class BidHostRuntime extends TypertRemoteService {
         : '先调用 bid_stage_inspect(view="recovery") 分析真实阻断，向用户说明原因和需要的动作；不要机械重试。',
     ]
     return { target, fingerprint: decision.fingerprint ?? createHash('sha256').update(JSON.stringify([target, failure])).digest('hex'),
+      ...('windowKey' in decision ? { windowKey: decision.windowKey } : {}),
       eligible: decision.eligible, reason: decision.reason, facts }
   }
 
@@ -3460,7 +3503,8 @@ export class BidHostRuntime extends TypertRemoteService {
     }, { global: true })
     installStageInteractionTools(ctx,
       (agent, request, signal, authorization) => this.executeStageInteraction(agent, request, signal, authorization),
-      session => new BidWorkspace(projectKey(session), workspaceConfig(this.config)))
+      session => new BidWorkspace(projectKey(session), workspaceConfig(this.config)),
+      { window: this.config.modelStageRepairAttempts, total: this.config.recoveryTotalAttempts ?? 9 })
     ctx.on('agent/session-start', ({ agent }) => {
       if (!this.isContextActive() || !isBidMainSession(agent.session)) return
       const task = this.drainPersistedCapabilityRequests(agent.session)
@@ -4128,7 +4172,7 @@ export class BidHostRuntime extends TypertRemoteService {
       const recoveryKey = `${String(session.id)}:${request.run_id}`
       const existing = this.recoveryAcceptances.get(recoveryKey)
       if (existing !== undefined) return existing
-      const decision = bidRunRecoveryEligibility(session, this.config.modelStageRepairAttempts)
+      const decision = bidRunRecoveryEligibility(session, this.config.modelStageRepairAttempts, this.config.recoveryTotalAttempts)
       if (!decision.eligible || decision.target?.runId !== request.run_id) {
         throw new BidOrchestratorError('BID_RESUME_NOT_ALLOWED', decision.reason)
       }
@@ -4180,7 +4224,8 @@ export class BidHostRuntime extends TypertRemoteService {
         } else if (run === undefined && state.status === 'failed') workspace = undefined
       }
       return {
-        ...await inspectBidStage(workspace, session, request.reference, request.view),
+        ...await inspectBidStage(workspace, session, request.reference, request.view,
+          { window: this.config.modelStageRepairAttempts, total: this.config.recoveryTotalAttempts ?? 9 }),
         ...(request.view === 'recovery' ? { continuation: session.events.findLast(event => event.type === 'bid.recovery.round')?.data ?? null } : {}),
         scheduling_paused: active?.stageControl.paused() ?? false,
       }
@@ -5465,6 +5510,16 @@ export class BidHostRuntime extends TypertRemoteService {
       await this.prepareOperation(operation)
       const task = bidSessionTaskState(session)
 
+      if (task.status === 'failed') {
+        const run = bidRecoverableRun(session, task)
+        if (run !== undefined) {
+          session.append('bid.task.changed', { state: { workflow: task.workflow, status: 'suspended',
+            run: { ...run, cause: 'user_stop', updatedAt: Date.now() } } })
+          await this.ctx.sessions.flush(session)
+        }
+        return
+      }
+
       // 4. 若已经处于 suspended Run：不写入口停止记录，保留现有 Run 恢复链路
       if (task.status === 'suspended') {
         if (task.run.cause !== 'user_stop') {
@@ -6403,7 +6458,8 @@ export class BidHostRuntime extends TypertRemoteService {
     if (this.inFlight.has(projectKey(session))) {
       throw new BidOrchestratorError('BID_OPERATION_IN_PROGRESS', 'A Bid operation is already running for this Session.')
     }
-    const expectedRecovery = recovery === undefined ? undefined : bidRunRecoveryEligibility(session, this.config.modelStageRepairAttempts)
+    const expectedRecovery = recovery === undefined ? undefined
+      : bidRunRecoveryEligibility(session, this.config.modelStageRepairAttempts, this.config.recoveryTotalAttempts)
     const authorization = recovery === undefined ? resolveBidToolAuthorization(session) : undefined
     const operation = this.beginOperation(session)
     let admitted = false
@@ -6443,7 +6499,7 @@ export class BidHostRuntime extends TypertRemoteService {
       }
       if (acceptedRecovery !== undefined) {
         const main = this.ctx.agents.get(session.id)
-        const eligibility = bidRunRecoveryEligibility(session, this.config.modelStageRepairAttempts)
+        const eligibility = bidRunRecoveryEligibility(session, this.config.modelStageRepairAttempts, this.config.recoveryTotalAttempts)
         if (main?.session !== session
           || !userContinuation && !eligibility.eligible || eligibility.target?.runId !== suspendedRunId
           || !userContinuation && (eligibility.target.workId !== expectedRecovery?.target?.workId
@@ -6479,12 +6535,19 @@ export class BidHostRuntime extends TypertRemoteService {
           throw new BidOrchestratorError('BID_RECOVERY_DUPLICATE_INSTRUCTION', '同一问题不能重复提交相同修复指令。')
         }
         const source = resolveBidToolAuthorization(session)
+        if (userContinuation && session.events.some(event => event.type === 'bid.recovery.requested'
+          && event.data.continuation === true && event.data.sourceMessageId === source?.message_id)) {
+          throw new Error('BID_USER_CONTINUATION_ALREADY_ACCEPTED')
+        }
         const acceptedEvent = session.append('bid.recovery.requested', {
           ownerSessionId: String(session.id),
           target: { kind: 'run', workId: suspended.work.workId, runId: suspendedRunId },
           unit: suspended.error.recovery.unit,
           instruction: acceptedRecovery.instruction,
           progressFingerprint: eligibility.fingerprint,
+          windowBudget: this.config.modelStageRepairAttempts,
+          totalBaseBudget: this.config.recoveryTotalAttempts ?? 9,
+          ...(userContinuation ? { continuation: true as const } : {}),
           ...source === undefined ? {} : { sourceMessageId: source.message_id },
         })
         await this.ctx.sessions.flush(session)
@@ -7243,14 +7306,15 @@ export class BidHostRuntime extends TypertRemoteService {
           candidate.run.signal.throwIfAborted()
           const failure = safeRecoverableBidFailure(candidate.run.work, error)
           return { status: 'failed', code: failure.issues?.[0]?.code ?? failure.code ?? 'BID_CHAPTER_REVISION_FAILED',
-            message: failure.issues?.[0]?.message ?? failure.message }
+            message: failure.issues?.[0]?.message ?? failure.message, ...(failure.cause === undefined ? {} : { cause: failure.cause }) }
         }
         const unit = (await readRevisionBatch(candidate.workspace, batchExecutionInput.batchId))?.tasks
           .find(task => task.task_id === item.task.task_id)
         if (unit === undefined) throw new Error('BID_REVISION_BATCH_TASK_NOT_FOUND')
         if (unit.status === 'completed' || unit.status === 'needs_input') return { status: unit.status }
         return { status: unit.status === 'blocked' ? 'blocked' : 'failed',
-          code: unit.failure?.code ?? 'BID_CHAPTER_REVISION_FAILED', message: unit.failure?.message ?? '正文修订未完成。' }
+          code: unit.failure?.code ?? 'BID_CHAPTER_REVISION_FAILED', message: unit.failure?.message ?? '正文修订未完成。',
+          ...(unit.failure?.cause === undefined ? {} : { cause: unit.failure.cause }) }
       }
       const results = await runParagraphRevisionScheduler({
         tasks: scheduled,
@@ -7271,7 +7335,7 @@ export class BidHostRuntime extends TypertRemoteService {
             candidate.run.signal.throwIfAborted()
             const failure = safeRecoverableBidFailure(candidate.run.work, error)
             return { status: 'failed', code: failure.issues?.[0]?.code ?? failure.code ?? 'BID_CHAPTER_REVISION_FAILED',
-              message: failure.issues?.[0]?.message ?? failure.message }
+              message: failure.issues?.[0]?.message ?? failure.message, ...(failure.cause === undefined ? {} : { cause: failure.cause }) }
           }
         },
         fallback,
@@ -7295,6 +7359,7 @@ export class BidHostRuntime extends TypertRemoteService {
                   : { ...task, status: 'failed' as const, started_at: task.started_at ?? now, completed_at: null, failure: {
                     code: result.status === 'failed' ? result.code : 'PARAGRAPH_REVISION_FAILED',
                     message: result.status === 'failed' ? result.message : '局部修订失败。', phase: null,
+                    ...(result.status !== 'failed' || result.cause === undefined ? {} : { cause: result.cause }),
                   } }
           }),
           updated_at: now,

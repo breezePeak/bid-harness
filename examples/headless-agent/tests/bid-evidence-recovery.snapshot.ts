@@ -140,7 +140,7 @@ it.each(['structure', 'legacy', 'legacy-output', 'server', 'server-takeover', 't
       if (scenario === 'structure') expect(main).toContain('\\"continuation\\":null')
       const mainEvents = main.trimEnd().split('\n').slice(1).map(line => JSON.parse(line) as SessionEvent)
       const runs = mainEvents.filter(event => event.type === 'bid.run.started')
-      expect(runs).toHaveLength(scenario === 'legacy-output' ? 3 : 2)
+      expect(runs).toHaveLength(2)
       for (let index = 1; index < runs.length; index++) {
         if (takeover) {
           expect(runs[index]!.data.run.work.workId).not.toBe(runs[0]!.data.run.work.workId)
@@ -172,19 +172,22 @@ it.each(['structure', 'legacy', 'legacy-output', 'server', 'server-takeover', 't
           expect(JSON.parse(text.text)).toMatchObject({ eligible: true, mapping_progress: { final_check_completed: 0 } })
         }
       }
-      expect(reviewer).toContain('需要访问控制与安全审计方案。')
+      const reviews = logs.filter(log => log.includes('review-large-original') || log.includes('review-actual-repair'))
+        .sort((left, right) => {
+          const prompt = (log: string) => log.split('\n').find(line => line.includes('agent/inbox/spliced')) ?? ''
+          const text = (log: string) => JSON.parse(prompt(log)) as { data: { inserted: Array<{ content: unknown }> } }
+          return JSON.stringify(text(left).data.inserted[0]?.content).localeCompare(JSON.stringify(text(right).data.inserted[0]?.content))
+        })
+      expect(reviews.join('\n')).toContain('需要访问控制与安全审计方案。')
       if (scenario === 'legacy-output') {
         expect(outputFailure).toContain('"maxTokens":2048')
-        expect(main).toContain('OUTLINE_REVIEW_OUTPUT_BUDGET_EXCEEDED')
-        const outputInspect = mainEvents.find(event => event.type === 'tool/result'
-          && event.data.message.source.callId === 'inspect-output-recovery')
-        if (outputInspect?.type !== 'tool/result') throw new Error('缺少输出超限后的恢复诊断')
-        const text = outputInspect.data.message.content.flatMap(block => block.type === 'tool-result' ? block.content : [])
-          .find(block => block.type === 'text')!
-        if (text.type !== 'text') throw new Error('缺少输出超限后的恢复 JSON')
-        expect(JSON.parse(text.text)).toMatchObject({ eligible: true, attempts: 1 })
+        expect(mainEvents.filter(event => event.type === 'bid.recovery.requested')).toHaveLength(1)
         const reviewEvents = reviewer.trimEnd().split('\n').slice(1).map(line => JSON.parse(line) as SessionEvent)
-        expect(reviewEvents.find(event => event.type === 'request/header')?.data.header.config.maxTokens).toBe(8_192)
+        expect(reviewEvents.find(event => event.type === 'request/header')?.data.header.config.maxTokens).toBe(2_048)
+        const failureEvents = outputFailure!.trimEnd().split('\n').slice(1).map(line => JSON.parse(line) as SessionEvent)
+        const prompt = (events: SessionEvent[]) => events.filter(event => event.type === 'user/message')
+          .map(event => event.data.content).flat()
+        expect(prompt(reviewEvents)).not.toEqual(prompt(failureEvents))
       }
       const checkpoint = JSON.parse(await readFile(join(cwd, '.bid-harness/analysis/evidence-mapping-checkpoint.json'), 'utf8')) as {
         tasks: Array<{ task_id: string; completed: boolean }>
@@ -212,6 +215,9 @@ it.each(['structure', 'legacy', 'legacy-output', 'server', 'server-takeover', 't
         ...(repair === undefined ? {} : { 'repair.expected.jsonl': normalizeSessionSnapshot(repair, { sessionIds, cwd, cwdAliases }) }),
         ...(outputFailure === undefined ? {} : { 'output-failure.expected.jsonl': normalizeSessionSnapshot(outputFailure, { sessionIds, cwd, cwdAliases }) }),
         'review.expected.jsonl': normalizeSessionSnapshot(reviewer, { sessionIds, cwd, cwdAliases }),
+        ...scenario !== 'legacy-output' ? {} : Object.fromEntries(reviews.map((review, index) => [
+          `review-part-${index + 1}.expected.jsonl`, normalizeSessionSnapshot(review, { sessionIds, cwd, cwdAliases }),
+        ])),
       }
       if (process.env.DSH_SNAPSHOT === 'refresh') {
         await mkdir(fixtureDir, { recursive: true })

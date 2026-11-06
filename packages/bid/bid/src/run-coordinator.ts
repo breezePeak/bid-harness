@@ -8,9 +8,10 @@ import type {
 } from './control-plane-contract.ts'
 import { publishBidBatch, type BidPublicationLease } from './publication-batch.ts'
 import { bidRunProgressSchema, BID_INITIAL_TASK_STATE, reduceBidTaskState } from './runtime-state.ts'
-import { sanitizeBidErrorText } from './safe-error.ts'
+import { safeBidRunError, sanitizeBidErrorText } from './safe-error.ts'
 import { classifyBidRecovery } from './bid-recovery.ts'
 import { assertNoLinkedPath, within } from './workspace-path.ts'
+import { observeBidCleanup } from './run-cleanup.ts'
 
 /** Run-owned admission gate for model tasks and child creation. */
 export interface BidRunScheduler {
@@ -236,6 +237,21 @@ export interface BidRunContext {
   readonly commits: BidCommitScope
   readonly children: BidChildScope
   readonly activities: BidRunActivityScope
+  /** 每次子任务执行的总等待上限，不因进度或轮询重置。 */
+  readonly childTimeoutMs: number
+  /**
+   * 等待旧资源实际静止；超时只发布阻断诊断，仍保留写锁。
+   * @param resource 正在清理的资源名称。
+   * @param pending 已开始且必须排空的操作。
+   * @returns 原操作结果；绝不以超时代替排空。
+   */
+  waitForCleanup<T>(resource: string, pending: Promise<T>): Promise<T>
+  /**
+   * 记录已通过 Host 校验且已落盘的成果身份，重复身份不增加恢复额度。
+   * @param checkpoint 单元及其真实输入、计划摘要。
+   * @returns 进度证明已持久化；不得早于成果提交调用。
+   */
+  acceptProgress(checkpoint: NonNullable<import('./control-plane-contract.ts').BidRunProgress['checkpoint']>): Promise<void>
   /** Publish one bounded deterministic milestone for this exact Run. */
   reportProgress(progress: BidRunProgressInput): void
   /** Register a Main-Agent interval that must settle before suspension. */
@@ -278,6 +294,8 @@ export class BidRunCoordinator {
       notice: BidRunNotice,
       run: BidRunData & { cause: BidRunSuspensionCause; error?: BidTaskFailure },
     ) => void,
+    private readonly timeouts = { childMs: 30 * 60_000, cleanupMs: 60_000 },
+    private readonly flushProgress?: () => Promise<void>,
   ) {}
 
   /** Current live Run, if any. */
@@ -345,6 +363,12 @@ export class BidRunCoordinator {
         commits,
         children: this.children,
         activities,
+        childTimeoutMs: this.timeouts.childMs,
+        waitForCleanup: (resource, pending) => this.waitForCleanup(context, resource, pending),
+        acceptProgress: async (checkpoint) => {
+          this.reportProgress(context, { phase: 'accepted', summary: '已验收并保存任务成果。', checkpoint })
+          await this.flushProgress?.()
+        },
         reportProgress: (progress) => { this.reportProgress(context, progress) },
         bindMainAgent: (scope) => {
           mainAgents.add(scope)
@@ -382,6 +406,32 @@ export class BidRunCoordinator {
     })
   }
 
+  private async waitForCleanup<T>(context: BidRunContext, resource: string, pending: Promise<T>): Promise<T> {
+    return observeBidCleanup(pending, this.timeouts.cleanupMs, () => {
+      const active = this.active
+      if (active?.context !== context) return
+      this.reportProgress(context, { phase: 'cleanup_blocked', summary: `清理阻断：${resource}；保留项目写锁，等待旧任务静止。`,
+        ...(active.snapshot.progress?.details === undefined ? {} : { details: active.snapshot.progress.details }) })
+      this.session.append('bid.run.notice', {
+        noticeId: `run:${context.runId}:cleanup:${resource}`, supersedesTurn: null, runId: context.runId,
+        stage: context.work.kind === 'capability_task' ? null : context.work.stage,
+        kind: 'interrupted', severity: 'error', message: `BID_RUN_CLEANUP_TIMEOUT: ${resource} 未排空；禁止新 Run 写入。`,
+      })
+      // 内存诊断仍保留；持久层故障不能释放仍有写入能力的旧 Run。
+      void this.flushProgress?.().catch(() => {})
+    }).catch((error: unknown) => {
+      const failure = safeBidRunError(error)
+      this.session.append('bid.run.notice', {
+        noticeId: `run:${context.runId}:cleanup_failed:${resource}`, supersedesTurn: null, runId: context.runId,
+        stage: context.work.kind === 'capability_task' ? null : context.work.stage, kind: 'interrupted', severity: 'error',
+        message: `BID_RUN_CLEANUP_FAILED: ${resource}；${failure.message}；保留项目写锁。`,
+      })
+      // 清理失败仍由原调用者处理；通知写盘失败不能替换它。
+      void this.flushProgress?.().catch(() => {})
+      throw Object.assign(new Error(failure.message), { code: 'BID_RUN_CLEANUP_FAILED', cause: failure })
+    })
+  }
+
   /**
    * Settle a Run and its owning Workflow transition in one durable checkpoint.
    * @param context - Active Run authority to complete.
@@ -392,13 +442,13 @@ export class BidRunCoordinator {
     const active = this.requireActive(context)
     active.activities.retire()
     context.commits.retire()
-    await active.activities.whenDrained()
-    await context.commits.whenDrained()
+    await context.waitForCleanup('activities', active.activities.whenDrained())
+    await context.waitForCleanup('commits', context.commits.whenDrained())
     this.session.append('bid.run.completed', {
       run: { ...active.snapshot, updatedAt: Date.now() },
     })
     commitOutcome()
-    await this.checkpoint?.()
+    await context.waitForCleanup('completion_checkpoint', this.checkpoint?.() ?? Promise.resolve(0))
     if (this.active === active) this.active = undefined
   }
 
@@ -415,7 +465,10 @@ export class BidRunCoordinator {
     if (this.suspension !== undefined) return this.suspension
     const active = this.active
     if (active === undefined) return Promise.resolve(undefined)
-    this.suspension = this.settleSuspension(active, cause, error)
+    this.suspension = this.settleSuspension(active, cause, error).catch((cleanup: unknown) => {
+      if (error === undefined || !(cleanup instanceof Error) || !('code' in cleanup) || cleanup.code !== 'BID_RUN_CLEANUP_FAILED') throw cleanup
+      throw Object.assign(new Error(error.message), error)
+    })
     return this.suspension
   }
 
@@ -432,14 +485,16 @@ export class BidRunCoordinator {
       runId: active.snapshot.runId,
       epoch: active.snapshot.epoch,
     })
-    await this.checkpoint?.()
+    if (error !== undefined) this.reportProgress(active.context, { phase: 'cancelling', summary: '执行失败，正在安全清理旧任务。',
+      details: [sanitizeBidErrorText(`${error.code ?? 'BID_EXECUTOR_ERROR'}: ${error.message}`, 160)] })
     for (const scope of mainAgents) scope.discardOwnedInbox()
     active.controller.abort({ kind: 'hook', reason: `bid-run-${cause}` })
     for (const scope of mainAgents) scope.cancel()
-    await Promise.all(mainAgents.map(scope => scope.whenIdle()))
-    await this.children.drain()
-    await active.activities.whenDrained()
-    await active.context.commits.whenDrained()
+    await active.context.waitForCleanup('settlement_checkpoint', this.checkpoint?.() ?? Promise.resolve(0))
+    await active.context.waitForCleanup('main_agents', Promise.all(mainAgents.map(scope => scope.whenIdle())))
+    await active.context.waitForCleanup('children', this.children.drain())
+    await active.context.waitForCleanup('activities', active.activities.whenDrained())
+    await active.context.waitForCleanup('commits', active.context.commits.whenDrained())
     if (this.active !== active) return undefined
     const recovery = error === undefined || cause !== 'executor_error' || error.recovery !== undefined
       ? undefined : classifyBidRecovery(active.snapshot.work, error)
@@ -455,7 +510,6 @@ export class BidRunCoordinator {
       ...(observedError === undefined ? {} : { error: observedError }),
       updatedAt: Date.now(),
     }
-    this.active = undefined
     const terminal = cause === 'executor_error' || cause === 'retry_exhausted'
     if (terminal) {
       this.session.append('bid.task.changed', {
@@ -483,7 +537,8 @@ export class BidRunCoordinator {
     }
     this.session.append('bid.run.notice', notice)
     this.onSuspended?.(notice, snapshot)
-    await this.checkpoint?.()
+    await active.context.waitForCleanup('terminal_checkpoint', this.checkpoint?.() ?? Promise.resolve(0))
+    if (this.active === active) this.active = undefined
     return snapshot
   }
 
@@ -517,10 +572,10 @@ export class BidRunCoordinator {
     for (const scope of mainAgents) scope.discardOwnedInbox()
     active.controller.abort({ kind: 'hook', reason: 'bid-run-retired' })
     for (const scope of mainAgents) scope.cancel()
-    await Promise.all(mainAgents.map(scope => scope.whenIdle()))
-    await this.children.drain()
-    await active.activities.whenDrained()
-    await active.context.commits.whenDrained()
+    await active.context.waitForCleanup('main_agents', Promise.all(mainAgents.map(scope => scope.whenIdle())))
+    await active.context.waitForCleanup('children', this.children.drain())
+    await active.context.waitForCleanup('activities', active.activities.whenDrained())
+    await active.context.waitForCleanup('commits', active.context.commits.whenDrained())
     if (this.active === active) this.active = undefined
   }
 
@@ -555,6 +610,7 @@ export function createTestBidRunContext(options: {
   readonly work?: BidWorkDescriptor
   readonly resumeOf?: BidRunResumeIdentity
   readonly reportProgress?: (progress: BidRunProgressInput) => void
+  readonly childTimeoutMs?: number
 } = {}): BidRunContext {
   const controlRevision = options.controlRevision ?? 0
   const signal = options.signal ?? new AbortController().signal
@@ -579,6 +635,9 @@ export function createTestBidRunContext(options: {
     commits: new BidCommitScope({ runId, epoch: 1, controlRevision, signal }, readProjectRevision),
     children,
     activities,
+    childTimeoutMs: options.childTimeoutMs ?? 30 * 60_000,
+    waitForCleanup: (_resource, pending) => pending,
+    acceptProgress: async () => {},
     reportProgress: options.reportProgress ?? (() => {}),
     bindMainAgent: () => () => {},
   }

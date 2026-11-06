@@ -30,7 +30,7 @@ registerCapabilityTaskDispatcher(dispatcher: CapabilityTaskDispatcher): () => vo
  * Rewind to the current or an earlier Bid stage and apply its fixed restart policy.
  * Active work is cancelled and drained before artifacts owned by the selected
  * stage and every later stage are removed.
- * S1 同时清理项目内上传资料、解析语料、资料清单与 Word 模板及格式配置。
+ * S1 清理专业资料清单与 Word 模板配置；不可变原件、解析缓存和独立资产保留。
  * @param agent - live Bid Agent receiving the scoped command.
  * @param stage - current or earlier stage named by that command.
  * @returns S2-S4 已提交的 ready 状态；S1 与 S5 返回 waiting_user。
@@ -249,9 +249,17 @@ async resumeCurrentRun( session: Session, suspendedRunId: string, expectedProjec
 @Remote('deleteRevisionIssue') async deleteRevisionIssue(session: Session, request: BidDeleteRevisionIssueRequest): Promise<BidRevisionQueueResult>
 
 /**
- * 读取有效能力计划，导出尾步骤的完成状态来自正式导出回执。
+ * 读取完成通知对应的已发布文件，下载位置绑定当前会话和精确回执。
  * @param session 项目公开主会话。
- * @returns 最近任务的只读摘要；尚无能力任务或历史任务已清理时为 null。
+ * @param workId 完成通知绑定的任务身份。
+ * @returns 当前任务的最终文档、图片及来源文件。
+ */
+@Remote('getTaskDeliverables') async getTaskDeliverables(session: Session, workId: string): Promise<BidTaskDeliverablesView>
+
+/**
+ * 读取当前能力计划及发布状态。
+ * @param session 项目公开主会话。
+ * @returns 当前任务的只读计划摘要。
  */
 @Remote('getCapabilityTaskPlan') async getCapabilityTaskPlan(session: Session): Promise<BidCapabilityPlanView | null>
 

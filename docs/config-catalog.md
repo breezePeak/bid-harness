@@ -418,6 +418,12 @@ export interface Config {
   docxTemplateMaxBytes: number
   /** Validator-guided repair turns available to each model-authored stage execution. */
   modelStageRepairAttempts: number
+  /** 同一 Work 未追加用户授权时的恢复执行总上限；默认九次，窗口仍使用 modelStageRepairAttempts。 */
+  recoveryTotalAttempts?: number
+  /** 单个 S4 Child 首次执行或 follow-up 的总等待上限，默认 30 分钟。 */
+  runChildTimeoutMs?: number
+  /** 每个清理资源的诊断期限；默认一分钟，超时后仍等待排空并保留项目写锁。 */
+  runCleanupTimeoutMs?: number
   /** Maximum Mapping Subagents running at the same time during S4. */
   evidenceMappingMaxConcurrency: number
   /** Maximum Chapter Subagents running at the same time during S5. */
@@ -449,7 +455,7 @@ export interface BidImageGenerationConfig {
 }
 ```
 
-Source: [`packages/bid/bid/src/index.ts:532`](../packages/bid/bid/src/index.ts)
+Source: [`packages/bid/bid/src/index.ts:544`](../packages/bid/bid/src/index.ts)
 
 <a id="deepseek-aidsh-client-connection"></a>
 

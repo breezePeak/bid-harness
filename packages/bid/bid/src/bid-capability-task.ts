@@ -1370,6 +1370,8 @@ export async function executeCapabilityTask(
     for (const file of result.changed_artifacts) { removed.delete(file); changed.add(file) }
     for (const path of removedPaths) { changed.delete(path); removed.add(path) }
     previous = { status: 'completed', result }
+    await run.acceptProgress({ unit: `step:${saved.step_id}`, inputSha256: stepInputSha256,
+      planSha256: bidInputFingerprint(checkpoint.steps.map(record => ({ step_id: record.step_id, step: record.step }))) })
     run.reportProgress({ phase: 'executing', summary: `已完成能力步骤 ${String(index + 1)}/${String(checkpoint.steps.length)}`,
       completed: index + 1, total: checkpoint.steps.length })
   }

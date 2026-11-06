@@ -287,6 +287,8 @@ export function createChapterWriterChild(
         case 'blocked': return { stopReason: 'refusal', output: [] }
         case 'error': {
           const failure = safeBidRunError(reason.error)
+          if (failure.code === 'BID_EXECUTOR_ERROR') return { stopReason: 'error', output: [],
+            failure: { ...failure, code: 'CHAPTER_SUBAGENT_FAILURE_UNKNOWN' } }
           return { stopReason: 'error', output: [], diagnostic: `章节模型回合失败（${failure.code}）。`, failure }
         }
         // TurnEndReason 可由插件扩展；未完成回合不能作为成功提交。

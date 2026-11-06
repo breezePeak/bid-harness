@@ -11,7 +11,6 @@
 {"type":"bid.run.progress","data":{"runId":"{{sessionId}}","epoch":1,"progress":{"phase":"mapping","summary":"资料映射任务已规划，正在准备执行","completed":0,"total":1,"details":[],"updatedAt":1791453600000}}}
 {"type":"bid.run.progress","data":{"runId":"{{sessionId}}","epoch":1,"progress":{"phase":"mapping","summary":"正在准备章节研究任务","completed":0,"total":1,"details":[],"updatedAt":1791453600000}}}
 {"type":"bid.run.progress","data":{"runId":"{{sessionId}}","epoch":1,"progress":{"phase":"mapping","summary":"正在为章节映射资料与证据","completed":0,"total":1,"details":["进行中：访问控制与安全审计"],"updatedAt":1791453600000}}}
-{"type":"bid.run.progress","data":{"runId":"{{sessionId}}","epoch":1,"progress":{"phase":"mapping","summary":"章节资料映射已完成，正在推进剩余任务","completed":1,"total":1,"details":[],"updatedAt":1791453600000}}}
 {"type":"agent/inbox/spliced","data":{"target":"next-turn","start":0,"inserted":[{"content":[{"type":"text","text":"Background subagent {{sessionId}} finished and will do no further work unless you send it more."},{"type":"text","text":"Its closing message:"},{"type":"tool-call","id":"finish-initial-mapping","name":"finish_mapping_task","arguments":"{}"}],"source":{"kind":"subagent-settled","form":"notice","summary":"Background subagent {{sessionId}} finished and will do no further work unless you send it more.","senderSessionId":"{{sessionId}}"},"role":"user","id":"{{sessionId}}"}]}}
 {"type":"turn/start","data":{"turn":1}}
 {"type":"agent/inbox/spliced","data":{"target":"next-turn","start":0,"removedCount":1,"inserted":[]}}
@@ -22,12 +21,13 @@
 {"type":"assistant/chunk","data":{"turn":1,"step":1,"chunk":{"type":"block-start","index":0,"blockType":"text"}}}
 {"type":"assistant/chunk","data":{"turn":1,"step":1,"chunk":{"type":"block-end","index":0,"block":{"type":"text","text":"等待 Host 下发目录深化任务。"}}}}
 {"type":"assistant/chunk","data":{"turn":1,"step":1,"chunk":{"type":"finish","reason":{"kind":"stop"}}}}
-{"type":"assistant/message","data":{"turn":1,"step":1,"message":{"role":"assistant","content":[{"type":"text","text":"等待 Host 下发目录深化任务。"}],"source":{"kind":"model","provider":"mock","model":"mock"},"id":"{{sessionId}}"}},"sourceEventSeqs":[20,21,22],"surfaceOp":"append"}
+{"type":"assistant/message","data":{"turn":1,"step":1,"message":{"role":"assistant","content":[{"type":"text","text":"等待 Host 下发目录深化任务。"}],"source":{"kind":"model","provider":"mock","model":"mock"},"id":"{{sessionId}}"}},"sourceEventSeqs":[19,20,21],"surfaceOp":"append"}
 {"type":"step/end","data":{"turn":1,"step":1}}
 {"type":"turn/end","data":{"turn":1,"reason":{"kind":"completed"}}}
+{"type":"bid.run.progress","data":{"runId":"{{sessionId}}","epoch":1,"progress":{"checkpoint":{"unit":"mapping:MAP-INIT-SEC-SECURITY","inputSha256":"c1a8f3a911c46c68fc88c1dbe40a9b722cd62c40aaaf0ab2ebaec5a4e0501706","planSha256":"9cf3a6fdcf4e16a4ec52a23d1b50d0e004df8972cf3b436bd19b2985b180141b"},"phase":"accepted","summary":"已验收并保存任务成果。","updatedAt":1791453600000}}}
+{"type":"bid.run.progress","data":{"runId":"{{sessionId}}","epoch":1,"progress":{"phase":"mapping","summary":"章节资料映射已完成，正在推进剩余任务","completed":1,"total":1,"details":[],"updatedAt":1791453600000}}}
 {"type":"bid.run.progress","data":{"runId":"{{sessionId}}","epoch":1,"progress":{"phase":"mapping","summary":"正在准备章节研究任务","completed":1,"total":2,"details":[],"updatedAt":1791453600000}}}
 {"type":"bid.run.progress","data":{"runId":"{{sessionId}}","epoch":1,"progress":{"phase":"mapping","summary":"正在为章节映射资料与证据","completed":1,"total":2,"details":["进行中：修复目录范围：访问控制与安全审计"],"updatedAt":1791453600000}}}
-{"type":"bid.run.progress","data":{"runId":"{{sessionId}}","epoch":1,"progress":{"phase":"mapping","summary":"章节资料映射已完成，正在推进剩余任务","completed":2,"total":2,"details":[],"updatedAt":1791453600000}}}
 {"type":"agent/inbox/spliced","data":{"target":"next-turn","start":0,"inserted":[{"content":[{"type":"text","text":"Background subagent {{sessionId}} finished and will do no further work unless you send it more."},{"type":"text","text":"Its closing message:"},{"type":"tool-call","id":"repair-1-finish","name":"finish_mapping_task","arguments":"{}"}],"source":{"kind":"subagent-settled","form":"notice","summary":"Background subagent {{sessionId}} finished and will do no further work unless you send it more.","senderSessionId":"{{sessionId}}"},"role":"user","id":"{{sessionId}}"}]}}
 {"type":"turn/start","data":{"turn":2}}
 {"type":"agent/inbox/spliced","data":{"target":"next-turn","start":0,"removedCount":1,"inserted":[]}}
@@ -39,9 +39,10 @@
 {"type":"assistant/message","data":{"turn":2,"step":1,"message":{"role":"assistant","content":[{"type":"text","text":"等待 Host 下发目录深化任务。"}],"source":{"kind":"model","provider":"mock","model":"mock"},"id":"{{sessionId}}"}},"sourceEventSeqs":[34,35,36],"surfaceOp":"append"}
 {"type":"step/end","data":{"turn":2,"step":1}}
 {"type":"turn/end","data":{"turn":2,"reason":{"kind":"completed"}}}
+{"type":"bid.run.progress","data":{"runId":"{{sessionId}}","epoch":1,"progress":{"checkpoint":{"unit":"mapping:MAP-REPAIR-1-SEC-SECURITY","inputSha256":"d80be1d25052b893449d09b90c9b3cea75d3d9f7dd2adffb41ce2950ccf00efd","planSha256":"9ec2b90982a3f08e66ca48973c93c02e79c37e07dacaa50dbb34369de4ce255b"},"phase":"accepted","summary":"已验收并保存任务成果。","updatedAt":1791453600000}}}
+{"type":"bid.run.progress","data":{"runId":"{{sessionId}}","epoch":1,"progress":{"phase":"mapping","summary":"章节资料映射已完成，正在推进剩余任务","completed":2,"total":2,"details":[],"updatedAt":1791453600000}}}
 {"type":"bid.run.progress","data":{"runId":"{{sessionId}}","epoch":1,"progress":{"phase":"mapping","summary":"正在准备章节研究任务","completed":2,"total":3,"details":[],"updatedAt":1791453600000}}}
 {"type":"bid.run.progress","data":{"runId":"{{sessionId}}","epoch":1,"progress":{"phase":"mapping","summary":"正在为章节映射资料与证据","completed":2,"total":3,"details":["进行中：修复目录范围：访问控制与安全审计"],"updatedAt":1791453600000}}}
-{"type":"bid.run.progress","data":{"runId":"{{sessionId}}","epoch":1,"progress":{"phase":"mapping","summary":"章节资料映射已完成，正在推进剩余任务","completed":3,"total":3,"details":[],"updatedAt":1791453600000}}}
 {"type":"agent/inbox/spliced","data":{"target":"next-turn","start":0,"inserted":[{"content":[{"type":"text","text":"Background subagent {{sessionId}} finished and will do no further work unless you send it more."},{"type":"text","text":"Its closing message:"},{"type":"tool-call","id":"repair-2-finish","name":"finish_mapping_task","arguments":"{}"}],"source":{"kind":"subagent-settled","form":"notice","summary":"Background subagent {{sessionId}} finished and will do no further work unless you send it more.","senderSessionId":"{{sessionId}}"},"role":"user","id":"{{sessionId}}"}]}}
 {"type":"turn/start","data":{"turn":3}}
 {"type":"agent/inbox/spliced","data":{"target":"next-turn","start":0,"removedCount":1,"inserted":[]}}
@@ -50,12 +51,13 @@
 {"type":"assistant/chunk","data":{"turn":3,"step":1,"chunk":{"type":"block-start","index":0,"blockType":"text"}}}
 {"type":"assistant/chunk","data":{"turn":3,"step":1,"chunk":{"type":"block-end","index":0,"block":{"type":"text","text":"等待 Host 下发目录深化任务。"}}}}
 {"type":"assistant/chunk","data":{"turn":3,"step":1,"chunk":{"type":"finish","reason":{"kind":"stop"}}}}
-{"type":"assistant/message","data":{"turn":3,"step":1,"message":{"role":"assistant","content":[{"type":"text","text":"等待 Host 下发目录深化任务。"}],"source":{"kind":"model","provider":"mock","model":"mock"},"id":"{{sessionId}}"}},"sourceEventSeqs":[48,49,50],"surfaceOp":"append"}
+{"type":"assistant/message","data":{"turn":3,"step":1,"message":{"role":"assistant","content":[{"type":"text","text":"等待 Host 下发目录深化任务。"}],"source":{"kind":"model","provider":"mock","model":"mock"},"id":"{{sessionId}}"}},"sourceEventSeqs":[49,50,51],"surfaceOp":"append"}
 {"type":"step/end","data":{"turn":3,"step":1}}
 {"type":"turn/end","data":{"turn":3,"reason":{"kind":"completed"}}}
+{"type":"bid.run.progress","data":{"runId":"{{sessionId}}","epoch":1,"progress":{"checkpoint":{"unit":"mapping:MAP-REPAIR-2-SEC-SECURITY","inputSha256":"ade633431f227e678aa5a03fe5678bed457fe42f2d5da323d8e5cf9cd9265de4","planSha256":"174a55e9ed15b1b48680c55f0544644204769374f5ce0c8556a7fd6f2f289c04"},"phase":"accepted","summary":"已验收并保存任务成果。","updatedAt":1791453600000}}}
+{"type":"bid.run.progress","data":{"runId":"{{sessionId}}","epoch":1,"progress":{"phase":"mapping","summary":"章节资料映射已完成，正在推进剩余任务","completed":3,"total":3,"details":[],"updatedAt":1791453600000}}}
 {"type":"bid.run.progress","data":{"runId":"{{sessionId}}","epoch":1,"progress":{"phase":"mapping","summary":"正在准备章节研究任务","completed":3,"total":4,"details":[],"updatedAt":1791453600000}}}
 {"type":"bid.run.progress","data":{"runId":"{{sessionId}}","epoch":1,"progress":{"phase":"reviewing","summary":"正在复核章节资料映射","completed":3,"total":4,"details":["进行中：章节证据复核：访问控制与安全审计"],"updatedAt":1791453600000}}}
-{"type":"bid.run.progress","data":{"runId":"{{sessionId}}","epoch":1,"progress":{"phase":"mapping","summary":"章节资料映射已完成，正在推进剩余任务","completed":4,"total":4,"details":[],"updatedAt":1791453600000}}}
 {"type":"agent/inbox/spliced","data":{"target":"next-turn","start":0,"inserted":[{"content":[{"type":"text","text":"Background subagent {{sessionId}} finished and will do no further work unless you send it more."},{"type":"text","text":"Its closing message:"},{"type":"tool-call","id":"finish-final-check","name":"finish_final_check","arguments":"{}"}],"source":{"kind":"subagent-settled","form":"notice","summary":"Background subagent {{sessionId}} finished and will do no further work unless you send it more.","senderSessionId":"{{sessionId}}"},"role":"user","id":"{{sessionId}}"}]}}
 {"type":"turn/start","data":{"turn":4}}
 {"type":"agent/inbox/spliced","data":{"target":"next-turn","start":0,"removedCount":1,"inserted":[]}}
@@ -64,8 +66,10 @@
 {"type":"assistant/chunk","data":{"turn":4,"step":1,"chunk":{"type":"block-start","index":0,"blockType":"text"}}}
 {"type":"assistant/chunk","data":{"turn":4,"step":1,"chunk":{"type":"block-end","index":0,"block":{"type":"text","text":"等待 Host 下发目录深化任务。"}}}}
 {"type":"assistant/chunk","data":{"turn":4,"step":1,"chunk":{"type":"finish","reason":{"kind":"stop"}}}}
-{"type":"assistant/message","data":{"turn":4,"step":1,"message":{"role":"assistant","content":[{"type":"text","text":"等待 Host 下发目录深化任务。"}],"source":{"kind":"model","provider":"mock","model":"mock"},"id":"{{sessionId}}"}},"sourceEventSeqs":[62,63,64],"surfaceOp":"append"}
+{"type":"assistant/message","data":{"turn":4,"step":1,"message":{"role":"assistant","content":[{"type":"text","text":"等待 Host 下发目录深化任务。"}],"source":{"kind":"model","provider":"mock","model":"mock"},"id":"{{sessionId}}"}},"sourceEventSeqs":[64,65,66],"surfaceOp":"append"}
 {"type":"step/end","data":{"turn":4,"step":1}}
 {"type":"turn/end","data":{"turn":4,"reason":{"kind":"completed"}}}
+{"type":"bid.run.progress","data":{"runId":"{{sessionId}}","epoch":1,"progress":{"checkpoint":{"unit":"mapping:MAP-FINAL-CHECK","inputSha256":"9060ff9baec1955f8614f48a1be1ee0dcc9ee8e29802e2abc7930f6d83578d09","planSha256":"a3c62e5ee3c03d7958c286115e4a9fc05d054150cb02d52f8236e99b9d3d7e07"},"phase":"accepted","summary":"已验收并保存任务成果。","updatedAt":1791453600000}}}
+{"type":"bid.run.progress","data":{"runId":"{{sessionId}}","epoch":1,"progress":{"phase":"mapping","summary":"章节资料映射已完成，正在推进剩余任务","completed":4,"total":4,"details":[],"updatedAt":1791453600000}}}
 {"type":"bid.run.completed","data":{"run":{"runId":"{{sessionId}}","interactionSessionId":"{{sessionId}}","work":{"kind":"stage_execution","stage":"evidence_mapping","workId":"snapshot-{{sessionId}}-structure","requestRef":"requests/snapshot-{{sessionId}}-structure.json","requestSha256":"c26fcb46425f80239f17165c10db64dde37ee9d179fe9086467c10ed3fa3aa11","inputFingerprint":"43c7adb40e5e201a89a9e81b60200d73dd53d873af2b660f74aa8c9d6e6a8837"},"epoch":1,"baseProjectRevision":0,"controlRevision":0,"startedAt":1791453600000,"updatedAt":1791453600000,"progress":{"phase":"mapping","summary":"章节资料映射已完成，正在推进剩余任务","completed":4,"total":4,"details":[],"updatedAt":1791453600000}}}}
 {"type":"bid.user_confirmation.required","data":{"stage":"evidence_mapping","status":"waiting_user"}}

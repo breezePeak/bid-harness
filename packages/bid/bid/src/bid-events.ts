@@ -290,6 +290,9 @@ declare module '@deepseek-ai/dsh-session/types' {
      * @param instruction 主 Agent 提交的具体修复方案。
      * @param progressFingerprint 恢复前的问题与检查点摘要。
      * @param sourceMessageId 接纳时的真实用户消息；自动纠正没有新用户消息时省略。
+     * @param continuation 当前用户继续消息开启一个有限窗口；每条消息只计一次。
+     * @param windowBudget 接纳时窗口上限，恢复后仅允许降低。
+     * @param totalBaseBudget 原 Work 的基础累计上限，不含明确用户继续授予的额度。
      */
     'bid.recovery.requested': {
       ownerSessionId: string
@@ -298,6 +301,9 @@ declare module '@deepseek-ai/dsh-session/types' {
       instruction: string
       progressFingerprint: string
       sourceMessageId?: string
+      continuation?: true
+      windowBudget?: number
+      totalBaseBudget?: number
     }
     /**
      * Host 将原生回答关联到真实提问任务；未绑定 Work 的 Main 问题只属于当前会话。
@@ -323,6 +329,7 @@ declare module '@deepseek-ai/dsh-session/types' {
      * @param messageId 当前轮对应的模型消息身份。
      * @param nextAt 下次允许派发的宿主时间。
      * @param reason 真实失败、已执行动作或具体 blocker。
+     * @param windowKey Host 验收进度或用户继续消息确定的恢复窗口，不随 Run 改变。
      */
     'bid.recovery.round': {
       ownerSessionId: string
@@ -335,6 +342,7 @@ declare module '@deepseek-ai/dsh-session/types' {
       messageId?: string
       nextAt?: number
       reason: string
+      windowKey?: string
     }
     /**
      * 旧版 Goal 绑定，仅用于历史日志回放；运行时不再生产或消费。

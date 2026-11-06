@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import { z } from 'zod'
 import { recordOnlySchemaVersion } from './schema-version.ts'
+import { bidTaskFailureSchema } from './runtime-state.ts'
 import { assertNoLinkedPath, within } from './workspace-path.ts'
 import { publishBidBatch } from './publication-batch.ts'
 import {
@@ -36,6 +37,7 @@ export const revisionBatchTaskStatusSchema = z.enum([
 export const revisionBatchTaskFailureSchema = z.object({
   code: z.string().min(1),
   message: z.string().min(1),
+  cause: bidTaskFailureSchema.shape.cause,
   phase: z.string().nullable(),
 }).strict()
 

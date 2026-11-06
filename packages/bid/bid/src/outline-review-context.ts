@@ -178,11 +178,13 @@ export function buildOutlineReviewRequest(input: OutlineReviewContext, budgetTok
  * @param input - 全量审查依据及程序绑定位置。
  * @param budgetTokens - 已扣除 system、工具和输出余量后的输入 token 预算。
  * @param targetTokens - 常规分片目标；不可拆分的单章或跨片关系可使用剩余模型预算。
+ * @param partitionEvidence 输出超限后强制细分业务字段和原文，保留全目录与逐对关系审核。
  * @returns 全部必需请求及程序绑定的覆盖位置；最小请求仍超限时抛错。
  */
 export function buildOutlineReviewRequests(
-  input: OutlineReviewContext, budgetTokens: number, targetTokens = budgetTokens,
+  input: OutlineReviewContext, budgetTokens: number, targetTokens = budgetTokens, partitionEvidence = false,
 ): OutlineReviewRequest[] {
+  if (partitionEvidence) return buildPartitionedOutlineReviewRequests(input, Math.min(budgetTokens, targetTokens))
   try { return buildWholeOutlineReviewRequests(input, budgetTokens, targetTokens) } catch (error) {
     if (!(error instanceof OutlineReviewContextTooLargeError)) throw error
     return buildPartitionedOutlineReviewRequests(input, budgetTokens)

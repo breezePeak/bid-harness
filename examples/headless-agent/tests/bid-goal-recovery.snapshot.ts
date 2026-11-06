@@ -58,11 +58,11 @@ it.each(['continue', 'quota-continue', 'wrapped-quota-continue'])('用户继续 
   })
   expect(JSON.parse(result.stdout)).toEqual({
     startedRuns: mode === 'wrapped-quota-continue' ? 4 : 2, sameWork: true, resumeOfOriginal: true, automaticEligible: false, attempts: 1,
-    automaticRound: mode === 'continue' ? 3 : 0, automaticBudget: 3,
+    automaticRound: 3, automaticBudget: 3,
     currentRunReportedOnce: true,
     calls: ['bid_stage_inspect', 'bid_resume_current_run'], toolFailures: [],
     userMessages: [mode === 'continue' ? '继续' : '继续，现在 api 好了'],
-    continuationGuidance: '先用 bid_stage_inspect(view=recovery) 核对失败、原目标和检查点。新的直接用户消息明确要求继续或重试原任务时，调用 bid_resume_current_run 实际执行；即使自动恢复预算已耗尽，也可按这次新授权继续一次。保留原 Work、已保存候选和正式校验，不重置自动预算；普通问答不启动恢复。',
+    continuationGuidance: '先用 bid_stage_inspect(view=recovery) 核对失败、原目标和检查点。新的直接用户消息明确要求继续或重试原任务时，调用 bid_resume_current_run 开启有限恢复窗口；同一消息只接纳一次。窗口内后续可恢复故障用 bid_recover_task 继续。保留原 Work、已保存候选和正式校验，累计用量保留；普通问答不启动恢复。',
   })
 }, LOADER_SMOKE_TEST_TIMEOUT_MS)
 

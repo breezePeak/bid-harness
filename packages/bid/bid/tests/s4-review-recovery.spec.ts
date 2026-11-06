@@ -157,15 +157,15 @@ it.each(['valid', 'output_limit', 'missing', 'fingerprint', 'input', 'checkpoint
     await first.sessions.flush(result.agent.session)
     await first.fiber.dispose()
 
-    let restored = await boot('s4-legacy-review-restored', path, undefined, undefined, configRoot)
+    const restored = await boot('s4-legacy-review-restored', path, undefined, undefined, configRoot)
     try {
       await restored.plugin(LocalFileSystem)
       registerIntegrationTools(restored, root, result.sourceUrl)
       restored.llm.registerAdapter(['mock'], result.adapter)
-      let { agent } = await restored.agentLoop.resume(restored, { resumeSessionId: result.agent.id,
+      const { agent } = await restored.agentLoop.resume(restored, { resumeSessionId: result.agent.id,
         agentOptions: { provider: 'mock', model: 'mock' } })
       await restored.plugin(BidHostRuntime)
-      let operations = (restored.bid as unknown as { inFlight: Map<string, { done: Promise<void> }> }).inFlight
+      const operations = (restored.bid as unknown as { inFlight: Map<string, { done: Promise<void> }> }).inFlight
       await vi.waitFor(() => { expect(operations.size).toBe(0) })
       expect(bidRunRecoveryEligibility(agent.session)).toMatchObject({ eligible: true, attempts: 0 })
       if (fault === 'valid') {
@@ -218,40 +218,14 @@ it.each(['valid', 'output_limit', 'missing', 'fingerprint', 'input', 'checkpoint
         expect(Buffer.byteLength(text.text)).toBeLessThan(50_000)
         expect(JSON.parse(text.text)).not.toHaveProperty('objects')
       }
-      let state = await readBidProjectState(new BidWorkspace(root))
-      let previousRunId = run.runId
+      const state = await readBidProjectState(new BidWorkspace(root))
+      const previousRunId = run.runId
       if (fault === 'output_limit') {
-        expect(state).toMatchObject({ status: 'failed', failure: { issues: [{ code: 'OUTLINE_REVIEW_OUTPUT_BUDGET_EXCEEDED' }] } })
-        expect(bidRunRecoveryEligibility(agent.session)).toMatchObject({ eligible: true, attempts: 1 })
-        expect(result.requests.slice(before).filter(request => request.system?.includes('技术标目录轻量复核'))).toHaveLength(1)
-        previousRunId = agent.session.events.findLast(event => event.type === 'bid.run.started')!.data.run.runId
-        await restored.sessions.flush(agent.session)
-        await restored.fiber.dispose()
-        restored = await boot('s4-output-limit-restored', path, undefined, undefined, configRoot)
-        await restored.plugin(LocalFileSystem)
-        registerIntegrationTools(restored, root, result.sourceUrl)
-        restored.llm.registerAdapter(['mock'], result.adapter)
-        agent = (await restored.agentLoop.resume(restored, { resumeSessionId: result.agent.id,
-          agentOptions: { provider: 'mock', model: 'mock' } })).agent
-        await restored.plugin(BidHostRuntime)
-        operations = (restored.bid as unknown as { inFlight: Map<string, { done: Promise<void> }> }).inFlight
-        await vi.waitFor(() => { expect(operations.size).toBe(0) })
-        expect(bidRunRecoveryEligibility(agent.session)).toMatchObject({ eligible: true, attempts: 1 })
-        result.adapter.outlineReview!.defaultMaxTokens = 8_192
-        const retryBefore = result.requests.length
-        result.parentScript.push(call('bid_stage_inspect', { view: 'recovery' }), call('bid_recover_task', {
-          target: 'run', instruction: '使用所选模型的完整输出预算，保留已完成研究后重新复核。' }))
-        agent.followup(createUserMessage({ content: [{ type: 'text', text: '继续修复原 S4 的输出超限。' }], source: { kind: 'user' } }))
-        await agent.whenIdle()
-        await Promise.all([...operations.values()].map(operation => operation.done))
-        expect(result.requests[retryBefore]?.tools?.map(tool => tool.name))
-          .toEqual(['bid_project_inspect', 'bid_recover_task', 'bid_resume_current_run', 'bid_run_task', 'bid_stage_inspect',
-            'bid_start_workflow', 'grep', 'read', 'web_fetch', 'web_search', 'write'])
-        const reviews = result.requests.slice(retryBefore).filter(request => request.system?.includes('技术标目录轻量复核'))
-        expect(reviews.length).toBeGreaterThan(0)
-        expect(reviews.every(request => request.maxTokens === 8_192)).toBe(true)
-        expect(agent.session.events.filter(event => event.type === 'bid.recovery.requested')).toHaveLength(2)
-        state = await readBidProjectState(new BidWorkspace(root))
+        const reviews = result.requests.slice(before).filter(request => request.system?.includes('技术标目录轻量复核'))
+        expect(reviews.length).toBeGreaterThan(1)
+        expect(new Set(reviews.map(request => JSON.stringify(request.messages))).size).toBe(reviews.length)
+        expect(reviews.every(request => request.maxTokens === reviews[0]!.maxTokens)).toBe(true)
+        expect(agent.session.events.filter(event => event.type === 'bid.recovery.requested')).toHaveLength(1)
       }
       if (fault === 'valid' || fault === 'output_limit') {
         expect(state).toMatchObject({ workflow: { kind: 'full_bid' as const, stage: 'evidence_mapping' }, status: 'waiting_user' })

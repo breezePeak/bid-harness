@@ -2,6 +2,8 @@ import { z } from 'zod'
 import { recordOnlySchemaVersion } from './schema-version.ts'
 import type { OutlineArtifact } from './outline-generation-artifacts.ts'
 import type { StageValidationIssue } from './control-plane-contract.ts'
+import { chapterMetadataSchema } from './chapter-writing-artifacts.ts'
+import { chapterReviewSchema } from './chapter-writing-review-artifacts.ts'
 
 /** Durable S6 relation-plan and execution-log format version. */
 export const CHAPTER_EXECUTION_SCHEMA_VERSION = 3 as const
@@ -94,6 +96,13 @@ export const chapterExecutionLogSchema = z.object({
     phase: z.enum(['queued', 'writing', 'reviewing', 'repairing']).nullable(),
     failure_phase: z.enum(['queued', 'writing', 'reviewing', 'repairing', 'blocked']).nullable(),
     attempts: z.array(executionAttemptSchema),
+    /** 已审核但尚未正式提交的候选；失败和恢复均保留其原 Writer、输入及审核身份。 */
+    reviewed_candidate: z.object({
+      candidate: z.object({ section_id: z.string().min(1), markdown: z.string().min(1), metadata: chapterMetadataSchema }).strict(),
+      review: chapterReviewSchema,
+      writer_child_session_id: z.string().min(1), reviewer_child_session_id: z.string().min(1),
+      candidate_sha256: sha256Schema, input: executionAttemptSchema.shape.input,
+    }).strict().optional(),
     final_writer_child_session_id: z.string().min(1).nullable(),
     final_reviewer_child_session_id: z.string().min(1).nullable(),
   }).strict()),

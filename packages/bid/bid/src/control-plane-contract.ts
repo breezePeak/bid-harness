@@ -63,6 +63,8 @@ export type BidTaskStatus = typeof BID_TASK_STATUSES[number]
 
 /** Latest bounded milestone reported by deterministic Run code. */
 export interface BidRunProgress {
+  /** Host 已验收并落盘的单元、输入及计划身份；普通进度不能设置。 */
+  readonly checkpoint?: { readonly unit: string; readonly inputSha256: string; readonly planSha256: string } | undefined
   /** Stable machine-readable phase within the current stage. */
   readonly phase: string
   /** Short user-visible description of the work currently in progress. */

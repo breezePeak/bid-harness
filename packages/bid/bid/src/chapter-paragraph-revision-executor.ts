@@ -56,7 +56,10 @@ export type ParagraphRevisionTaskResult =
   | { readonly status: 'full_review' }
   | { readonly status: 'needs_input' }
   | { readonly status: 'blocked'; readonly code: string; readonly message: string }
-  | { readonly status: 'failed'; readonly code: string; readonly message: string }
+  | { readonly status: 'failed'
+    readonly code: string
+    readonly message: string
+    readonly cause?: import('./control-plane-contract.ts').BidTaskFailure['cause'] }
 
 /** 执行一个局部任务所需的 Host 权威输入。 */
 export interface ExecuteParagraphRevisionTaskInput {

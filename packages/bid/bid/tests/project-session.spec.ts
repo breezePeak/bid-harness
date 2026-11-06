@@ -264,6 +264,7 @@ async function fixture(options: {
   readonly withPreset?: boolean
   readonly withPersistence?: boolean
   readonly repairAttempts?: number
+  readonly cleanupTimeoutMs?: number
   readonly root?: string
 } = {}) {
   const root = options.root ?? await mkdtemp(join(tmpdir(), 'dsh-project-session-'))
@@ -308,8 +309,10 @@ async function fixture(options: {
   await ctx.plugin(SubagentRuntime)
   await ctx.plugin(spawn, { providerName: 'spawn' })
   await ctx.plugin(SessionProjectionRegistry)
-  const config = BidHostRuntime.Config((options.repairAttempts === undefined
-    ? {} : { modelStageRepairAttempts: options.repairAttempts }) as Parameters<typeof BidHostRuntime.Config>[0])
+  const config = BidHostRuntime.Config({
+    ...(options.repairAttempts === undefined ? {} : { modelStageRepairAttempts: options.repairAttempts }),
+    ...(options.cleanupTimeoutMs === undefined ? {} : { runCleanupTimeoutMs: options.cleanupTimeoutMs }),
+  } as Parameters<typeof BidHostRuntime.Config>[0])
   const bidFiber = await ctx.plugin(BidHostRuntime, config)
   const workspace = new BidWorkspace(root)
   const host = ctx.bid as unknown as HostExecution
@@ -738,7 +741,7 @@ describe('Workspace 项目与独立 Session', () => {
     const operation = host.beginOperation(agent.session)
     await host.prepareOperation(operation)
     await operation.runs.start(work)
-    adapter.script.push(answer('我已看到失败。'), toolCall('bid_recover_task', {
+    adapter.script.push(toolCall('bid_resume_current_run', {}), answer('我已看到失败。'), toolCall('bid_recover_task', {
       target: 'run', instruction: '核对原检查点，仅补全当前目录缺失的字段。',
     }), answer('已核验恢复。'))
     executor.canExecute = stage => stage === 'outline_generation'
@@ -755,6 +758,123 @@ describe('Workspace 项目与独立 Session', () => {
     }, { timeout: 10_000 })
     expect(ask).not.toHaveBeenCalled()
     expect(ctx.get('goals')).toBeUndefined()
+    const request = adapter.requests.find(request => request.sessionId === agent.id)!
+    const context = JSON.stringify(request.messages)
+    expect(context).toContain('只有后台失败通知、没有新的用户执行要求时')
+    expect(context).toContain('先 bid_plan_task，保留完成前缀')
+    expect(context).toContain('询问状态只答复状态，要求停止就停止')
+    expect(JSON.stringify(agent.session.events)).toContain('BID_USER_CONTINUATION_REQUIRED')
+  })
+
+  it('execution handle dispose 超时可观察，实际退出前 Host 保留项目占用', async () => {
+    const { ctx, workspace, fresh, adapter } = await fixture({ withPersistence: true, cleanupTimeoutMs: 1_000 })
+    await seedProjectArtifacts(workspace)
+    await checkpointBidProjectState(workspace, { stage: 'outline_generation', status: 'completed' })
+    const agent = await fresh('cleanup-dispose')
+    const host = ctx.bid as unknown as {
+      inFlight: Map<string, unknown>
+      beginOperation(session: Session): { runs: BidRunCoordinator; executionHandle?: { dispose(): Promise<void> } }
+      prepareOperation(operation: unknown): Promise<unknown>
+      executionAgent(operation: unknown, stage: BidStage): Promise<Agent>
+      finishOperation(session: Session, operation: unknown): Promise<void>
+    }
+    const operation = host.beginOperation(agent.session)
+    await host.prepareOperation(operation)
+    await host.executionAgent(operation, 'outline_generation')
+    await operation.runs.start(await persistStageExecutionWork(workspace, 'outline_generation'))
+    await operation.runs.suspend('executor_error', { code: 'AUTH', message: '凭证失效',
+      recovery: { kind: 'blocked', unit: 'outline/outline.json', reason: '凭证失效' } })
+    const handle = operation.executionHandle!
+    const dispose = handle.dispose.bind(handle)
+    const gate = Promise.withResolvers<undefined>()
+    vi.spyOn(handle, 'dispose').mockImplementationOnce(async () => { await gate.promise; await dispose() })
+    adapter.script.push(answer('当前凭证失效，任务未继续。'))
+    let finished = false
+    const pending = host.finishOperation(agent.session, operation).then(() => { finished = true })
+    try {
+      await vi.waitFor(() => {
+        expect(agent.session.events.some(event => event.type === 'bid.run.notice'
+          && event.data.message.includes('execution_handle 未释放'))).toBe(true)
+      }, { timeout: 3_000 })
+      expect(finished).toBe(false)
+      expect(host.inFlight.size).toBe(1)
+      expect(() => host.beginOperation(agent.session)).toThrow()
+      expect(runtime(agent.session)).toMatchObject({ status: 'failed', failure: { code: 'AUTH' } })
+    } finally { gate.resolve(undefined); await pending }
+    expect(host.inFlight.size).toBe(0)
+  })
+
+  it('状态询问和失败通知同轮进入时只读诊断，不接纳继续原 Work', async () => {
+    const { ctx, workspace, fresh, executor, adapter } = await fixture({ withPersistence: true })
+    await seedProjectArtifacts(workspace)
+    await checkpointBidProjectState(workspace, { stage: 'outline_generation', status: 'completed' })
+    const agent = await fresh('status-with-notice')
+    const host = ctx.bid as unknown as {
+      beginOperation(session: Session): { runs: BidRunCoordinator }
+      prepareOperation(operation: unknown): Promise<unknown>
+      finishOperation(session: Session, operation: unknown): Promise<void>
+    }
+    const operation = host.beginOperation(agent.session)
+    await host.prepareOperation(operation)
+    await operation.runs.start(await persistStageExecutionWork(workspace, 'outline_generation'))
+    await operation.runs.suspend('executor_error', { code: 'TIMEOUT', message: '模型超时',
+      recovery: { kind: 'retry', unit: 'outline/outline.json', reason: '模型超时' } })
+    adapter.script.push(toolCall('bid_stage_inspect', { view: 'recovery' }), answer('目录任务因模型超时失败，当前仅报告状态。'))
+    try {
+      agent.inject(createUserMessage({ content: [{ type: 'text', text: '原 Work 执行失败，请处理。' }],
+        source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-bid', form: 'notice', summary: 'Bid 执行失败，交由主 Agent 处理' } }))
+      agent.steer(createUserMessage({ content: [{ type: 'text', text: '现在是什么状态？只告诉我状态。' }], source: { kind: 'user' } }))
+      await agent.whenIdle()
+      const request = adapter.requests.find(request => request.sessionId === agent.id)!
+      expect(request.messages.some(message => message.source.kind === 'plugin')).toBe(true)
+      expect(request.messages.some(message => message.source.kind === 'user')).toBe(true)
+      expect(JSON.stringify(request.messages)).toContain('询问状态只答复状态')
+      expect(agent.session.events.some(event => event.type === 'bid.recovery.requested')).toBe(false)
+      expect(executor.execute).not.toHaveBeenCalled()
+    } finally {
+      const stopped = ctx.bid.stopRun(agent.session)
+      await host.finishOperation(agent.session, operation)
+      await stopped
+    }
+  })
+
+  it('失败通知确认与用户停止竞争时，真实 stopRun 保留原 Work 并拒绝迟到恢复', async () => {
+    const { ctx, workspace, fresh, executor, adapter } = await fixture({ withPersistence: true })
+    await seedProjectArtifacts(workspace)
+    await checkpointBidProjectState(workspace, { stage: 'outline_generation', status: 'completed' })
+    const agent = await fresh('failed-stop-notice')
+    const host = ctx.bid as unknown as {
+      beginOperation(session: Session): { runs: BidRunCoordinator }
+      prepareOperation(operation: unknown): Promise<unknown>
+      finishOperation(session: Session, operation: unknown): Promise<void>
+    }
+    const operation = host.beginOperation(agent.session)
+    await host.prepareOperation(operation)
+    const run = await operation.runs.start(await persistStageExecutionWork(workspace, 'outline_generation'))
+    await operation.runs.suspend('executor_error', { code: 'TIMEOUT', message: '模型超时',
+      recovery: { kind: 'retry', unit: 'outline/outline.json', reason: '模型超时' } })
+    const entered = Promise.withResolvers<undefined>()
+    const gate = Promise.withResolvers<undefined>()
+    let held = false
+    const off = ctx.on('session/flush', async (session) => {
+      if (!held && session === agent.session && session.events.findLast(event => event.type === 'bid.recovery.round')?.data.state === 'notified') {
+        held = true
+        entered.resolve(undefined)
+        await gate.promise
+      }
+    }, { global: true })
+    try {
+      await host.finishOperation(agent.session, operation)
+      await entered.promise
+      await ctx.bid.stopRun(agent.session)
+      expect(runtime(agent.session)).toMatchObject({ status: 'suspended', run: { runId: run.runId, cause: 'user_stop', work: run.work } })
+      gate.resolve(undefined)
+      await vi.waitFor(() => { expect((ctx.bid as unknown as { recoveryTasks: Set<unknown> }).recoveryTasks.size).toBe(0) })
+      await agent.whenIdle()
+      expect(adapter.requests.filter(request => request.sessionId === agent.id)).toHaveLength(0)
+      expect(executor.execute).not.toHaveBeenCalled()
+      expect(agent.session.events.some(event => event.type === 'bid.recovery.requested')).toBe(false)
+    } finally { gate.resolve(undefined); off() }
   })
 
   it('无有效动作的相同失败有界结算，重启不清空纠正预算', async () => {

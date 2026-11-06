@@ -212,7 +212,7 @@ export function createParagraphRevisionReviewerChild(
       const end = await waitForTurn(parent, child, eventStart, signal)
       if (end.data.reason.kind === 'error') {
         const failure = safeBidRunError(end.data.reason.error)
-        throw Object.assign(new Error(failure.message), { code: failure.code })
+        throw Object.assign(new Error(failure.message), failure)
       }
       return end.data.reason.kind === 'completed'
         ? { stopReason: 'completed', output: [], structured: runtime.captured() }
