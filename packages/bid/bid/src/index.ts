@@ -1,3 +1,4 @@
+import { createChapterWriterParentResolver } from './chapter-writing-child.ts'
 import { safeFileName, validateBidFileBatch } from './file-input.ts'
 export { safeFileName, validateBidFileBatch } from './file-input.ts'
 /**
@@ -201,7 +202,7 @@ import type {} from '@deepseek-ai/dsh-goal-round-driver'
 import { bidCapabilityTakeoverRun, bidCompletedCapabilityRun, bidEvidenceMappingTakeoverRun, bidRecoverableRun, bidRecoveryFingerprint, bidRecoveryInstructionRepeated, bidRunRecoveryEligibility, bidUserContinuableRun, bidWritingPlanRecoveryEligibility, isBidWritingPlanRecoverableFailure, safeRecoverableBidFailure } from './bid-recovery.ts'
 import { BidRecoveryDriver, type BidRecoveryNotice } from './bid-recovery-driver.ts'
 import { observeBidCleanup } from './run-cleanup.ts'
-import { resolveBidToolAuthorization, withBidNativeTaskAuthorization } from './bid-tool-authorization.ts'
+import { bidUserStopBoundary, resolveBidToolAuthorization, withBidNativeTaskAuthorization } from './bid-tool-authorization.ts'
 import type { BidSessionEventMap } from './bid-events.ts'
 import {
   applyWritingPlanInput,
@@ -3466,7 +3467,7 @@ export class BidHostRuntime extends TypertRemoteService {
         && this.ctx.agents.get(session.id)?.session === session && !this.inFlight.has(projectKey(session))
         && !this.writingEntryStops.has(projectKey(session)))
     this.builtInCapabilityDispatcher = createBidCapabilityDispatcher(config, async (input, context) =>
-      this.executeChapterRevisionBatchCandidate(context.sourceSession as Session, context.agent,
+      this.executeChapterRevisionBatchCandidate(context.agent,
         context.canonical, input, context.run, { workspace: context.working, run: context.run,
           preservation: await prepareWritingCapabilityPreservation(context, input.tasks.map(task => task.section_id), true) }),
     this.imageGeneration)
@@ -4027,6 +4028,7 @@ export class BidHostRuntime extends TypertRemoteService {
         }, updatedState)
         if (completed !== undefined && !repeated) session.append('bid.run.notice', {
           noticeId: `run:${completed.runId}:failed`, supersedesTurn: null, runId: completed.runId,
+          workId: completed.work.workId,
           stage: null, kind: 'interrupted', severity: 'info', message: correctionFailure.message,
         })
         return { accepted: true, work_id: request.work_id, steps: stepCount,
@@ -4105,20 +4107,10 @@ export class BidHostRuntime extends TypertRemoteService {
         throw new BidOrchestratorError('BID_RESUME_NOT_ALLOWED', '当前任务不在可由聊天继续的状态。')
       }
       if (current.status === 'suspended' && current.run.cause === 'user_stop') {
-        const messageIndex = session.events.findIndex(event => event.type === 'user/message'
+        const message = session.events.find(event => event.type === 'user/message'
           && String(event.data.id) === authorization.message_id && event.data.source.kind === 'user')
-        const stoppedIndex = session.events.findIndex((event) => {
-          if (event.type === 'bid.run.suspended') return event.data.run.runId === current.run.runId
-            && event.data.run.updatedAt === current.run.updatedAt && event.data.run.cause === 'user_stop'
-          if (event.type === 'bid.task.changed') return event.data.state.status === 'suspended'
-            && event.data.state.run.runId === current.run.runId && event.data.state.run.updatedAt === current.run.updatedAt
-            && event.data.state.run.cause === 'user_stop'
-          if (event.type === 'bid.project.resumed' && 'state' in event.data) return event.data.state.status === 'suspended'
-            && event.data.state.run.runId === current.run.runId && event.data.state.run.updatedAt === current.run.updatedAt
-            && event.data.state.run.cause === 'user_stop'
-          return false
-        })
-        if (messageIndex <= stoppedIndex) throw new Error('BID_USER_CONTINUATION_REQUIRED')
+        const stopped = bidUserStopBoundary(session, current.run)
+        if (message === undefined || stopped === undefined || message.seq <= stopped) throw new Error('BID_USER_CONTINUATION_REQUIRED')
       }
       this.cancelRunDecisions(session)
       const accepted = Promise.withResolvers<{ accepted: true; execution_status: 'started'; completed: false; run_id: string }>()
@@ -6467,15 +6459,20 @@ export class BidHostRuntime extends TypertRemoteService {
       const task = await this.prepareOperation(operation)
       const suspended = bidRecoverableRun(session, task)
       let acceptedRecovery = recovery
-      const userContinuation = recovery === undefined && task.status === 'failed'
+      const userContinuation = recovery === undefined && (task.status === 'failed'
+        || task.status === 'suspended' && task.run.cause === 'user_stop' && task.run.error?.recovery !== undefined)
       if (userContinuation) {
         const currentAuthorization = resolveBidToolAuthorization(session)
         const message = session.events.find(event => event.type === 'user/message'
           && String(event.data.id) === authorization?.message_id && event.data.source.kind === 'user')
         const failed = session.events.findLast(event => event.type === 'bid.run.notice'
           && event.data.noticeId === `run:${suspendedRunId}:failed`)
+        const stopped = task.status === 'suspended' ? bidUserStopBoundary(session, task.run) : undefined
         if (bidUserContinuableRun(session, task) === undefined || message?.type !== 'user/message'
-          || currentAuthorization?.message_id !== authorization?.message_id || failed === undefined || message.seq <= failed.seq) {
+          || suspended?.interactionSessionId !== undefined && suspended.interactionSessionId !== String(session.id)
+          || currentAuthorization?.session_id !== String(session.id)
+          || currentAuthorization.message_id !== authorization?.message_id || failed === undefined || message.seq <= failed.seq
+          || task.status === 'suspended' && (stopped === undefined || message.seq <= stopped)) {
           throw new Error('BID_USER_CONTINUATION_REQUIRED: 继续失败任务需要失败之后新的直接用户消息。')
         }
         acceptedRecovery = { instruction: message.data.content.flatMap(block => block.type === 'text' ? [block.text] : []).join('\n') }
@@ -6535,6 +6532,9 @@ export class BidHostRuntime extends TypertRemoteService {
           throw new BidOrchestratorError('BID_RECOVERY_DUPLICATE_INSTRUCTION', '同一问题不能重复提交相同修复指令。')
         }
         const source = resolveBidToolAuthorization(session)
+        if (userContinuation && (source?.session_id !== String(session.id) || source.message_id !== authorization?.message_id)) {
+          throw new Error('BID_USER_CONTINUATION_REQUIRED')
+        }
         if (userContinuation && session.events.some(event => event.type === 'bid.recovery.requested'
           && event.data.continuation === true && event.data.sourceMessageId === source?.message_id)) {
           throw new Error('BID_USER_CONTINUATION_ALREADY_ACCEPTED')
@@ -6714,7 +6714,7 @@ export class BidHostRuntime extends TypertRemoteService {
             })
             if (runnableTasks.length > 0) {
               await this.executeChapterRevisionBatchCandidate(
-                operation.session, agent, operation.workspace,
+                agent, operation.workspace,
                 { batchId: runningBatch.batch_id, tasks: runnableTasks }, run,
               )
             }
@@ -7174,10 +7174,8 @@ export class BidHostRuntime extends TypertRemoteService {
   }
 
   /**
-   * 恢复批次中各 section 原 Writer 的 parent agent，执行批量修订后发布结果。
-   * 原 Writer 不可恢复时抛出 BID_CHAPTER_REVISION_CONTEXT_UNAVAILABLE。
-   * 每个原 parent 只恢复和释放一次，全部章节仍共享同一并发上限。
-   * @param session Bid Main Session。
+   * 按已验证候选的实际 Writer 惰性恢复原父会话，执行批量修订后发布结果。
+   * 仅释放本次恢复的父会话；身份不可证明时拒绝续写。
    * @param executionAgent 当前执行 agent，仅当其本身即原 parent 时直接复用。
    * @param canonical 规范工作区。
    * @param batchExecutionInput 批次执行输入。
@@ -7185,7 +7183,6 @@ export class BidHostRuntime extends TypertRemoteService {
    * @param admittedCandidate 已接纳任务的步骤候选，复用时只执行，不另行发布。
    */
   private async executeChapterRevisionBatchCandidate(
-    session: Session,
     executionAgent: Agent,
     canonical: BidWorkspace,
     batchExecutionInput: RevisionBatchExecutionInput,
@@ -7200,59 +7197,8 @@ export class BidHostRuntime extends TypertRemoteService {
     const logPath = within(candidate.workspace.projectRoot, 'chapters/execution-log.json')
     await assertNoLinkedPath(candidate.workspace.root, logPath)
     const log = parseOrMigrateChapterExecutionLog(JSON.parse(await readFile(logPath, 'utf8')))
-    const sectionIds = new Set(batchExecutionInput.tasks.map(task => task.section_id))
-    const writerIds = new Map<string, string>()
-    for (const sectionId of sectionIds) {
-      const writerId = log.sections.find(section => section.section_id === sectionId)
-        ?.final_writer_child_session_id
-      if (writerId == null) throw new Error('BID_CHAPTER_REVISION_CONTEXT_UNAVAILABLE')
-      writerIds.set(sectionId, writerId)
-    }
-    const persistence = this.ctx.get('sessionPersistence')
-    if (persistence === undefined) throw new Error('BID_CHAPTER_REVISION_CONTEXT_UNAVAILABLE')
-    const parentIds = new Set<SessionId>()
-    const writerParents = new Map<string, SessionId>()
-    for (const writerId of writerIds.values()) {
-      const writer = await persistence.inspect(SessionId(writerId), run.signal)
-      const parentId = writer.meta.parentSession
-      if (parentId === undefined || writer.meta.cwd === undefined
-        || projectKey({ header: writer.meta }) !== projectKey(session)) {
-        throw new Error('BID_CHAPTER_REVISION_CONTEXT_UNAVAILABLE')
-      }
-      parentIds.add(parentId)
-      writerParents.set(writerId, parentId)
-    }
-    const resumedParents: AgentHandle[] = []
-    const revisionParents = new Map<SessionId, Agent>()
+    const writerParents = createChapterWriterParentResolver(executionAgent, canonical.root, candidate.run.signal)
     try {
-      for (const parentId of parentIds) {
-        let parent = parentId === executionAgent.id ? executionAgent : this.ctx.agents.get(parentId)
-        if (parent === undefined) {
-          const parentSession = await persistence.inspect(parentId, run.signal)
-          const presets = this.ctx.get('agentPresets')
-          const handle = await this.ctx.agents.resume({
-            resumeSessionId: parentId, signal: run.signal,
-            async setup(parentContext) {
-              parentContext.on('agent/pre-step', () => Promise.resolve({ kind: 'reject' }))
-              if (presets !== undefined) await presets.mount(parentContext, resolveSessionPreset({
-                header: parentSession.meta, events: parentSession.events,
-              }))
-            },
-          })
-          resumedParents.push(handle)
-          parent = handle.agent
-        }
-        if (parent.session.header.cwd === undefined || projectKey(parent.session) !== projectKey(session)) {
-          throw new Error('BID_CHAPTER_REVISION_CONTEXT_UNAVAILABLE')
-        }
-        revisionParents.set(parentId, parent)
-      }
-      const parentFor = (writerId: string): Agent => {
-        const parentId = writerParents.get(writerId)
-        const parent = parentId === undefined ? undefined : revisionParents.get(parentId)
-        if (parent === undefined) throw new Error('BID_CHAPTER_REVISION_CONTEXT_UNAVAILABLE')
-        return parent
-      }
       const [outline, requirements, scoring, compliance, responsePoints, writingPlan] = await Promise.all([
         readFile(within(candidate.workspace.projectRoot, 'outline/confirmed-outline.json'), 'utf8')
           .then(value => parseConfirmedOutlineArtifact(JSON.parse(value))),
@@ -7272,9 +7218,9 @@ export class BidHostRuntime extends TypertRemoteService {
       const scheduled = batchExecutionInput.tasks.map((task) => {
         const index = worklist.findIndex(section => section.id === task.section_id)
         const section = worklist[index]
-        const writerId = writerIds.get(task.section_id)
+        const writerId = log.sections.find(section => section.section_id === task.section_id)?.final_writer_child_session_id
         const assigned = locations.get(task.section_id)
-        if (section === undefined || writerId === undefined || assigned === undefined) throw new Error('BID_CHAPTER_REVISION_NOT_WRITABLE')
+        if (section === undefined || assigned === undefined) throw new Error('BID_CHAPTER_REVISION_NOT_WRITABLE')
         return { task, value: { location: assigned, title: section.title, writerId } }
       })
       const customerTextContext = {
@@ -7296,7 +7242,7 @@ export class BidHostRuntime extends TypertRemoteService {
           webSearchEnabled: this.config.webSearchEnabled,
           run: candidate.run,
           documentReview: 'defer',
-          writerParentFor: writerId => Promise.resolve(parentFor(writerId)),
+          writerParentFor: writerId => writerParents.resolve(writerId),
           ...(admittedCandidate?.preservation === undefined ? {} : { preservation: admittedCandidate.preservation }),
           revisionBatch: {
             batchId: batchExecutionInput.batchId,
@@ -7321,17 +7267,19 @@ export class BidHostRuntime extends TypertRemoteService {
         maxConcurrency: this.config.chapterWritingMaxConcurrency,
         run: async (item) => {
           if (!isParagraphOnlyRevisionTask(item.task)) return { status: 'full_review' }
-          try { return await executeParagraphRevisionTask({
-            parent: parentFor(item.value.writerId),
-            workspace: candidate.workspace,
-            batchId: batchExecutionInput.batchId,
-            task: item.task,
-            location: item.value.location,
-            title: item.value.title,
-            writerId: item.value.writerId,
-            signal: candidate.run.signal,
-            customerTextContext,
-          }) } catch (error) {
+          try {
+            if (item.value.writerId == null) throw new Error('BID_CHAPTER_REVISION_CONTEXT_UNAVAILABLE')
+            return await executeParagraphRevisionTask({
+              parent: await writerParents.resolve(item.value.writerId),
+              workspace: candidate.workspace,
+              batchId: batchExecutionInput.batchId,
+              task: item.task,
+              location: item.value.location,
+              title: item.value.title,
+              writerId: item.value.writerId,
+              signal: candidate.run.signal,
+              customerTextContext,
+            }) } catch (error) {
             candidate.run.signal.throwIfAborted()
             const failure = safeRecoverableBidFailure(candidate.run.work, error)
             return { status: 'failed', code: failure.issues?.[0]?.code ?? failure.code ?? 'BID_CHAPTER_REVISION_FAILED',
@@ -7368,7 +7316,7 @@ export class BidHostRuntime extends TypertRemoteService {
       }
       if (admittedCandidate === undefined) await publishBidWorkingPaths(run, canonical, candidate.workspace, ['chapters'])
     } finally {
-      await Promise.all(resumedParents.map(parent => parent.dispose()))
+      await candidate.run.waitForCleanup('s5_revision_writer_parents', writerParents.dispose())
     }
   }
 

@@ -9,7 +9,7 @@ import {
   executeChapterWriting, parseWritingPlan, readBidProjectState,
 } from '@deepseek-ai/dsh-bid'
 import { CallId, createUserMessage, LlmAdapter, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
-import { SessionId } from '@deepseek-ai/dsh-session'
+import { SessionId, type Session, type UserMessage } from '@deepseek-ai/dsh-session'
 import { chapterContentSha256 } from '../../../../packages/bid/bid/src/chapter-revision.ts'
 import { ChapterAdapter } from '../../../../packages/bid/bid/tests/fixtures/chapter-writing-adapter.ts'
 import { writeInputs } from '../../../../packages/bid/bid/tests/fixtures/chapter-writing-inputs.ts'
@@ -40,6 +40,7 @@ class WritingRecoveryAdapter extends LlmAdapter {
   readonly mainRequests: GenerateOptions[] = []
   readonly researchSteps = new Map<string, number>()
   researchReceivedAnswer = false
+  beforePlanSubmission?: (turn: number) => Promise<void>
   constructor(private readonly mainId: SessionId, private readonly scenario: string) { super() }
   override resolveModel(provider: string, model: string): Promise<{ provider: string; id: string; name: string }> {
     return Promise.resolve({ provider, id: model, name: model })
@@ -128,6 +129,7 @@ class WritingRecoveryAdapter extends LlmAdapter {
       yield* answer('已按用户回答继续原任务，保留完成正文。')
     } else if (this.scenario.startsWith('saved-')) {
       if (this.mainRequests.length === 1) {
+        await this.beforePlanSubmission?.(1)
         yield { type: 'finish', reason: { kind: 'error', failure: { code: this.scenario.slice('saved-'.length), message: '暂态计划请求故障' } } }
       } else if (this.mainRequests.length === 2) {
         yield* tool('bid_recover_task', { target: 'writing_plan', instruction: '复用已保存的实施要求，重新提交失败的计划步骤。' })
@@ -135,6 +137,7 @@ class WritingRecoveryAdapter extends LlmAdapter {
         // 计划提交响应原生引导消息，等待接纳调用所属回合结束。
         yield { type: 'finish', reason: { kind: 'stop' } }
       } else if (this.mainRequests.length === 4) {
+        await this.beforePlanSubmission?.(3)
         yield* tool('bid_stage_inspect', { view: 'task_contract_context' })
       } else if (this.mainRequests.length === 5) {
         const result = options.messages.flatMap(message => message.content).findLast(block => block.type === 'tool-result' && block.toolCallId === 'bid_stage_inspect')
@@ -285,6 +288,37 @@ try {
       failures: agent.session.events.filter(event => event.type === 'bid.task.changed' && event.data.state.status === 'failed').length,
     })}\n`)
   } else if (savedRequirements) {
+    const followup = agent.followup.bind(agent)
+    const queuedPlans: UserMessage[] = []
+    agent.followup = (message) => {
+      if (message.content.some(block => block.type === 'text' && block.text.includes('Host 已保存 S5 初始原生问答'))) queuedPlans.push(message)
+      else followup(message)
+    }
+    const views = ctx.bid as unknown as { publishWritingEntryView(session: Session): Promise<void> }
+    const publish = views.publishWritingEntryView.bind(views)
+    let publication = Promise.resolve()
+    // 受控投递在入口摘要发布后领取，避免 queued/running 摘要互相穿插。
+    views.publishWritingEntryView = (session) => {
+      const messages = queuedPlans.splice(0)
+      publication = publication.then(() => publish(session))
+      return publication.then(() => { for (const message of messages) followup(message) })
+    }
+    const modelStarts = new Map([1, 3].map(turn => [turn, Promise.withResolvers<undefined>()]))
+    const preparing = ctx.bid as unknown as { prepareOperation(operation: unknown): Promise<unknown> }
+    const prepare = preparing.prepareOperation.bind(preparing)
+    // 固定领取事务与模型请求起点的次序，避免同一 revision 的投影因交错而重复。
+    preparing.prepareOperation = async (operation) => {
+      const turn = agent.session.events.findLast(event => event.type === 'turn/start')?.data.turn
+      if (turn !== undefined) await modelStarts.get(turn)?.promise
+      return prepare(operation)
+    }
+    adapter.beforePlanSubmission = async (turn) => {
+      modelStarts.get(turn)?.resolve(undefined)
+      await until(async () => {
+        const request = JSON.parse(await readFile(join(workspace.projectRoot, 'chapters/writing-request.json'), 'utf8')) as WritingRequest
+        return request.processing?.state === 'running' && request.processing.turn === turn && host.inFlight.size === 0
+      }, '恢复计划轮次领取落盘')
+    }
     await ctx.bid.requestWritingRequirements(agent.session, { mode: 'ensure' })
     const requestPath = join(workspace.projectRoot, 'chapters/writing-request.json')
     await until(async () => (JSON.parse(await readFile(requestPath, 'utf8')) as WritingRequest).state === 'consumed', '原回答生成计划')

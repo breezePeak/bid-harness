@@ -172,12 +172,22 @@ it.each(['structure', 'legacy', 'legacy-output', 'server', 'server-takeover', 't
           expect(JSON.parse(text.text)).toMatchObject({ eligible: true, mapping_progress: { final_check_completed: 0 } })
         }
       }
+      const reviewKey = (log: string): number[] => {
+        const events = log.trimEnd().split('\n').slice(1).map(line => JSON.parse(line) as SessionEvent)
+        const descriptor = events.find(event => event.type === 'subagent/descriptor')
+        if (descriptor?.type !== 'subagent/descriptor') throw new Error('目录复核缺少 Host 请求身份')
+        const label = /^S4 · 全局目录复核 · 分片 (\d+)(?: · 修复 (\d+))?$/u.exec(descriptor.data.label ?? '')
+        if (label === null) throw new Error('目录复核请求身份无效')
+        return [Number(label[1]), Number(label[2] ?? 0)]
+      }
       const reviews = logs.filter(log => log.includes('review-large-original') || log.includes('review-actual-repair'))
         .sort((left, right) => {
-          const prompt = (log: string) => log.split('\n').find(line => line.includes('agent/inbox/spliced')) ?? ''
-          const text = (log: string) => JSON.parse(prompt(log)) as { data: { inserted: Array<{ content: unknown }> } }
-          return JSON.stringify(text(left).data.inserted[0]?.content).localeCompare(JSON.stringify(text(right).data.inserted[0]?.content))
+          const a = reviewKey(left)
+          const b = reviewKey(right)
+          return a[0]! - b[0]! || a[1]! - b[1]!
         })
+      expect(new Set(reviews.map(log => JSON.stringify(reviewKey(log)))).size).toBe(reviews.length)
+      expect(reviews.map(log => reviewKey(log)[0])).toEqual(Array.from({ length: reviews.length }, (_, index) => index + 1))
       expect(reviews.join('\n')).toContain('需要访问控制与安全审计方案。')
       if (scenario === 'legacy-output') {
         expect(outputFailure).toContain('"maxTokens":2048')

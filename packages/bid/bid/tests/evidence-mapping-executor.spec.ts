@@ -206,7 +206,7 @@ it.each([
     project, requirements, scoring: parseTenderScoringArtifact(await read('analysis/scoring.json')),
     responsePoints: parseScoringResponsePointCatalog(await read('analysis/scoring-response-points.json')),
     compliance: parseTenderComplianceArtifact(await read('analysis/compliance.json')), outline, frameworks: [],
-  }, [], 0, new AbortController().signal, createTestBidRunContext().commits)
+  }, [], 0, new AbortController().signal, createTestBidRunContext())
   expect(result.blockingIssues).toHaveLength(supported ? 0 : 1)
 })
 
@@ -236,7 +236,7 @@ it.each(['wrong_file', 'wrong_chunk', 'wrong_corpus', 'wrong_metadata', 'line_ra
       responsePoints: parseScoringResponsePointCatalog(await read('analysis/scoring-response-points.json')),
       compliance: parseTenderComplianceArtifact(await read('analysis/compliance.json')),
       outline: parseOutlineArtifact(await read('outline/initial-confirmed-outline.json')), frameworks: [],
-    }, [], 0, new AbortController().signal, createTestBidRunContext().commits)).rejects.toThrow('OUTLINE_REVIEW_SOURCE_INVALID')
+    }, [], 0, new AbortController().signal, createTestBidRunContext())).rejects.toThrow('OUTLINE_REVIEW_SOURCE_INVALID')
     expect(fixture.outlineReviewPrompts).toHaveLength(0)
   },
 )
@@ -256,7 +256,7 @@ it.each([16_384, 32_768])('目录复核按模型容量 %i 完整或分段核对�
     responsePoints: parseScoringResponsePointCatalog(await read('analysis/scoring-response-points.json')),
     compliance: parseTenderComplianceArtifact(await read('analysis/compliance.json')),
     outline: parseOutlineArtifact(await read('outline/initial-confirmed-outline.json')), frameworks: [],
-  }, [], 0, new AbortController().signal, createTestBidRunContext().commits)
+  }, [], 0, new AbortController().signal, createTestBidRunContext())
   if (modelContextWindow === 16_384) {
     expect((await result).blockingIssues).toEqual([])
     expect(fixture.outlineReviewPrompts.some(prompt => prompt.includes('本片依据分段：'))).toBe(true)
@@ -294,7 +294,7 @@ it.each([['configured', 12_288], ['default', 8_192]] as const)('目录复核沿�
     responsePoints: parseScoringResponsePointCatalog(await read('analysis/scoring-response-points.json')),
     compliance: parseTenderComplianceArtifact(await read('analysis/compliance.json')),
     outline: parseOutlineArtifact(await read('outline/initial-confirmed-outline.json')), frameworks: [],
-  }, [], 0, new AbortController().signal, createTestBidRunContext().commits)
+  }, [], 0, new AbortController().signal, createTestBidRunContext())
   expect(result.blockingIssues).toEqual([])
   for (const [, request] of fixture.subagents.start.mock.calls) {
     expect(request).toMatchObject({ agentOptions: { maxTokens: outputTokens } })
@@ -320,7 +320,7 @@ it('目录复核输出超限先拆分实际请求，最小单元仍超限则保�
     responsePoints: parseScoringResponsePointCatalog(await read('analysis/scoring-response-points.json')),
     compliance: parseTenderComplianceArtifact(await read('analysis/compliance.json')),
     outline: parseOutlineArtifact(await read('outline/initial-confirmed-outline.json')), frameworks: [],
-  }, [], 3, new AbortController().signal, createTestBidRunContext().commits)).rejects.toMatchObject({
+  }, [], 3, new AbortController().signal, createTestBidRunContext())).rejects.toMatchObject({
     issues: [{ code: 'OUTLINE_REVIEW_OUTPUT_BUDGET_EXCEEDED', artifact: 'outline/quality-report.json',
       message: expect.stringContaining('2048 token') }],
   })
@@ -331,6 +331,85 @@ it('目录复核输出超限先拆分实际请求，最小单元仍超限则保�
   expect(fixture.outlineReviewDisposals.every(dispose => dispose.mock.calls.length === 1)).toBe(true)
   await expect(readFile(join(workspace.projectRoot, 'analysis/evidence-mapping-quality.candidate.json'))).rejects.toMatchObject({ code: 'ENOENT' })
 })
+
+it.each(['late_start', 'shared_deadline', 'result_timeout', 'AUTH', 'TIMEOUT', 'success', 'user_stop'] as const)(
+  '全局 Reviewer 期限覆盖 start 和 result，清理不替换主因：%s', async (scenario) => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-outline-review-lifecycle-')))
+    const material = await writeInputs(workspace)
+    const fixture = mappingFixture(workspace, material)
+    const read = async (path: string) => JSON.parse(await readFile(join(workspace.projectRoot, path), 'utf8')) as unknown
+    const inputs = {
+      project: parseTenderProjectArtifact(await read('analysis/project.json')),
+      requirements: parseTenderRequirementsArtifact(await read('analysis/requirements.json')),
+      scoring: parseTenderScoringArtifact(await read('analysis/scoring.json')),
+      responsePoints: parseScoringResponsePointCatalog(await read('analysis/scoring-response-points.json')),
+      compliance: parseTenderComplianceArtifact(await read('analysis/compliance.json')),
+      outline: parseOutlineArtifact(await read('outline/initial-confirmed-outline.json')), frameworks: [],
+    }
+    const ctx = new Context()
+    await ctx.plugin(SessionStore)
+    const session = ctx.sessions.create()
+    session.append('bid.task.changed', { state: { workflow: { kind: 'full_bid', stage: 'evidence_mapping' }, status: 'ready', run: null } })
+    const controller = new AbortController()
+    const runs = new BidRunCoordinator(session, { close() {}, paused: () => false, waitUntilRunnable: async () => {} },
+      { drain: async () => {} }, () => 0, undefined, controller.signal, undefined, undefined, undefined, undefined,
+      { childMs: 100, cleanupMs: 10 })
+    const run = await runs.start({ ...createTestBidRunContext().work, kind: 'stage_execution', stage: 'evidence_mapping' })
+    const startup = Promise.withResolvers<undefined>()
+    const disposal = Promise.withResolvers<undefined>()
+    const result = Promise.withResolvers<never>()
+    const start = fixture.subagents.start.getMockImplementation()!
+    let childSignal: AbortSignal | undefined
+    const dispose = vi.fn(async () => {
+      await disposal.promise
+      if (['AUTH', 'TIMEOUT', 'success'].includes(scenario)) throw Object.assign(new Error('dispose EIO'), { code: 'EIO' })
+    })
+    fixture.subagents.start.mockImplementation(async (provider, request) => {
+      childSignal = (request as SubagentStartRequest).signal
+      await startup.promise
+      const child = await start(provider, request)
+      return { ...child, result: scenario === 'success' ? child.result : result.promise, dispose }
+    })
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    const review = reviewRefinedOutline(fixture.agent, workspace, inputs, [], 0, controller.signal, run)
+    const observed = review.then(value => ({ value }), (error: unknown) => ({ error: error as Error & { code?: string } }))
+    try {
+      await vi.waitFor(() => { expect(childSignal).toBeDefined() })
+      if (scenario === 'shared_deadline') await vi.advanceTimersByTimeAsync(60)
+      if (scenario !== 'late_start') startup.resolve(undefined)
+      if (scenario === 'AUTH') result.reject(Object.assign(new Error('原鉴权失败'), { code: 'AUTH' }))
+      else if (scenario === 'TIMEOUT') result.reject(Object.assign(new Error('原执行超时'), { code: 'TIMEOUT' }))
+      else if (scenario === 'user_stop') controller.abort(new Error('用户停止'))
+      else if (scenario !== 'success') await vi.advanceTimersByTimeAsync(scenario === 'shared_deadline' ? 40 : 100)
+      await vi.advanceTimersByTimeAsync(11)
+      await vi.waitFor(() => { expect(session.events.some(event => event.type === 'bid.run.notice'
+        && event.data.noticeId.includes('cleanup:s4_outline_reviewer:1:0'))).toBe(true) })
+      expect(runs.current).toBe(run)
+      await expect(runs.start(run.work)).rejects.toThrow('BID_RUN_ALREADY_ACTIVE')
+      expect(childSignal?.aborted).toBe(scenario !== 'AUTH' && scenario !== 'TIMEOUT' && scenario !== 'success')
+      startup.resolve(undefined)
+      disposal.resolve(undefined)
+      const outcome = await observed
+      expect(outcome).toHaveProperty('error')
+      if (!('error' in outcome)) throw new Error('错误地报告了复核成功')
+      expect(outcome.error.code).toBe(scenario === 'AUTH' ? 'AUTH' : scenario === 'success' ? 'BID_RUN_CLEANUP_FAILED'
+        : scenario === 'user_stop' ? undefined : 'TIMEOUT')
+      if (scenario === 'user_stop') expect(outcome.error.message).toBe('用户停止')
+      if (['AUTH', 'TIMEOUT', 'success'].includes(scenario)) expect(session.events.some(event => event.type === 'bid.run.notice'
+        && event.data.noticeId.includes('cleanup_failed:s4_outline_reviewer:1:0') && event.data.message.includes('dispose EIO'))).toBe(true)
+      expect(dispose).toHaveBeenCalledOnce()
+      expect(fixture.subagents.start).toHaveBeenCalledOnce()
+    } finally {
+      startup.resolve(undefined)
+      disposal.resolve(undefined)
+      await observed
+      vi.useRealTimers()
+      await runs.retire()
+      await ctx.fiber.dispose()
+      await rm(workspace.root, { recursive: true, force: true })
+    }
+  },
+)
 
 it('大原文按硬预算分段，任一分段缺少有效审核都不写入最终质量报告', async () => {
   const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-outline-review-source-budget-')))
@@ -356,7 +435,7 @@ it('大原文按硬预算分段，任一分段缺少有效审核都不写入最�
     return start(provider, request)
   })
   await expect(reviewRefinedOutline(fixture.agent, workspace, inputs, [], 0, new AbortController().signal,
-    createTestBidRunContext().commits)).rejects.toThrow('第二片没有有效审核结果')
+    createTestBidRunContext())).rejects.toThrow('第二片没有有效审核结果')
   expect(parts).toBe(2)
   await expect(readFile(join(workspace.projectRoot, 'analysis/evidence-mapping-quality.candidate.json'))).rejects.toMatchObject({ code: 'ENOENT' })
 })
@@ -382,7 +461,7 @@ it('全局目录复核按预算审完尾节与跨章职责，共享索引不在�
     scoring: parseTenderScoringArtifact(await read('analysis/scoring.json')),
     responsePoints: parseScoringResponsePointCatalog(await read('analysis/scoring-response-points.json')),
     compliance: parseTenderComplianceArtifact(await read('analysis/compliance.json')), outline, frameworks: [],
-  }, [], 0, new AbortController().signal, createTestBidRunContext().commits)
+  }, [], 0, new AbortController().signal, createTestBidRunContext())
   expect(result.blockingIssues).toContainEqual({ code: 'OUTLINE_STRUCTURE_REVIEW', section_id: 'SEC-64', reason: '尾节和首节职责冲突，应明确责任归属。' })
   expect(fixture.outlineReviewPrompts.every(prompt => estimateMessage(createUserMessage({ content: [{ type: 'text', text: prompt }], source: { kind: 'user' } })) <= 12_000)).toBe(true)
   expect(fixture.outlineReviewPrompts.every(prompt => !prompt.includes('"siblings":'))).toBe(true)
@@ -408,7 +487,7 @@ it('完整输入未变时复用已通过审核，章节或模型配置变化时�
   inputs.outline.sections.forEach((section) => { section.purpose += '方法和成果责任。'.repeat(80) })
   const fixture = mappingFixture(workspace, material)
   const run = (passes: Awaited<ReturnType<typeof reviewRefinedOutline>>['passes'] = []) => reviewRefinedOutline(
-    fixture.agent, workspace, inputs, [], 0, new AbortController().signal, createTestBidRunContext().commits,
+    fixture.agent, workspace, inputs, [], 0, new AbortController().signal, createTestBidRunContext(),
     undefined, undefined, passes)
   const first = await run()
   const originalCount = fixture.outlineReviewPrompts.length
@@ -418,7 +497,7 @@ it('完整输入未变时复用已通过审核，章节或模型配置变化时�
   expect(fixture.outlineReviewPrompts).toHaveLength(originalCount)
   const resumed = mappingFixture(workspace, material)
   await reviewRefinedOutline(resumed.agent, workspace, inputs, [], 0, new AbortController().signal,
-    createTestBidRunContext().commits, undefined, undefined, restoredPasses)
+    createTestBidRunContext(), undefined, undefined, restoredPasses)
   expect(resumed.outlineReviewPrompts).toHaveLength(0)
   inputs.outline.sections[0]!.purpose += '补齐验收责任。'
   const changed = await run(restoredPasses)
@@ -457,7 +536,7 @@ it('目录复核把同章相反与重复意见交语义环节整理，并保留�
     scoring: parseTenderScoringArtifact(await read('analysis/scoring.json')),
     responsePoints: parseScoringResponsePointCatalog(await read('analysis/scoring-response-points.json')),
     compliance: parseTenderComplianceArtifact(await read('analysis/compliance.json')), outline, frameworks: [],
-  }, [], 0, new AbortController().signal, createTestBidRunContext().commits)
+  }, [], 0, new AbortController().signal, createTestBidRunContext())
   expect(fixture.outlineReviewPrompts).toHaveLength(2)
   expect(fixture.outlineReviewPrompts[1]).toContain('相同成果应合并表达。')
   expect(fixture.outlineReviewPrompts[1]).toContain('独立问题分别保留')
@@ -480,7 +559,7 @@ it('目录复核把同章相反与重复意见交语义环节整理，并保留�
     scoring: parseTenderScoringArtifact(await read('analysis/scoring.json')),
     responsePoints: parseScoringResponsePointCatalog(await read('analysis/scoring-response-points.json')),
     compliance: parseTenderComplianceArtifact(await read('analysis/compliance.json')), outline, frameworks: [],
-  }, [], 0, new AbortController().signal, createTestBidRunContext().commits)).resolves.toMatchObject({ blockingIssues: [] })
+  }, [], 0, new AbortController().signal, createTestBidRunContext())).resolves.toMatchObject({ blockingIssues: [] })
   expect(fixture.outlineReviewPrompts.length).toBeGreaterThan(3)
   expect(fixture.outlineReviewPrompts.slice(3).every(prompt => prompt.includes('只整理 section_position=0'))).toBe(true)
 })
@@ -508,7 +587,7 @@ it('单章粒度意见整理保留详细卡片且不被无关章节索引阻断'
     scoring: parseTenderScoringArtifact(await read('analysis/scoring.json')),
     responsePoints: parseScoringResponsePointCatalog(await read('analysis/scoring-response-points.json')),
     compliance: parseTenderComplianceArtifact(await read('analysis/compliance.json')), outline, frameworks: [],
-  }, [], 0, new AbortController().signal, createTestBidRunContext().commits)
+  }, [], 0, new AbortController().signal, createTestBidRunContext())
   const consolidation = fixture.outlineReviewPrompts.filter(prompt => prompt.includes('只整理 section_position='))
   expect(consolidation).toHaveLength(1)
   expect(consolidation[0]).toContain('"section_id":"SEC-1"')
@@ -566,7 +645,7 @@ it('初审输入不变时整理超限仍可缩减，无法缩减的请求不重�
     return start(provider, request)
   })
   await expect(reviewRefinedOutline(fixture.agent, workspace, inputs, [], 0, new AbortController().signal,
-    createTestBidRunContext().commits)).resolves.toMatchObject({ blockingIssues: [] })
+    createTestBidRunContext())).resolves.toMatchObject({ blockingIssues: [] })
   expect(fixture.outlineReviewPrompts[0]).toBe(fixture.outlineReviewPrompts[1])
   expect(consolidationPrompts).toHaveLength(2)
   expect(consolidationPrompts[1]).not.toBe(consolidationPrompts[0])
@@ -580,7 +659,7 @@ it('初审输入不变时整理超限仍可缩减，无法缩减的请求不重�
   outline.sections[1]!.purpose = '职责说明。'
   consolidationPrompts.length = 0
   await expect(reviewRefinedOutline(fixture.agent, workspace, inputs, [], 0, new AbortController().signal,
-    createTestBidRunContext().commits)).rejects.toThrow('目录意见整理无法继续缩减')
+    createTestBidRunContext())).rejects.toThrow('目录意见整理无法继续缩减')
   expect(consolidationPrompts).toHaveLength(1)
 })
 
@@ -1406,7 +1485,7 @@ function mappingFixture(
           return () => { observers.splice(observers.indexOf(observer), 1) }
         }),
       } as unknown as Context
-      const localAgent = { id, status: 'running', ctx: childCtx,
+      const localAgent = { id, status: 'running', ctx: childCtx, cancel: vi.fn(),
         session: { id, header: { cwd: workspace.root, parentSession: parentSessionId, origin: 'subagent' }, events: [] },
         whenIdle: () => idle } as unknown as Agent
       ;(childCtx as unknown as { agent: Agent }).agent = localAgent

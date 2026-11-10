@@ -48,7 +48,7 @@ import {
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { prepareBidStageContextTransition } from '../src/stage-context.ts'
 import { inspectBidStage, isBidMainSession } from '../src/stage-interaction.ts'
-import { bidCompletedCapabilityRun, bidRecoverableRun } from '../src/bid-recovery.ts'
+import { bidCompletedCapabilityRun, bidRecoverableRun, bidRunRecoveryEligibility } from '../src/bid-recovery.ts'
 import { withBidNativeTaskAuthorization } from '../src/bid-tool-authorization.ts'
 import { parseChapterExecutionLog, parseOrMigrateChapterExecutionLog } from '../src/chapter-writing-plan-artifacts.ts'
 import { chapterContentSha256 } from '../src/chapter-revision.ts'
@@ -766,7 +766,7 @@ describe('Workspace 项目与独立 Session', () => {
     expect(JSON.stringify(agent.session.events)).toContain('BID_USER_CONTINUATION_REQUIRED')
   })
 
-  it('execution handle dispose 超时可观察，实际退出前 Host 保留项目占用', async () => {
+  it.each(['AUTH', 'TIMEOUT'])('execution handle dispose 延迟后仍可查询和接纳原失败：%s', async (code) => {
     const { ctx, workspace, fresh, adapter } = await fixture({ withPersistence: true, cleanupTimeoutMs: 1_000 })
     await seedProjectArtifacts(workspace)
     await checkpointBidProjectState(workspace, { stage: 'outline_generation', status: 'completed' })
@@ -781,9 +781,9 @@ describe('Workspace 项目与独立 Session', () => {
     const operation = host.beginOperation(agent.session)
     await host.prepareOperation(operation)
     await host.executionAgent(operation, 'outline_generation')
-    await operation.runs.start(await persistStageExecutionWork(workspace, 'outline_generation'))
-    await operation.runs.suspend('executor_error', { code: 'AUTH', message: '凭证失效',
-      recovery: { kind: 'blocked', unit: 'outline/outline.json', reason: '凭证失效' } })
+    const original = await operation.runs.start(await persistStageExecutionWork(workspace, 'outline_generation'))
+    await operation.runs.suspend('executor_error', { code, message: '原模型执行失败',
+      recovery: { kind: code === 'AUTH' ? 'blocked' : 'retry', unit: 'outline/outline.json', reason: '原模型执行失败' } })
     const handle = operation.executionHandle!
     const dispose = handle.dispose.bind(handle)
     const gate = Promise.withResolvers<undefined>()
@@ -799,9 +799,24 @@ describe('Workspace 项目与独立 Session', () => {
       expect(finished).toBe(false)
       expect(host.inFlight.size).toBe(1)
       expect(() => host.beginOperation(agent.session)).toThrow()
-      expect(runtime(agent.session)).toMatchObject({ status: 'failed', failure: { code: 'AUTH' } })
+      expect(runtime(agent.session)).toMatchObject({ status: 'failed', failure: { code } })
     } finally { gate.resolve(undefined); await pending }
     expect(host.inFlight.size).toBe(0)
+    expect(bidRecoverableRun(agent.session, runtime(agent.session))?.runId).toBe(original.runId)
+    if (code === 'TIMEOUT') {
+      await vi.waitFor(() => { expect(agent.session.events.some(event => event.type === 'agent/inbox/spliced'
+        && event.data.inserted.some(message => message.source.kind === 'plugin' && message.source.form === 'notice' && message.source.summary === 'Bid 执行失败，交由主 Agent 处理'))).toBe(true) })
+      const message = createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: '继续原目录任务' }] })
+      agent.session.append('user/message', message, { surfaceOp: 'append' })
+      adapter.script.push(answer('已核验原目录任务的实际结果。'))
+      const accepted = await withBidNativeTaskAuthorization(agent.session, message, () => ctx.tools.execute({
+        agent, name: 'bid_resume_current_run', arguments: {}, callId: CallId('resume-cleaned-run'), signal: new AbortController().signal,
+      }))
+      expect(accepted).toMatchObject({ isError: false, value: { accepted: true } })
+      await vi.waitFor(() => { expect(host.inFlight.size).toBe(0) })
+      expect(agent.session.events.filter(event => event.type === 'bid.run.started').at(-1)?.data.run)
+        .toMatchObject({ work: original.work, resumeOf: { runId: original.runId } })
+    }
   })
 
   it('状态询问和失败通知同轮进入时只读诊断，不接纳继续原 Work', async () => {
@@ -875,6 +890,78 @@ describe('Workspace 项目与独立 Session', () => {
       expect(executor.execute).not.toHaveBeenCalled()
       expect(agent.session.events.some(event => event.type === 'bid.recovery.requested')).toBe(false)
     } finally { gate.resolve(undefined); off() }
+  })
+
+  it('旧通知确认期间停止并用新消息继续，耗尽窗口重开后自动通知并执行原 Work', async () => {
+    const { ctx, workspace, fresh, executor, adapter } = await fixture({ withPersistence: true })
+    await seedProjectArtifacts(workspace)
+    await checkpointBidProjectState(workspace, { stage: 'outline_generation', status: 'completed' })
+    const agent = await fresh('continued-window-pending')
+    const host = ctx.bid as unknown as {
+      inFlight: Map<string, unknown>
+      beginOperation(session: Session): { runs: BidRunCoordinator }
+      prepareOperation(operation: unknown): Promise<unknown>
+      finishOperation(session: Session, operation: unknown): Promise<void>
+    }
+    const operation = host.beginOperation(agent.session)
+    await host.prepareOperation(operation)
+    const original = await operation.runs.start(await persistStageExecutionWork(workspace, 'outline_generation'))
+    await operation.runs.suspend('executor_error', { code: 'TIMEOUT', message: '旧窗口超时',
+      recovery: { kind: 'retry', unit: original.work.workId, reason: '旧窗口超时' } })
+    for (let round = 1; round <= 3; round++) agent.session.append('bid.recovery.requested', {
+      ownerSessionId: String(agent.id), target: { kind: 'run', workId: original.work.workId, runId: original.runId },
+      unit: original.work.workId, instruction: `原窗口第 ${round} 次恢复`, progressFingerprint: 'unchanged',
+    })
+    const entered = Promise.withResolvers<undefined>()
+    const flushGate = Promise.withResolvers<undefined>()
+    const mainGate = Promise.withResolvers<undefined>()
+    let held = false
+    const off = ctx.on('session/flush', async (session) => {
+      if (!held && session === agent.session
+        && session.events.findLast(event => event.type === 'bid.recovery.round')?.data.state === 'blocked') {
+        held = true
+        entered.resolve(undefined)
+        await flushGate.promise
+      }
+    }, { global: true })
+    try {
+      await host.finishOperation(agent.session, operation)
+      await entered.promise
+      await ctx.bid.stopRun(agent.session)
+      expect(bidRunRecoveryEligibility(agent.session)).toMatchObject({ eligible: false, attempts: 3 })
+      executor.canExecute = stage => stage === 'outline_generation'
+      executor.execute.mockRejectedValueOnce(Object.assign(new Error('新窗口执行超时'), { code: 'TIMEOUT' }))
+      const message = createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: '继续原目录任务' }] })
+      agent.session.append('user/message', message, { surfaceOp: 'append' })
+      const continued = await withBidNativeTaskAuthorization(agent.session, message, () => ctx.tools.execute({
+        agent, name: 'bid_resume_current_run', arguments: {}, callId: CallId('new-window'), signal: new AbortController().signal,
+      }))
+      expect(continued).toMatchObject({ isError: false, value: { accepted: true } })
+      await vi.waitFor(() => { expect(host.inFlight.size).toBe(0) })
+      expect(executor.execute).toHaveBeenCalledOnce()
+      expect(bidRunRecoveryEligibility(agent.session)).toMatchObject({
+        eligible: true, attempts: 4, windowAttempts: 1, windowLimit: 3, totalLimit: 12,
+      })
+      expect(agent.session.events.filter(event => event.type === 'bid.recovery.requested' && event.data.continuation)).toHaveLength(1)
+      const resumed = agent.session.events.findLast(event => event.type === 'bid.run.started')!.data.run
+      expect(resumed).toMatchObject({ work: original.work, resumeOf: { runId: original.runId } })
+      adapter.requestGate = mainGate.promise
+      adapter.script.push(toolCall('bid_recover_task', { target: 'run', instruction: '保留已完成结果，重试暂态目录执行故障。' }), answer('原任务已继续。'))
+      flushGate.resolve(undefined)
+      await vi.waitFor(() => { expect(adapter.requests.filter(request => request.sessionId === agent.id)).toHaveLength(1) })
+      const notifications = agent.session.events.filter(event => event.type === 'user/message' && event.data.source.kind === 'plugin'
+        && event.data.source.form === 'notice' && event.data.source.summary === 'Bid 执行失败，交由主 Agent 处理')
+      expect(notifications).toHaveLength(1)
+      expect(agent.session.events.findLast(event => event.type === 'bid.recovery.round')?.data)
+        .toMatchObject({ state: 'notified', round: 1, target: { runId: resumed.runId, workId: original.work.workId } })
+      mainGate.resolve(undefined)
+      await vi.waitFor(() => { expect(executor.execute).toHaveBeenCalledTimes(2); expect(host.inFlight.size).toBe(0) })
+      await agent.whenIdle()
+      const starts = agent.session.events.filter(event => event.type === 'bid.run.started')
+      expect(starts).toHaveLength(3)
+      expect(starts[2]!.data.run).toMatchObject({ work: original.work, resumeOf: { runId: resumed.runId } })
+      expect(agent.session.events.filter(event => event.type === 'bid.recovery.requested' && event.data.continuation)).toHaveLength(1)
+    } finally { flushGate.resolve(undefined); mainGate.resolve(undefined); off() }
   })
 
   it('无有效动作的相同失败有界结算，重启不清空纠正预算', async () => {
@@ -1572,7 +1659,7 @@ describe('Workspace 项目与独立 Session', () => {
     await checkpointStoredBidProjectState(workspace,
       { workflow: { kind: 'full_bid' as const, stage: 'evidence_mapping' }, status: 'suspended', run: suspended })
     agent.session.append('bid.run.started', { run: oldRun })
-    agent.session.append('bid.run.suspended', { run: suspended })
+    if (status === 'suspended') agent.session.append('bid.run.suspended', { run: suspended })
     if (status === 'failed') {
       const failed = { workflow: { kind: 'full_bid' as const, stage: 'evidence_mapping' as const }, status: 'failed' as const, run: null,
         failure: { code: 'BID_TASK_SCOPE_AUTHORIZATION_REQUIRED', message: '旧授权范围需要澄清',
@@ -5109,7 +5196,7 @@ describe('Workspace 项目与独立 Session', () => {
     expect((await ctx.bid.getRevisionQueue(agent.session)).issues.every(issue => issue.status === 'pending')).toBe(true)
   }, 20_000)
 
-  it('S5 批量修订：从失败修订残留恢复原 Writer parent 续写', async () => {
+  it.each(['formal', 'draft', 'single_draft', 'missing_final'] as const)('S5 修订恢复按实际候选选择 Writer 和 parent：%s', async (mode) => {
     const { ctx, workspace, fresh, adapter } = await fixture({ withPersistence: true, withPreset: true })
     for (const name of ['grep', 'read'] as const) {
       ctx.tools.register({ name, description: name, parameters: { type: 'object' }, output: { schema: { type: 'object' }, render: () => [{ type: 'text' as const, text: '{}' }] }, execute: async () => ({}) })
@@ -5196,10 +5283,44 @@ describe('Workspace 项目与独立 Session', () => {
       stop_reason: 'completed', accepted: true, issues: [],
       input: { plan_version: 1, section_epoch: 0, evidence_sha256: evidenceSha, dependencies: [] },
     }
+    let selectedParent = originalParent
+    let selectedWriter = 'writer-sec-1'
+    let reviewedCandidate
+    if (mode !== 'formal') {
+      const parent = await ctx.agentLoop.createAgent(ctx, { sessionId: SessionId('draft-parent'),
+        agentOptions: { provider: 'mock', model: 'mock' }, meta: { cwd: workspace.root } })
+      selectedParent = parent.agent
+      selectedWriter = 'draft-writer-sec-1'
+      await ctx.agentLoop.createAgent(ctx, { sessionId: SessionId(selectedWriter), agentOptions: { provider: 'mock', model: 'mock' },
+        meta: { cwd: workspace.root, origin: 'subagent', parentSession: selectedParent.id } })
+      const { candidate_sha256: _hash, writer_child_session_id: _writer, reviewer_child_session_id: _reviewer, ...review }
+        = parseChapterReviewArtifact(JSON.parse(await readFile(join(workspace.projectRoot, 'chapters/reviews/0001.json'), 'utf8')))
+      const draft = markdown.replaceAll('已有正文', '候选正文')
+      const coverage = <T extends { evidence_quotes: string[] }>(items: T[]) => items.map(item => ({ ...item, evidence_quotes: ['候选正文'] }))
+      reviewedCandidate = { candidate: { section_id: 'SEC-1', markdown: draft,
+        metadata: JSON.parse(await readFile(join(workspace.projectRoot, 'chapters/meta/0001.json'), 'utf8')) as unknown },
+      review: { ...review, verdict: 'repair', must_answer_coverage: coverage(review.must_answer_coverage),
+        requirement_coverage: coverage(review.requirement_coverage), response_point_coverage: coverage(review.response_point_coverage),
+        blocking_issues: ['缺少设备配置的核验方法。'] }, writer_child_session_id: selectedWriter, reviewer_child_session_id: 'draft-reviewer',
+      candidate_sha256: createHash('sha256').update(`${draft.trim()}\n`).digest('hex'), input: attempt.input }
+      parent.agent.session.append('turn/start', { turn: 1 })
+      parent.agent.session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+      await ctx.sessions.flush(parent.agent.session)
+      await parent.dispose()
+      const reviewer = new ChapterAdapter()
+      reviewer.repairReviews = Infinity
+      const stream = adapter.stream.bind(adapter)
+      vi.spyOn(adapter, 'stream').mockImplementation(options => options.messages.some(message => message.content.some(block =>
+        block.type === 'text' && block.text.includes('Review Checklist：'))) ? reviewer.stream(options) : stream(options))
+    }
     await writeFile(join(workspace.projectRoot, 'chapters/execution-log.json'), JSON.stringify({
       schema_version: 4, scope: 'technical_bid', confirmed_outline_sha256: outlineSha,
       writing_plan_version: 1, max_concurrency: 1, observed_max_concurrency: 1,
-      sections: [{ section_id: 'SEC-1', depends_on: [], related_sections: [], epoch: 0, status: 'failed', phase: null, failure_phase: 'repairing', attempts: [attempt, reviewAttempt], final_writer_child_session_id: 'writer-sec-1', final_reviewer_child_session_id: 'reviewer-a' }],
+      sections: [{ section_id: 'SEC-1', depends_on: [], related_sections: [], epoch: 0, status: 'failed', phase: null, failure_phase: 'repairing', attempts: [attempt, reviewAttempt, ...reviewedCandidate === undefined ? [] : [
+        { ...attempt, attempt: 2, child_session_id: selectedWriter }, { ...reviewAttempt, attempt: 2, child_session_id: 'draft-reviewer' }]],
+      final_writer_child_session_id: mode === 'missing_final' ? null : 'writer-sec-1',
+      final_reviewer_child_session_id: mode === 'missing_final' ? null : 'reviewer-a',
+      ...(reviewedCandidate === undefined ? {} : { reviewed_candidate: reviewedCandidate }) }],
     }))
 
     await checkpointBidProjectState(workspace, { stage: 'chapter_writing', status: 'completed' })
@@ -5221,19 +5342,20 @@ describe('Workspace 项目与独立 Session', () => {
     const issueId = added.value.issues[0]!.issue_id
 
     const followup = vi.spyOn(ctx.subagents, 'followup')
-    adapter.script.push(toolCall('bid_run_task', await modelTaskArguments(agent, { task: { goal: '按原 Writer 完成审批意见', issue_ids: [issueId],
-      scope: { kind: 'sections', section_ids: ['SEC-1'] }, steps: [{ description: '恢复原 Writer 完成修订',
-        scope: { source: 'task' }, call: { capability: 'chapter.revision_batch', input: {
-          issue_ids: [issueId], tasks: [{ task_id: 'TASK-1', section_id: 'SEC-1', issue_ids: [issueId], depends_on: [] }],
-        } } }] } })), answer('实际结果保存在原 Work。'))
+    const call = mode === 'single_draft' ? { capability: 'chapter.revise', input: { instruction: '加强技术方案',
+      reference: { scope: 'chapter', section_id: 'SEC-1' } } }
+      : { capability: 'chapter.revision_batch', input: { issue_ids: [issueId], tasks: [{ task_id: 'TASK-1', section_id: 'SEC-1', issue_ids: [issueId], depends_on: [] }] } }
+    adapter.script.push(toolCall('bid_run_task', await modelTaskArguments(agent, { task: { goal: '按原 Writer 完成审批意见',
+      ...(mode === 'single_draft' ? {} : { issue_ids: [issueId] }), scope: { kind: 'sections', section_ids: ['SEC-1'] },
+      steps: [{ description: '恢复原 Writer 完成修订', scope: { source: 'task' }, call }] } })), answer('实际结果保存在原 Work。'))
     agent.followup(createUserMessage({ content: [{ type: 'text', text: '处理这一条章节意见。' }], source: { kind: 'user' } }))
     await agent.whenIdle()
     await settleCapabilityOperations(ctx)
     const executed = await readBidProjectState(workspace)
 
     expect(followup.mock.calls.some(([parent, childId]) =>
-      parent.id === originalParent.id && childId === SessionId('writer-sec-1')), JSON.stringify({
-      executed,
+      parent.id === selectedParent.id && childId === SessionId(selectedWriter)), JSON.stringify({
+      executed, results: agent.session.events.filter(event => event.type === 'tool/result').slice(-3).map(event => event.data),
       followups: followup.mock.calls.map(([parent, childId]) => ({ parentId: parent.id, childId })),
     })).toBe(true)
     const executedError = JSON.stringify(executed)

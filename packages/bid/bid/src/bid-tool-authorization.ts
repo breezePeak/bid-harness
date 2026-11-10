@@ -5,6 +5,22 @@ import type {} from '@deepseek-ai/dsh-goal'
 import type { Session } from '@deepseek-ai/dsh-session'
 import type { UserMessage } from '@deepseek-ai/dsh-session'
 import { AsyncLocalStorage } from 'node:async_hooks'
+import type { BidTaskState } from './control-plane-contract.ts'
+
+/**
+ * 定位精确停止身份首次出现的位置；相同检查点的再次投影不产生新停止。
+ * @param session 保存停止事实的原会话。
+ * @param run 当前挂起的 Run。
+ * @returns 停止边界序号；缺少持久事实时不授予继续。
+ */
+export function bidUserStopBoundary(session: Session, run: Extract<BidTaskState, { status: 'suspended' }>['run']): number | undefined {
+  return session.events.find((event) => {
+    const stopped = event.type === 'bid.run.suspended' ? event.data.run
+      : event.type === 'bid.task.changed' || event.type === 'bid.project.resumed'
+        ? event.data.state.status === 'suspended' ? event.data.state.run : undefined : undefined
+    return stopped?.runId === run.runId && stopped.updatedAt === run.updatedAt && stopped.cause === 'user_stop'
+  })?.seq
+}
 
 /** 消息引用保持与持久 Work 和队列相同的结构。 */
 type Authorization = { session_id: string; message_id: string }

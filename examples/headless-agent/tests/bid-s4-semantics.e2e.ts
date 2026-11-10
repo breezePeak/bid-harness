@@ -355,7 +355,7 @@ describe.skipIf(!process.env.DEEPSEEK_API_KEY && !process.env.DSH_BID_EVAL_PROVI
           { provider, model: process.env.DSH_BID_EVAL_MODEL ?? 'deepseek-v4-flash' }, { cwd: root })
         const reviewRun = createTestBidRunContext({ signal: AbortSignal.timeout(150_000) })
         const review = await reviewRefinedOutline(
-          agent, workspace, inputs, results, 0, reviewRun.signal, reviewRun.commits,
+          agent, workspace, inputs, results, 0, reviewRun.signal, reviewRun,
         )
         await writeFile(join(root, 'independent-review-report.json'), JSON.stringify(review, null, 2))
         if (scenario.id === 'boundary') {
@@ -363,7 +363,7 @@ describe.skipIf(!process.env.DEEPSEEK_API_KEY && !process.env.DSH_BID_EVAL_PROVI
         } else {
           expect(review.blockingIssues).toEqual([])
           const unmet = await reviewRefinedOutline(agent, workspace, inputs, results, 0,
-            reviewRun.signal, reviewRun.commits, '将背景与实施方案从当前父章中移出，形成两个平级的顶层章节。')
+            reviewRun.signal, reviewRun, '将背景与实施方案从当前父章中移出，形成两个平级的顶层章节。')
           expect(unmet.blockingIssues.length).toBeGreaterThan(0)
         }
         console.info('S4 独立复核验收记录：' + root)
@@ -425,7 +425,7 @@ describe.skipIf(!process.env.DEEPSEEK_API_KEY && !process.env.DSH_BID_EVAL_PROVI
       const agent = ctx.agentLoop.create(SessionId(`source-review-${scenario.id}`),
         { provider, model: process.env.DSH_BID_EVAL_MODEL ?? 'deepseek-v4-flash', maxTokens: 32_768 }, { cwd: root })
       const run = createTestBidRunContext({ signal: AbortSignal.timeout(540_000) })
-      const review = await reviewRefinedOutline(agent, workspace, inputs, [], 0, run.signal, run.commits)
+      const review = await reviewRefinedOutline(agent, workspace, inputs, [], 0, run.signal, run)
       const logs = (await readdir(join(root, '.session-store'), { recursive: true })).filter(path => path.endsWith('.jsonl'))
       const prompts = (await Promise.all(logs.map(path => readFile(join(root, '.session-store', path), 'utf8'))))
         .flatMap(log => log.trimEnd().split('\n').slice(1).map(line => JSON.parse(line) as SessionEvent))

@@ -10,6 +10,8 @@ import {
   type BidWorkDescriptor,
 } from '@deepseek-ai/dsh-bid'
 import { describe, expect, it, vi } from 'vitest'
+import { bidRecoverableRun } from '../src/bid-recovery.ts'
+import { BID_INITIAL_TASK_STATE, reduceBidTaskState } from '../src/runtime-state.ts'
 
 class TestScheduler implements BidRunScheduler {
   closed = false
@@ -41,6 +43,44 @@ function work(stage: BidStage): BidWorkDescriptor {
 }
 
 describe('BidRunCoordinator', () => {
+  it('失败终态后的清理诊断不遮蔽原 Run，下一生命周期不回扫旧失败', async () => {
+    const ctx = new Context()
+    await ctx.plugin(SessionStore)
+    const session = ctx.sessions.create()
+    const initial = { workflow: { kind: 'full_bid' as const, stage: 'chapter_writing' as const }, status: 'ready' as const, run: null }
+    session.append('bid.task.changed', { state: initial })
+    const state = () => session.events.reduce(reduceBidTaskState, BID_INITIAL_TASK_STATE)
+    const gate = Promise.withResolvers<number>()
+    let checkpoints = 0
+    const runs = new BidRunCoordinator(session, new TestScheduler(), { drain: async () => {} }, () => 0,
+      () => ++checkpoints === 3 ? gate.promise : Promise.resolve(0), undefined, undefined, undefined, undefined, undefined,
+      { childMs: 100, cleanupMs: 10 })
+    const first = await runs.start(work('chapter_writing'))
+    const pending = runs.suspend('executor_error', { code: 'TIMEOUT', message: '原执行超时' })
+    try {
+      await vi.waitFor(() => { expect(session.events.findLast(event => event.type === 'bid.run.notice')?.data.noticeId)
+        .toBe(`run:${first.runId}:cleanup:terminal_checkpoint`) })
+      expect(bidRecoverableRun(session, state())).toMatchObject({ runId: first.runId, epoch: first.epoch, work: first.work })
+      await expect(runs.start(first.work, { runId: first.runId, cause: 'executor_error' })).rejects.toThrow('BID_RUN_ALREADY_ACTIVE')
+      gate.resolve(0)
+      await pending
+      session.append('bid.project.resumed', { state: state(), revision: 0 })
+      expect(bidRecoverableRun(session, state())?.runId).toBe(first.runId)
+      const second = await runs.start(first.work, { runId: first.runId, cause: 'executor_error' })
+      const late = { noticeId: `run:${first.runId}:cleanup:execution_handle`, supersedesTurn: null, runId: first.runId,
+        stage: 'chapter_writing' as const, kind: 'interrupted' as const, severity: 'error' as const, message: '旧 Run 清理诊断' }
+      session.append('bid.run.notice', late)
+      expect(bidRecoverableRun(session, state())).toBeUndefined()
+      await runs.suspend('executor_error', { code: 'TIMEOUT', message: '本轮超时' })
+      const failed = state()
+      session.append('bid.run.notice', late)
+      expect(bidRecoverableRun(session, state())?.runId).toBe(second.runId)
+      session.append('bid.stage.reset', { stage: 'chapter_writing', status: 'ready' })
+      session.append('bid.task.changed', { state: failed })
+      expect(bidRecoverableRun(session, state())).toBeUndefined()
+    } finally { gate.resolve(0); await pending; await runs.retire(); await ctx.fiber.dispose() }
+  })
+
   it('清理拒绝保留原执行错误，附加资源诊断且不释放旧 Run', async () => {
     const { session, runs, children } = await fixture()
     const run = await runs.start(work('chapter_writing'))

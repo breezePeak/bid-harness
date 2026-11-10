@@ -72,6 +72,7 @@ import {
 } from './chapter-revision.ts'
 import {
   createRevisionBatchTaskStatusWriter,
+  readRevisionBatch,
   renderRevisionBatchSectionPrompt,
   type RevisionBatchExecutionInput,
   type RevisionBatchTaskExecution,
@@ -1343,8 +1344,8 @@ async function loadChapterCheckpoint(
         return undefined
       }
       // 修订失败不撤销此前已提交的章节；只有修订恢复路径可通过下方完整产物校验恢复完成状态。
-      const reviewed = log.reviewed_candidate
-      if (log.status !== 'completed' && !recoverAcceptedArtifacts && reviewed === undefined) {
+      const retained = log.reviewed_candidate
+      if (log.status !== 'completed' && !recoverAcceptedArtifacts && retained === undefined) {
         log.status = 'pending'
         log.phase = 'queued'
         log.failure_phase = null
@@ -1352,90 +1353,129 @@ async function loadChapterCheckpoint(
         log.final_reviewer_child_session_id = null
         continue
       }
-      try {
-        const writerId = reviewed?.writer_child_session_id ?? log.final_writer_child_session_id
-        const reviewerId = reviewed?.reviewer_child_session_id ?? log.final_reviewer_child_session_id
-        if (writerId === null) throw new Error('checkpoint-writer-missing')
-        if (reviewed === undefined) await assertNoLinkedPath(workspace.root, join(workspace.projectRoot, context.contentPath))
-        const markdown = reviewed?.candidate.markdown ?? await readFile(join(workspace.projectRoot, context.contentPath), 'utf8')
-        const metadata = reviewed?.candidate.metadata ?? parseChapterMetadata(await readJson(workspace, context.metadataPath))
-        const serial = String(context.storageSerial).padStart(4, '0')
-        const reviewPath = context.reviewPath
-        const candidateSha256 = chapterCandidateSha256(markdown)
-        if (metadata.section_id !== section.id
-        || !log.attempts.some(attempt => attempt.role === 'writer' && attempt.accepted
-          && attempt.child_session_id === writerId)
-        || reviewed !== undefined && (reviewed.candidate.section_id !== section.id
-          || reviewed.candidate_sha256 !== candidateSha256 || reviewed.input.section_epoch !== log.epoch
-          || reviewed.input.plan_version !== context.writingPlan.plan_version)
-        ) {
-          throw new Error('checkpoint-identity-invalid')
-        }
-        const candidate: AcceptedChapterCandidate = { section_id: section.id, markdown: markdown.trim(), metadata }
-        if ((await validateChapterImages(workspace, metadata.images ?? [], markdown, context.contentPath)).length > 0) throw new Error('checkpoint-image-invalid')
-        if (validateChapterHeadings(markdown, section.title, section.id).length > 0
-        || metadata.handoff.section_id !== section.id
-        || JSON.stringify(metadata.covered_must_answer) !== JSON.stringify(section.must_answer)
-        || JSON.stringify(metadata.covered_scoring_response_point_ids) !== JSON.stringify(section.scoring_response_point_ids ?? [])
-        || JSON.stringify(metadata.covered_scoring_response_points) !== JSON.stringify(section.scoring_response_points)
-        || (await Promise.all(metadata.local_materials_used.map(material =>
-          localMaterialValid(workspace, manifest, material)))).some(valid => !valid)
-        || (await Promise.all(metadata.web_materials_used.map(material =>
-          webMaterialValid(workspace, sources, material)))).some(valid => !valid)) {
-          throw new Error('checkpoint-artifact-invalid')
-        }
-        drafts.set(section.id, { candidate, writerChildSessionId: writerId, needsPublication: reviewed !== undefined })
-        let candidateBytesChanged = false
+      // 正式成果与未发布候选分别验收；同一章节可同时保留两者。
+      for (const reviewed of [undefined, ...retained === undefined ? [] : [retained]]) {
         try {
-          if (reviewerId === null) throw new Error('checkpoint-reviewer-missing')
-          const review = reviewed === undefined ? parseChapterReviewArtifact(await readJson(workspace, reviewPath)) : {
-            ...reviewed.review, candidate_sha256: reviewed.candidate_sha256,
-            writer_child_session_id: writerId, reviewer_child_session_id: reviewerId,
+          let formalReview: ReturnType<typeof parseChapterReviewArtifact> | undefined
+          if (reviewed === undefined) {
+            try { formalReview = parseChapterReviewArtifact(await readJson(workspace, context.reviewPath)) } catch {
+              // 缺失或无效的正式审核只能留下待审正文，不能授予发布身份。
+            }
           }
-          candidateBytesChanged = review.candidate_sha256 !== candidateSha256
-          const semanticPath = candidateBytesChanged
-            ? await resolveSemanticRevisionPath(workspace, serial, section.id, review.candidate_sha256, candidateSha256)
-            : undefined
-          const reviewCandidate = semanticPath?.valid === true && semanticPath.from_markdown !== undefined
-            ? { ...candidate, markdown: semanticPath.from_markdown }
-            : candidate
-          if (review.section_id !== section.id || (candidateBytesChanged && semanticPath?.valid !== true)
-          || review.writer_child_session_id !== writerId
-          || review.reviewer_child_session_id !== reviewerId
-          || !log.attempts.some(attempt => attempt.role === 'reviewer' && attempt.accepted
-            && attempt.child_session_id === reviewerId)
-           || (activeSectionIds === undefined || activeSectionIds.has(section.id))
-             && log.attempts.findLast(attempt => attempt.role === 'reviewer' && attempt.accepted
-             && attempt.child_session_id === reviewerId)?.input.evidence_sha256
-             !== chapterEvidenceInputFingerprint(context, manifest, sources)
-           || validateChapterReview(context, reviewCandidate, review).length > 0) throw new Error('checkpoint-review-invalid')
-          if (reviewed !== undefined) {
+          const writerId = reviewed?.writer_child_session_id ?? log.final_writer_child_session_id
+            ?? formalReview?.writer_child_session_id ?? null
+          const reviewerId = reviewed?.reviewer_child_session_id ?? log.final_reviewer_child_session_id
+            ?? formalReview?.reviewer_child_session_id ?? null
+          if (writerId === null) throw new Error('checkpoint-writer-missing')
+          if (reviewed === undefined) await assertNoLinkedPath(workspace.root, join(workspace.projectRoot, context.contentPath))
+          const markdown = reviewed?.candidate.markdown ?? await readFile(join(workspace.projectRoot, context.contentPath), 'utf8')
+          const metadata = reviewed?.candidate.metadata ?? parseChapterMetadata(await readJson(workspace, context.metadataPath))
+          const serial = String(context.storageSerial).padStart(4, '0')
+          const reviewPath = context.reviewPath
+          const candidateSha256 = chapterCandidateSha256(markdown)
+          if (metadata.section_id !== section.id
+          || !log.attempts.some(attempt => attempt.role === 'writer' && attempt.accepted
+            && attempt.child_session_id === writerId)
+          || reviewed !== undefined && (reviewed.candidate.section_id !== section.id
+            || reviewed.candidate_sha256 !== candidateSha256 || reviewed.input.section_epoch !== log.epoch
+            || reviewed.input.plan_version !== context.writingPlan.plan_version)
+          ) {
+            throw new Error('checkpoint-identity-invalid')
+          }
+          const candidate: AcceptedChapterCandidate = { section_id: section.id, markdown: markdown.trim(), metadata }
+          if ((await validateChapterImages(workspace, metadata.images ?? [], markdown, context.contentPath)).length > 0) throw new Error('checkpoint-image-invalid')
+          if (validateChapterHeadings(markdown, section.title, section.id).length > 0
+          || metadata.handoff.section_id !== section.id
+          || JSON.stringify(metadata.covered_must_answer) !== JSON.stringify(section.must_answer)
+          || JSON.stringify(metadata.covered_scoring_response_point_ids) !== JSON.stringify(section.scoring_response_point_ids ?? [])
+          || JSON.stringify(metadata.covered_scoring_response_points) !== JSON.stringify(section.scoring_response_points)
+          || (await Promise.all(metadata.local_materials_used.map(material =>
+            localMaterialValid(workspace, manifest, material)))).some(valid => !valid)
+          || (await Promise.all(metadata.web_materials_used.map(material =>
+            webMaterialValid(workspace, sources, material)))).some(valid => !valid)) {
+            throw new Error('checkpoint-artifact-invalid')
+          }
+          drafts.set(section.id, { candidate, writerChildSessionId: writerId, needsPublication: reviewed !== undefined })
+          let candidateBytesChanged = false
+          try {
+            if (reviewerId === null || reviewed === undefined && formalReview === undefined) throw new Error('checkpoint-reviewer-missing')
+            const review = reviewed === undefined ? formalReview : {
+              ...reviewed.review, candidate_sha256: reviewed.candidate_sha256,
+              writer_child_session_id: writerId, reviewer_child_session_id: reviewerId,
+            }
+            if (review === undefined) throw new Error('checkpoint-review-missing')
+            candidateBytesChanged = review.candidate_sha256 !== candidateSha256
+            const semanticPath = candidateBytesChanged
+              ? await resolveSemanticRevisionPath(workspace, serial, section.id, review.candidate_sha256, candidateSha256)
+              : undefined
+            const reviewCandidate = semanticPath?.valid === true && semanticPath.from_markdown !== undefined
+              ? { ...candidate, markdown: semanticPath.from_markdown }
+              : candidate
+            if (review.section_id !== section.id || (candidateBytesChanged && semanticPath?.valid !== true)
+            || review.writer_child_session_id !== writerId
+            || review.reviewer_child_session_id !== reviewerId
+            || !log.attempts.some(attempt => attempt.role === 'reviewer' && attempt.accepted
+              && attempt.child_session_id === reviewerId)
+             || (activeSectionIds === undefined || activeSectionIds.has(section.id))
+               && log.attempts.findLast(attempt => attempt.role === 'reviewer' && attempt.accepted
+               && attempt.child_session_id === reviewerId)?.input.evidence_sha256
+               !== chapterEvidenceInputFingerprint(context, manifest, sources)
+             || validateChapterReview(context, reviewCandidate, review).length > 0) throw new Error('checkpoint-review-invalid')
+            if (reviewed !== undefined) {
+              if (!log.attempts.some(attempt => attempt.role === 'reviewer' && attempt.accepted
+                && attempt.child_session_id === reviewerId && JSON.stringify(attempt.input) === JSON.stringify(reviewed.input))) {
+                throw new Error('checkpoint-draft-input-invalid')
+              }
+              continue
+            }
+            log.final_writer_child_session_id = writerId
+            log.final_reviewer_child_session_id = reviewerId
+            completed.set(section.id, { candidate, entry: entryFor(context, candidate, reviewPath, candidateSha256) })
+            drafts.delete(section.id)
+            log.status = 'completed'
+            log.phase = null
+            log.failure_phase = null
+          } catch {
+            if (candidateBytesChanged || reviewed !== undefined) throw new Error('checkpoint-candidate-changed')
             log.status = 'pending'
             log.phase = 'queued'
-            log.final_writer_child_session_id = writerId
+            log.failure_phase = null
             log.final_reviewer_child_session_id = null
-            continue
           }
-          completed.set(section.id, { candidate, entry: entryFor(context, candidate, reviewPath, candidateSha256) })
-          drafts.delete(section.id)
-          log.status = 'completed'
-          log.phase = null
-          log.failure_phase = null
-        } catch {
-          if (candidateBytesChanged) throw new Error('checkpoint-candidate-changed')
-          log.status = 'pending'
-          log.phase = 'queued'
-          log.failure_phase = null
-          log.final_reviewer_child_session_id = null
+        } catch { /* 当前内容的身份或输入失效时只撤销该份恢复结果。 */
+          if (reviewed !== undefined) {
+            delete log.reviewed_candidate
+            drafts.delete(section.id)
+          } else {
+            drafts.delete(section.id)
+            log.final_writer_child_session_id = null
+            log.final_reviewer_child_session_id = null
+          }
         }
-      } catch { /* 无法恢复的章节及其强依赖下游需要重跑，历史尝试仍保留。 */
-        delete log.reviewed_candidate
-        drafts.delete(section.id)
+      }
+      if (!completed.has(section.id)) {
         log.status = 'pending'
         log.phase = 'queued'
         log.failure_phase = null
-        log.final_writer_child_session_id = null
-        log.final_reviewer_child_session_id = null
+      }
+    }
+    for (const [sectionId] of drafts) {
+      const log = executionLog.sections.find(item => item.section_id === sectionId)
+      const planned = planSections.get(sectionId)
+      const context = contexts.get(sectionId)
+      if (log === undefined || planned === undefined || context === undefined) return undefined
+      const reviewed = log.reviewed_candidate
+      if (reviewed === undefined) continue
+      const dependencies = planned.depends_on.map(({ section_id }) => {
+        const prior = completed.get(section_id)?.candidate ?? drafts.get(section_id)?.candidate
+        return prior === undefined ? undefined : { section_id,
+          candidate_sha256: chapterCandidateSha256(prior.markdown),
+          handoff_sha256: chapterCandidateSha256(JSON.stringify(prior.metadata.handoff)) }
+      })
+      if (reviewed.input.evidence_sha256 !== chapterEvidenceInputFingerprint(context, manifest, sources)
+        || JSON.stringify(dependencies) !== JSON.stringify(reviewed.input.dependencies)) {
+        drafts.delete(sectionId)
+        delete log.reviewed_candidate
       }
     }
     const downstream = new Map<string, string[]>()
@@ -2373,10 +2413,16 @@ async function runChapterWriting(
     sectionId: string,
     update: UpdateRevisionBatchTaskOptions,
   ): Promise<void> => {
-    if (batchStatusWriter === undefined) return Promise.resolve()
+    if (batchStatusWriter === undefined || revisionBatch === undefined) return Promise.resolve()
     const task = batchTaskBySection.get(sectionId)
     if (task === undefined) return Promise.resolve()
-    return batchStatusWriter.updateTask(task.task_id, update)
+    return (async () => {
+      if (update.status === 'running') {
+        const current = (await readRevisionBatch(workspace, revisionBatch.batchId))?.tasks.find(item => item.task_id === task.task_id)
+        if (current?.status === 'failed') await batchStatusWriter.updateTask(task.task_id, { status: 'queued', failure: null })
+      }
+      await batchStatusWriter.updateTask(task.task_id, update)
+    })()
   }
   await mkdir(join(chaptersRoot, 'sections'), { recursive: true, mode: 0o700 })
   await mkdir(join(chaptersRoot, 'meta'), { recursive: true, mode: 0o700 })
@@ -2470,7 +2516,6 @@ async function runChapterWriting(
   executionLog = await ensureChapterLocations(workspace, executionLog, storagePlan, options.run.commits)
   let logWrites = Promise.resolve()
   const persistLog = (): Promise<void> => {
-    if (revision !== undefined || revisionBatch !== undefined) return Promise.resolve()
     // A failed final publication must not poison the recovery log queue:
     // persist the failed task state in a fresh commit lease.
     logWrites = logWrites.catch(() => undefined).then(() => {
@@ -3210,9 +3255,11 @@ async function runChapterWriting(
       let pendingVisualPrompt: ContentBlock[] | undefined
       let presentedRenderedHash: string | undefined
       let visualReviewRounds = 0
-      const preserved = effectiveRevision === undefined && batchTask === undefined ? checkpoint?.drafts.get(sectionId) : undefined
+      const preserved = checkpoint?.drafts.get(sectionId)
       let firstAttempt = 0
       if (preserved !== undefined) {
+        await updateBatchTask(sectionId, { status: 'running' })
+        await updateBatchTask(sectionId, { status: 'reviewing' })
         const reviewed = await reviewCandidate(preserved.candidate)
         if (reviewed.review === undefined || reviewed.reviewerChildSessionId === undefined) {
           throw new Error(`Bid chapter review failed for preserved ${sectionId}; ${reviewed.issues.map(item => `${item.code}: ${item.message}`).join('; ')}`)
@@ -3319,7 +3366,7 @@ async function runChapterWriting(
         let stopAfterVisualIssue = false
         let acceptedWriter = false
         let failedTurn = false
-        const reusableWriterId = originalWriterId ?? reusableWriterIds.get(sectionId) ?? preserved?.writerChildSessionId
+        const reusableWriterId = preserved?.writerChildSessionId ?? originalWriterId ?? reusableWriterIds.get(sectionId)
         childSetups.set(label, (child) => {
           readableWebPathsByChild.set(String(child.id), mappedWebPaths(context))
         })

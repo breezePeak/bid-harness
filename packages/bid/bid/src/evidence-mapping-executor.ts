@@ -78,7 +78,7 @@ import {
   parseTenderScoringArtifact,
 } from './tender-analysis-artifacts.ts'
 import { assertNoLinkedPath } from './workspace-path.ts'
-import type { BidCommitScope } from './run-coordinator.ts'
+import type { BidCommitScope, BidRunContext } from './run-coordinator.ts'
 import { customerFacingOutlineText, findBidInternalIdentifiers } from './customer-facing-prose.ts'
 import {
   parseWebEvidenceSourcesArtifact,
@@ -4171,7 +4171,7 @@ type OutlineStructureIssue = { code: string; section_id: string; reason: string 
  * @param researchResults - 已完成研究及当前结构判断。
  * @param maxRepairAttempts - 质量报告格式修复上限。
  * @param signal - 本次运行的取消信号。
- * @param commits - 同一 Run 拥有的候选写入权限。
+ * @param execution - 同一 Run 的候选写入权限、子任务期限和清理观察。
  * @param request - 本次用户修改目标；复核实际目录是否满足，而非只检查业务覆盖。
  * @param previousIssues - 历史审核诊断，须根据当前目录和用户目标重新核实。
  * @param previousPasses - 同一研究链已通过的请求；仅完整输入及执行配置指纹相同才复用。
@@ -4185,11 +4185,12 @@ export async function reviewRefinedOutline(
   researchResults: readonly CompletedMappingTask[],
   maxRepairAttempts: number,
   signal: AbortSignal,
-  commits: BidCommitScope,
+  execution: Pick<BidRunContext, 'commits' | 'childTimeoutMs' | 'waitForCleanup'>,
   request?: string,
   previousIssues?: readonly OutlineStructureIssue[],
   previousPasses: readonly OutlineReviewPass[] = [],
 ): Promise<{ outline: OutlineArtifact; blockingIssues: OutlineStructureIssue[]; passes: OutlineReviewPass[] }> {
+  const { commits } = execution
   const subagents = agent.ctx.get('subagents')
   if (subagents === undefined) throw new Error('Bid outline review requires subagents service')
   const reviewSubagents = subagents
@@ -4442,14 +4443,19 @@ export async function reviewRefinedOutline(
     let repairIssues: StageValidationIssue[] = []
     for (let attempt = 0; attempt <= maxRepairAttempts; attempt++) {
       signal.throwIfAborted()
-      const run = await reviewSubagents.start('spawn', {
+      const waiting = deadline(signal, execution.childTimeoutMs, 'TIMEOUT')
+      const aborted = Promise.withResolvers<never>()
+      const onAbort = () => { aborted.reject(waiting.signal.reason) }
+      waiting.signal.addEventListener('abort', onAbort, { once: true })
+      if (waiting.signal.aborted) onAbort()
+      const starting = reviewSubagents.start('spawn', {
         label: `S4 · 全局目录复核 · 分片 ${String(requestIndex + 1)}${attempt === 0 ? '' : ` · 修复 ${attempt}`}`,
         parent: agent,
         prompt: [{ type: 'text', text: [review.prompt, ...attempt === 0 ? [] : [
           '上一份质量报告未通过校验。只修复报告字段并重新返回完整报告。',
           ...renderStageRepairIssues(repairIssues),
         ]].join('\n') }],
-        signal,
+        signal: waiting.signal,
         agentOptions: { maxTokens: outputTokens },
         outputSchema: outlineQualityOutputSchema(review.sectionPositions, review.kind === 'sections'),
         toolFilter: { allow: [] },
@@ -4459,8 +4465,11 @@ export async function reviewRefinedOutline(
       let quality: OutlineQualityReport | undefined
       let blockingIssues: ReviewIssue[] = []
       const issues: StageValidationIssue[] = []
+      let executionFailed = false
       try {
-        const result = await run.result
+        const run = await Promise.race([starting, aborted.promise])
+        const result = await Promise.race([run.result, aborted.promise])
+        waiting.signal.throwIfAborted()
         if (result.stopReason === 'max-tokens') throw new BidStageExecutionError([{
           code: 'OUTLINE_REVIEW_OUTPUT_BUDGET_EXCEEDED', artifact: QUALITY_PATH,
           message: `目录复核达到输出上限 ${String(outputTokens)} token，未形成完整报告；Host 已尝试无损缩小审核范围。最小请求或两次调整仍无法完整输出时，需要调整部署的输出限制或模型路由。`,
@@ -4501,8 +4510,18 @@ export async function reviewRefinedOutline(
         if (quality !== undefined) validateOutlineGenerationQuality(
           inputs.outline, quality, inputs.requirements, inputs.scoring, inputs.responsePoints, issues,
         )
+      } catch (error) {
+        executionFailed = true
+        throw error
       } finally {
-        await run.dispose()
+        waiting[Symbol.dispose]()
+        waiting.signal.removeEventListener('abort', onAbort)
+        // start 拒绝前工厂负责回滚；返回的 handle 始终由本次 attempt 清理。
+        const cleanup = starting.then(handle => handle.dispose(), () => {})
+        try { await execution.waitForCleanup(`s4_outline_reviewer:${requestIndex + 1}:${attempt}`, cleanup) } catch (error) {
+          if (!executionFailed) throw error
+          agent.ctx.logger.warn(`S4 目录复核清理失败：${String(error)}`)
+        }
       }
       if (issues.length === 0 && quality !== undefined) {
         if (blockingIssues.length === 0) passes.set(fingerprint, { fingerprint, advisory: quality.issues.map(issue => issue.message) })
@@ -6019,7 +6038,7 @@ async function executeEvidenceMappingRun(
           await writeJson(join(workspace.projectRoot, MAPPING_CANDIDATE_PATH), currentEvidence, options.run.commits)
           await writeJson(join(workspace.projectRoot, REFINED_OUTLINE_CANDIDATE_PATH), finalOutline, options.run.commits)
           let reviewedOutline = await reviewRefinedOutline(
-            agent, workspace, { ...inputs, outline: finalOutline }, initialResults, options.maxRepairAttempts, signal, options.run.commits,
+            agent, workspace, { ...inputs, outline: finalOutline }, initialResults, options.maxRepairAttempts, signal, options.run,
             reviewRequest, executionLog.outline_reviews?.at(-1)?.blocking_issues,
             executionLog.outline_review_passes,
           )
@@ -6060,7 +6079,7 @@ async function executeEvidenceMappingRun(
             await writeJson(join(workspace.projectRoot, MAPPING_CANDIDATE_PATH), preliminary.map, options.run.commits)
             reviewedOutline = await reviewRefinedOutline(
               agent, workspace, { ...inputs, outline: finalOutline }, initialResults,
-              options.maxRepairAttempts, signal, options.run.commits,
+              options.maxRepairAttempts, signal, options.run,
               reviewRequest, reviewedOutline.blockingIssues,
               executionLog.outline_review_passes,
             )

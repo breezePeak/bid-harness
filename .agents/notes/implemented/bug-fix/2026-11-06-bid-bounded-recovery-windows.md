@@ -24,6 +24,8 @@ S4 输出耗尽保持实际输出 cap，强制复用无损分组程序细分字�
 
 本记录部分替代[恢复结算](2026-10-06-bid-recovery-settlement.md)的单一 Work 次数上限、[用户继续授权](2026-10-16-bid-explicit-user-continuation.md)的一次执行额度及[输出预算](2026-10-10-s4-review-output-budget-and-recovery-chain.md)的直接停止策略。三份记录仍分别拥有通知与输入结算、当前消息接纳和输出容量推导的独立约束，保留活跃；[无损分段](2026-10-09-s4-review-partitions-and-legacy-recovery.md)继续拥有覆盖与来源规则，无归档记录变更。
 
+失败身份、双份章节成果、合并通知核验与 Reviewer 启动事务的生命周期关联见[恢复断点](2026-11-06-bid-recovery-lifecycle-breakpoints.md)。
+
 ## Alternatives considered
 
 **放大一个累计常量或清空历史。** 前者不能区分真实进展与空转，后者使重启和重复消息获得无限额度。窗口与累计上限同时从既有日志推导，旧用量保持可审计。

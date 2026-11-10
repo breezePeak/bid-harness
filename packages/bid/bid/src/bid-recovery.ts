@@ -1,5 +1,6 @@
 /** S2–S5 recovery decisions derived from Host-owned failures. */
 import { createHash } from 'node:crypto'
+import { isDeepStrictEqual } from 'node:util'
 import type { BidRunData, BidRunProgress, BidTaskFailure, BidTaskState, BidWorkDescriptor, StageValidationIssue } from './control-plane-contract.ts'
 import { BidStageExecutionError } from './control-plane-contract.ts'
 import type { Session } from '@deepseek-ai/dsh-session'
@@ -20,14 +21,54 @@ export function bidRecoverableRun(session: Session, task: BidTaskState):
   Extract<BidTaskState, { status: 'suspended' }>['run'] | undefined {
   if (task.status === 'suspended') return task.run
   if (task.status !== 'failed') return
-  const notice = session.events.findLast(event => event.type === 'bid.run.notice')
-  const started = notice?.type === 'bid.run.notice' ? session.events.findLast(event => event.type === 'bid.run.started'
-    && event.data.run.runId === notice.data.runId) : undefined
-  if (started?.type !== 'bid.run.started' || notice?.type !== 'bid.run.notice'
-    || started.data.run.work.kind !== 'capability_task' && started.data.run.work.stage !== task.workflow?.stage
-    || notice.data.noticeId !== `run:${started.data.run.runId}:failed`
-    || notice.data.stage !== (started.data.run.work.kind === 'capability_task' ? null : started.data.run.work.stage)) return
-  return { ...started.data.run, cause: 'executor_error', error: task.failure }
+  let state = BID_INITIAL_TASK_STATE
+  let started: BidRunData | undefined
+  let failed: BidRunData | undefined
+  let startedSeq = -1
+  let completed: BidRunData | undefined
+  let completedSeq = -1
+  let userSeq = -1
+  let correctionSeq: number | undefined
+  for (const event of session.events) {
+    const next = reduceBidTaskState(state, event)
+    if (event.type === 'user/message' && event.data.source.kind === 'user') userSeq = event.seq
+    if (event.type === 'bid.run.started') {
+      started = event.data.run
+      startedSeq = event.seq
+      failed = undefined
+      completed = undefined
+      correctionSeq = undefined
+    } else if (event.type === 'bid.run.completed') {
+      completed = started?.runId === event.data.run.runId && isDeepStrictEqual(started.work, event.data.run.work)
+        ? event.data.run : undefined
+      completedSeq = event.seq
+      failed = undefined
+    } else if (event.type === 'bid.run.suspended' || event.type === 'bid.stage.reset') {
+      failed = undefined
+      completed = undefined
+      started = undefined
+    } else if (!isDeepStrictEqual(next, state)) {
+      // 已发布任务的用户纠正由新的精确 Work 通知重新绑定，不复用历史失败。
+      const correction = (event.type === 'bid.task.changed' || event.type === 'bid.project.resumed') && next.status === 'failed'
+        && next.failure.code === 'BID_TASK_RESULT_UNMET' && completed?.work.kind === 'capability_task'
+        && userSeq > completedSeq && isDeepStrictEqual(next.workflow, state.workflow)
+        && (state.status === 'ready' || state.status === 'waiting_user' || state.status === 'completed')
+      failed = event.type === 'bid.task.changed' && next.status === 'failed' && state.status === 'running'
+        && state.run.runId === started?.runId && state.run.epoch === started.epoch
+        && isDeepStrictEqual(state.run.work, started.work) ? started : correction ? completed : undefined
+      correctionSeq = correction ? event.seq : undefined
+    }
+    state = next
+  }
+  if (failed === undefined || state.status !== 'failed'
+    || !isDeepStrictEqual(state.workflow, task.workflow) || !isDeepStrictEqual(state.failure, task.failure)
+    || failed.work.kind !== 'capability_task' && failed.work.stage !== task.workflow?.stage) return
+  const terminal = session.events.findLast(event => event.seq > startedSeq && event.type === 'bid.run.notice'
+    && event.data.noticeId === `run:${failed.runId}:failed` && event.data.runId === failed.runId
+    && event.data.stage === (failed.work.kind === 'capability_task' ? null : failed.work.stage)
+    && (correctionSeq === undefined || event.seq > correctionSeq && event.data.workId === failed.work.workId))
+  if (terminal === undefined) return
+  return { ...failed, cause: 'executor_error', error: task.failure }
 }
 
 /**
@@ -64,12 +105,8 @@ export function bidCapabilityTakeoverRun(session: Session, task: BidTaskState): 
     return task.run.work.kind === 'capability_task' && task.run.cause !== 'awaiting_input' ? task.run : undefined
   }
   if (task.status !== 'failed') return
-  const started = session.events.findLast(event => event.type === 'bid.run.started')
-  const notice = session.events.findLast(event => event.type === 'bid.run.notice')
-  if (started?.type !== 'bid.run.started' || notice?.type !== 'bid.run.notice'
-    || started.data.run.work.kind !== 'capability_task'
-    || notice.data.noticeId !== `run:${started.data.run.runId}:failed` || notice.data.stage !== null) return
-  return started.data.run
+  const run = bidRecoverableRun(session, task)
+  return run?.work.kind === 'capability_task' ? run : undefined
 }
 
 /**
@@ -95,7 +132,7 @@ const STAGES = new Set(['tender_analysis', 'outline_generation', 'evidence_mappi
  * @returns 可修复、可重试或仅额度耗尽的原 Run；输入、权限及其他外部阻断不授予继续。
  */
 export function bidUserContinuableRun(session: Session, task: BidTaskState): ReturnType<typeof bidRecoverableRun> {
-  if (task.status !== 'failed') return
+  if (task.status !== 'failed' && !(task.status === 'suspended' && task.run.cause === 'user_stop')) return
   const run = bidRecoverableRun(session, task)
   if (run?.error?.recovery === undefined || run.work.kind === 'file_intake') return
   const recovery = classifyBidRecovery(run.work, run.error)

@@ -155,6 +155,94 @@ it.each(['EACCES', 'EIO', 'corrupt'])('required 页数测量 %s 失败保留 cau
   expect(completion.completion?.document_acceptance_results).toContainEqual(expect.objectContaining({ status: 'met' }))
 })
 
+it.each(['revision', 'batch', 'missing_final', 'conflicting_final', 'stale_input', 'changed_body'] as const)(
+  '修订恢复同时验证正式稿与整改草稿并实际续写：%s', async (mode) => {
+    const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-revision-reviewed-resume-')))
+    const outline = await writeInputs(workspace)
+    await executeChapterWriting(fixtureAgent(workspace, outline).agent, workspace, buildBidStageTask('chapter_writing'))
+    const bodyPath = join(workspace.projectRoot, 'chapters/sections/0001.md')
+    const original = await readFile(bodyPath, 'utf8')
+    const independent = await readFile(join(workspace.projectRoot, 'chapters/sections/0003.md'), 'utf8')
+    const { addRevisionIssue, readRevisionQueue } = await import('../src/chapter-revision-queue.ts')
+    const { createRevisionBatch, readRevisionBatch, writeRevisionBatch } = await import('../src/chapter-revision-batch.ts')
+    const queue = addRevisionIssue(await readRevisionQueue(workspace), { section_id: 'SEC-1', scope: 'chapter',
+      reference: { scope: 'chapter', base_content_sha256: chapterContentSha256(original) },
+      instruction: '补全设备配置的核验方法', suggestion: null }, '章节1', 1)
+    const issue = queue.issues[0]!
+    const plan = { issue_ids: [issue.issue_id], expected_queue_revision: queue.revision,
+      tasks: [{ task_id: 'task-1', section_id: 'SEC-1', issue_ids: [issue.issue_id], depends_on: [] }] }
+    const { batch } = createRevisionBatch(queue, plan, 'BATCH-REVIEWED', 1, [])
+    await writeRevisionBatch(workspace, batch)
+    const input = { batchId: batch.batch_id, tasks: [{ ...plan.tasks[0]!, issues: [{
+      issue_id: issue.issue_id, instruction: issue.instruction, suggestion: null, scope: 'chapter' as const,
+      reference_text: null, start: null, end: null,
+    }] }] }
+    const options = mode === 'revision' ? { revision: { instruction: issue.instruction,
+      reference: { scope: 'chapter' as const, section_id: 'SEC-1', content_sha256: chapterContentSha256(original) } } }
+      : { revisionBatch: input }
+    const repairReview = (request: SubagentStartRequest) => ({ ...reviewFrom(request), verdict: 'repair' as const,
+      blocking_issues: ['设备配置缺少可执行的核验方法。'],
+      ...(mode === 'revision' ? {} : { revision_issue_checks: [{ issue_id: issue.issue_id, status: 'unsatisfied' as const, reason: '核验方法尚不完整' }] }) })
+    let writerCalls = 0
+    const failed = fixtureAgent(workspace, outline, {}, true, () => true, (_attempt, request) =>
+      ++writerCalls > 1
+        ? { stopReason: 'error', output: [], failure: { code: 'TIMEOUT', message: '后续 Writer 超时' } }
+        : { stopReason: 'completed', output: [], structured: { ...candidateFrom(request), markdown: '# 章节1\n\n保留候选中的设备配置方案。' } })
+    failed.reviewerResult.mockImplementation(repairReview)
+    const execute = (agent: Agent) => executeChapterWriting(agent, workspace, buildBidStageTask('chapter_writing'), {
+      ...options, maxRepairAttempts: 1, documentReview: 'defer',
+    })
+    if (mode === 'revision') await expect(execute(failed.agent)).rejects.toMatchObject({ code: 'TIMEOUT' })
+    else await execute(failed.agent)
+    expect(await readFile(bodyPath, 'utf8')).toBe(original)
+    const logPath = join(workspace.projectRoot, 'chapters/execution-log.json')
+    const log = parseChapterExecutionLog(JSON.parse(await readFile(logPath, 'utf8')))
+    const section = log.sections.find(item => item.section_id === 'SEC-1')!
+    expect(section.reviewed_candidate, JSON.stringify(section)).toMatchObject({ review: { verdict: 'repair' } })
+    const draftWriter = section.reviewed_candidate!.writer_child_session_id
+    const formalWriter = section.final_writer_child_session_id
+    const formalReviewer = section.final_reviewer_child_session_id
+    expect(formalWriter).not.toBeNull()
+    expect(formalReviewer).not.toBeNull()
+    if (mode === 'missing_final') {
+      section.final_writer_child_session_id = null
+      section.final_reviewer_child_session_id = null
+    }
+    if (mode === 'conflicting_final') section.final_writer_child_session_id = 'unrelated-writer'
+    if (mode === 'stale_input') section.reviewed_candidate!.input.evidence_sha256 = '0'.repeat(64)
+    if (mode === 'changed_body') await writeFile(bodyPath, '# 章节1\n\n与正式审核不匹配的正文。')
+    await writeFile(logPath, JSON.stringify(log))
+    const retry = fixtureAgent(workspace, outline, {}, true, () => true, async (_attempt, request) => {
+      expect(await readFile(bodyPath, 'utf8')).toBe(original)
+      if (mode === 'stale_input') expect(promptText(request)).not.toContain('保留候选中的设备配置方案')
+      else {
+        expect(promptText(request)).toContain('保留候选中的设备配置方案')
+        expect(promptText(request)).toContain('设备配置缺少可执行的核验方法')
+      }
+      return { stopReason: 'completed', output: [], structured: { ...candidateFrom(request), markdown: '# 章节1\n\n设备配置方案按交付清单逐项核验，记录检查结果。' } }
+    })
+    retry.reviewerResult.mockImplementationOnce(repairReview).mockImplementation(request => ({ ...reviewFrom(request),
+      ...(mode === 'revision' ? {} : { revision_issue_checks: [{ issue_id: issue.issue_id, status: 'satisfied', reason: '核验方法完整' }] }) }))
+    if (mode === 'conflicting_final' || mode === 'changed_body') {
+      await expect(execute(retry.agent)).rejects.toThrow('BID_CHAPTER_REVISION_CONTEXT_UNAVAILABLE')
+      expect(retry.starts).toHaveLength(0)
+    } else if (mode !== 'stale_input') {
+      await execute(retry.agent)
+      expect(retry.starts).toHaveLength(1)
+      expect(retry.starts[0]!.run.id).toBe(draftWriter)
+      expect(await readFile(bodyPath, 'utf8')).toContain('逐项核验')
+      if (mode !== 'revision') expect((await readRevisionBatch(workspace, batch.batch_id))?.tasks[0]?.status).toBe('completed')
+    } else {
+      retry.reviewerResult.mockImplementation(request => ({ ...reviewFrom(request), revision_issue_checks: [{
+        issue_id: issue.issue_id, status: 'satisfied', reason: '重新生成并核验' }] }))
+      await execute(retry.agent)
+      expect(retry.starts).toHaveLength(2)
+      expect((await readRevisionBatch(workspace, batch.batch_id))?.tasks[0]?.status).toBe('completed')
+    }
+    expect(await readFile(join(workspace.projectRoot, 'chapters/sections/0003.md'), 'utf8')).toBe(independent)
+  },
+)
+
 it.each(['conflict', 'external', 'mixed'])('审批批次 %s 按具体原因结算并保留审核上下文', async (kind) => {
   const workspace = new BidWorkspace(await mkdtemp(join(tmpdir(), 'dsh-revision-attention-class-')))
   const outline = await writeInputs(workspace)

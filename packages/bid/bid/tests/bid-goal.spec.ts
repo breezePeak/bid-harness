@@ -395,8 +395,8 @@ it('无 Goal 时主 Agent 恢复原 Run；重复失败再次 steer，相同指�
 }, 15_000)
 
 
-it.each([0, 3])('自动纠正耗尽且已执行 %i 次时新消息可继续原 Run，同一消息和自动通知不能重复授权', async (attempts) => {
-  const { host, agent, workspace } = await setup('tender_analysis', false)
+it.each([false, true].flatMap(stopped => [0, 3].map(attempts => ({ attempts, stopped }))))('自动纠正耗尽 $attempts 次，停止=$stopped 后新消息继续原 Work', async ({ attempts, stopped }) => {
+  const { ctx, host, agent, workspace } = await setup('tender_analysis', false)
   const session = agent.session
   const message = (text: string, human = true) => session.append('user/message', createUserMessage({
     content: [{ type: 'text', text }], source: human ? { kind: 'user' } : { kind: 'plugin', plugin: 'test', form: 'notice', summary: '自动继续' },
@@ -421,6 +421,10 @@ it.each([0, 3])('自动纠正耗尽且已执行 %i 次时新消息可继续原 R
     round: 3, budget: 3, state: 'blocked', reason: 'BID_RECOVERY_BUDGET_EXHAUSTED' })
   vi.spyOn(agent, 'steer').mockImplementation(() => {})
   await host.finishOperation(session, operation)
+  if (stopped) {
+    await ctx.bid.stopRun(session)
+    expect(session.events.reduce(reduceBidTaskState, BID_INITIAL_TASK_STATE)).toMatchObject({ status: 'suspended', run: { cause: 'user_stop', error: failure } })
+  }
   const call = (args = {}) => agent.ctx.tools.execute({ agent, name: 'bid_resume_current_run',
     arguments: args, callId: CallId('user-continue'), signal: new AbortController().signal })
   expect(bidRunRecoveryEligibility(session)).toMatchObject({ eligible: false, attempts })
@@ -441,9 +445,12 @@ it.each([0, 3])('自动纠正耗尽且已执行 %i 次时新消息可继续原 R
   })
   message('继续')
   expect((await call({ run_id: original.runId })).isError).toBe(true)
-  expect(await call()).toMatchObject({ isError: false, value: { accepted: true, execution_status: 'started', completed: false } })
+  const continued = await call()
+  expect(continued, JSON.stringify(continued)).toMatchObject({ isError: false, value: { accepted: true, execution_status: 'started', completed: false } })
   await vi.waitFor(() => { expect(host.inFlight.size).toBe(0) })
-  expect(bidRunRecoveryEligibility(session)).toMatchObject({ eligible: true, attempts: attempts + 1, windowAttempts: 1 })
+  expect(bidRunRecoveryEligibility(session)).toMatchObject({
+    eligible: true, attempts: attempts + 1, windowAttempts: 1, totalLimit: 12, windowLimit: 3 })
+  expect(session.events.filter(event => event.type === 'bid.recovery.requested' && event.data.continuation)).toHaveLength(1)
   expect((await call()).isError).toBe(true)
   expect(session.events.filter(event => event.type === 'bid.run.started')).toHaveLength(2)
   message('继续')

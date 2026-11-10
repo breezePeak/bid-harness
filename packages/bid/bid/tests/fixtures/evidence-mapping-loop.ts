@@ -16,7 +16,7 @@ import { SearchError } from '@deepseek-ai/dsh-tool-fs-search'
 import type {} from '@deepseek-ai/dsh-fs'
 import type {} from '@deepseek-ai/dsh-web'
 import {
-  BidOrchestrator, BidWorkspace, createScoringResponsePointCatalog, executeEvidenceMapping,
+  BidOrchestrator, BidWorkspace, BidRunCoordinator, DirectBidRunScheduler, createScoringResponsePointCatalog, executeEvidenceMapping,
   validateEvidenceMapping, resolveMappingCorpusLocations, buildBidStageTask, executeChapterWriting,
   executeOutlineGeneration, validateOutlineGeneration,
   executeTenderAnalysis, validateTenderAnalysis, outlineArtifactSha256, parseOutlineArtifact,
@@ -466,6 +466,7 @@ function researchAssessment(sufficient: boolean, affectsBlueprint: boolean, mode
  * @param structureRecovery - 使用两代内容修复脚本；automatic 在同一 Run 内完成，true 在首代后耗尽预算供 Main 恢复。
  * @param largeReview - 大原文使用足够容量、硬预算分段或旧本地预算失败场景。
  * @param deferChildReports 在初始执行结算后再递交 Child 通知，固定回放的并发调度。
+ * @param historicalFailure 在失败结算入口模拟已保存的旧服务端或连接错误分类。
  * @returns 阶段结果、Host、工作区及模型实际请求。
  */
 export async function runEvidenceMappingLoop(ctx: Context, root: string, repair: boolean, interactive = false,
@@ -481,7 +482,8 @@ export async function runEvidenceMappingLoop(ctx: Context, root: string, repair:
     resume?: true
     production?: true
   }, researchMode?: 'zero' | 'local' | 'external_unbound', structureRecovery: boolean | 'automatic' = false,
-  largeReview: boolean | 'partitioned' | 'legacy' | 'server' = false, deferChildReports = false) {
+  largeReview: boolean | 'partitioned' | 'legacy' | 'server' = false, deferChildReports = false,
+  historicalFailure?: 'server' | 'transport') {
   const sessionId = SessionId('s3-real-loop')
   const workspace = new BidWorkspace(root)
   const owner = { id: sessionId }
@@ -708,6 +710,18 @@ export async function runEvidenceMappingLoop(ctx: Context, root: string, repair:
     agent.session.append('bid.stage.started', { stage: 'outline_generation', status: 'running' })
     agent.session.append('bid.stage.completed', { stage: 'outline_generation', status: 'completed', artifacts: [] })
   }
+  const runs = new BidRunCoordinator(agent.session, new DirectBidRunScheduler(), { drain: async () => {} }, () => 0)
+  if (historicalFailure !== undefined) {
+    const suspend = runs.suspend.bind(runs)
+    runs.suspend = (cause, failure) => {
+      const transport = historicalFailure === 'transport'
+      const message = transport ? 'Connection error.'
+        : 'An error occurred while processing your request. You can retry your request, or contact us through our help center at help.openai.com if the error persists.'
+      return suspend(cause, failure === undefined ? undefined : { code: 'BID_EXECUTOR_ERROR', message: '阶段执行结果未通过校验，共 1 条关键问题。',
+        cause: { code: transport ? 'TRANSPORT' : 'PI_AI_ERROR', message }, issues: [{ code: 'EVIDENCE_MAPPING_INFRASTRUCTURE_ERROR', message }],
+        recovery: { kind: transport ? 'retry' : 'blocked', unit: failure.recovery!.unit, reason: message } })
+    }
+  }
   const orchestrator = new BidOrchestrator(
     agent.session,
     { canExecute: stage => stage === 'evidence_mapping', execute: (task, run) => executeEvidenceMapping(agent, workspace, task, {
@@ -717,7 +731,7 @@ export async function runEvidenceMappingLoop(ctx: Context, root: string, repair:
       run: fault?.signal === undefined ? run : { ...run, signal: AbortSignal.any([run.signal, fault.signal]) },
     }) },
     { validate: (stage, artifacts) => validateEvidenceMapping(workspace, stage, artifacts) },
-    undefined, undefined, undefined,
+    undefined, undefined, runs,
     structureRecovery || largeReview === 'legacy' || largeReview === 'server' ? async (stage) => {
       const payload = { stage }
       const inputs = await Promise.all(buildBidStageTask(stage).inputs.map(async path => ({ path,
@@ -767,19 +781,10 @@ export async function runEvidenceMappingRecoveryLoop(ctx: Context, root: string,
   const takeover = scenario === 'server-takeover' || scenario === 'transport-takeover'
   const structure = scenario === 'structure' || takeover
   const result = await runEvidenceMappingLoop(ctx, root, false, true, undefined, 'local', structure,
-    structure ? false : scenario === 'server' ? 'server' : 'legacy', scenario === 'legacy-output')
+    structure ? false : scenario === 'server' ? 'server' : 'legacy', scenario === 'legacy-output',
+    scenario === 'server' || takeover ? scenario === 'transport-takeover' ? 'transport' : 'server' : undefined)
   if (scenario === 'legacy-output') result.adapter.reviewMaxTokens = true
   if (result.outcome.status !== 'failed') throw new Error('结构恢复夹具未产生首代修复后的失败：' + JSON.stringify(result.outcome))
-  if (scenario === 'server' || takeover) {
-    // 固定已保存的服务端或连接失败，验证真实恢复和新授权接管入口。
-    const transport = scenario === 'transport-takeover'
-    const message = transport ? 'Connection error.'
-      : 'An error occurred while processing your request. You can retry your request, or contact us through our help center at help.openai.com if the error persists.'
-    result.outcome = { ...result.outcome, failure: { code: 'BID_EXECUTOR_ERROR', message: '阶段执行结果未通过校验，共 1 条关键问题。',
-      cause: { code: transport ? 'TRANSPORT' : 'PI_AI_ERROR', message }, issues: [{ code: 'EVIDENCE_MAPPING_INFRASTRUCTURE_ERROR', message }],
-      recovery: { kind: transport ? 'retry' : 'blocked', unit: result.outcome.failure.recovery!.unit, reason: message } } }
-    result.agent.session.append('bid.task.changed', { state: result.outcome })
-  }
   const failedLog = JSON.parse(await readFile(join(result.workspace.projectRoot, 'analysis/evidence-mapping-log.json'), 'utf8')) as {
     tasks: Array<{ task_id: string; status: string }>
     failure?: unknown

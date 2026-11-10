@@ -106,6 +106,64 @@ async function fixture(options: { root?: string; budget?: number; resume?: boole
 }
 
 describe('BidRecoveryDriver 的持久化与运行时协议', () => {
+  it.each(['failed', 'user_stop', 'awaiting_input', 'disposed'] as const)(
+    '旧通知 flush 期间的新请求重新核验当前窗口：%s', async (outcome) => {
+      const f = await fixture()
+      const first = await f.fail()
+      const gate = Promise.withResolvers<undefined>()
+      const flush = f.ctx.sessions.flush.bind(f.ctx.sessions)
+      let blocked = false
+      const checkpoint = vi.spyOn(f.ctx.sessions, 'flush').mockImplementation(async (session) => {
+        const persisted = await flush(session)
+        if (!blocked && f.rounds().at(-1)?.state === 'notified') {
+          blocked = true
+          await gate.promise
+        }
+        return persisted
+      })
+      const pending = f.driver.request(f.agent)
+      await vi.waitFor(() => { expect(blocked).toBe(true) })
+      const runs = f.coordinator()
+      const current = await runs.start(f.work, { runId: first.run.runId, cause: 'executor_error' })
+      await current.acceptProgress({ unit: 'chapter:SEC-2', inputSha256: 'c'.repeat(64), planSha256: 'd'.repeat(64) })
+      await runs.suspend(outcome === 'user_stop' || outcome === 'awaiting_input' ? outcome : 'executor_error',
+        { code: 'TIMEOUT', message: '新窗口的模型超时', recovery: { kind: 'retry', unit: f.work.workId, reason: '超时' } })
+      for (let index = 0; index < 20; index++) expect(f.driver.request(f.agent)).toBe(pending)
+      let disposal: Promise<void> | undefined
+      if (outcome === 'disposed') disposal = f.ctx.fiber.dispose()
+      gate.resolve(undefined)
+      await pending
+      await disposal
+      checkpoint.mockRestore()
+      if (outcome !== 'disposed') await f.agent.whenIdle()
+      expect(f.adapter.requests).toHaveLength(outcome === 'failed' ? 1 : 0)
+      if (outcome === 'failed') {
+        expect(f.rounds().at(-1)).toMatchObject({ state: 'notified', round: 1,
+          target: { runId: current.runId }, windowKey: expect.stringMatching(/^progress:/) as unknown })
+        expect(f.agent.session.events.filter(event => event.type === 'user/message')).toHaveLength(1)
+      }
+    },
+  )
+
+  it('Session 回调同步重入时已登记单飞，收尾微任务收到请求也不丢失', async () => {
+    const f = await fixture()
+    await f.fail()
+    const requests: Promise<void>[] = []
+    let entered = false
+    f.ctx.on('session/event', (session, event) => {
+      if (session !== f.agent.session || event.type !== 'bid.recovery.round' || entered) return
+      entered = true
+      requests.push(f.driver.request(f.agent))
+      queueMicrotask(() => { requests.push(f.driver.request(f.agent)) })
+    })
+    const pending = f.driver.request(f.agent)
+    await pending
+    await f.agent.whenIdle()
+    expect(requests).toHaveLength(2)
+    expect(requests.every(request => request === pending)).toBe(true)
+    expect(f.adapter.requests).toHaveLength(1)
+  })
+
   it('新验收成果解除旧窗口 blocked，重复证明及重启不再次开放窗口', async () => {
     const f = await fixture({ budget: 1 })
     await f.fail()
@@ -121,7 +179,7 @@ describe('BidRecoveryDriver 的持久化与运行时协议', () => {
     await runs.suspend('executor_error', { code: 'TIMEOUT', message: '超时', recovery: { kind: 'retry', unit: 'chapter:SEC-3', reason: '超时' } })
     await f.driver.request(f.agent)
     await f.agent.whenIdle()
-    expect(f.rounds().at(-1)).toMatchObject({ state: 'notified', round: 1, windowKey: expect.stringMatching(/^progress:/) })
+    expect(f.rounds().at(-1)).toMatchObject({ state: 'notified', round: 1, windowKey: expect.stringMatching(/^progress:/) as unknown })
     await f.driver.request(f.agent)
     await f.agent.whenIdle()
     expect(f.rounds().at(-1)?.state).toBe('blocked')
@@ -252,21 +310,28 @@ describe('BidRecoveryDriver 的持久化与运行时协议', () => {
     } finally { checkpoint.mockRestore() }
   })
 
-  it('连续 JSONL 确认失败有界停止，恢复存储并重启也不会增加同轮派发预算', async () => {
+  it('连续 JSONL 确认失败与合并请求仍按退避有界停止，重启不增加同轮派发预算', async () => {
     const f = await fixture({ budget: 1 })
     await f.fail()
     const hash = await f.hash()
     const flush = f.ctx.sessions.flush.bind(f.ctx.sessions)
+    const merged: Promise<void>[] = []
+    const attemptsAt: number[] = []
     const checkpoint = vi.spyOn(f.ctx.sessions, 'flush').mockImplementation(async (session) => {
       const persisted = await flush(session)
       if (['notified', 'blocked'].includes(f.rounds().at(-1)?.state ?? '')) {
+        attemptsAt.push(Date.now())
+        for (let index = 0; index < 5; index++) merged.push(f.driver.request(f.agent))
         throw Object.assign(new Error('持久化确认仍不可用'), { code: 'EIO' })
       }
       return persisted
     })
     try {
-      await expect(f.driver.request(f.agent)).rejects.toThrow('持久化确认仍不可用')
+      const request = f.driver.request(f.agent)
+      await expect(request).rejects.toThrow('持久化确认仍不可用')
+      expect(merged.every(task => task === request)).toBe(true)
       await vi.waitFor(() => { expect(f.rounds().at(-1)?.dispatchAttempts).toBe(2) }, { timeout: 3000 })
+      expect(attemptsAt[2]! - attemptsAt[0]!).toBeGreaterThanOrEqual(250)
       expect(f.adapter.requests).toHaveLength(0)
     } finally { checkpoint.mockRestore() }
     await f.ctx.sessions.flush(f.agent.session)

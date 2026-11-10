@@ -32,7 +32,7 @@ export function sameBidRecoveryTarget(left: Round['target'], right: Round['targe
 
 /** Host 有界调度；再次派发前重新检查当前失败、授权和停止状态。 */
 export class BidRecoveryDriver {
-  private readonly pending = new Map<Session, Promise<void>>()
+  private readonly pending = new Map<Session, { task: Promise<void>; recheck: boolean }>()
   private readonly timers = new Map<Session, ReturnType<typeof setTimeout>>()
   private readonly unconfirmedReports = new WeakMap<Session, string>()
   private disposed = false
@@ -45,7 +45,7 @@ export class BidRecoveryDriver {
       for (const timer of this.timers.values()) clearTimeout(timer)
       this.timers.clear()
       // 请求的调用者及 timer 已拥有失败处理；卸载等待其 checkpoint 全部退出。
-      await Promise.allSettled([...this.pending.values()])
+      await Promise.allSettled([...this.pending.values()].map(entry => entry.task))
     })
   }
 
@@ -56,13 +56,32 @@ export class BidRecoveryDriver {
    */
   request(agent: Agent): Promise<void> {
     const existing = this.pending.get(agent.session)
-    if (existing !== undefined) return existing
-    const task = this.drive(agent).catch(async (error: unknown) => {
-      await this.retryDispatch(agent, error)
-      throw error
-    }).finally(() => { this.pending.delete(agent.session) })
-    this.pending.set(agent.session, task)
-    return task
+    if (existing !== undefined) {
+      existing.recheck = true
+      return existing.task
+    }
+    const result = Promise.withResolvers<void>()
+    const entry = { task: result.promise, recheck: false }
+    this.pending.set(agent.session, entry)
+    void (async () => {
+      try {
+        do {
+          entry.recheck = false
+          await this.drive(agent)
+        } while (this.pending.get(agent.session)?.recheck === true && this.active() && !this.timers.has(agent.session))
+      } catch (error: unknown) {
+        try { await this.retryDispatch(agent, error) } catch (dispatchError: unknown) {
+          this.ctx.logger.warn(`Bid 恢复派发结算失败：${String(dispatchError)}`)
+        }
+        if (this.pending.get(agent.session) === entry) this.pending.delete(agent.session)
+        result.reject(error)
+        return
+      }
+      // 核验标记与撤销单飞之间不能让出执行权，否则收尾请求会丢失。
+      if (this.pending.get(agent.session) === entry) this.pending.delete(agent.session)
+      result.resolve()
+    })()
+    return entry.task
   }
 
   private async append(session: Session, round: Round): Promise<void> {

@@ -109,6 +109,7 @@ it.each(['PI_AI_ERROR', 'TRANSPORT', 'SERVER', 'TIMEOUT'])('S4 的 %s 开放新�
   const failure = code === 'PI_AI_ERROR' ? { ...current, recovery: { ...current.recovery!, kind: 'blocked' as const } } : current
   const original = { ...run('old-server'), work: s4 }
   const target = { kind: 'run' as const, runId: original.runId, workId: s4.workId }
+  session.append('bid.task.changed', { state: { workflow: { kind: 'full_bid', stage: original.work.stage }, status: 'ready', run: null } })
   session.append('bid.run.started', { run: original })
   session.append('bid.run.notice', { runId: original.runId, stage: s4.stage, kind: 'interrupted', severity: 'error',
     noticeId: `run:${original.runId}:failed`, supersedesTurn: null, message })
@@ -125,7 +126,9 @@ it.each(['PI_AI_ERROR', 'TRANSPORT', 'SERVER', 'TIMEOUT'])('S4 的 %s 开放新�
     expect(bidEvidenceMappingTakeoverRun(session, session.events.findLast(event => event.type === 'bid.task.changed')!.data.state)).toBeUndefined()
     expect((await inspectBidStage(undefined, session, undefined, 'recovery')).available_actions).not.toContain('bid_resume_current_run')
   }
+  session.append('bid.run.started', { run: { ...original, runId: 'restored-server', epoch: original.epoch + 1 } })
   session.append('bid.task.changed', { state: { workflow: { kind: 'full_bid' as const, stage: s4.stage }, status: 'failed', run: null, failure } })
+  session.append('bid.run.notice', { runId: 'restored-server', stage: s4.stage, kind: 'interrupted', severity: 'error', noticeId: 'run:restored-server:failed', supersedesTurn: null, message })
   session.append('bid.recovery.round', { ownerSessionId: String(session.id), target,
     fingerprint: 'old-server', round: 0, budget: 3, state: 'blocked', reason: 'BID_RECOVERY_DISPATCH_BUDGET_EXHAUSTED' })
   expect(bidRunRecoveryEligibility(session).eligible).toBe(false)
@@ -144,6 +147,7 @@ it('旧 S4 本地预算 blocked 重算资格但保留有限恢复历史和其他
   const issue = { code: 'CONTEXT_WINDOW_EXCEEDED', message: '目录审查对象超过输入预算：位置 0，估算 15496 token，预算 12000 token。' }
   const failure = safeRecoverableBidFailure(s4, new BidStageExecutionError([issue]))
   const original = { ...run('old-s4'), work: s4 }
+  session.append('bid.task.changed', { state: { workflow: { kind: 'full_bid', stage: original.work.stage }, status: 'ready', run: null } })
   session.append('bid.run.started', { run: original })
   session.append('bid.run.notice', { runId: original.runId, stage: s4.stage, kind: 'interrupted', severity: 'error',
     noticeId: `run:${original.runId}:failed`, supersedesTurn: null, message: issue.message })
@@ -184,6 +188,7 @@ it.each(['budget', 'server'])('已接纳旧 blocked 恢复后，新的输出超�
   session.append('bid.recovery.requested', { ownerSessionId: String(session.id), target,
     unit: s4.workId, instruction: '按模型窗口重组', progressFingerprint: 'old' })
   const current = { ...run('resumed-s4'), work: s4, resumeOf: { runId: target.runId, cause: 'executor_error' as const } }
+  session.append('bid.task.changed', { state: { workflow: { kind: 'full_bid', stage: s4.stage }, status: 'ready', run: null } })
   session.append('bid.run.started', { run: current })
   session.append('bid.run.notice', { runId: current.runId, stage: s4.stage, kind: 'interrupted', severity: 'error',
     noticeId: `run:${current.runId}:failed`, supersedesTurn: null, message: '输出超限' })
@@ -230,7 +235,8 @@ it('额度耗尽仅开放用户继续，混合权限、输入及未知故障仍�
   cleanup.push(() => ctx.fiber.dispose())
   await ctx.plugin(SessionStore)
   const session = ctx.sessions.create()
-  const original = run('quota')
+  const original = { ...run('quota'), work }
+  session.append('bid.task.changed', { state: { workflow: { kind: 'full_bid', stage: original.work.stage }, status: 'ready', run: null } })
   session.append('bid.run.started', { run: original })
   session.append('bid.run.notice', { runId: original.runId, stage: work.stage, kind: 'interrupted', severity: 'error',
     noticeId: `run:${original.runId}:failed`, supersedesTurn: null, message: '额度耗尽' })
@@ -261,6 +267,7 @@ it.each([undefined, 'AUTH', 'INPUT_CHANGED', 'UNKNOWN'])('S4 额度 cause 的同
   error.cause = Object.assign(new Error(message), { code: 'QUOTA' })
   const failure = safeRecoverableBidFailure(original.work, error)
   const state = { workflow: { kind: 'full_bid' as const, stage: original.work.stage }, status: 'failed' as const, run: null, failure }
+  session.append('bid.task.changed', { state: { workflow: { kind: 'full_bid', stage: original.work.stage }, status: 'ready', run: null } })
   session.append('bid.run.started', { run: original })
   session.append('bid.run.notice', { runId: original.runId, stage: original.work.stage, kind: 'interrupted', severity: 'error',
     noticeId: `run:${original.runId}:failed`, supersedesTurn: null, message })
